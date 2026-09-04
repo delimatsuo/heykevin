@@ -207,8 +207,15 @@ async def _is_stale_deactivation(
     payload: dict,
     *,
     lookup: Callable[[str], Any],
-) -> bool:
-    """True iff a deactivating notification's term is already superseded.
+) -> Optional[tuple[str, str]]:
+    """None unless this is a confirmed-stale deactivating notification.
+
+    When the item is stale, returns ``(account_expires_iso,
+    notification_expires_iso)`` -- both ISO-8601 UTC, ready for the caller
+    to print in a "STALE (account term ends ..., this notification's term
+    ended ...)" line without re-fetching anything. Every other outcome
+    returns None (falsy, same as the old ``False``), so ``if await
+    _is_stale_deactivation(...):`` still works exactly as before.
 
     ``notificationType`` is coerced with ``str(... or "")`` before the
     membership test (same as ``summarize()``) so a missing, non-string, or
@@ -220,7 +227,7 @@ async def _is_stale_deactivation(
     ``data.signedTransactionInfo``, missing/invalid ``appAccountToken`` or
     ``expiresDate``, a raising or None-returning ``lookup``, or a
     non-numeric/bool ``subscription_expires`` on the looked-up contractor —
-    returns False. This guard only ever *prevents* an apply; it never forces
+    returns None. This guard only ever *prevents* an apply; it never forces
     one, so every ambiguous case defers to the handler exactly as before
     this guard existed.
 
@@ -232,19 +239,19 @@ async def _is_stale_deactivation(
     """
     notification_type = str(payload.get("notificationType") or "")
     if notification_type not in _DEACTIVATING_NOTIFICATION_TYPES:
-        return False
+        return None
 
     data = payload.get("data")
     transaction_info = _decode_data_signed_field(data, "signedTransactionInfo")
     if transaction_info is None:
-        return False
+        return None
 
     app_account_token = transaction_info.get("appAccountToken")
     expires_ms = transaction_info.get("expiresDate")
     if not isinstance(app_account_token, str) or not app_account_token:
-        return False
+        return None
     if isinstance(expires_ms, bool) or not isinstance(expires_ms, (int, float)):
-        return False
+        return None
 
     try:
         contractor = await lookup(app_account_token)
@@ -253,15 +260,20 @@ async def _is_stale_deactivation(
             "appstore_replay stale-check lookup failed (%s) -- not skipping",
             type(exc).__name__,
         )
-        return False
+        return None
     if not isinstance(contractor, dict):
-        return False
+        return None
 
     stored_expires = contractor.get("subscription_expires")
     if isinstance(stored_expires, bool) or not isinstance(stored_expires, (int, float)):
-        return False
+        return None
 
-    return float(stored_expires) > (float(expires_ms) / 1000.0 + 1.0)
+    if float(stored_expires) > (float(expires_ms) / 1000.0 + 1.0):
+        return (
+            _signed_date_iso(float(stored_expires) * 1000.0),
+            _signed_date_iso(float(expires_ms)),
+        )
+    return None
 
 
 def summarize(payload: dict, attempts: list[dict]) -> dict:
@@ -378,12 +390,18 @@ async def replay(
         summary = summarize(payload, attempts)
         notification_type = summary["type"] or "UNKNOWN"
 
-        if await _is_stale_deactivation(payload, lookup=lookup):
+        stale_dates = await _is_stale_deactivation(payload, lookup=lookup)
+        if stale_dates is not None:
+            account_expires_iso, notification_expires_iso = stale_dates
             report.stale_skipped += 1
             report.stale_by_type[notification_type] = (
                 report.stale_by_type.get(notification_type, 0) + 1
             )
-            emit(format_summary_line(summary) + "  STALE (account term ends later) — skipped")
+            emit(
+                format_summary_line(summary)
+                + f"  STALE (account term ends {account_expires_iso}, "
+                f"this notification's term ended {notification_expires_iso}) — skipped"
+            )
             continue
 
         report.by_type[notification_type] = report.by_type.get(notification_type, 0) + 1

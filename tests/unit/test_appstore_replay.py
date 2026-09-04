@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest")
@@ -33,10 +34,15 @@ from app.services.appstore_replay import (
     HistoryItem,
     ReplayReport,
     fetch_notification_history,
+    format_summary_line,
     replay,
     summarize,
 )
-from app.services.subscription import APPSTORE_PRODUCTION_URL, handle_appstore_notification
+from app.services.subscription import (
+    APPSTORE_PRODUCTION_URL,
+    APPSTORE_SANDBOX_URL,
+    handle_appstore_notification,
+)
 from app.webhooks.appstore import _decode_notification_payload
 
 
@@ -890,6 +896,93 @@ async def test_stale_guard_runs_in_dry_run_too_and_is_excluded_from_dry_run_coun
     assert any("STALE" in line for line in lines)
 
 
+@pytest.mark.asyncio
+async def test_stale_line_carries_both_iso_dates_and_no_extra_pii():
+    """A STALE line must say *why* -- both the account's stored expiry and
+    the notification's own term end, in ISO-8601 UTC -- without leaking the
+    full original transaction id or the appAccountToken beyond what
+    summarize() already redacts."""
+    expires_ms = 1_700_000_000_000  # notification's term end
+    full_original_id = "9876543210123456"
+    app_account_token = "should-never-appear-token-uuid"
+    transaction_info = {
+        "expiresDate": expires_ms,
+        "appAccountToken": app_account_token,
+        "originalTransactionId": full_original_id,
+    }
+    payload = {
+        "notificationType": "EXPIRED",
+        "subtype": "",
+        "signedDate": 1000,
+        "data": {
+            "environment": "Production",
+            "signedTransactionInfo": _unsigned_jws(transaction_info),
+        },
+    }
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    # A later (30-day-further) term is on file -- this is the stale case.
+    stored_expires_seconds = expires_ms / 1000.0 + 30 * 24 * 3600
+
+    async def fake_lookup(_token):
+        return {"subscription_expires": stored_expires_seconds}
+
+    async def fake_handler(_p):  # pragma: no cover -- stale items never reach the handler
+        raise AssertionError("handler must not be called for a stale item")
+
+    lines = []
+    report = await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lines.append,
+    )
+
+    assert report.stale_skipped == 1
+    [stale_line] = lines
+    assert "STALE" in stale_line
+
+    account_iso = (
+        datetime.fromtimestamp(stored_expires_seconds, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    notification_iso = (
+        datetime.fromtimestamp(expires_ms / 1000.0, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    assert account_iso in stale_line
+    assert notification_iso in stale_line
+
+    assert full_original_id not in stale_line
+    assert app_account_token not in stale_line
+
+
+@pytest.mark.asyncio
+async def test_non_stale_deactivating_item_line_is_unchanged_format():
+    """A non-stale item's emitted line must still be exactly
+    format_summary_line(summary) -- no STALE suffix, no extra text."""
+    expires_ms = 1_700_000_000_000
+    payload = _deactivating_payload("REFUND", expires_ms=expires_ms)
+    items = [HistoryItem(signed_payload="x", send_attempts=[])]
+
+    async def fake_lookup(_token):
+        return {"subscription_expires": expires_ms / 1000.0}  # same term, not stale
+
+    async def fake_handler(_p):
+        return True
+
+    lines = []
+    await replay(
+        items, apply=True, verify=lambda sp: payload, handler=fake_handler,
+        lookup=fake_lookup, emit=lines.append,
+    )
+
+    [line] = lines
+    assert "STALE" not in line
+    summary = summarize(payload, [])
+    assert line == format_summary_line(summary)
+
+
 # ---------------------------------------------------------------------------
 # summarize
 # ---------------------------------------------------------------------------
@@ -1097,3 +1190,97 @@ def test_cli_replay_exception_is_caught_and_reported(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "fetched=1" in out
     assert "aborted" in out
+
+
+def test_cli_fetch_connect_error_exits_1_with_type_and_base_url_no_secrets(monkeypatch, capsys):
+    """A connection failure (the likely case: a wrong App Store hostname)
+    must not reach the operator as a raw traceback -- it exits 1 with a
+    usable, PII-free message naming the exception type and the base URL."""
+    mod = _load_cli_module()
+
+    secret_marker = "eyJhbGciOiJFUzI1NiJ9.super-secret-jwt-body.sig-should-not-print"
+
+    async def fake_fetch(**_kwargs):
+        raise httpx.ConnectError(f"Connection refused (debug detail: {secret_marker})")
+
+    async def _unexpected_replay(*_args, **_kwargs):
+        raise AssertionError("replay should not be called when fetch fails")
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", _unexpected_replay)
+
+    rc = mod.main(["--days", "7", "--environment", "sandbox"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "ConnectError" in combined
+    assert APPSTORE_SANDBOX_URL in combined
+    assert secret_marker not in combined
+
+
+def test_cli_fetch_runtime_error_still_exits_1_and_reports_status(monkeypatch, capsys):
+    """A non-200 from Apple (RuntimeError from fetch_notification_history)
+    must keep reporting the HTTP status the way it always has, even though
+    the guard around it has widened to catch other exceptions too."""
+    mod = _load_cli_module()
+
+    async def fake_fetch(**_kwargs):
+        raise RuntimeError("Get Notification History failed: HTTP 401 unauthorized")
+
+    async def _unexpected_replay(*_args, **_kwargs):
+        raise AssertionError("replay should not be called when fetch fails")
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", _unexpected_replay)
+
+    rc = mod.main(["--days", "7", "--environment", "sandbox"])
+
+    assert rc == 1
+    combined = capsys.readouterr().err
+    assert "401" in combined
+
+
+def test_cli_days_banner_says_now_not_inclusive(monkeypatch, capsys):
+    """--days ends at the current instant, not a whole calendar day -- the
+    banner must say so honestly instead of claiming 'inclusive'."""
+    mod = _load_cli_module()
+
+    async def fake_fetch(**_kwargs):
+        return []
+
+    async def fake_replay(items, *, apply):
+        return ReplayReport(fetched=0)
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", fake_replay)
+
+    rc = mod.main(["--days", "7", "--environment", "sandbox"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "inclusive" not in out
+    assert "now" in out
+
+
+def test_cli_start_end_banner_still_says_inclusive(monkeypatch, capsys):
+    """--start/--end covers whole UTC calendar days -- that banner keeps
+    saying 'inclusive'."""
+    mod = _load_cli_module()
+
+    async def fake_fetch(**_kwargs):
+        return []
+
+    async def fake_replay(items, *, apply):
+        return ReplayReport(fetched=0)
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", fake_replay)
+
+    rc = mod.main(
+        ["--start", "2026-08-01", "--end", "2026-08-01", "--environment", "sandbox"]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "inclusive" in out

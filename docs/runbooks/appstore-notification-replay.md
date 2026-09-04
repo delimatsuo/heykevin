@@ -106,11 +106,18 @@ This script includes one targeted guard against exactly that regression: a
 deactivating notification (`EXPIRED`, `DID_FAIL_TO_RENEW`,
 `GRACE_PERIOD_EXPIRED`, `REFUND`, `REVOKE`) whose implicated subscription
 term has already been superseded by a newer paid term on file for that
-contractor is skipped — printed as `STALE (account term ends later) —
-skipped`, counted in the `stale_skipped` total (broken down by type in
-`stale_by_type`), and never handed to the handler. This check runs in
-**both** dry-run and `--apply`, so a dry run's `dry_run` count already
-excludes what would have been skipped as stale.
+contractor is skipped — printed as `STALE (account term ends
+<ISO-8601 UTC>, this notification's term ended <ISO-8601 UTC>) — skipped`,
+counted in the `stale_skipped` total (broken down by type in
+`stale_by_type`), and never handed to the handler. Both dates are the
+account's stored `subscription_expires` and the notification's own
+`expiresDate`, so the line says *why* it was judged stale without needing
+to cross-reference anything else — and without printing anything beyond
+those two dates and the same 6-character transaction-id suffix and
+redacted fields `summarize()` already uses (never the full transaction id,
+`appAccountToken`, or any email/phone). This check runs in **both** dry-run
+and `--apply`, so a dry run's `dry_run` count already excludes what would
+have been skipped as stale.
 
 That guard covers one specific, worst-case regression. It is **not**
 general idempotency: every non-stale notification in the window is still
@@ -122,6 +129,17 @@ applying again — `by_type` only counts non-stale notifications (it
 reconciles exactly with `dry_run + applied + handler_false + handler_error`),
 so a type that's fully accounted for in `stale_by_type` and absent from
 `by_type` was entirely skipped as stale.
+
+**A known edge case: trial-holder accounts can legitimately show as stale.**
+An account whose stored `subscription_expires` is still a 14-day trial end
+can be later than a shorter purchased term's own `expiresDate` on a
+deactivation notification for that purchase — which the guard reads as "a
+later term is already on file" and skips as stale, even though nothing was
+ever renewed. Reading the two dates on the STALE line together with
+`stale_by_type` is how you catch this: don't assume every stale skip means
+"the customer already renewed" — check whether the account-side date looks
+like a trial end rather than a paid renewal before treating a batch of
+stale skips as fully explained.
 
 ## Credentials
 
@@ -143,3 +161,24 @@ notification type/subtype, the signed date, environment, a 6-character
 suffix of the original transaction id, attempt count, and the last
 delivery result — never the full transaction id, `appAccountToken`, or any
 email/phone.
+
+## If the dry run fails to connect
+
+Any fetch failure — not just a non-200 from Apple — exits 1 with a
+one-line message naming the exception type, the base URL that was being
+called, and the environment (e.g. `error: Fetch failed against
+https://api.storekit.itunes.apple.com (production): ConnectError`), never
+a raw traceback and never the token, the JWT, or a transaction identifier.
+
+If that message is a name-resolution or connection error rather than an
+HTTP status from Apple, it most likely means the App Store host constant
+is wrong for this endpoint. The script reuses `APPSTORE_PRODUCTION_URL` /
+`APPSTORE_SANDBOX_URL` from `app/services/subscription.py` — the same
+constants the production service already verifies live purchases against
+for other App Store Server API calls, so those are the first (and most
+likely only) thing to check. All four candidate Apple hostnames considered
+for this service resolve fine in DNS, so a connection failure here points
+at *which endpoint*, not at basic network reachability. Which host Apple
+actually serves the Get Notification History endpoint from is otherwise
+unverified until a real dry run against it succeeds — this note
+deliberately does not assert that beyond what's checked above.

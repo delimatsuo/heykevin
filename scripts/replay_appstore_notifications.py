@@ -261,12 +261,23 @@ def main(argv: list[str] | None = None) -> int:
 
     only_failures = not args.all
     mode = "APPLY" if args.apply else "DRY RUN"
-    # end_dt is an exclusive upper bound (the instant after the last
-    # inclusive day ends) -- step back a moment before printing so the
-    # displayed window shows the calendar day the caller actually asked for.
-    display_end_date = (end_dt - timedelta(microseconds=1)).date().isoformat()
+    # --start/--end covers whole UTC calendar days -- "inclusive" is
+    # accurate there. --days ends at the current instant (see
+    # _resolve_window: it returns `now` itself as the end), which is not a
+    # whole day, so that banner says "now" plus the actual timestamp
+    # instead of claiming "inclusive".
+    explicit_dates = bool(args.start and args.end)
+    if explicit_dates:
+        # end_dt is an exclusive upper bound (the instant after the last
+        # inclusive day ends) -- step back a moment before printing so the
+        # displayed window shows the calendar day the caller actually asked for.
+        display_end_date = (end_dt - timedelta(microseconds=1)).date().isoformat()
+        window_desc = f"{start_dt.date().isoformat()} .. {display_end_date} (UTC, inclusive)"
+    else:
+        now_iso = end_dt.isoformat().replace("+00:00", "Z")
+        window_desc = f"{start_dt.date().isoformat()} .. now ({now_iso}) (UTC)"
     print(
-        f"window: {start_dt.date().isoformat()} .. {display_end_date} (UTC, inclusive)  "
+        f"window: {window_desc}  "
         f"environment={environment}  onlyFailures={only_failures}  mode={mode}"
     )
 
@@ -279,8 +290,28 @@ def main(argv: list[str] | None = None) -> int:
                 only_failures=only_failures,
             )
         )
-    except RuntimeError as e:
-        print(f"error: {e}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - every fetch failure (a non-200 from
+        # Apple, a DNS/connection error, a timeout, ...) must exit 1 with a usable
+        # message, never a raw traceback -- see the runbook's "If the dry run
+        # fails to connect" section. Never prints the token, the JWT, or any
+        # transaction identifier.
+        if isinstance(exc, RuntimeError):
+            # fetch_notification_history's own message already names Apple's
+            # HTTP status and a truncated response body -- unchanged from
+            # before this guard widened.
+            print(f"error: {exc}", file=sys.stderr)
+        else:
+            print(
+                f"error: Fetch failed against {base_url} ({environment}): {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            print(
+                "error: a name-resolution or connection error here most likely means "
+                "the App Store host constant is wrong for this endpoint -- check "
+                "APPSTORE_PRODUCTION_URL / APPSTORE_SANDBOX_URL in "
+                "app/services/subscription.py.",
+                file=sys.stderr,
+            )
         return 1
 
     try:

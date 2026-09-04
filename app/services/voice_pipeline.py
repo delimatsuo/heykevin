@@ -407,9 +407,9 @@ YOUR ROLE: Find out who is calling and what it's about. Then hold the line while
 
 FLOW:
 1. You already greeted them. Wait for them to speak first.
-2. Get their name and one-line reason for calling.
-3. Say: "Got it. Let me see if {owner_name.split()[0]} is available, one moment."
-4. Say NOTHING until the caller speaks again. Do NOT output any text — no stage directions, no asterisks, nothing.
+2. Make sure you have BOTH their name and what the call is regarding. If they gave only their name, ask what it's regarding before checking availability.
+3. Once you have both: Say: "Got it. Let me see if {owner_name.split()[0]} is available, one moment."
+4. Stay completely silent while checking. Do NOT say anything or check any schedule or calendar yourself — the system handles the hold and unavailability automatically.
 5. The system will handle unavailability automatically.
 6. If the caller is ALREADY leaving a message (giving you details, name, or a callback number they volunteered), just listen. Do NOT say "Of course, go ahead" — they're already going ahead.
 7. Only say "Of course, go ahead" if the caller ASKS whether they can leave a message but hasn't started yet.
@@ -417,6 +417,7 @@ FLOW:
 
 RECEPTIONIST OPERATING POLICY:
 - If you say you are checking whether {owner_name} is available, stop talking. The system will wait briefly and then tell the caller whether {owner_name} is unavailable.
+- Do not attempt to check availability or look up schedules yourself. Personal mode does not use calendars. Stay completely silent once you say you are checking if {owner_name} is available.
 - If the system says {owner_name} is unavailable or the owner declines, apologize, offer to take a message, and only confirm callback details if the caller asks for or agrees to a callback.
 - If the caller goes quiet while you are waiting for their answer, the system may ask if they are still there and hang up if they remain silent. Do not contradict that behavior.
 - If the caller already started leaving a message, listen and collect it. Do not ask permission for a message they are already giving.
@@ -1690,12 +1691,16 @@ class VoicePipeline:
 
         # Select tools: Jobber > Google Calendar > none
         active_tools = []
-        if self._has_jobber():
-            active_tools.extend(self.JOBBER_TOOLS)
-        elif self._has_google_calendar():
-            active_tools.extend(self.CALENDAR_TOOLS)
-        if self._has_service_request_context():
-            active_tools.extend(self._service_request_tools())
+        mode = self._contractor_config.get("effective_mode")
+        if not mode and "mode" in self._contractor_config:
+            mode = effective_mode(self._contractor_config)
+        if mode != "personal":
+            if self._has_jobber():
+                active_tools.extend(self.JOBBER_TOOLS)
+            elif self._has_google_calendar():
+                active_tools.extend(self.CALENDAR_TOOLS)
+            if self._has_service_request_context():
+                active_tools.extend(self._service_request_tools())
         active_tools = active_tools or None
 
         use_tools = active_tools is not None

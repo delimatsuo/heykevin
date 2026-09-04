@@ -997,3 +997,63 @@ def test_gemini_nonstaging_retains_configured_model_tools(monkeypatch):
             },
         }],
     }]
+
+
+def test_gemini_personal_mode_suppresses_tools_even_when_tokens_configured(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
+        lambda: False,
+    )
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop,
+        on_transcript=_noop,
+        contractor_config={
+            "contractor_id": "c1",
+            "effective_mode": "personal",
+            "jobber_access_token": "configured",
+            "jobber_refresh_token": "configured-refresh",
+            "google_calendar_access_token": "configured-gcal",
+        },
+    )
+
+    declarations = pipeline._build_gemini_tools()
+    assert declarations == []
+
+
+@pytest.mark.asyncio
+async def test_claude_personal_mode_suppresses_tools_even_when_calendar_configured():
+    recorded_requests = []
+
+    class FakeClaudeClient:
+        async def post(self, _url, headers=None, json=None, timeout=None):
+            recorded_requests.append(json)
+
+            class FakeResponse:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        "stop_reason": "end_turn",
+                        "content": [{"type": "text", "text": "Got it."}],
+                    }
+
+            return FakeResponse()
+
+    pipeline = _pipeline({
+        "contractor_id": "c1",
+        "effective_mode": "personal",
+        "google_calendar_access_token": "gcal-token",
+        "google_calendar_refresh_token": "gcal-refresh",
+    })
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+
+    async def fake_speak(_text):
+        return None
+
+    pipeline._speak = fake_speak
+
+    await pipeline._handle_caller_speech("Can I talk to Deli?")
+
+    assert len(recorded_requests) == 1
+    assert "tools" not in recorded_requests[0]

@@ -23,13 +23,23 @@ enum RegulatoryAddress {
 
     /// Whether a provisioning error message indicates the caller needs to
     /// supply (or correct) the business address before retrying. True when
-    /// the message, lowercased, contains "address and city" — matching both
-    /// `api_provision_number`'s pre-check ("Business address and city are
-    /// required for number provisioning in your country.") and
-    /// `provision_twilio_number`'s service-layer check ("Business address
-    /// and city required for number provisioning in this country") — or
-    /// "address verification failed" (the rejected-bundle message, which the
-    /// user fixes by correcting the address, not by retrying blindly).
+    /// the message, lowercased, contains "address and city" or "address
+    /// verification failed".
+    ///
+    /// Through `api_provision_number` today, only two messages actually
+    /// match: its own pre-check ("Business address and city are required
+    /// for number provisioning in your country.") and the rejected-bundle
+    /// remap ("Address verification failed. Please check your business
+    /// address.", the fix-not-retry case). `provision_twilio_number`'s
+    /// service-layer exception ("Business address and city required for
+    /// number provisioning in this country") is not currently reachable
+    /// through the API as distinct text: the pre-check above it in
+    /// `api_provision_number` already returns before that exception can be
+    /// raised, and `except Exception` would remap it to the "Address
+    /// verification failed" message (its text also contains "address")
+    /// before any response left the server anyway. The "address and city"
+    /// branch of the match still covers that message directly — kept for
+    /// defense in depth should a future code path surface it unmapped.
     /// False for the other server messages ("No phone numbers available in
     /// your area…", "Your country is not yet supported…", the generic
     /// "Failed to provision phone number…") and for "".

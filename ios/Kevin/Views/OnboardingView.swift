@@ -1060,6 +1060,21 @@ struct OnboardingView: View {
             let local = businessName.trimmingCharacters(in: .whitespaces)
             return local.isEmpty ? appState.businessName : local
         }()
+        // Same resolution as the names above: prefer whatever the user just
+        // typed on the provisioning-failure screen (regulatoryAddress/City,
+        // captured by retryProvisioningWithAddress) over the last confirmed
+        // AppState value. Reading local form state here — not
+        // appState.businessAddress directly — is what keeps this call from
+        // needing to write an unconfirmed address into AppState before the
+        // create request that is the actual confirmation.
+        let resolvedBusinessAddress: String = {
+            let local = regulatoryAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+            return local.isEmpty ? appState.businessAddress : local
+        }()
+        let resolvedBusinessCity: String = {
+            let local = regulatoryCity.trimmingCharacters(in: .whitespacesAndNewlines)
+            return local.isEmpty ? appState.businessCity : local
+        }()
 
         let isPersonal = mode == "personal"
         let bizName: String = {
@@ -1131,8 +1146,8 @@ struct OnboardingView: View {
                     ownerPhone: phoneNumber,
                     appleUserId: appState.appleUserId,
                     appleIdentityToken: appState.appleIdentityToken,
-                    businessAddress: appState.businessAddress,
-                    businessCity: appState.businessCity
+                    businessAddress: resolvedBusinessAddress,
+                    businessCity: resolvedBusinessCity
                 )
             }
             let result: [String: Any]?
@@ -1280,21 +1295,37 @@ struct OnboardingView: View {
             return
         }
         regulatoryAddressError = ""
-        appState.businessAddress = regulatoryAddress
-        appState.businessCity = regulatoryCity
+        let address = regulatoryAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        let city = regulatoryCity.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let contractorId = appState.contractorId
         if !contractorId.isEmpty {
+            // An existing contractor: patch first, and adopt the value into
+            // AppState only once the server has confirmed it — the same
+            // rule SettingsView.saveRegulatoryAddress follows. On failure,
+            // AppState is left untouched and the typed values stay on
+            // screen next to the error.
             let saved = await APIClient.shared.updateBusinessAddress(
                 contractorId: contractorId,
-                address: regulatoryAddress,
-                city: regulatoryCity
+                address: address,
+                city: city
             )
             guard saved else {
                 regulatoryAddressError = String(localized: "Failed to save address. Please try again.")
                 return
             }
+            appState.businessAddress = address
+            appState.businessCity = city
         }
+        // else: no contractor exists yet — there is nothing to patch.
+        // `provision(mode:)` below creates the contractor and resolves its
+        // own businessAddress/businessCity from this same
+        // regulatoryAddress/regulatoryCity form state (mirroring how it
+        // already resolves owner/business name), so the create request
+        // itself carries these values without AppState ever holding an
+        // unconfirmed draft. AppState later adopts the confirmed value the
+        // ordinary way, via SettingsView.loadKnowledge reading it back from
+        // the saved profile — the same path business_name already takes.
         errorMessage = ""
         await provision(mode: selectedMode)
     }

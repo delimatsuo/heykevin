@@ -49,7 +49,15 @@ final class RegulatoryAddressTests: XCTestCase {
         ))
     }
 
-    func testNeedsAddressCaptureTrueForTheServiceLayerMessage() {
+    // provision_twilio_number's internal exception text is not reachable
+    // through api_provision_number today: the endpoint's own pre-check
+    // already returns before that exception can be raised, and if it were
+    // ever raised, `except Exception` would remap it to the "Address
+    // verification failed" message before any response left the server (its
+    // text also contains "address"). This test only proves the substring
+    // match still covers that text directly — defense in depth for a
+    // hypothetical future code path, not a message the client can see today.
+    func testNeedsAddressCaptureTrueForTheUnreachableServiceLayerMessage() {
         XCTAssertTrue(RegulatoryAddress.needsAddressCapture(
             errorMessage: "Business address and city required for number provisioning in this country"
         ))

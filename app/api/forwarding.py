@@ -33,24 +33,32 @@ router = APIRouter(prefix="/api", dependencies=[Depends(verify_api_token)])
 # ``disable_everything`` (``##002#``) erases every forwarding type at once —
 # including a carrier's own voicemail conditional forwards.
 #
-# NANP (US/CA) rows deliberately carry only the legacy ``disable``. The
-# granular cancel codes are not uniform across the carriers named in
-# ``notes`` (T-Mobile US documents GSM MMI ``##61#``/``##21#``; AT&T documents
-# ``*93`` for no-answer cancel, distinct from ``*73``), so the server does not
-# assert them. Clients must not derive NANP behaviour from this table.
+# NANP (US/CA) rows reflect CDMA/Verizon-style forwarding (*71/*72/*73)
+# and deliberately carry only the legacy ``disable``. Granular and standard GSM
+# forwarding codes (e.g. GSM MMI ``*61*``/``##61#`` on T-Mobile/AT&T) differ across
+# carriers, so the server table does not assert a single universal code for NANP.
+# Per owner decision ("keep client, fix notes"), the iOS client continues to handle
+# the Verizon vs GSM carrier split locally (ForwardingCountry.isNANP).
 FORWARDING_CODES = {
     "US": {
         "forward_all": "*72{number}",
         "forward_unanswered": "*71{number}",
         "disable": "*73",
-        "notes": "Works on all major US carriers (AT&T, Verizon, T-Mobile).",
+        "notes": (
+            "CDMA/Verizon-style forwarding (*71/*72/*73). US carriers differ "
+            "(T-Mobile and AT&T use GSM MMI codes); the iOS client handles "
+            "the Verizon vs GSM carrier split locally."
+        ),
         "recommended": "forward_unanswered",
     },
     "CA": {
         "forward_all": "*72{number}",
         "forward_unanswered": "*71{number}",
         "disable": "*73",
-        "notes": "Works on all major Canadian carriers (Bell, Rogers, Telus).",
+        "notes": (
+            "CDMA-style forwarding (*71/*72/*73). Canadian carriers differ; "
+            "the iOS client handles carrier forwarding locally."
+        ),
         "recommended": "forward_unanswered",
     },
     "BR": {

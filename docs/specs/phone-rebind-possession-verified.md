@@ -73,7 +73,17 @@ leaving their old carrier forward pointed at the Kevin number.
   `PROTECTED_FIELDS` filter in `api_update_contractor` is unconditional, so even
   an admin bearer token cannot PATCH the field. The only mechanism that exists
   is a manual Firestore document edit, which is an owner-gated live mutation
-  (`docs/current-roadmap.md` §6.B). v1 does not change that; see §9.
+  (`docs/current-roadmap.md` §6.B). v1 does not change that; see §9. That stays
+  true after this spec ships only because the rebind endpoints deliberately
+  decline the admin bypass built into the two helpers they otherwise reuse:
+  `require_contractor_access` (`app/middleware/auth.py`) and
+  `_enforce_apple_identity` (`app/api/contractors.py`) both begin `if
+  getattr(request.state, "is_admin", False): return`. Reusing
+  `require_contractor_access` as-is is harmless — it only gates which
+  `contractor_id` a caller may address. `_enforce_apple_identity`'s bypass is
+  *not* reused (§3 Step 1); if it were, an admin bearer token could rebind any
+  account with no Apple proof at all, which is exactly the write path this
+  bullet says does not exist.
 - **Multi-number accounts / aliases.** One account, one owner phone.
 - **Backfilling the 22 production records with no `owner_phone`.** Setting a
   phone for the first time uses the same endpoints and the same checks, but no
@@ -95,18 +105,42 @@ matters practically: `app/main.py` is byte-hash-pinned by
 `tests/unit/test_voice_bakeoff_session_driver.py`, so a new module with its own
 router would force a reviewed re-pin for no benefit.
 
+`require_contractor_access` itself is unconditional for admin — it begins
+`if getattr(request.state, "is_admin", False): return`, so a global bearer
+token has access to every `contractor_id`, exactly as it does for
+`api_update_contractor`. That is fine at this step: Step 0 only decides *which*
+`contractor_id` a caller may address, not *whether* the write proceeds. The
+proceed-or-refuse decision belongs entirely to Step 1, which is why Step 1 must
+not inherit `_enforce_apple_identity`'s own admin bypass — see below.
+
 **Step 1 — fresh Apple identity (recommended, see §9).** `start` additionally
-requires an `apple_identity_token` and verifies it through
-`_enforce_apple_identity`, the same helper the create endpoint uses, which calls
-`verify_apple_identity_token` and maps every failure to a generic
-`401 Apple authentication required`. The expected `apple_user_id` is **read from
-the contractor document, not from the request body** — the caller does not get
-to say who they are; they get to prove they are who the account already says.
+requires an `apple_identity_token`. **This is not a call to
+`_enforce_apple_identity`.** That helper begins with the same short-circuit as
+`require_contractor_access` — `if getattr(request.state, "is_admin", False):
+return` — which is correct on the unauthenticated bootstrap endpoints it was
+written for, where "admin caller, skip Apple verification" is the intended
+behaviour. Reused verbatim on the rebind endpoints, that one line would let any
+holder of `API_BEARER_TOKEN` call `start` with no `apple_identity_token` at all
+and complete a rebind on any account — exactly the confused-deputy shape F-04
+describes, only with a support badge on it. So the rebind endpoints run their
+own identity check: either a rebind-specific function, or the same
+`verify_apple_identity_token` plumbing `_enforce_apple_identity` calls, with the
+admin branch removed. Either way, an admin bearer token presenting no valid
+Apple identity token for the account's stored `apple_user_id` is refused with
+the same generic `401 Apple authentication required` as any other caller —
+admin status buys access to the *route* (Step 0), never a waiver on the
+*identity proof* (Step 1). Whichever shape is implemented, it still calls
+`verify_apple_identity_token` and maps every failure to that same generic 401.
+The expected `apple_user_id` is **read from the contractor document, not from
+the request body** — the caller does not get to say who they are; they get to
+prove they are who the account already says.
 
 The reason to require it: an API token proves *possession of a session*, while
 F-04's whole model binds account identity to the verified Apple ID. A rebind is
 an identity-binding write, so it should require the identity factor that F-04
-trusts, not merely the one that F-04 already found insufficient. This closes T-7.
+trusts, not merely the one that F-04 already found insufficient. This closes
+T-7 and, by declining the admin bypass above, also closes the admin-confused-
+deputy path that reusing `_enforce_apple_identity` verbatim would have reopened.
 An account with no `apple_user_id` on file (legacy records) cannot satisfy this
 and is refused — the same fail-closed choice `api_create_contractor` already
 makes for legacy records.
@@ -135,26 +169,41 @@ permitted-by-us but blocked-by-Twilio country would fail silently, since
 
 If the canonical target equals the account's current `owner_phone_e164`, return
 `200` with `{"status": "no changes"}` and send nothing. It is not an error, and
-it must not consume SMS budget.
+it must not consume SMS budget — but it still burns one `phone_rebind_start_limit`
+slot (§6), the same as any other `start` call, before the no-op check even runs.
+Exempting the no-op from the start limit would let a caller spam `start` with
+the account's own current number to learn how many real attempts remain without
+spending any of them — a free rate-limit-state oracle. It does not touch
+`phone_rebind_target_limit`, since no SMS is sent to any destination.
 
 **Step 3 — collision check.** Call `get_contractor_by_owner_phone(canonical,
 country_code=country)`, the same lookup `api_create_contractor` uses, so a
 number that would collide at signup collides here too. Three outcomes:
 
-- `PhoneDedupeAmbiguityError` → `409` with the create endpoint's existing
-  ambiguity message.
-- A different active contractor owns it → `409` with the same generic message.
+- `PhoneDedupeAmbiguityError` → `409` with the rebind's own single collision
+  message (§5).
+- A different active contractor owns it → `409` with that same single
+  collision message.
 - `None`, or a match whose `contractor_id` is this account → proceed.
 
-On the generic message and enumeration (T-4): the create endpoint already
-answers "an account already exists for this phone number" to any Apple account
-holder who guesses a number, so a rebind that says the same thing to an
-*authenticated customer* adds no new disclosure — it merely refuses to be
-stricter than the precedent. That is the justification, and it is a bounded one:
-the oracle is not new, and it now costs an authenticated session plus a fresh
-Apple token plus a rate-limit slot per query, which the create path does not
-charge. If Deli later wants the oracle closed, it must be closed in both places
-at once, or closing it here achieves nothing.
+On the message and enumeration (T-4): `api_create_contractor` actually returns
+three distinct 409 bodies for what a caller experiences as one outcome —
+"An account already exists for this phone number. Please contact support to
+recover your account." for the ambiguity case and for a legacy match with no
+`apple_user_id`, but "An account already exists for this phone number under a
+different Apple ID." for an active match whose `apple_user_id` differs from the
+caller's, which is the realistic collision shape. That three-body split is
+itself a small existence oracle: the response text tells a caller whether a
+collision is a legacy record or an Apple-ID mismatch, not merely that one
+exists. The rebind endpoint does not replicate that split. It returns exactly
+one message for every collision shape it can produce — ambiguity error or an
+active-contractor match — so a rebind caller learns nothing about *why* a
+number collided, only *that* it did. This is a deliberate unification, not a
+byte-for-byte match with `api_create_contractor`'s text (see §5): closing the
+oracle on this path is worthwhile on its own even though
+`api_create_contractor`'s three-body split is unchanged; if Deli later wants
+that split closed too, it is a separate, smaller fix to the create endpoint,
+not a reason to hold this one back.
 
 Note the lookup queries only `active == True` documents, so a deactivated
 account that once held the number does not block the rebind. That is the
@@ -325,9 +374,15 @@ All three live under the authenticated contractor router.
 | 429 | `Too many attempts. Please try again later.` | Any rate limit; body carries `retry_after_seconds` | T-3, T-8 |
 | 503 | `Could not send the verification code. Please try again.` | `send_sms` returned `False` | — |
 
-The two 409s deliberately share the collision message with
-`api_create_contractor` so the two endpoints cannot be differentiated by
-response text (T-4). A wrong code returns `404 No verification in progress`
+The `An account already exists...` 409 above deliberately covers both of its
+causes — an active contractor already owning the target, or
+`PhoneDedupeAmbiguityError` — with one message, so a rebind caller cannot tell
+those two shapes apart from response text (T-4). It is **not** the same string
+as any of `api_create_contractor`'s three 409 bodies (two of which read
+"...Please contact support to recover your account.", the third "...under a
+different Apple ID."; see §3 Step 3): the rebind intentionally unifies what the
+create endpoint splits into two, rather than reusing either of the create
+endpoint's strings. A wrong code returns `404 No verification in progress`
 **only** after the challenge is destroyed on the fifth failure; a wrong code with
 attempts remaining returns `400 Invalid code` with the remaining count omitted.
 
@@ -353,7 +408,12 @@ closed* on Firestore errors. Two new settings on `Settings`, shaped exactly like
 
 Use `phone_hash` for the target key so no raw phone number becomes a Firestore
 document id. Each `start` burns one slot from both start limits *before* the SMS
-goes out. Cancelling a challenge does not refund a slot.
+goes out. Cancelling a challenge does not refund a slot. The no-op path (§3
+Step 2, target equals the account's current number) is not exempt from
+`phone_rebind_start_limit` either: it still burns a per-account start slot even
+though it sends no SMS and never touches `phone_rebind_target_limit`. Without
+that, the no-op would be a free way to probe how much of the account's start
+budget is left.
 
 **Lockout behaviour.** Per-challenge: 5 wrong codes destroys the challenge.
 Per-account: exceeding `phone_rebind_start_limit` returns `429` with
@@ -382,6 +442,14 @@ observable that catches a lost T-5 race, and it should be zero forever.
 number. The per-contractor admin read can show `owner_phone_rebound_at` and the
 hashed history, which is enough for support to answer "when did this account
 move?" without support gaining the ability to move it.
+
+These counters are not only the T-5 race detector described above. They are
+also the detection backstop for §3 Step 1's decline of `_enforce_apple_identity`'s
+`is_admin` bypass: if that control were ever weakened or regressed — a future
+edit that reused the helper verbatim, say — there is today no legitimate path
+that produces an admin-triggered rebind, so any rebind volume or pattern that
+does not trace back to a customer's own session is the signal that catches it,
+not just a means to spot a lost concurrency race.
 
 ---
 
@@ -475,12 +543,12 @@ Negative tests, one per threat in §1:
 | Threat | Negative test |
 |---|---|
 | T-1 | PATCH with `owner_phone` still drops it (extend `test_contractor_protected_fields.py`); a rebind targeting a number owned by another active account returns the generic 409 and writes nothing; a `start` for a `contractor_id` the token does not own returns 403 |
-| T-2 | A `verify` succeeds only for the code sent to the target; a code delivered to the *old* number is never accepted (no such code is ever generated) |
+| T-2 | A `verify` succeeds only for the code sent to the target; a code delivered to the *old* number is never accepted (no such code is ever generated); see T-7 below — those tests are what actually prove possession of the target number alone, with no valid session or Apple proof, is insufficient to write anything |
 | T-3 | Five wrong codes destroy the challenge and the sixth returns 404; comparison uses `hmac.compare_digest`; a 7-digit or alphabetic code is rejected on shape before any Firestore read |
-| T-4 | The collision 409 and the ambiguity 409 are byte-identical to each other and to `api_create_contractor`'s; `start` never returns the target's full number |
+| T-4 | The collision 409 (an active contractor owns the target) and the ambiguity 409 (`PhoneDedupeAmbiguityError`) are byte-identical to *each other*; the rebind returns this same single message for every collision shape, and it is **not** asserted equal to any of `api_create_contractor`'s three 409 strings — the rebind intentionally has its own message (§3 Step 3); `start` never returns the target's full number |
 | T-5 | With the account's `owner_phone_e164` mutated between start and verify, the transaction aborts with the CAS 409 and no field is written; a collision introduced between start and verify is caught by the in-transaction re-check |
 | T-6 | A successful rebind clears `forwarding_last_seen_at`, leaves `last_inbound_call_at` untouched, and returns both the old country's disable codes and the new country's enable codes |
-| T-7 | `start` without `apple_identity_token`, with a token whose `sub` differs from the stored `apple_user_id`, with a stale `iat`, and on an account with no `apple_user_id`, all return the generic 401 |
+| T-7 | `start` without `apple_identity_token`, with a token whose `sub` differs from the stored `apple_user_id`, with a stale `iat`, and on an account with no `apple_user_id`, all return the generic 401; a request authenticated with the global admin bearer token and no `apple_identity_token` also returns the generic 401 and writes nothing — this is the test that proves the rebind endpoints do not inherit `_enforce_apple_identity`'s `is_admin` bypass |
 | T-8 | The per-target limit blocks a fourth start for the same number across different accounts; an unsupported-region target is rejected before any send; a duplicate `start` overwrites the challenge without a second free SMS beyond the limit |
 | T-9 | `is_safe_to_release_number` and `is_safe_to_release_lapsed_number` both return `False` for an account with a recent `owner_phone_rebound_at`, including when `forwarding_last_seen_at` is absent |
 
@@ -502,10 +570,13 @@ the account's current number is a no-op that sends no SMS.
 2. **Can support force a rebind? — Recommend no in v1.** Support cannot do it
    today (no admin write path exists), so saying no changes nothing and keeps
    the possession requirement absolute: an admin-forced rebind is exactly the
-   confused-deputy F-04 describes, only with a nicer UI. Revisit if real support
-   volume proves the self-serve flow leaves people stranded; the honest v1 answer
-   for a stranded customer is an owner-performed Firestore edit under the
-   existing live-mutation gate.
+   confused-deputy F-04 describes, only with a nicer UI. This "no" is enforced
+   in code, not merely stated: §3 Step 1 declines `_enforce_apple_identity`'s
+   `is_admin` bypass, so shipping this feature does not quietly reopen the
+   admin path this decision forecloses. Revisit if real support volume proves
+   the self-serve flow leaves people stranded; the honest v1 answer for a
+   stranded customer is an owner-performed Firestore edit under the existing
+   live-mutation gate.
 3. **Keep the old number as an alias for 7 days? — Recommend no.** An alias
    means two active numbers resolve to one account, which reintroduces exactly
    the dedupe ambiguity `PhoneDedupeAmbiguityError` exists to catch, and it

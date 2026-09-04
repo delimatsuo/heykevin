@@ -235,7 +235,14 @@ customer-data qualification.
   `owner_phone`/`owner_phone_e164` update. Implementation has not started; it
   waits on the owner decisions enumerated in the spec's §9. Generic PATCH
   must keep both fields protected under F-04 until then.
-- **US/CA Forwarding Codes Decision:** Non-NANP countries now dial server-supplied codes (see Task 5). US/CA still use the client's Verizon/GSM split because `CLAUDE.md` (`*61*number#` for non-Verizon US) and the server table's `notes` (`*71`/`*73` for all major US carriers) disagree, and T-Mobile US documents GSM MMI while AT&T documents `*93` for no-answer cancel. Decide the per-carrier US/CA codes, correct `notes`, then let the client consume server codes for NANP too. The user-facing country override is now the Settings country control (Task 7).
+- **US/CA Forwarding Codes Decision — resolved (keep client, fix notes):**
+  Per owner decision, the client keeps its tested Verizon/GSM split
+  (`ForwardingCountry.nanp` in `ForwardingInstructions.swift`), where Verizon
+  dials `*71` / `*73` and GSM carriers dial standard GSM MMI `*61*...#` /
+  `##61#`. The server table's notes in `app/api/forwarding.py` have been
+  corrected to state that `*71` / `*73` represents CDMA/Verizon forwarding rather
+  than asserting it universally for all carriers, reconciling the server table with
+  `CLAUDE.md` and the iOS client.
 - **International forward target format:** the client strips `+` and dials the Kevin number as bare digits (`**61*15551234567#`). From a non-NANP SIM, a target in another country most likely needs the `+` international form in the MMI string; today's behaviour predates server-driven codes and has never been verified on a real carrier. Confirm on a live network (Task 8) before treating non-NANP forwarding as working end-to-end.
 - **iOS International Address Capture — shipped (source):** Business street
   address and city capture for accounts in the six regulatory countries

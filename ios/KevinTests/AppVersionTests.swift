@@ -5,9 +5,9 @@ import XCTest
 final class AppVersionTests: XCTestCase {
     func testMarketingVersionWithValidShortVersionString() {
         let infoDictionary: [String: Any] = [
-            "CFBundleShortVersionString": "1.2.10"
+            "CFBundleShortVersionString": "1.2.11"
         ]
-        XCTAssertEqual(AppVersionService.marketingVersion(from: infoDictionary), "1.2.10")
+        XCTAssertEqual(AppVersionService.marketingVersion(from: infoDictionary), "1.2.11")
     }
 
     func testMarketingVersionWithNilDictionary() {

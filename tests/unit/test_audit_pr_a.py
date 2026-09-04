@@ -167,7 +167,7 @@ def _non_admin_request() -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(is_admin=False, contractor_id=""))
 
 
-async def _fake_no_apple_id_match(_apple_user_id: str):
+async def _fake_no_apple_id_match(apple_user_id: str):
     """No contractor is already bound to the caller's Apple ID.
 
     `api_create_contractor` does a call-time
@@ -178,8 +178,12 @@ async def _fake_no_apple_id_match(_apple_user_id: str):
     pattern in tests/unit/test_twilio_provisioning.py). Every test below
     passes a nonblank apple_user_id that must NOT already match an existing
     record, so returning None here reproduces the intended scenario as well
-    as unblocking it offline.
+    as unblocking it offline. Assert the value received is non-empty (like
+    the neighbouring `stub_apple_identity` fake) so a future refactor that
+    passes the wrong value into this dedupe lookup fails loudly instead of
+    silently returning None for the wrong reason.
     """
+    assert apple_user_id, "get_contractor_by_apple_user_id called with an empty apple_user_id"
     return None
 
 

@@ -126,10 +126,10 @@ def _effective_validation_time(payload: dict) -> datetime:
     Apple's verifier pins its trust store to the payload's signedDate when
     online checks are off, so history still verifies after the signing
     leaf expires. Mirror that: use signedDate (ms since epoch) when it is
-    a positive number and not in the future beyond a small tolerance;
-    otherwise fall back to now. A missing, malformed, or future-dated
-    signedDate never widens acceptance beyond the pre-existing now-based
-    check.
+    a finite positive number and not in the future beyond a small
+    tolerance; otherwise fall back to now. A missing, malformed, or
+    future-dated signedDate never widens acceptance beyond the
+    pre-existing now-based check.
     """
     now = datetime.now(timezone.utc)
     raw = payload.get("signedDate")

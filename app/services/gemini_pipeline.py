@@ -1485,6 +1485,12 @@ class GeminiPipeline:
             self._log_voice_timing("live_tools_disabled", reason="staging_native_safety")
             return []
 
+        mode = self._contractor_config.get("effective_mode")
+        if not mode and "mode" in self._contractor_config:
+            mode = effective_mode(self._contractor_config)
+        if mode == "personal":
+            return []
+
         from app.services.integration_tokens import has_usable_token
 
         has_jobber = has_usable_token(self._contractor_config, "jobber")

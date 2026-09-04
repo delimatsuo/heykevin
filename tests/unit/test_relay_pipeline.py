@@ -890,3 +890,83 @@ async def test_playback_receipts_count_as_activity_for_the_watchdog():
         await pipeline.stop()
 
     assert not nudged_early
+
+
+@pytest.mark.asyncio
+async def test_caller_speech_during_hold_updates_transcript_and_preserves_silence():
+    """Speech while on hold must update live transcript without breaking silence."""
+    recorder = _Recorder()
+    pipeline = _pipeline(
+        recorder,
+        [
+            [{"text": "Got it. Let me see if Deli is available, one moment."}],
+            [{"text": "Deli is not available right now. Can I take a message?"}],
+        ],
+    )
+    pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS = 0.1
+
+    # Initial prompt that puts the caller on hold
+    await _drive(pipeline, {"type": "prompt", "voicePrompt": "Can I talk to Deli?", "last": True})
+    assert pipeline._hold_task is not None
+    assert not pipeline._hold_task.done()
+
+    tokens_before = [m["token"] for m in recorder.sent if m["type"] == "text" and m["token"]]
+    assert "Got it. Let me see if Deli is available, one moment." in tokens_before
+
+    # Caller adds information while the hold is active
+    await pipeline.handle_message({
+        "type": "prompt",
+        "voicePrompt": "This is about a car he wants to buy.",
+        "last": True,
+    })
+
+    # The transcript must be forwarded immediately so the owner sees it in the app
+    assert ("Caller", "This is about a car he wants to buy.") in recorder.transcripts
+
+    # But Kevin must NOT have generated any new reply yet (still silent on hold)
+    tokens_during_hold = [m["token"] for m in recorder.sent if m["type"] == "text" and m["token"]]
+    assert tokens_during_hold == tokens_before
+
+    # The speech must be recorded in history
+    assert any(
+        entry.get("role") == "user"
+        and any("car he wants to buy" in p.get("text", "") for p in entry.get("parts", []))
+        for entry in pipeline._history
+    )
+
+    # When the hold timer expires, unavailability reply is generated
+    await pipeline._hold_task
+    await pipeline.wait_idle()
+
+    tokens_after = [m["token"] for m in recorder.sent if m["type"] == "text" and m["token"]]
+    assert "Deli is not available right now. Can I take a message?" in tokens_after
+    assert pipeline._unavailable_said is True
+
+
+def test_personal_mode_has_no_tools_even_with_calendar_or_jobber():
+    """Personal assistant mode must never expose scheduling or CRM tools."""
+    recorder = _Recorder()
+    pipeline = _pipeline(
+        recorder,
+        [],
+        effective_mode="personal",
+        integration_tokens={
+            "google_calendar": {
+                "access_token": "ya29.test",
+                "expires_at": 9999999999,
+            },
+            "jobber": {
+                "access_token": "jobber.test",
+                "expires_at": 9999999999,
+            },
+        },
+    )
+    assert pipeline._tools == []
+
+    from app.services.gemini_pipeline import GeminiPipeline
+
+    gemini = GeminiPipeline.__new__(GeminiPipeline)
+    gemini._contractor_config = pipeline._contractor_config
+    gemini._log_voice_timing = lambda *args, **kwargs: None
+    assert gemini._build_gemini_tools() == []
+

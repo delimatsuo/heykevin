@@ -50,3 +50,14 @@ def test_business_prompt_is_unaffected():
     })
 
     assert "must not guess" not in business.lower()
+
+
+def test_personal_prompt_requires_name_and_reason_before_hold():
+    """Prompt must instruct Kevin to get both name and reason before checking availability."""
+    lowered = _personal_prompt().lower()
+    assert "both" in lowered
+    assert "name" in lowered
+    assert "regarding" in lowered
+    assert "stay completely silent" in lowered
+    assert "does not use calendars" in lowered
+

@@ -280,6 +280,20 @@ class RelayPipeline:
         # what was actually spoken of it, then answer the fuller history.
         await self._supersede_in_flight()
         self._history.append({"role": "user", "parts": [{"text": text}]})
+        self._last_activity = time.monotonic()
+
+        if self._hold_task and not self._hold_task.done():
+            logger.info(
+                "relay_event event=caller_speech_during_hold call=%s chars=%d",
+                _call_label(self._call_sid),
+                len(text),
+            )
+            # The owner-availability hold is active: do not generate speech
+            # or break silence. Let the owner review the live transcript in the
+            # app and decide whether to pick up. The hold timer will handle
+            # unavailability if the owner does not answer.
+            return
+
         self._start_generation()
 
     async def _handle_interrupt(self, message: dict) -> None:
@@ -533,6 +547,12 @@ class RelayPipeline:
 
     def _build_tools(self) -> list:
         """Reuse the Gemini-format tool declarations from the live engine."""
+        mode = self._contractor_config.get("effective_mode")
+        if not mode and "mode" in self._contractor_config:
+            mode = effective_mode(self._contractor_config)
+        if mode == "personal":
+            return []
+
         from app.services.gemini_pipeline import GeminiPipeline
 
         borrowed = GeminiPipeline.__new__(GeminiPipeline)

@@ -49,6 +49,51 @@ The following discrete backend hardening slices have been merged to `main` and v
    - **Core paths:** [`app/db/contractors.py`](../app/db/contractors.py), [`app/db/service_requests.py`](../app/db/service_requests.py), [`app/services/calendar.py`](../app/services/calendar.py), [`app/services/google_calendar_request_provider.py`](../app/services/google_calendar_request_provider.py), [`app/services/integration_tokens.py`](../app/services/integration_tokens.py), [`app/services/integration_token_mutations.py`](../app/services/integration_token_mutations.py), [`app/services/service_request_recovery.py`](../app/services/service_request_recovery.py), [`app/services/service_request_repository.py`](../app/services/service_request_repository.py), [`tests/unit/test_calendar_appointment_mutations.py`](../tests/unit/test_calendar_appointment_mutations.py), [`tests/unit/test_contractor_protected_fields.py`](../tests/unit/test_contractor_protected_fields.py), [`tests/unit/test_google_calendar_request_provider.py`](../tests/unit/test_google_calendar_request_provider.py), [`tests/unit/test_integration_token_envelope.py`](../tests/unit/test_integration_token_envelope.py), [`tests/unit/test_service_request_repository.py`](../tests/unit/test_service_request_repository.py), [`tests/unit/test_service_request_recovery.py`](../tests/unit/test_service_request_recovery.py), [`tests/unit/test_service_request_firestore.py`](../tests/unit/test_service_request_firestore.py).
    - **Outcome:** Delivered provider-safe Google Calendar reschedule fencing in backend services with fresh ETag invariant, UTC whole-second comparison, atomic recovery finalization, and fail-closed uncertainty classification.
 
+### 2026-09-03 Follow-Up Wave (PRs #223–#233)
+
+Eleven pull requests merged to `main` in one session, source-only. Nothing in
+this wave has been deployed — production and staging both still serve the
+pre-wave code as of this writing. Each closed one or more entries reconciled
+in §6.A below.
+
+1. **PR #223 (merge `9202885`):** Pinned twilio-python's request logging to
+   `WARNING`; caller phone numbers were previously logged at `INFO`.
+2. **PR #224 (merge `7b662bd`):** Corrected the deploy docs: staging dispatch
+   requires `candidate_sha`; production dispatch must not pass it; only one
+   `workflow_dispatch` run from `main` proceeds at a time.
+3. **PR #225 (merge `b06aab4`):** The lapsed-number release's Apple ownership
+   check now walks both App Store environments; the deleted-app release
+   guard now honours `last_inbound_call_at`.
+4. **PR #226 (merge `f381851`):** Twilio provisioning — a missing regulation
+   now maps to "not yet supported" instead of "No phone numbers available in
+   your area"; the regulatory address guard now runs before the Twilio
+   client is constructed.
+5. **PR #227 (merge `9908814`):** App Store webhook signature verification
+   hardened — full 3-certificate chain validation, Apple's marker OIDs
+   checked, `bundleId` mismatch fails closed across the payload locations
+   Apple may populate.
+6. **PR #228 (merge `ddf666d`):** Added an owner-run CLI to replay App Store
+   notifications Apple failed to deliver, with a guard that skips replaying
+   a stale deactivation against a contractor who has since renewed.
+7. **PR #229 (merge `5242134`):** Wave-1 cleanup — fixed the stale
+   deploy-workflow comment in `CLAUDE.md`/`AGENTS.md`, removed the dead
+   `_get_appstore_url` resolver, extracted a shared inbound-call-stamp
+   helper used by both release guards, named the environment in Apple
+   non-200 webhook errors, and made a Firestore-reaching provisioning test
+   run offline.
+8. **PR #230 (merge `ef9813c`):** The App Store webhook verifier now checks
+   certificate validity at the notification payload's `signedDate` rather
+   than at `now()`, matching Apple's own offline verifier semantics.
+9. **PR #231 (merge `5ae6845`):** Added an `isfinite` guard on `signedDate`;
+   a non-dict JWS header now returns HTTP 400 instead of 500; the audit and
+   subscription-security test suites run offline.
+10. **PR #232 (merge `81dcabd`):** Added
+    [`docs/specs/phone-rebind-possession-verified.md`](specs/phone-rebind-possession-verified.md),
+    the design spec for the possession-verified owner-phone rebind flow.
+11. **PR #233 (merge `387c847`):** iOS business address and city capture
+    shipped for the six regulatory countries (`DE`, `FR`, `IT`, `ES`, `PT`,
+    `BR`).
+
 ---
 
 ## 3. Internationalization Status (Tasks 1–8)
@@ -184,12 +229,30 @@ customer-data qualification.
 ## 6. Categorization: Remaining Source Gaps vs. Owner / Live Gates
 
 ### A. Remaining Source Gaps (Repository Code & Tests)
-- **Possession-Verified Phone Rebind Flow:** Design and implement a dedicated possession-verified rebind flow with collision checks and atomic `owner_phone`/`owner_phone_e164` updates; generic PATCH must keep both fields protected under F-04.
+- **Possession-Verified Phone Rebind Flow:** The design spec now exists —
+  [`docs/specs/phone-rebind-possession-verified.md`](specs/phone-rebind-possession-verified.md)
+  (PR #232, merge `81dcabd`) — covering collision checks and an atomic
+  `owner_phone`/`owner_phone_e164` update. Implementation has not started; it
+  waits on the owner decisions enumerated in the spec's §9. Generic PATCH
+  must keep both fields protected under F-04 until then.
 - **US/CA Forwarding Codes Decision:** Non-NANP countries now dial server-supplied codes (see Task 5). US/CA still use the client's Verizon/GSM split because `CLAUDE.md` (`*61*number#` for non-Verizon US) and the server table's `notes` (`*71`/`*73` for all major US carriers) disagree, and T-Mobile US documents GSM MMI while AT&T documents `*93` for no-answer cancel. Decide the per-carrier US/CA codes, correct `notes`, then let the client consume server codes for NANP too. The user-facing country override is now the Settings country control (Task 7).
 - **International forward target format:** the client strips `+` and dials the Kevin number as bare digits (`**61*15551234567#`). From a non-NANP SIM, a target in another country most likely needs the `+` international form in the MMI string; today's behaviour predates server-driven codes and has never been verified on a real carrier. Confirm on a live network (Task 8) before treating non-NANP forwarding as working end-to-end.
-- **iOS International Address Capture:** Add business street address and city input fields to iOS onboarding/settings for accounts in regulatory countries (`DE`, `FR`, `IT`, `ES`, `PT`, `BR`).
+- **iOS International Address Capture — shipped (source):** Business street
+  address and city capture for accounts in the six regulatory countries
+  (`DE`, `FR`, `IT`, `ES`, `PT`, `BR`) merged in PR #233 (`387c847`).
+  End-to-end provisioning in those countries remains gated on Twilio
+  international number inventory and a live regulatory bundle round-trip
+  (Task 8, owner-gated).
 - **EU/BR number provisioning — `email` fix landed (source):** twilio 9.x `BundleList.create` requires `email`; `_create_regulatory_bundle` now passes `settings.twilio_regulatory_contact_email` and refuses clearly ("Regulatory contact email not configured") before any Twilio call when it is unset. `TWILIO_REGULATORY_CONTACT_EMAIL` is set on production (`kevin-api-00265-jr8`, 2026-09-03) but **not on staging** — after the next staging deploy, staging's EU/BR provisioning refuses on config until it is set there — and the code is inert until the next backend deploy (owner-gated). Live regulatory provisioning still needs Twilio international inventory and a real bundle round-trip (Task 8).
-- **Regulatory provisioning follow-ups (from the unit-test pass):** a missing Twilio regulation is reported as "No phone numbers available in your area" rather than "not yet supported" (one-line mapping change); the Twilio client is constructed before the regulatory address guard (harmless; two-line reorder); addresses are created with empty `region`/`postal_code`, which several regulatory countries require — only a live provisioning check (Task 8, owner-gated) can confirm that path.
+- **Regulatory provisioning follow-ups:** Twilio regulatory bundle addresses
+  are still created with empty `region`/`postal_code`, which several
+  regulatory countries require — only a live provisioning check (Task 8,
+  owner-gated) can confirm whether that blocks bundle approval. (The
+  "not yet supported" mapping and the Twilio-client-before-guard ordering
+  closed in PR #226, merge `f381851`.)
+- **App Store replay `--days` end-date label:** `scripts/replay_appstore_notifications.py` (PR #228, merge `ddf666d`) prints its window banner as "(UTC, inclusive)" for every run. That's accurate for `--start`/`--end`, where the end date really is a full inclusive calendar day, but in `--days` mode the actual upper fetch bound is `now`, not the end of the printed day — the label overstates how much of the final day was covered. Cosmetic only; the fetch window itself is correct.
+- **App Store replay trial-holder STALE edge:** the stale-deactivation guard (`app/services/appstore_replay.py::_is_stale_deactivation`, PR #228, merge `ddf666d`) compares a deactivating notification's `expiresDate` against the contractor's stored `subscription_expires`. For a contractor whose stored expiry is still their trial end rather than a paid renewal, a shorter-term deactivation could be misclassified STALE and skipped. Errs toward keeping access, not wrongly deactivating; needs an owner decision on whether trial-only expiries should be excluded from the comparison.
+- **Replay CLI's narrow fetch exception handling:** in `scripts/replay_appstore_notifications.py` (PR #228, merge `ddf666d`), the call to `fetch_notification_history` is wrapped only in `except RuntimeError`. Any other exception raised during the fetch propagates as an unhandled traceback instead of the CLI's usual `error: ...` message and exit code 1. Deliberately left open at final review.
 
 ### B. Owner / Live Gates (Explicitly Out of Bounds for Agent Tasks)
 - Cloud Run staging and production deployments (`gcloud run deploy` or GitHub Actions deploy workflows).

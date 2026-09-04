@@ -367,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
         print("-" * 72)
         print(f"fetched={len(items)} (replay aborted before totals were available)")
         print(f"error: replay failed: {type(e).__name__}", file=sys.stderr)
+        if args.debug:
+            raise
         return 1
 
     print("-" * 72)

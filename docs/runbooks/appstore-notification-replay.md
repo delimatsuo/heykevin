@@ -194,11 +194,24 @@ shape depends on what actually failed — there are three:
   `--debug` for a full traceback.
 
 Add `--debug` to re-raise the original exception (a bare re-raise,
-preserving the traceback) after those messages print, instead of exiting 1
--- for any of the three branches above, not only the credential one. This
-is the one way to see the exception's own message when the default output
-withholds it (the credential branch above). It may print that message, so
-use `--debug` locally and do not paste its output anywhere.
+preserving the traceback) after whatever that failure point already
+printed, instead of exiting 1 -- at **both** points in this script where an
+unexpected exception can end the run, not just the fetch:
+
+- Fetching notification history from Apple -- any of the three branches
+  above, not only the credential one.
+- Replaying/applying the verified batch (`replay()` itself raising
+  mid-run), printed as `error: replay failed: <ExceptionType>` with the
+  fetched count so the totals stay visible even though the run aborted.
+  This is exactly the moment you most want a traceback: under `--apply`,
+  some notifications in the batch may already have been applied before the
+  failure.
+
+`--debug` is the one way to see an exception's own message when the
+default output withholds it (the fetch credential branch above, and the
+replay-failure message, which by default only ever names the exception
+type). It may print that message, so use `--debug` locally and do not
+paste its output anywhere.
 
 For the connection-failure case specifically: it most likely means the App
 Store host constant is wrong for this endpoint. The script reuses

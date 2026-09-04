@@ -1198,6 +1198,31 @@ def test_cli_replay_exception_is_caught_and_reported(monkeypatch, capsys):
     assert "aborted" in out
 
 
+def test_cli_debug_flag_reraises_replay_exception_too(monkeypatch, capsys):
+    """--debug must also cover a mid-replay failure, not only a fetch
+    failure -- a failure here is exactly when the operator most wants a
+    traceback, since under --apply some notifications may already have
+    been applied before replay() raised."""
+    mod = _load_cli_module()
+
+    async def fake_fetch(**_kwargs):
+        return [HistoryItem(signed_payload="p1", send_attempts=[])]
+
+    async def fake_replay(items, *, apply):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mod, "fetch_notification_history", fake_fetch)
+    monkeypatch.setattr(mod, "replay", fake_replay)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        mod.main(["--days", "7", "--environment", "sandbox", "--debug"])
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "fetched=1" in combined
+    assert "aborted" in combined
+
+
 def test_cli_fetch_connect_error_exits_1_with_type_base_url_and_host_guidance(monkeypatch, capsys):
     """A genuine connection failure (the likely real case: a wrong App Store
     hostname) must not reach the operator as a raw traceback -- it exits 1

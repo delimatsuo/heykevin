@@ -71,6 +71,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
+
 # app.config.settings freezes at first import of any app.* module, so the
 # sys.path insertion happens here (safe -- no app.* import yet) and every
 # app.* import is deferred until after --from-cloud-run has had a chance to
@@ -157,6 +159,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--from-cloud-run", metavar="SERVICE", default=None,
         help="Source APPSTORE_*/FIRESTORE_PROJECT_ID credentials from this Cloud Run "
              "service's env before doing anything else. Never prints a value.",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Re-raise the original exception after reporting, for a full traceback. "
+             "May print the exception's own message, so use it locally rather than "
+             "pasting the output anywhere.",
     )
     return parser
 
@@ -261,12 +269,28 @@ def main(argv: list[str] | None = None) -> int:
 
     only_failures = not args.all
     mode = "APPLY" if args.apply else "DRY RUN"
-    # end_dt is an exclusive upper bound (the instant after the last
-    # inclusive day ends) -- step back a moment before printing so the
-    # displayed window shows the calendar day the caller actually asked for.
-    display_end_date = (end_dt - timedelta(microseconds=1)).date().isoformat()
+    # --start/--end covers whole UTC calendar days -- "inclusive" is
+    # accurate there. --days ends at the current instant (see
+    # _resolve_window: it returns `now` itself as the end), which is not a
+    # whole day, so that banner says "now" plus the actual timestamp
+    # instead of claiming "inclusive".
+    explicit_dates = bool(args.start and args.end)
+    if explicit_dates:
+        # end_dt is an exclusive upper bound (the instant after the last
+        # inclusive day ends) -- step back a moment before printing so the
+        # displayed window shows the calendar day the caller actually asked for.
+        display_end_date = (end_dt - timedelta(microseconds=1)).date().isoformat()
+        window_desc = f"{start_dt.date().isoformat()} .. {display_end_date} (UTC, inclusive)"
+    else:
+        # start_dt is `now - N days` at the current time of day, not midnight
+        # -- a bare date here would silently make the printed window look
+        # like it covers the whole boundary day when --days actually
+        # excludes its oldest hours. Print both ends as exact instants.
+        start_iso = start_dt.isoformat().replace("+00:00", "Z")
+        now_iso = end_dt.isoformat().replace("+00:00", "Z")
+        window_desc = f"{start_iso} .. now ({now_iso}) (UTC)"
     print(
-        f"window: {start_dt.date().isoformat()} .. {display_end_date} (UTC, inclusive)  "
+        f"window: {window_desc}  "
         f"environment={environment}  onlyFailures={only_failures}  mode={mode}"
     )
 
@@ -279,8 +303,62 @@ def main(argv: list[str] | None = None) -> int:
                 only_failures=only_failures,
             )
         )
-    except RuntimeError as e:
-        print(f"error: {e}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - every fetch failure (a non-200 from
+        # Apple, a connection/DNS failure, a credentials problem raised while
+        # signing the request, ...) must exit 1 with a usable message by default,
+        # never a raw traceback -- see the runbook's "If the dry run fails to
+        # connect" section. Which details are safe to print depends on which of
+        # these this is; see the three branches below. --debug re-raises (bare
+        # `raise`, preserving the original traceback) after those messages are
+        # printed, for whichever branch this was -- not only the credential one,
+        # since a transport or Apple-status failure can want a traceback too.
+        if isinstance(exc, RuntimeError):
+            # fetch_notification_history's own message already names Apple's
+            # HTTP status and a truncated response body -- unchanged from
+            # before this guard widened. That body comes straight from Apple
+            # and is not filtered for PII by this script, same as always.
+            print(f"error: {exc}", file=sys.stderr)
+        elif isinstance(exc, (httpx.TransportError, OSError)):
+            # A genuine connection/DNS/TLS/timeout failure -- the most likely
+            # real-world cause is a wrong App Store host constant. These
+            # exception messages are the diagnostic here and are safe to
+            # print in full: they describe a socket/TLS/DNS failure and never
+            # carry the Authorization header, the token, or a transaction id.
+            print(
+                f"error: Fetch failed against {base_url} ({environment}): "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            print(
+                "error: a name-resolution or connection error here most likely means "
+                "the App Store host constant is wrong for this endpoint -- check "
+                "APPSTORE_PRODUCTION_URL / APPSTORE_SANDBOX_URL in "
+                "app/services/subscription.py.",
+                file=sys.stderr,
+            )
+        else:
+            # Not a connection failure -- most likely token_factory()
+            # (_get_appstore_jwt) raised while signing the request, e.g. a
+            # malformed APPSTORE_PRIVATE_KEY (--from-cloud-run copies it
+            # pipe-separated; it must be un-mangled back into real newlines
+            # before it is a usable PEM key). Only the exception type is
+            # printed here -- unlike httpx.TransportError above, an arbitrary
+            # exception's message is not proven credential-free.
+            print(
+                f"error: Fetch failed against {base_url} ({environment}): {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            print(
+                "error: this does not look like a connection failure -- check the App "
+                "Store credentials, especially APPSTORE_PRIVATE_KEY (must be a PEM "
+                "private key; --from-cloud-run copies it pipe-separated and it must be "
+                "un-mangled back into real newlines). Re-run with --debug for a full "
+                "traceback (may print the exception's own message, so use it locally "
+                "rather than pasting the output anywhere).",
+                file=sys.stderr,
+            )
+        if args.debug:
+            raise
         return 1
 
     try:
@@ -289,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
         print("-" * 72)
         print(f"fetched={len(items)} (replay aborted before totals were available)")
         print(f"error: replay failed: {type(e).__name__}", file=sys.stderr)
+        if args.debug:
+            raise
         return 1
 
     print("-" * 72)

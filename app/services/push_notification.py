@@ -234,6 +234,8 @@ async def send_regular_push(
     caller_phone: str = "",
     caller_name: str = "",
     contractor_id: str = "",
+    collapse_id: Optional[str] = None,
+    category: Optional[str] = None,
 ) -> bool:
     """Send a regular APNs push notification (banner, not CallKit)."""
     if not device_token or not settings.apns_key_content:
@@ -256,21 +258,28 @@ async def send_regular_push(
         "caller_phone": caller_phone,
         "caller_name": caller_name,
     }
+    if category:
+        payload["aps"]["category"] = category
+
+    headers = {
+        "apns-topic": topic,
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+        "apns-expiration": "0",
+    }
+    if collapse_id:
+        headers["apns-collapse-id"] = collapse_id
 
     for attempt in range(2):
         try:
             token = _generate_apns_token()
+            req_headers = dict(headers)
+            req_headers["authorization"] = f"bearer {token}"
 
             async with httpx.AsyncClient(http2=True) as client:
                 response = await client.post(
                     f"{apns_url}/3/device/{device_token}",
-                    headers={
-                        "authorization": f"bearer {token}",
-                        "apns-topic": topic,
-                        "apns-push-type": "alert",
-                        "apns-priority": "10",
-                        "apns-expiration": "0",
-                    },
+                    headers=req_headers,
                     content=json.dumps(payload),
                     timeout=10.0,
                 )
@@ -297,6 +306,49 @@ async def send_regular_push(
             return False
 
     return False
+
+
+async def send_screening_summary_push(
+    *,
+    contractor_id: str,
+    call_sid: str,
+    caller_phone: str = "",
+    caller_name: str = "",
+    reason: str = "",
+    collapse_id: Optional[str] = None,
+) -> bool:
+    """Send an in-place screening summary push replacing the incoming call banner.
+
+    Uses `apns-collapse-id` so APNs collapses/updates the existing notification
+    in place on the lock screen / Apple Watch without clutter.
+    """
+    if not contractor_id:
+        return False
+
+    device_token = await get_device_token(contractor_id=contractor_id)
+    if not device_token:
+        logger.warning(f"No push token for contractor {contractor_id} — screening summary not sent")
+        return False
+
+    title = caller_name or caller_phone or "Incoming Call"
+    if reason:
+        body = f"{reason} — Tap to answer"
+    else:
+        body = "Kevin is screening this call. Tap to answer."
+
+    cid = collapse_id or (f"call_{call_sid}" if call_sid else None)
+
+    return await send_regular_push(
+        device_token=device_token,
+        title=title,
+        body=body,
+        call_sid=call_sid,
+        caller_phone=caller_phone,
+        caller_name=caller_name,
+        contractor_id=contractor_id,
+        collapse_id=cid,
+        category="SCREENING_CALL",
+    )
 
 
 async def send_urgent_push(

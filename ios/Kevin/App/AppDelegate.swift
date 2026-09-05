@@ -20,6 +20,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         // Request push notification permission
         UNUserNotificationCenter.current().delegate = self
+        setupNotificationCategories()
 
         // Deliberately does NOT prompt here. This used to call
         // requestAuthorization() straight out of didFinishLaunching, which put
@@ -114,7 +115,41 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     ) {
         let userInfo = response.notification.request.content.userInfo
         handleIncomingCallNotification(userInfo)
+
+        if response.actionIdentifier == "PICK_UP_ACTION" {
+            let callSid = userInfo["call_sid"] as? String ?? ""
+            let callerPhone = userInfo["caller_phone"] as? String ?? ""
+            var callerName = userInfo["caller_name"] as? String ?? ""
+            if callerName.isEmpty {
+                callerName = lookupContactName(phone: callerPhone)
+            }
+            Task { @MainActor in
+                await CallManager.shared.answerActiveCall(
+                    callSid: callSid,
+                    callerName: callerName,
+                    callerPhone: callerPhone
+                )
+            }
+        }
+
         completionHandler()
+    }
+
+    // MARK: - Notification Categories
+
+    private func setupNotificationCategories() {
+        let pickUpAction = UNNotificationAction(
+            identifier: "PICK_UP_ACTION",
+            title: String(localized: "Pick Up"),
+            options: [.foreground]
+        )
+        let screeningCategory = UNNotificationCategory(
+            identifier: "SCREENING_CALL",
+            actions: [pickUpAction],
+            intentIdentifiers: [],
+            options: []
+        )
+        UNUserNotificationCenter.current().setNotificationCategories([screeningCategory])
     }
 
     // MARK: - PushKit (VoIP Push)

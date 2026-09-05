@@ -1024,6 +1024,7 @@ async def _send_summary_push(job_data: dict, contractor: dict):
             caller_phone=job_data.get("caller_phone", ""),
             caller_name=caller_name,
             contractor_id=contractor_id,
+            collapse_id=f"call_{job_data.get('call_sid', '')}" if job_data.get("call_sid") else None,
         )
         if sent:
             _log_post_call_event(

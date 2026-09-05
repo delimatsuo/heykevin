@@ -217,6 +217,7 @@ class GeminiPipeline:
         self._first_inbound_audio_logged = False
         self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
+        self._screening_summary_push_sent = False
         self._audio_chunks_sent = 0
         self._cumulative_inbound_audio_ms = 0
         self._cumulative_outbound_audio_ms = 0
@@ -1684,6 +1685,25 @@ class GeminiPipeline:
             self._unavailable_task.cancel()
         self._unavailable_task = asyncio.create_task(self._unavailable_timer())
         self._log_voice_timing("owner_availability_hold_started")
+        if not self._screening_summary_push_sent:
+            self._screening_summary_push_sent = True
+            asyncio.create_task(self._trigger_screening_summary_push())
+
+    async def _trigger_screening_summary_push(self) -> None:
+        try:
+            cid = self._contractor_config.get("contractor_id", "")
+            if not cid or not self._call_sid:
+                return
+            transcript = "\n".join(self._transcript_lines)
+            from app.services.screening_summary import extract_and_send_screening_summary
+            await extract_and_send_screening_summary(
+                contractor_id=cid,
+                call_sid=self._call_sid,
+                caller_phone=self._caller_phone,
+                transcript=transcript,
+            )
+        except Exception as e:
+            logger.warning(f"Gemini screening summary push error: {e}")
 
     def _finish_owner_availability_wait(self):
         self._waiting_for_owner_availability = False

@@ -1,9 +1,9 @@
 # Hey Kevin — Session Handoff (2026-09-04)
 
-**Owner**: Deli Matsuo (`delimatsuo@gmail.com`; GCP identity `deli@ellaexecutivesearch.com`)  
-**Workspace**: `/Volumes/Extreme Pro/MYPROJECTS/Kevin`  
-**Primary Commit**: `main` at `c093ed6` (`Merge pull request #239 from delimatsuo/codex/release-v1211-b37`)  
-**Active PRs**: 0 open PRs  
+**Owner**: Deli Matsuo (`delimatsuo@gmail.com`; GCP identity `deli@ellaexecutivesearch.com`)
+**Workspace**: `/Volumes/Extreme Pro/MYPROJECTS/Kevin`
+**Primary Commit**: `main` at `c093ed6` (`Merge pull request #239 from delimatsuo/codex/release-v1211-b37`)
+**Active PRs**: 0 open PRs
 
 ---
 

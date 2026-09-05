@@ -1917,8 +1917,8 @@ class VoicePipeline:
                 caller_phone=self._caller_phone,
                 transcript=transcript,
             )
-        except Exception as e:
-            logger.warning(f"VoicePipeline screening summary push error: {e}")
+        except Exception as error:
+            logger.warning("VoicePipeline screening summary push failed: %s", type(error).__name__)
 
     def _finish_owner_availability_wait(self):
         self._waiting_for_owner_availability = False

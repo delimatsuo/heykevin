@@ -1,6 +1,6 @@
 # Hey Kevin — Canonical Source Roadmap & Reconciliation
 
-**Reconciled source baseline:** `main` (`10af26bb065e904799257d2f47b9b5c45431c997`)
+**Reconciled source baseline:** `main` (`c093ed6ef1c505e8d68f01d6f6f365bf2553ac55`)
 **Project:** Kevin (`delimatsuo/heykevin`)
 
 ---
@@ -93,6 +93,40 @@ in §6.A below.
 11. **PR #233 (merge `387c847`):** iOS business address and city capture
     shipped for the six regulatory countries (`DE`, `FR`, `IT`, `ES`, `PT`,
     `BR`).
+
+### 2026-09-04 Wave & Build 37 Release (PRs #234–#239)
+
+Six pull requests merged to `main`, completing client and backend screening ergonomics, stability, and build 37 release to TestFlight:
+
+1. **PR #234 (merge `6583a0c`):** Wave final sweep — reconciled the roadmap
+   after the 2026-09-03 follow-up wave and addressed review cleanups.
+2. **PR #235 (merge `8067f30`):** App Store replay notification fetch usability
+   — typed exception handling, honest `--days` current-instant bound labeling,
+   and explicit stale notification skip diagnostics.
+3. **PR #236 (merge `9752e06`):** Forwarding carrier documentation reconciliation
+   — aligned US/CA carrier notes with the client's tested Verizon/GSM split.
+4. **PR #237 (merge `e3addc6`):** iOS 1.2.11 candidate preparation (build 36).
+5. **PR #238 (merge `407bf0b`):** Personal mode screening — preserved the 30-second
+   silence hold threshold and suppressed business intake tool declarations
+   in `app/services/relay_pipeline.py`.
+6. **PR #239 (merge `c093ed6`):** Screening summary push notifications and in-app
+   feedback/review system:
+   - **In-Place Screening Summary Notification:** Emits an in-place notification
+     update (`apns-collapse-id: call_<call_sid>`) when Kevin places the caller
+     on hold, showing caller name and reason directly on the lock screen.
+     Registers `SCREENING_CALL` category with 1-tap `PICK_UP_ACTION` quick pickup.
+   - **Feedback & Review System:** `StoreReviewManager.swift` handles StoreKit
+     in-app review requests at milestones (>= 3 calls or confirmed appointment,
+     guarded against active calls, 60-day rate-limited, version-gated) and
+     provides in-app mailto support with diagnostic metadata in Settings.
+   - **Release Candidate:** Bumped `CURRENT_PROJECT_VERSION` to 37, regenerated
+     Xcode project, archived, exported, and uploaded to TestFlight.
+   - **TestFlight Intake:** Validated (`BUILD-STATUS: VALID`), internal testing
+     activated (`IN_BETA_TESTING`), What's New notes published via ASC API.
+   - **Staging Deployment:** Deployed revision `kevin-api-staging-00165-kif`
+     (`c093ed6`), verified via release smoke test.
+   - **Production Deployment:** Workflow run `33938295394` dispatched from `main`
+     at `c093ed6`, passed all CI test suites, and parked at the owner approval gate.
 
 ---
 
@@ -257,9 +291,11 @@ customer-data qualification.
   owner-gated) can confirm whether that blocks bundle approval. (The
   "not yet supported" mapping and the Twilio-client-before-guard ordering
   closed in PR #226, merge `f381851`.)
-- **App Store replay `--days` end-date label:** `scripts/replay_appstore_notifications.py` (PR #228, merge `ddf666d`) prints its window banner as "(UTC, inclusive)" for every run. That's accurate for `--start`/`--end`, where the end date really is a full inclusive calendar day, but in `--days` mode the actual upper fetch bound is `now`, not the end of the printed day — the label overstates how much of the final day was covered. Cosmetic only; the fetch window itself is correct.
-- **App Store replay trial-holder STALE edge:** the stale-deactivation guard (`app/services/appstore_replay.py::_is_stale_deactivation`, PR #228, merge `ddf666d`) compares a deactivating notification's `expiresDate` against the contractor's stored `subscription_expires`. For a contractor whose stored expiry is still their trial end rather than a paid renewal, a shorter-term deactivation could be misclassified STALE and skipped. Errs toward keeping access, not wrongly deactivating; needs an owner decision on whether trial-only expiries should be excluded from the comparison.
-- **Replay CLI's narrow fetch exception handling:** in `scripts/replay_appstore_notifications.py` (PR #228, merge `ddf666d`), the call to `fetch_notification_history` is wrapped only in `except RuntimeError`. Any other exception raised during the fetch propagates as an unhandled traceback instead of the CLI's usual `error: ...` message and exit code 1. Deliberately left open at final review.
+- **App Store replay CLI usability — resolved (source):** PR #235 (merge `8067f30`)
+  hardened `scripts/replay_appstore_notifications.py` and `app/services/appstore_replay.py`
+  with typed exception handling naming failure targets, honest current-instant bound
+  labeling for `--days`, and explicit logging when notifications are skipped against
+  stored expiry timestamps.
 
 ### B. Owner / Live Gates (Explicitly Out of Bounds for Agent Tasks)
 - Cloud Run staging and production deployments (`gcloud run deploy` or GitHub Actions deploy workflows).

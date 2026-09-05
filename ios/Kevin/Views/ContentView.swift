@@ -56,6 +56,8 @@ struct ContentView: View {
             // When the in-call screen closes, clear state and go to Recents
             appState.clearActiveCall()
             appState.selectedTab = .recents
+            StoreReviewManager.shared.incrementScreenedCallCount()
+            StoreReviewManager.shared.requestReviewIfEligible()
         }) {
             InCallView()
         }
@@ -313,6 +315,8 @@ struct LiveCallTab: View {
             // Call ignored — Kevin is taking a message. Single Dismiss action.
             Button {
                 appState.clearActiveCall()
+                StoreReviewManager.shared.incrementScreenedCallCount()
+                StoreReviewManager.shared.requestReviewIfEligible()
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "xmark")
@@ -524,6 +528,8 @@ struct LiveCallTab: View {
             await MainActor.run {
                 appState.clearActiveCall()
                 appState.selectedTab = .recents
+                StoreReviewManager.shared.incrementScreenedCallCount()
+                StoreReviewManager.shared.requestReviewIfEligible()
             }
             return
         }

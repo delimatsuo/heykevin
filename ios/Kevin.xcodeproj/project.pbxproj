@@ -31,6 +31,7 @@
 		92445173BA3671A68B54188A /* Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4249AB29D64072D037CA55 /* Call.swift */; };
 		925E51ED40B8CFE41A644C3E /* SubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */; };
 		949E492170B9C2A6AFE5A138 /* SubscriptionVerification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26F75183A354A43842B21498 /* SubscriptionVerification.swift */; };
+		96A9359EC54A1CE2863A085D /* StoreReviewManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018EE4799A8ABB4B65C636DC /* StoreReviewManagerTests.swift */; };
 		982AF26603B1E7590FDF77B3 /* AppleIdentityRefresher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */; };
 		A129025734A48531F68AD17F /* ForwardingInstructions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 030EFAEC8F57B2AEEA9D3692 /* ForwardingInstructions.swift */; };
 		A8F7A82BCF2F0C274C54B80C /* ContactSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFD9C29266287A3B2BDF2369 /* ContactSyncManager.swift */; };
@@ -42,6 +43,7 @@
 		C9EA0A211944CEE40CEC243D /* CallHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09A23D5E418687FDCFD9F90B /* CallHistoryView.swift */; };
 		CBC1321AF32D63C2E942389B /* PhoneFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B2CDD06B01EAAE824F1B2D /* PhoneFormatter.swift */; };
 		CE4E2CEC954085A7FD2B48AB /* SettingsCountryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05B544A0AB86C4DE6799512 /* SettingsCountryTests.swift */; };
+		D63496DC4CB2027823E00AD6 /* StoreReviewManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 870D15DAE77727CB39244218 /* StoreReviewManager.swift */; };
 		D84086E76D3C95C468C1232A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F13DF6B56C517300EE66A80B /* SettingsView.swift */; };
 		D941F4E2B5D75A232360FEDB /* UpdateGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A88828214BCFD33CE2F29216 /* UpdateGate.swift */; };
 		D982E08E8C9387D1889A8CE3 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 355A811D1510B586161B0963 /* PrivacyInfo.xcprivacy */; };
@@ -62,6 +64,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		018EE4799A8ABB4B65C636DC /* StoreReviewManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreReviewManagerTests.swift; sourceTree = "<group>"; };
 		030EFAEC8F57B2AEEA9D3692 /* ForwardingInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForwardingInstructions.swift; sourceTree = "<group>"; };
 		09A23D5E418687FDCFD9F90B /* CallHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallHistoryView.swift; sourceTree = "<group>"; };
 		0B4D3F4353001283E75341A9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -86,6 +89,7 @@
 		75E7CE6639F7C036F139197C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		7D5BA48FE5494D5FC061B7B7 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallView.swift; sourceTree = "<group>"; };
 		82CF29BB00A2E1D12106350D /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		870D15DAE77727CB39244218 /* StoreReviewManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreReviewManager.swift; sourceTree = "<group>"; };
 		873DFCD1C285EE67D8AB70C0 /* RegulatoryAddressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegulatoryAddressTests.swift; sourceTree = "<group>"; };
 		88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleIdentityRefresher.swift; sourceTree = "<group>"; };
 		8B7722B929833EF075295A83 /* SettingsCountry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsCountry.swift; sourceTree = "<group>"; };
@@ -191,6 +195,7 @@
 				CB4523976C8CA1F94FD69173 /* ForwardingInstructionsTests.swift */,
 				873DFCD1C285EE67D8AB70C0 /* RegulatoryAddressTests.swift */,
 				F05B544A0AB86C4DE6799512 /* SettingsCountryTests.swift */,
+				018EE4799A8ABB4B65C636DC /* StoreReviewManagerTests.swift */,
 				C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */,
 			);
 			path = KevinTests;
@@ -226,6 +231,7 @@
 				359DC411E16B65BDC5671DB2 /* KeychainManager.swift */,
 				51D990DFEA3460D9F31B5803 /* RegulatoryAddress.swift */,
 				8B7722B929833EF075295A83 /* SettingsCountry.swift */,
+				870D15DAE77727CB39244218 /* StoreReviewManager.swift */,
 				62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */,
 				26F75183A354A43842B21498 /* SubscriptionVerification.swift */,
 			);
@@ -367,6 +373,7 @@
 				B670617C06440B284622AA7E /* ForwardingInstructionsTests.swift in Sources */,
 				50F4C8B9EF0C72931D9F16CF /* RegulatoryAddressTests.swift in Sources */,
 				CE4E2CEC954085A7FD2B48AB /* SettingsCountryTests.swift in Sources */,
+				96A9359EC54A1CE2863A085D /* StoreReviewManagerTests.swift in Sources */,
 				1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -399,6 +406,7 @@
 				8B6E78B156D9D3B1709602BA /* ServicesView.swift in Sources */,
 				F32453F5B03451C8BD41203F /* SettingsCountry.swift in Sources */,
 				D84086E76D3C95C468C1232A /* SettingsView.swift in Sources */,
+				D63496DC4CB2027823E00AD6 /* StoreReviewManager.swift in Sources */,
 				925E51ED40B8CFE41A644C3E /* SubscriptionManager.swift in Sources */,
 				949E492170B9C2A6AFE5A138 /* SubscriptionVerification.swift in Sources */,
 				6B58067C9247D03F41C2016B /* Theme.swift in Sources */,
@@ -500,7 +508,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 36;
+				CURRENT_PROJECT_VERSION = 37;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -587,7 +595,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 36;
+				CURRENT_PROJECT_VERSION = 37;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;
@@ -715,7 +723,7 @@
 				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 36;
+				CURRENT_PROJECT_VERSION = 37;
 				DEVELOPMENT_TEAM = 3FLG8W6B95;
 				ENABLE_DEBUG_DYLIB = NO;
 				ENABLE_PREVIEWS = NO;

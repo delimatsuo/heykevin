@@ -124,6 +124,21 @@ class CallManager: NSObject, ObservableObject {
         }
     }
 
+    /// Answer an active screening call directly from a push notification action or trigger
+    @MainActor
+    func answerActiveCall(callSid: String, callerName: String, callerPhone: String) async {
+        guard !callSid.isEmpty else { return }
+        if let response = await APIClient.shared.sendCallAction(callSid: callSid, action: "accept") {
+            let accessToken = response["access_token"] as? String ?? ""
+            let conferenceName = response["conference_name"] as? String ?? ""
+            if !accessToken.isEmpty && !conferenceName.isEmpty {
+                self.callerName = callerName
+                self.callerPhone = callerPhone
+                self.connectDirectly(accessToken: accessToken, conferenceName: conferenceName)
+            }
+        }
+    }
+
     func toggleMute() {
         guard let call = activeCall else { return }
         isMuted.toggle()

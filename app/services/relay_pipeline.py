@@ -164,6 +164,7 @@ class RelayPipeline:
         self._silence_nudged = False
         self._nudged_monotonic = 0.0
         self._command_task: Optional[asyncio.Task] = None
+        self._screening_summary_push_sent = False
         self._tools = self._build_tools()
 
         # The welcome greeting is spoken by Twilio before any prompt arrives;
@@ -630,6 +631,38 @@ class RelayPipeline:
             "relay_event event=owner_hold_started call=%s",
             _call_label(self._call_sid),
         )
+        if not self._screening_summary_push_sent:
+            self._screening_summary_push_sent = True
+            asyncio.create_task(self._trigger_screening_summary_push())
+
+    async def _trigger_screening_summary_push(self) -> None:
+        try:
+            cid = self._contractor_config.get("contractor_id", "")
+            if not cid or not self._call_sid:
+                return
+            caller_lines = []
+            for entry in self._history:
+                role = entry.get("role")
+                if role == "user":
+                    for part in entry.get("parts", []):
+                        text = part.get("text", "")
+                        if text:
+                            caller_lines.append(f"Caller: {text}")
+                elif role == "model":
+                    for part in entry.get("parts", []):
+                        text = part.get("text", "")
+                        if text:
+                            caller_lines.append(f"Kevin: {text}")
+            transcript = "\n".join(caller_lines)
+            from app.services.screening_summary import extract_and_send_screening_summary
+            await extract_and_send_screening_summary(
+                contractor_id=cid,
+                call_sid=self._call_sid,
+                caller_phone=self._caller_phone,
+                transcript=transcript,
+            )
+        except Exception as e:
+            logger.warning(f"relay_event event=screening_summary_push_error error={type(e).__name__} call={_call_label(self._call_sid)}")
 
     async def _owner_hold_timer(self) -> None:
         await asyncio.sleep(self.OWNER_AVAILABILITY_TIMEOUT_SECONDS)

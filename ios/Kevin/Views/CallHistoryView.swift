@@ -94,6 +94,10 @@ struct CallHistoryView: View {
                 guard !AppStoreScreenshotFixtures.isEnabled else { return }
                 await loadCalls()
             }
+            .onAppear {
+                guard !AppStoreScreenshotFixtures.isEnabled else { return }
+                StoreReviewManager.shared.requestReviewIfEligible()
+            }
         }
     }
 
@@ -103,7 +107,11 @@ struct CallHistoryView: View {
         errorMessage = ""
         do {
             calls = try await APIClient.shared.getCallHistory()
-            await MainActor.run { appState.updateUnreadCount(calls: calls) }
+            await MainActor.run {
+                appState.updateUnreadCount(calls: calls)
+                StoreReviewManager.shared.recordScreenedCalls(count: calls.count)
+                StoreReviewManager.shared.requestReviewIfEligible()
+            }
         } catch {
             errorMessage = String(localized: "Failed to load calls: \(error.localizedDescription)")
         }
@@ -484,6 +492,8 @@ struct CallDetailView: View {
         do {
             callerWasNotified = try await APIClient.shared.confirmAppointment(callSid: call.id)
             appointmentConfirmed = true
+            StoreReviewManager.shared.recordAppointmentConfirmed()
+            StoreReviewManager.shared.requestReviewIfEligible()
         } catch let failure as AppointmentConfirmFailure {
             // Distinguishes "this time is unusable" from "Calendar hiccuped".
             confirmError = failure.localizedDescription

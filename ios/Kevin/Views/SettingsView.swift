@@ -670,6 +670,24 @@ struct SettingsView: View {
                     Text(String(localized: "The server couldn't complete the deletion, so your account is unchanged. Please check your connection and try again."))
                 }
 
+                // MARK: - Feedback & Support
+
+                Section {
+                    Button {
+                        FeedbackSupport.sendFeedback(contractorId: appState.contractorId)
+                    } label: {
+                        HStack {
+                            Text(String(localized: "Send Feedback"))
+                            Spacer()
+                            Image(systemName: "envelope")
+                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                } header: {
+                    Text(String(localized: "Feedback & Support"))
+                }
+
                 // MARK: - Legal
 
                 Section {

@@ -1920,18 +1920,33 @@ class VoicePipeline:
                 return
             caller_lines = []
             for entry in self._conversation:
-                role = "Caller" if entry.get("role") == "user" else "Kevin"
+                role = entry.get("role")
                 content = entry.get("content", "")
-                if isinstance(content, str):
-                    cleaned = content.replace("<caller_speech>", "").replace("</caller_speech>", "").strip()
-                    if cleaned:
-                        caller_lines.append(f"{role}: {cleaned}")
-                elif isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text = block.get("text", "").strip()
-                            if text:
-                                caller_lines.append(f"{role}: {text}")
+                if role == "user":
+                    if isinstance(content, str):
+                        if "<caller_speech>" in content:
+                            cleaned = content.replace("<caller_speech>", "").replace("</caller_speech>", "").strip()
+                            if cleaned:
+                                caller_lines.append(f"Caller: {cleaned}")
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                                if "<caller_speech>" in text:
+                                    cleaned = text.replace("<caller_speech>", "").replace("</caller_speech>", "").strip()
+                                    if cleaned:
+                                        caller_lines.append(f"Caller: {cleaned}")
+                elif role == "assistant":
+                    if isinstance(content, str):
+                        cleaned = content.strip()
+                        if cleaned:
+                            caller_lines.append(f"Kevin: {cleaned}")
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "").strip()
+                                if text:
+                                    caller_lines.append(f"Kevin: {text}")
             transcript = "\n".join(caller_lines)
             from app.services.screening_summary import extract_and_send_screening_summary
             await extract_and_send_screening_summary(

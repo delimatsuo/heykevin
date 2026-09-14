@@ -137,7 +137,7 @@ def _make_voice_pipeline(
         },
     )
     pipeline._connected = True
-    pipeline._conversation.append({"role": "user", "content": "I have an emergency roof leak."})
+    pipeline._conversation.append({"role": "user", "content": "<caller_speech>I have an emergency roof leak.</caller_speech>"})
     return pipeline
 
 
@@ -552,3 +552,77 @@ async def test_cancellation_resistant_mock_aborts_at_liveness_boundary(monkeypat
     # Even though resistant_extract returned a dict without raising CancelledError,
     # the is_active predicate failed at the send boundary, so zero pushes were sent.
     assert push_mock.call_count == 0
+
+
+# --- Language Switch and Transcript Selection Regressions ---
+
+
+@pytest.mark.asyncio
+async def test_voice_switch_language_fallback_summary_excludes_system_instruction(monkeypatch):
+    pipeline = _make_voice_pipeline(
+        contractor_id="c_spanish_test",
+        call_sid="CA_spanish_test_400",
+    )
+    pipeline._conversation.clear()
+    pipeline._conversation.append({"role": "assistant", "content": "Hola, gracias por llamar a Test Plumbing."})
+
+    # Real switch_language mid-call
+    await pipeline._switch_language("es")
+
+    # Production-wrapped caller utterance
+    caller_speech = "Hola, se rompió la tubería principal y tengo una fuga grande."
+    pipeline._conversation.append({"role": "user", "content": f"<caller_speech>{caller_speech}</caller_speech>"})
+
+    # Disable Anthropic API key so real deterministic fallback extraction executes
+    monkeypatch.setattr(screening_summary.settings, "anthropic_api_key", "")
+
+    push_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    pipeline._start_owner_availability_wait()
+    assert pipeline._summary_task is not None
+    await pipeline._summary_task
+
+    assert push_mock.call_count == 1
+    call_kwargs = push_mock.call_args.kwargs
+    assert call_kwargs["contractor_id"] == "c_spanish_test"
+    assert call_kwargs["call_sid"] == "CA_spanish_test_400"
+    assert call_kwargs["caller_phone"] == "+15550003333"
+    assert call_kwargs["reason"] == caller_speech
+    assert "[System:" not in call_kwargs["reason"]
+    assert "<caller_speech>" not in call_kwargs["reason"]
+    assert "</caller_speech>" not in call_kwargs["reason"]
+    assert "[System:" not in call_kwargs.get("caller_name", "")
+    assert "<caller_speech>" not in call_kwargs.get("caller_name", "")
+
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_voice_caller_speech_quoting_system_is_preserved_not_filtered(monkeypatch):
+    pipeline = _make_voice_pipeline(
+        contractor_id="c_system_quote_test",
+        call_sid="CA_system_quote_test_500",
+    )
+    pipeline._conversation.clear()
+    pipeline._conversation.append({"role": "assistant", "content": "Hello, thanks for calling."})
+    caller_speech = "The panel says [System: low battery]. Please check the alarm."
+    pipeline._conversation.append({"role": "user", "content": f"<caller_speech>{caller_speech}</caller_speech>"})
+
+    monkeypatch.setattr(screening_summary.settings, "anthropic_api_key", "")
+
+    push_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    pipeline._start_owner_availability_wait()
+    assert pipeline._summary_task is not None
+    await pipeline._summary_task
+
+    assert push_mock.call_count == 1
+    call_kwargs = push_mock.call_args.kwargs
+    assert call_kwargs["contractor_id"] == "c_system_quote_test"
+    assert call_kwargs["call_sid"] == "CA_system_quote_test_500"
+    assert call_kwargs["reason"] == caller_speech
+    assert "<caller_speech>" not in call_kwargs["reason"]
+
+    await pipeline.stop()

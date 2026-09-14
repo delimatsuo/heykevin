@@ -265,6 +265,7 @@ async def test_relay_hold_completion_cancels_pending_summary(monkeypatch):
     except asyncio.CancelledError:
         pass
 
+    assert pipeline._summary_task.cancelled()
     assert push_mock.call_count == 0
     await pipeline.stop()
 
@@ -381,6 +382,7 @@ async def test_gemini_finish_owner_availability_wait_cancels_pending_summary(mon
     except asyncio.CancelledError:
         pass
 
+    assert pipeline._summary_task.cancelled()
     assert push_mock.call_count == 0
     await pipeline.stop()
 
@@ -496,6 +498,7 @@ async def test_voice_finish_owner_availability_wait_cancels_pending_summary(monk
     except asyncio.CancelledError:
         pass
 
+    assert pipeline._summary_task.cancelled()
     assert push_mock.call_count == 0
     await pipeline.stop()
 

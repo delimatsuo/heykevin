@@ -73,6 +73,18 @@ struct CallHistoryView: View {
             }
             .listStyle(.insetGrouped)
             .navigationTitle(String(localized: "Recents"))
+            .sheet(isPresented: Binding(
+                get: { !appState.notificationCallSid.isEmpty },
+                set: { if !$0 { appState.notificationCallSid = ""; appState.notificationCallMessage = "" } }
+            )) {
+                NavigationStack {
+                    if let call = calls.first(where: { $0.id == appState.notificationCallSid }) {
+                        CallDetailView(call: call)
+                    } else {
+                        ContentUnavailableView("Call details unavailable", systemImage: "phone.badge.questionmark", description: Text(appState.notificationCallMessage.isEmpty ? "This call is no longer in your history." : appState.notificationCallMessage))
+                    }
+                }
+            }
             .toolbar {
                 if calls.contains(where: { appState.isCallUnread($0) }) {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -103,16 +115,20 @@ struct CallHistoryView: View {
 
     private func loadCalls() async {
         guard !AppStoreScreenshotFixtures.isEnabled else { return }
+        let auth = appState.currentAuthContext()
         isLoading = true
         errorMessage = ""
         do {
-            calls = try await APIClient.shared.getCallHistory()
+            let loaded = try await APIClient.shared.getCallHistory(authContext: auth)
+            guard appState.currentAuthContext() == auth else { return }
+            calls = loaded
             await MainActor.run {
                 appState.updateUnreadCount(calls: calls)
                 StoreReviewManager.shared.recordScreenedCalls(count: calls.count)
                 StoreReviewManager.shared.requestReviewIfEligible()
             }
         } catch {
+            guard appState.currentAuthContext() == auth else { return }
             errorMessage = String(localized: "Failed to load calls: \(error.localizedDescription)")
         }
         isLoading = false

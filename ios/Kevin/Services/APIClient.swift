@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 private func debugLog(_ message: String) {
     #if DEBUG
@@ -11,6 +12,127 @@ struct ActiveCallInfo {
     let callerPhone: String
     let callerName: String
     let transcript: String
+}
+
+struct CallActionResult: Equatable, Sendable {
+    let callSid: String
+    let contractorId: String
+    let operationId: String
+    let action: String
+    let actionStatus: String
+    let accessToken: String?
+    let conferenceName: String?
+    let isActive: Bool
+    let isUrgent: Bool
+    let callerName: String?
+    let callerPhone: String?
+    let transcript: String?
+    let statusCode: Int
+    let rawStatus: String?
+    let errorDetail: String?
+    var retryable: Bool = false
+    var hasExplicitActive: Bool = true
+
+    var isPreparationFailure: Bool {
+        statusCode == 503 && rawStatus == "error" && action == "accept" && actionStatus == "preparation_failed"
+        && retryable && hasExplicitActive && isActive && accessToken == nil && conferenceName == nil
+    }
+    var isAccepted: Bool {
+        statusCode == 200 && rawStatus == "ok" && hasExplicitActive && isActive && action == "accept" && actionStatus == "accepted"
+        && !(accessToken?.isEmpty ?? true) && !(conferenceName?.isEmpty ?? true)
+    }
+    var isTakingMessage: Bool {
+        statusCode == 200 && rawStatus == "ok" && hasExplicitActive && isActive && action == "decline" && actionStatus == "taking_message"
+        && accessToken == nil && conferenceName == nil
+    }
+    var isPending: Bool {
+        statusCode == 202 && rawStatus == "pending" && hasExplicitActive && isActive && accessToken == nil && conferenceName == nil
+        && ((action == "accept" && ["accepting", "uncertain"].contains(actionStatus))
+            || (action == "decline" && ["message_requested", "uncertain"].contains(actionStatus)))
+    }
+    var isEnded: Bool { statusCode == 200 && rawStatus == "ok" && hasExplicitActive && !isActive && actionStatus == "ended" }
+    var isConflict: Bool { statusCode == 409 && rawStatus == "error" && actionStatus == "action_conflict" && accessToken == nil && conferenceName == nil }
+    func matchesAction(callSid: String, contractorId: String, operationId: String, action: String) -> Bool {
+        self.callSid == callSid && self.contractorId == contractorId && self.operationId == operationId
+        && (isEnded || isConflict || (self.action == action && (isAccepted || isTakingMessage || isPending || isPreparationFailure)))
+    }
+    func validNavigation(callSid: String, contractorId: String) -> Bool {
+        guard self.callSid == callSid, self.contractorId == contractorId,
+              accessToken == nil, conferenceName == nil else { return false }
+        if isEnded { return true }
+        if statusCode == 200 && rawStatus == "ok" && hasExplicitActive && isActive {
+            return ["ready", "accepted", "taking_message", "action_conflict"].contains(actionStatus)
+        }
+        return statusCode == 202 && rawStatus == "pending" && hasExplicitActive && isActive
+            && ["accepting", "message_requested", "uncertain"].contains(actionStatus)
+    }
+
+}
+
+enum CallActionResponseParser {
+    static func boolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+    static func parse(
+        data: Data,
+        response: HTTPURLResponse,
+        requestedCallSid: String,
+        requestedContractorId: String,
+        requestedOperationId: String,
+        requestedAction: String,
+        isGet: Bool = false
+    ) -> CallActionResult {
+        let statusCode = response.statusCode
+        let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+
+        let rawStatus = json["status"] as? String
+        let callSid = json["call_sid"] as? String ?? ""
+        let contractorId = json["contractor_id"] as? String ?? ""
+        let operationId = json["operation_id"] as? String ?? ""
+        let action = json["action"] as? String ?? ""
+        let actionStatus = json["action_status"] as? String ?? ""
+        let accessToken = json["access_token"] as? String
+        let conferenceName = json["conference_name"] as? String
+        let active = boolean(json["active"]) ?? false
+        let urgent = boolean(json["urgent"]) ?? false
+        let callerName = json["caller_name"] as? String
+        let callerPhone = json["caller_phone"] as? String
+        let transcript = json["transcript"] as? String
+        let errorDetail = json["error"] as? String ?? json["detail"] as? String ?? json["message"] as? String
+
+        // Only the genuine legacy POST accept shape is synthesized. A partial v2
+        // response or any decline acknowledgement must never become success.
+        let identityKeys = ["call_sid", "contractor_id", "operation_id", "action", "action_status", "active"]
+        if !isGet && statusCode == 200 && rawStatus == "ok" && requestedAction == "accept",
+           identityKeys.allSatisfy({ json[$0] == nil }), Set(json.keys).isSubset(of: ["status", "access_token", "conference_name"]),
+           let token = accessToken, !token.isEmpty, let conference = conferenceName, !conference.isEmpty {
+            return CallActionResult(callSid: requestedCallSid, contractorId: requestedContractorId,
+                operationId: requestedOperationId, action: "accept", actionStatus: "accepted",
+                accessToken: token, conferenceName: conference, isActive: true, isUrgent: false,
+                callerName: nil, callerPhone: nil, transcript: nil, statusCode: 200, rawStatus: "ok", errorDetail: nil)
+        }
+
+        return CallActionResult(
+            callSid: callSid,
+            contractorId: contractorId,
+            operationId: operationId,
+            action: action,
+            actionStatus: actionStatus,
+            accessToken: accessToken,
+            conferenceName: conferenceName,
+            isActive: active,
+            isUrgent: urgent,
+            callerName: callerName,
+            callerPhone: callerPhone,
+            transcript: transcript,
+            statusCode: statusCode,
+            rawStatus: rawStatus,
+            errorDetail: errorDetail,
+            retryable: boolean(json["retryable"]) ?? false,
+            hasExplicitActive: boolean(json["active"]) != nil
+        )
+    }
 }
 
 /// Errors specific to the unauthenticated bootstrap calls (lookup-by-apple-id,
@@ -88,10 +210,10 @@ final class APIClient: @unchecked Sendable {
             return ""
         }
         set {
-            if newValue.isEmpty {
-                KeychainManager.shared.delete("contractorApiToken")
-            } else {
-                KeychainManager.shared.save("contractorApiToken", value: newValue)
+            CallSessionEpoch.shared.synchronized {
+                CallSessionEpoch.shared.credentialChanged(from: contractorToken, to: newValue)
+                if newValue.isEmpty { KeychainManager.shared.delete("contractorApiToken") }
+                else { KeychainManager.shared.save("contractorApiToken", value: newValue) }
             }
         }
     }
@@ -113,6 +235,7 @@ final class APIClient: @unchecked Sendable {
     /// Retry wrapper — only retries on 5xx server errors, not network failures.
     /// On 401, signals AppState to show re-auth (token expired/invalid).
     private func retryRequest(_ request: URLRequest, maxRetries: Int = 1, signalReauth: Bool = true) async throws -> (Data, URLResponse) {
+        let requestGeneration = CallSessionEpoch.shared.generation
         var lastError: Error?
         for attempt in 0...maxRetries {
             do {
@@ -120,7 +243,12 @@ final class APIClient: @unchecked Sendable {
                 if let http = response as? HTTPURLResponse {
                     if http.statusCode == 401 {
                         if signalReauth {
-                            await MainActor.run { AppState.shared.needsReauth = true }
+                            await MainActor.run {
+                                if CallSessionEpoch.shared.generation == requestGeneration,
+                                   request.value(forHTTPHeaderField: "Authorization") == "Bearer \(self.contractorToken)" {
+                                    AppState.shared.needsReauth = true
+                                }
+                            }
                         }
                         return (data, response)
                     }
@@ -144,9 +272,11 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Active Call Check
 
-    func getActiveCall() async -> ActiveCallInfo? {
-        let contractorId = await MainActor.run { AppState.shared.contractorId }
-        guard !contractorId.isEmpty, !contractorToken.isEmpty else { return nil }
+    func getActiveCall(authContext: CallAuthContext? = nil) async -> ActiveCallInfo? {
+        let current = await MainActor.run { AppState.shared.currentAuthContext() }
+        let auth = authContext ?? current
+        let contractorId = auth.contractorId
+        guard auth.isValid else { return nil }
 
         do {
             var components = URLComponents(string: "\(baseURL)/api/active-call")!
@@ -154,7 +284,7 @@ final class APIClient: @unchecked Sendable {
             let url = components.url!
             var request = URLRequest(url: url)
             request.timeoutInterval = 5
-            authorize(&request)
+            request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
 
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -255,6 +385,7 @@ final class APIClient: @unchecked Sendable {
                 "platform": "ios",
                 "timezone": TimeZone.current.identifier,
                 "language": Locale.current.language.languageCode?.identifier ?? "en",
+                "urgent_handoff_v1": true,
             ]
             if !voipToken.isEmpty {
                 body["voip_token"] = voipToken
@@ -288,31 +419,139 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Call Actions
 
+    func sendCallAction(
+        callSid: String,
+        action: String,
+        operationId: String = "",
+        message: String = "",
+        contractorId: String? = nil,
+        bearerToken: String? = nil,
+        sessionGeneration: Int? = nil
+    ) async throws -> CallActionResult {
+        let captured = await MainActor.run { AppState.shared.currentAuthContext() }
+        let requestGeneration = sessionGeneration ?? captured.generation
+        let activeContractorId = contractorId ?? captured.contractorId
+        let activeToken = bearerToken ?? captured.bearerToken
+        guard !activeContractorId.isEmpty, !activeToken.isEmpty else {
+            throw URLError(.userAuthenticationRequired)
+        }
+
+        var components = URLComponents(string: "\(baseURL)/api/call-action")!
+        components.queryItems = [URLQueryItem(name: "contractor_id", value: activeContractorId)]
+        let url = components.url!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+        var body: [String: Any] = [
+            "call_sid": callSid,
+            "action": action,
+            "contractor_id": activeContractorId,
+        ]
+        if !operationId.isEmpty {
+            body["operation_id"] = String(operationId.prefix(80))
+        }
+        if !message.isEmpty {
+            body["message"] = message
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+
+        if http.statusCode == 401 {
+            await MainActor.run {
+                if AppState.shared.currentAuthContext().matches(contractorId: activeContractorId, bearerToken: activeToken, generation: requestGeneration) {
+                    AppState.shared.needsReauth = true
+                }
+            }
+        }
+
+        return CallActionResponseParser.parse(
+            data: data,
+            response: http,
+            requestedCallSid: callSid,
+            requestedContractorId: activeContractorId,
+            requestedOperationId: operationId,
+            requestedAction: action,
+            isGet: false
+        )
+    }
+
+    func getCallAction(
+        callSid: String,
+        operationId: String = "",
+        contractorId: String? = nil,
+        bearerToken: String? = nil,
+        sessionGeneration: Int? = nil
+    ) async throws -> CallActionResult? {
+        let captured = await MainActor.run { AppState.shared.currentAuthContext() }
+        let requestGeneration = sessionGeneration ?? captured.generation
+        let activeContractorId = contractorId ?? captured.contractorId
+        let activeToken = bearerToken ?? captured.bearerToken
+        guard !activeContractorId.isEmpty, !activeToken.isEmpty, !callSid.isEmpty else { return nil }
+
+        let encodedSid = callSid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? callSid
+        var components = URLComponents(string: "\(baseURL)/api/call-action/\(encodedSid)")!
+        var queryItems = [URLQueryItem(name: "contractor_id", value: activeContractorId)]
+        if !operationId.isEmpty {
+            queryItems.append(URLQueryItem(name: "operation_id", value: String(operationId.prefix(80))))
+        }
+        components.queryItems = queryItems
+        guard let url = components.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return nil }
+
+        if http.statusCode == 401 {
+            await MainActor.run {
+                if AppState.shared.currentAuthContext().matches(contractorId: activeContractorId, bearerToken: activeToken, generation: requestGeneration) {
+                    AppState.shared.needsReauth = true
+                }
+            }
+        }
+
+        return CallActionResponseParser.parse(
+            data: data,
+            response: http,
+            requestedCallSid: callSid,
+            requestedContractorId: activeContractorId,
+            requestedOperationId: operationId,
+            requestedAction: "",
+            isGet: true
+        )
+    }
+
     func sendCallAction(callSid: String, action: String, message: String = "") async -> [String: Any]? {
         do {
-            var components = URLComponents(string: "\(baseURL)/api/call-action")!
-            components.queryItems = [URLQueryItem(name: "contractor_id", value: AppState.shared.contractorId)]
-            let url = components.url!
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 10
-            var body: [String: String] = [
-                "call_sid": callSid,
-                "action": action,
+            let result = try await sendCallAction(
+                callSid: callSid,
+                action: action,
+                operationId: "",
+                message: message,
+                contractorId: nil,
+                bearerToken: nil
+            )
+            var dict: [String: Any] = [
+                "status": result.rawStatus ?? (result.statusCode == 200 ? "ok" : "error"),
+                "call_sid": result.callSid,
+                "action": result.action,
+                "action_status": result.actionStatus,
             ]
-            if !message.isEmpty {
-                body["message"] = message
-            }
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            authorize(&request)
-
-            let (data, _) = try await retryRequest(request)
-            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let token = result.accessToken { dict["access_token"] = token }
+            if let conf = result.conferenceName { dict["conference_name"] = conf }
+            return dict
         } catch {
             debugLog("Call action failed: \(error.localizedDescription)")
+            return nil
         }
-        return nil
     }
 
     // MARK: - Transcript
@@ -603,8 +842,10 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Call History
 
-    func getCallHistory() async throws -> [CallRecord] {
-        let contractorId = await MainActor.run { AppState.shared.contractorId }
+    func getCallHistory(authContext: CallAuthContext? = nil) async throws -> [CallRecord] {
+        let current = await MainActor.run { AppState.shared.currentAuthContext() }
+        let auth = authContext ?? current
+        let contractorId = auth.contractorId
         guard !contractorId.isEmpty else {
             debugLog("Call history: no contractor ID")
             return []
@@ -614,7 +855,7 @@ final class APIClient: @unchecked Sendable {
         let url = components.url!
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        authorize(&request)
+        request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
 
         let (data, _) = try await retryRequest(request)
         if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -698,7 +939,7 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Contractor PATCH
 
-    func patchContractor(_ contractorId: String, body: [String: Any]) async throws -> Bool {
+    func patchContractor(_ contractorId: String, body: [String: Any], bearerToken: String? = nil) async throws -> Bool {
         let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
         let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)")!
         var request = URLRequest(url: url)
@@ -706,10 +947,14 @@ final class APIClient: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 10
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        authorize(&request)
+        let token = bearerToken ?? contractorToken
+        guard !token.isEmpty else { throw URLError(.userAuthenticationRequired) }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (_, response) = try await retryRequest(request)
-        return (response as? HTTPURLResponse)?.statusCode == 200
+        let (data, response) = try await retryRequest(request, maxRetries: 0, signalReauth: false)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return body["status"] as? String == "ok"
     }
 
     /// Saves the business street address and city regulatory countries

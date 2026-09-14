@@ -11,6 +11,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Unit test isolation: skip all registration and background services
+        if ProcessInfo.processInfo.environment["KEVIN_UNIT_TESTS"] == "1" {
+            return true
+        }
+
         // Screenshot fixtures must stay deterministic and network-free. Skipping
         // notification and PushKit registration also prevents system permission
         // sheets from obscuring App Store creative.
@@ -103,7 +108,17 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         let userInfo = notification.request.content.userInfo
-        handleIncomingCallNotification(userInfo)
+        let callSid = userInfo["call_sid"] as? String ?? ""
+        let callerPhone = userInfo["caller_phone"] as? String ?? ""
+        var callerName = userInfo["caller_name"] as? String ?? ""
+        if callerName.isEmpty {
+            callerName = lookupContactName(phone: callerPhone)
+        }
+
+        if !callSid.isEmpty, notification.request.content.categoryIdentifier == "SCREENING_CALL" {
+            // Foreground delivery refreshes current state without navigating on a passive alert.
+            AppState.shared.checkForActiveCall()
+        }
         completionHandler([.banner, .sound])
     }
 
@@ -114,21 +129,45 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
-        handleIncomingCallNotification(userInfo)
+        let actionIdentifier = response.actionIdentifier
 
-        if response.actionIdentifier == "PICK_UP_ACTION" {
-            let callSid = userInfo["call_sid"] as? String ?? ""
-            let callerPhone = userInfo["caller_phone"] as? String ?? ""
-            var callerName = userInfo["caller_name"] as? String ?? ""
-            if callerName.isEmpty {
-                callerName = lookupContactName(phone: callerPhone)
-            }
-            Task { @MainActor in
-                await CallManager.shared.answerActiveCall(
-                    callSid: callSid,
-                    callerName: callerName,
-                    callerPhone: callerPhone
-                )
+        if actionIdentifier == UNNotificationDismissActionIdentifier {
+            completionHandler()
+            return
+        }
+
+        let callSid = userInfo["call_sid"] as? String ?? ""
+        let callerPhone = userInfo["caller_phone"] as? String ?? ""
+        var callerName = userInfo["caller_name"] as? String ?? ""
+        if callerName.isEmpty {
+            callerName = lookupContactName(phone: callerPhone)
+        }
+
+        guard !callSid.isEmpty else {
+            completionHandler()
+            return
+        }
+
+        guard response.notification.request.content.categoryIdentifier == "SCREENING_CALL" else {
+            completionHandler(); return
+        }
+        let auth = AppState.shared.currentAuthContext()
+        let payloadOwner = userInfo["contractor_id"] as? String ?? ""
+        guard auth.isValid, payloadOwner.isEmpty || payloadOwner == auth.contractorId else {
+            completionHandler(); return
+        }
+        Task { @MainActor in
+            guard AppState.shared.currentAuthContext() == auth else { return }
+            if actionIdentifier == "PICK_UP_ACTION" || actionIdentifier == "TAKE_MESSAGE_ACTION" {
+                guard await CallActionCoordinator.shared.validateAndNavigate(callSid: callSid, authContext: auth),
+                      AppState.shared.currentAuthContext() == auth else { return }
+                if actionIdentifier == "PICK_UP_ACTION" {
+                    _ = await CallActionCoordinator.shared.pickUp(callSid: callSid, authContext: auth)
+                } else {
+                    _ = await CallActionCoordinator.shared.takeMessage(callSid: callSid, authContext: auth)
+                }
+            } else if actionIdentifier == UNNotificationDefaultActionIdentifier {
+                await CallActionCoordinator.shared.validateAndNavigate(callSid: callSid, authContext: auth)
             }
         }
 
@@ -143,9 +182,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             title: String(localized: "Pick Up"),
             options: [.foreground]
         )
+        let takeMessageAction = UNNotificationAction(
+            identifier: "TAKE_MESSAGE_ACTION",
+            title: String(localized: "Take a Message"),
+            options: [.foreground]
+        )
         let screeningCategory = UNNotificationCategory(
             identifier: "SCREENING_CALL",
-            actions: [pickUpAction],
+            actions: [pickUpAction, takeMessageAction],
             intentIdentifiers: [],
             options: []
         )
@@ -175,10 +219,13 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         let data = payload.dictionaryPayload
         let callSid = data["call_sid"] as? String ?? ""
+        let contractorId = data["contractor_id"] as? String ?? ""
         let callerPhone = data["caller_phone"] as? String ?? ""
         var callerName = data["caller_name"] as? String ?? ""
         let accessToken = data["access_token"] as? String ?? ""
         let conferenceName = data["conference_name"] as? String ?? ""
+        let reason = data["reason"] as? String ?? ""
+        let expiresAt = (data["expires_at"] as? NSNumber)?.doubleValue ?? 0.0
 
         // Look up caller name from iPhone contacts if not provided
         if callerName.isEmpty {
@@ -186,6 +233,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
 
         let uuid = UUID()
+        let isUrgent = reason == "urgent_call"
 
         // MUST report to CallKit immediately (Apple requirement)
         CallManager.shared.reportIncomingCall(
@@ -193,7 +241,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             callerPhone: callerPhone,
             callerName: callerName,
             accessToken: accessToken,
-            conferenceName: conferenceName
+            conferenceName: conferenceName,
+            callSid: callSid,
+            contractorId: contractorId,
+            expiresAt: expiresAt,
+            isUrgent: isUrgent
         ) {
             // Call completion AFTER CallKit is set up
             completion()
@@ -207,30 +259,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         #if DEBUG
         print("VoIP push token invalidated")
         #endif
-    }
-
-    // MARK: - Regular Push Notification Handling
-
-    private func handleIncomingCallNotification(_ userInfo: [AnyHashable: Any]) {
-        let callSid = userInfo["call_sid"] as? String ?? ""
-        let callerPhone = userInfo["caller_phone"] as? String ?? ""
-        var callerName = userInfo["caller_name"] as? String ?? ""
-
-        // Look up caller name from iPhone contacts if not provided
-        if callerName.isEmpty {
-            callerName = lookupContactName(phone: callerPhone)
-        }
-
-        if !callSid.isEmpty {
-            DispatchQueue.main.async {
-                AppState.shared.setActiveCall(
-                    callSid: callSid,
-                    callerPhone: callerPhone,
-                    callerName: callerName
-                )
-                AppState.shared.showActiveCall = true
-            }
-        }
     }
 
     // MARK: - iPhone Contact Lookup

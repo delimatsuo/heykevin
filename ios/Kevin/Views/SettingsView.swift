@@ -58,6 +58,10 @@ struct SettingsView: View {
     @State private var countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: "")
     @State private var isSavingCountry = false
     @State private var countrySaveError = ""
+    @State private var smartInterruptionSelection = AppState.shared.smartInterruption
+    @State private var isSavingSmartInterruption = false
+    @State private var smartInterruptionSaveError = ""
+    @State private var urgentPreferenceFence = PreferenceWriteFence()
     // Local drafts for the business address fields, mirroring how
     // countrySelection tracks appState.countryCode: the fields edit these,
     // not appState directly, so an unsaved keystroke or a failed server
@@ -217,15 +221,14 @@ struct SettingsView: View {
                             }
                         }
 
-                    Toggle(String(localized: "Alert me for urgent calls"), isOn: $appState.smartInterruption)
-                        .onChange(of: appState.smartInterruption) { _, newValue in
-                            Task {
-                                isSaving = true
-                                saveError = ""
-                                await updateContractorSetting("smart_interruption", newValue)
-                                isSaving = false
-                            }
-                        }
+                    Toggle(String(localized: "Alert me for urgent calls"), isOn: smartInterruptionBinding)
+                        .disabled(isSavingSmartInterruption)
+
+                    if !smartInterruptionSaveError.isEmpty {
+                        Text(smartInterruptionSaveError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
 
                     if appState.isPersonalMode {
                         Button {
@@ -1039,8 +1042,11 @@ struct SettingsView: View {
     }
 
     private func loadKnowledge() async {
-        guard !appState.contractorId.isEmpty else { return }
-        if let contractor = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
+        let auth = appState.currentAuthContext()
+        let readRevision = urgentPreferenceFence.revision
+        guard auth.isValid else { return }
+        if let contractor = await APIClient.shared.getContractorProfile(contractorId: auth.contractorId, bearerToken: auth.bearerToken) {
+            guard appState.currentAuthContext() == auth, urgentPreferenceFence.permitsLoad(readRevision) else { return }
             knowledgeText = contractor["knowledge"] as? String ?? ""
             let name = contractor["owner_name"] as? String ?? ""
             let biz = contractor["business_name"] as? String ?? ""
@@ -1050,6 +1056,7 @@ struct SettingsView: View {
             let mode = contractor["effective_mode"] as? String ?? contractor["mode"] as? String ?? "personal"
             let ringThrough = contractor["ring_through_contacts"] as? Bool ?? true
             await MainActor.run {
+                guard appState.currentAuthContext() == auth, urgentPreferenceFence.permitsLoad(readRevision) else { return }
                 if !name.isEmpty { appState.userName = name }
                 if !biz.isEmpty { appState.businessName = biz }
                 if !bizAddress.isEmpty {
@@ -1067,6 +1074,9 @@ struct SettingsView: View {
                 appState.sitToneEnabled = sitTone
                 let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
                 appState.autoReplySms = autoReply
+                let smartInterruption = contractor["smart_interruption"] as? Bool ?? true
+                appState.smartInterruption = smartInterruption
+                smartInterruptionSelection = smartInterruption
 
                 // Load account country (root-authoritative on the server)
                 if let country = SettingsCountry.accountCountry(from: contractor) {
@@ -1147,6 +1157,42 @@ struct SettingsView: View {
                     countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: appState.countryCode)
                     countrySaveError = String(localized: "Failed to save setting. Please try again.")
                 }
+            }
+        }
+    }
+
+    private var smartInterruptionBinding: Binding<Bool> {
+        Binding(
+            get: { smartInterruptionSelection },
+            set: { picked in
+                guard !isSavingSmartInterruption, picked != smartInterruptionSelection else { return }
+                smartInterruptionSelection = picked
+                saveSmartInterruption(picked)
+            }
+        )
+    }
+
+    private func saveSmartInterruption(_ newValue: Bool) {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !isSavingSmartInterruption, let operation = urgentPreferenceFence.beginSave() else { return }
+        smartInterruptionSaveError = ""
+        isSavingSmartInterruption = true
+        let previous = appState.smartInterruption
+        Task { @MainActor in
+            let success: Bool
+            do {
+                success = try await APIClient.shared.patchContractor(auth.contractorId,
+                    body: ["smart_interruption": newValue], bearerToken: auth.bearerToken)
+            } catch { success = false }
+            guard urgentPreferenceFence.finish(operation) else { return }
+            isSavingSmartInterruption = false
+            guard appState.currentAuthContext() == auth else { return }
+            if success {
+                appState.smartInterruption = newValue
+                smartInterruptionSelection = newValue
+            } else {
+                smartInterruptionSelection = previous
+                smartInterruptionSaveError = String(localized: "Failed to save setting. Please try again.")
             }
         }
     }

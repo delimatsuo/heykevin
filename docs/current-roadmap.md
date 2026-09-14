@@ -20,8 +20,9 @@ Read-only checks on September 14 found:
 |---|---|---|
 | Production backend | `kevin-api-00270-l9s`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:45:33Z` | Successful [production run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657), exact live health/runtime identity, 100% serving traffic and anonymous smoke. See the [release record](releases/2026-09-14-urgent-production-candidate.md). iOS release and real-call/device acceptance remain open. |
 | Staging backend | `kevin-api-staging-00169-muy`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:11:16Z` | Successful [staging run 34896587160](https://github.com/delimatsuo/heykevin/actions/runs/34896587160), live health identity, 100% serving traffic, runtime isolation and anonymous static smoke. Includes the rolling-call compatibility repair. Staging remains distinct from real caller/device acceptance. |
-| Public iOS | Version `1.2.11`, released September 5 (`2026-09-05T20:50:20Z`) | Live [Apple lookup](https://itunes.apple.com/lookup?id=6761427495&country=us) and [App Store page](https://apps.apple.com/us/app/hey-kevin/id6761427495). Public metadata does not expose the build number. |
-| iOS build 37 | The September 4 handoff records `1.2.11 (37)` uploaded and in internal TestFlight testing | Historical [build 37 handoff](handoffs/2026-09-04-screening-push-feedback-b37-handoff.md). No fresh authenticated Apple inspection; do not infer which build backs public version 1.2.11. |
+| Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Authenticated read-only App Store Connect inspection on September 14 links the public version to build 36. The public [Apple lookup](https://itunes.apple.com/lookup?id=6761427495&country=us) reports the September 5 release date but does not expose the build number. |
+| Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Authenticated Apple inspection before preparing build 38. This is distinct from the public build 36 and the new notification candidate below. |
+| Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** in the existing internal QA group, verified at `23:18:44Z` | Source `813e0e3b72e90c709832d72129b82f5e6622775b`. All 127 native unit tests, signed-package review and Apple validation passed. Upload and processing completed; phone acceptance and App Store submission remain open. See the [candidate record and device checklist](releases/2026-09-14-notification-ios-38.md). |
 | Development inventory | No open PRs at the initial status audit; issue #33 remains open | Read-only GitHub inventory, before this reconciliation is published. Old worktrees and retained branches are not evidence of new active feature work. |
 
 ## Shipped
@@ -113,13 +114,20 @@ text reply and the later-feature list are not active implementation.
 - [x] Confirm successful deployment: all ten applicable jobs passed. Production
       revision `kevin-api-00270-l9s` serves the exact candidate SHA with 100%
       traffic; runtime, health and anonymous serving checks passed at `21:45:33Z`.
-- [ ] Release the new iOS implementation under its separate publication approval.
+- [x] Complete TestFlight delivery: **1.2.12 (38)** is `VALID`,
+      `IN_BETA_TESTING` and present in the internal QA group. The
+      [candidate record](releases/2026-09-14-notification-ios-38.md) includes
+      package identity, verification and the owner test sequence.
+- [ ] Publish the validated iPhone build to the App Store after the device checks
+      and owner release approval.
 - [ ] Record the owner's installed iOS build and notification/pickup checks from
       the PRD, including stale-alert and ended-call behavior.
 
 Only Deli may approve the production environment; [AGENTS.md](../AGENTS.md)
 explicitly forbids an agent or API approval. Deli's approval and the completed
-production deployment above do not authorize an iPhone release. The tested
+production deployment above did not authorize an iPhone release. The owner
+subsequently agreed to the TestFlight candidate and device-validation sequence;
+App Store submission remains a later release approval. The tested
 forward-recovery patch still requires another build and approval if needed;
 it does not rely on returning live operations to the older backend.
 

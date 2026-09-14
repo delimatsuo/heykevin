@@ -39,8 +39,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen
         SWIFT_EMIT_LOC_STRINGS: true
-        MARKETING_VERSION: "1.2.11"
-        CURRENT_PROJECT_VERSION: "37"
+        MARKETING_VERSION: "1.2.12"
+        CURRENT_PROJECT_VERSION: "38"
         DEVELOPMENT_TEAM: 3FLG8W6B95
         CODE_SIGN_STYLE: Automatic
         ENABLE_DEBUG_DYLIB: false
@@ -71,6 +71,7 @@ targets:
         aps-environment: production
         com.apple.developer.applesignin:
           - Default
+        com.apple.developer.usernotifications.time-sensitive: true
     info:
       path: Kevin/Info.plist
       properties:

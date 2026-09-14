@@ -235,6 +235,7 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         on_call_complete=on_call_complete,
         spoken_greeting=spoken_greeting,
     )
+    pipeline._command_ws_token = ws_token
     pipeline.start_background_tasks()
     logger.info(
         "relay_event event=pipeline_selected call=%s engine=relay",

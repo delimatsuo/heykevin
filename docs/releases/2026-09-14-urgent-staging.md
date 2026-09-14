@@ -1,5 +1,9 @@
 # Urgent notification staging release — September 14, 2026
 
+**Later qualification:** The [rolling-call compatibility repair](2026-09-14-rolling-call-compatibility.md)
+supersedes this candidate for production. The evidence below remains a dated
+record of the earlier source and staging checks.
+
 **Staging deployed and verified at `2026-09-14T19:40:27Z`.**
 [Run 34887443367](https://github.com/delimatsuo/heykevin/actions/runs/34887443367)
 completed successfully on `2b56fdaec3eafddbd42f4ebb0516e60db812161d`: all ten

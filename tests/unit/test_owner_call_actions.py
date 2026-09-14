@@ -48,6 +48,9 @@ def backend(monkeypatch):
     monkeypatch.setattr(a, '_generate_access_token', lambda contractor_id: 'token')
     monkeypatch.setattr(a, '_redirect', AsyncMock())
     monkeypatch.setattr(a, '_conference_contains_call', AsyncMock(return_value=False))
+    monkeypatch.setattr('app.services.legacy_call_commands._run_legacy_command_transaction', AsyncMock(return_value={'type': 'take_message'}))
+    monkeypatch.setattr('app.services.legacy_call_commands.read_legacy_command', AsyncMock(return_value=None))
+    monkeypatch.setattr('app.services.legacy_call_commands.delete_legacy_command_conditional', AsyncMock(return_value=None))
     return store
 
 
@@ -321,6 +324,7 @@ async def test_direct_decline_ack_waits_for_successful_redirect(backend,monkeypa
     from app.webhooks import twilio_incoming as incoming
     from firebase_admin import db
     import twilio.rest
+    backend.record.update(state='pickup_ringing', conference_name='direct')
     await act('decline')
     monkeypatch.setattr('app.db.cache._init_firebase',lambda:None)
     monkeypatch.setattr(db,'reference',lambda path:MagicMock())

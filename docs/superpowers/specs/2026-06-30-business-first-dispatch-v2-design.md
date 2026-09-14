@@ -1,5 +1,12 @@
 # Hey Kevin v2 Business Dispatch Product Spec
 
+> **Historical proposal — superseded for product scope on 2026-09-14.**
+> The [current PRD](../../../kevin-prd.md) defines necessary work and later
+> candidates. This document is retained for design and security-contract context;
+> its phases, proposed navigation and approval text are not an active backlog.
+> Consult the [current roadmap](../../current-roadmap.md) for implementation and
+> release status. Separately approved safety constraints still apply.
+
 **Date:** 2026-06-30
 **Status:** Draft for user review
 **Decision source:** Product, engineering, UX, security, and growth panel handoff from 2026-06-30

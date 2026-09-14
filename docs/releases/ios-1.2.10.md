@@ -1,5 +1,9 @@
 # Hey Kevin iOS 1.2.10 Release Preparation
 
+> **Historical build-35 preparation record.** The candidate-status statements
+> below describe that preparation session. For the current public version and
+> release evidence, use the [current roadmap](../current-roadmap.md).
+
 ## Status
 
 **Source candidate only.** This candidate has not been archived, signed with a distribution identity, uploaded, submitted, approved, deployed, or released. Build 35 remains source/local only, does not exist in App Store Connect, and has not been uploaded, validated, tested in TestFlight, submitted, approved, or released.

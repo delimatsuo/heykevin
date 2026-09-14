@@ -218,6 +218,7 @@ class GeminiPipeline:
         self._first_caller_transcript_logged = False
         self._inbound_audio_error_logged = False
         self._screening_summary_push_sent = False
+        self._summary_task: Optional[asyncio.Task] = None
         self._audio_chunks_sent = 0
         self._cumulative_inbound_audio_ms = 0
         self._cumulative_outbound_audio_ms = 0
@@ -653,6 +654,8 @@ class GeminiPipeline:
             self._unavailable_task.cancel()
         if self._command_check_task:
             self._command_check_task.cancel()
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
         if self._receive_task:
             self._receive_task.cancel()
         if (
@@ -1677,6 +1680,8 @@ class GeminiPipeline:
         self._last_kevin_speech_time = now
 
     def _start_owner_availability_wait(self):
+        if not self._connected or self._unavailable_said:
+            return
         now = time.time()
         self._waiting_for_owner_availability = True
         self._owner_availability_wait_started_at = now
@@ -1687,9 +1692,13 @@ class GeminiPipeline:
         self._log_voice_timing("owner_availability_hold_started")
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
-            asyncio.create_task(self._trigger_screening_summary_push())
+            if self._summary_task and not self._summary_task.done():
+                self._summary_task.cancel()
+            self._summary_task = asyncio.create_task(self._trigger_screening_summary_push())
 
     async def _trigger_screening_summary_push(self) -> None:
+        if not self._connected or not self._waiting_for_owner_availability:
+            return
         try:
             cid = self._contractor_config.get("contractor_id", "")
             if not cid or not self._call_sid:
@@ -1701,6 +1710,11 @@ class GeminiPipeline:
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                is_active=lambda: (
+                    self._connected
+                    and self._waiting_for_owner_availability
+                    and not self._unavailable_said
+                ),
             )
         except Exception as error:
             logger.warning("Gemini screening summary push failed: %s", type(error).__name__)
@@ -1709,6 +1723,8 @@ class GeminiPipeline:
         self._waiting_for_owner_availability = False
         self._owner_availability_wait_started_at = 0.0
         self._caller_silence_prompted_at = None
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
 
     def _waiting_on_caller(self) -> bool:
         waiting = (

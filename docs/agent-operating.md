@@ -161,25 +161,25 @@ It is not a supervisor chat, not LangGraph `StateGraph`, not shared `AgentState`
    Default-off source on `main` ≠ activation. Owner live-test ≠ “unit tests
    proved live audio.”
 
-## Product position (verify; don’t trust)
+## Product position and current scope
 
-Snapshot 2026-08-17. Re-check `gh pr list --repo delimatsuo/heykevin` and
-`git fetch origin main` before acting.
+The [current PRD](../kevin-prd.md) is the product-scope authority. The
+[current roadmap](current-roadmap.md) contains dated implementation and release
+observations; re-check live state before acting on them.
 
-- Slice 1 live Gemini intake is on `origin/main` (PR #174) and in production.
-  Do not reopen intake unless a live call skips the job and jumps to the form.
-- Slice 2 returning-customer memory is draft PR #165, flags default-off. Merge
-  eligibility ≠ activation. P0 blockers (bare ANI auth, Google reschedule
-  concurrency) still block turning flags on.
-- Slice 3 owner Confirm UI and Slice 4 hang-up caller SMS are later; SMS is
-  A2P-blocked.
-- Public demo (`kevin-public-demo`) is not the production receptionist path.
-  Do not iterate demo greeting/legal/weekday UX unless a live demo regression
-  is reported.
-- Do not reintroduce global contact fallback.
+Owner direction on 2026-09-14: finish the screening-notification enhancement,
+repair necessary confirmed regressions, and record valuable later features
+without starting them automatically. The former Business Dispatch v2 redesign
+is not the active engineering queue. Old PR #165 and wedge-slice status in
+handoffs are historical; do not rebuild merged intake, memory or appointment
+confirmation from those snapshots. Merged source does not prove runtime
+activation, provider qualification, or physical-device acceptance.
+
+Do not reintroduce global contact fallback or reopen public-demo work without a
+reported regression. All owner gates and safety rules above remain in force.
 
 ## First action (new sessions)
 
 Fetch `origin/main`, `gh pr list --repo delimatsuo/heykevin`, list
-`.worktrees`. Continue the highest-leverage *unblocked* engineering node
-(fake-edge test). Do not ask Deli which slice to pick.
+`.worktrees`. Continue an unblocked necessary node in the current PRD
+(fake-edge test). Do not promote a later feature merely because it is unblocked.

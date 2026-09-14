@@ -165,6 +165,7 @@ class RelayPipeline:
         self._nudged_monotonic = 0.0
         self._command_task: Optional[asyncio.Task] = None
         self._screening_summary_push_sent = False
+        self._summary_task: Optional[asyncio.Task] = None
         self._tools = self._build_tools()
 
         # The welcome greeting is spoken by Twilio before any prompt arrives;
@@ -184,8 +185,14 @@ class RelayPipeline:
     async def stop(self) -> None:
         self._active = False
         self._turn_epoch += 1
-        for task in (self._generate_task, self._command_task, self._hold_task, self._silence_task):
-            if task and not task.done():
+        for task in (
+            self._generate_task,
+            self._command_task,
+            self._hold_task,
+            self._silence_task,
+            self._summary_task,
+        ):
+            if task and task is not asyncio.current_task() and not task.done():
                 task.cancel()
 
     async def wait_idle(self) -> None:
@@ -620,7 +627,7 @@ class RelayPipeline:
         back after 30s; this engine didn't, so on CAa5e0de the caller sat in
         dead air until Twilio killed the session 4m40s later.
         """
-        if self._ending or self._unavailable_said:
+        if not self._active or self._ending or self._unavailable_said:
             return
         if not is_owner_availability_hold(reply_text):
             return
@@ -633,9 +640,13 @@ class RelayPipeline:
         )
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
-            asyncio.create_task(self._trigger_screening_summary_push())
+            if self._summary_task and not self._summary_task.done():
+                self._summary_task.cancel()
+            self._summary_task = asyncio.create_task(self._trigger_screening_summary_push())
 
     async def _trigger_screening_summary_push(self) -> None:
+        if not self._active or self._ending:
+            return
         try:
             cid = self._contractor_config.get("contractor_id", "")
             if not cid or not self._call_sid:
@@ -660,6 +671,13 @@ class RelayPipeline:
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                is_active=lambda: (
+                    self._active
+                    and not self._ending
+                    and not self._unavailable_said
+                    and self._hold_task is not None
+                    and not self._hold_task.done()
+                ),
             )
         except Exception as e:
             logger.warning(f"relay_event event=screening_summary_push_error error={type(e).__name__} call={_call_label(self._call_sid)}")
@@ -671,6 +689,8 @@ class RelayPipeline:
         # Owner pickup redirects the call and stops the pipeline, so reaching
         # this point means they did not take it.
         self._unavailable_said = True
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
         owner_name = self._contractor_config.get("owner_name", settings.user_name)
         pronoun = self._contractor_config.get("pronoun", "he")
         logger.info(
@@ -848,6 +868,9 @@ class RelayPipeline:
         return True
 
     async def end_call(self) -> None:
+        self._ending = True
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
         try:
             await self._send({"type": "end"})
         except Exception:
@@ -881,6 +904,10 @@ class RelayPipeline:
             await loop.run_in_executor(None, ref.delete)
             if command.get("type") == "take_message" and not self._unavailable_said:
                 self._unavailable_said = True
+                if self._hold_task and not self._hold_task.done():
+                    self._hold_task.cancel()
+                if self._summary_task and not self._summary_task.done():
+                    self._summary_task.cancel()
                 owner_name = self._contractor_config.get(
                     "owner_name", settings.user_name
                 )

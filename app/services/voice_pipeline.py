@@ -689,6 +689,7 @@ class VoicePipeline:
         self._greeting_done = False
         self._reconnecting = False
         self._screening_summary_push_sent = False
+        self._summary_task: Optional[asyncio.Task] = None
         self._reconnect_count = 0
         self._max_reconnect_attempts = 2
 
@@ -854,6 +855,8 @@ class VoicePipeline:
             self._silence_check_task.cancel()
         if self._unavailable_task:
             self._unavailable_task.cancel()
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
         if self._deepgram_task:
             self._deepgram_task.cancel()
         if self._deepgram_ws:
@@ -1892,6 +1895,8 @@ class VoicePipeline:
             _log_voice_exception("claude_response_error", error, self._call_sid)
 
     def _start_owner_availability_wait(self):
+        if not self._connected or self._unavailable_said:
+            return
         now = time.time()
         self._waiting_for_owner_availability = True
         self._owner_availability_wait_started_at = now
@@ -1902,20 +1907,58 @@ class VoicePipeline:
         _log_voice_event("owner_availability_hold_started", self._call_sid)
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
-            asyncio.create_task(self._trigger_screening_summary_push())
+            if self._summary_task and not self._summary_task.done():
+                self._summary_task.cancel()
+            self._summary_task = asyncio.create_task(self._trigger_screening_summary_push())
 
     async def _trigger_screening_summary_push(self) -> None:
+        if not self._connected or not self._waiting_for_owner_availability:
+            return
         try:
             cid = self._contractor_config.get("contractor_id", "")
             if not cid or not self._call_sid:
                 return
-            transcript = "\n".join(self.transcript_lines)
+            caller_lines = []
+            for entry in self._conversation:
+                role = entry.get("role")
+                content = entry.get("content", "")
+                if role == "user":
+                    if isinstance(content, str):
+                        if "<caller_speech>" in content:
+                            cleaned = content.replace("<caller_speech>", "").replace("</caller_speech>", "").strip()
+                            if cleaned:
+                                caller_lines.append(f"Caller: {cleaned}")
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                                if "<caller_speech>" in text:
+                                    cleaned = text.replace("<caller_speech>", "").replace("</caller_speech>", "").strip()
+                                    if cleaned:
+                                        caller_lines.append(f"Caller: {cleaned}")
+                elif role == "assistant":
+                    if isinstance(content, str):
+                        cleaned = content.strip()
+                        if cleaned:
+                            caller_lines.append(f"Kevin: {cleaned}")
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "").strip()
+                                if text:
+                                    caller_lines.append(f"Kevin: {text}")
+            transcript = "\n".join(caller_lines)
             from app.services.screening_summary import extract_and_send_screening_summary
             await extract_and_send_screening_summary(
                 contractor_id=cid,
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                is_active=lambda: (
+                    self._connected
+                    and self._waiting_for_owner_availability
+                    and not self._unavailable_said
+                ),
             )
         except Exception as error:
             logger.warning("VoicePipeline screening summary push failed: %s", type(error).__name__)
@@ -1924,6 +1967,8 @@ class VoicePipeline:
         self._waiting_for_owner_availability = False
         self._owner_availability_wait_started_at = 0.0
         self._caller_silence_prompted_at = None
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
 
     def _mark_caller_activity(self):
         now = time.time()

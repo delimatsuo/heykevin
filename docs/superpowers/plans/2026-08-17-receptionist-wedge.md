@@ -1,5 +1,11 @@
 # Receptionist Wedge Sequencing Plan
 
+> **Historical sequencing plan — not the active backlog.** Live intake,
+> customer-memory source and the owner-confirm appointment loop subsequently
+> landed. Follow the [current PRD](../../../kevin-prd.md) and
+> [current roadmap](../../current-roadmap.md) for priorities and delivery status.
+> The older slice labels below do not authorize new work or prove runtime flags.
+
 > **For agentic workers:** This file sequences independent slices. Implement
 > only the linked plan for the current slice. Do not treat later slices as
 > authorized work. REQUIRED SUB-SKILL for the current slice:

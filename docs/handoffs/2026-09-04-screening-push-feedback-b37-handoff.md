@@ -1,5 +1,9 @@
 # Hey Kevin — Session Handoff (2026-09-04)
 
+> **Historical session evidence.** The production revision in this handoff is
+> superseded by the dated [current roadmap](../current-roadmap.md). Its build-37
+> TestFlight observation does not identify the build of public version 1.2.11.
+
 **Owner**: Deli Matsuo (`delimatsuo@gmail.com`; GCP identity `deli@ellaexecutivesearch.com`)
 **Workspace**: `/Volumes/Extreme Pro/MYPROJECTS/Kevin`
 **Primary Commit**: `main` at `c093ed6` (`Merge pull request #239 from delimatsuo/codex/release-v1211-b37`)

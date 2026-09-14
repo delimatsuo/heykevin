@@ -1,7 +1,7 @@
 # Hey Kevin — Current Roadmap and Release Status
 
 **Reconciled:** 2026-09-14
-**Implementation baseline:** `66f8a446e0e873ecb280c39aaab60f7cf0448a36`
+**Implementation baseline:** `2b56fdaec3eafddbd42f4ebb0516e60db812161d`
 **Repository:** `delimatsuo/heykevin`
 
 The [current PRD](../kevin-prd.md) defines necessary work and later opportunities.
@@ -19,7 +19,7 @@ Read-only checks on September 14 found:
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
 | Production backend | `kevin-api-00269-42l`, SHA `407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`, deployed September 4 | Live [production health](https://kevin-api-752910912062.us-central1.run.app/health) and successful [production run 33915568182](https://github.com/delimatsuo/heykevin/actions/runs/33915568182). This establishes the deployed source, not real-call/device acceptance. |
-| Staging backend | `kevin-api-staging-00165-kif`, SHA `c093ed6ef1c505e8d68f01d6f6f365bf2553ac55` | Live [staging health](https://kevin-api-staging-l63rergg7a-uc.a.run.app/health). Staging has different safety controls and is not equivalent to a production caller test. |
+| Staging backend | `kevin-api-staging-00167-qiq`, SHA `2b56fdaec3eafddbd42f4ebb0516e60db812161d`, verified September 14 at `19:40:27Z` | Successful [staging run 34887443367](https://github.com/delimatsuo/heykevin/actions/runs/34887443367), live health identity, 100% serving traffic and anonymous static smoke. Staging has different safety controls and is not equivalent to a production caller test. |
 | Public iOS | Version `1.2.11`, released September 5 (`2026-09-05T20:50:20Z`) | Live [Apple lookup](https://itunes.apple.com/lookup?id=6761427495&country=us) and [App Store page](https://apps.apple.com/us/app/hey-kevin/id6761427495). Public metadata does not expose the build number. |
 | iOS build 37 | The September 4 handoff records `1.2.11 (37)` uploaded and in internal TestFlight testing | Historical [build 37 handoff](handoffs/2026-09-04-screening-push-feedback-b37-handoff.md). No fresh authenticated Apple inspection; do not infer which build backs public version 1.2.11. |
 | Development inventory | No open PRs at the initial status audit; issue #33 remains open | Read-only GitHub inventory, before this reconciliation is published. Old worktrees and retained branches are not evidence of new active feature work. |
@@ -55,11 +55,11 @@ updates to an existing notification and the matching Pick Up action. The same
 source package contains client feedback/review improvements; no additional
 feedback work is planned.
 
-The existing [production run 33938295394](https://github.com/delimatsuo/heykevin/actions/runs/33938295394)
-is pinned to `c093ed6ef1c505e8d68f01d6f6f365bf2553ac55`. Its Test aggregator passed
-and the production job remains waiting at the owner approval gate. A September 14
-review confirmed that delayed summary work can survive pipeline teardown and
-send a stale actionable alert. **Do not approve this old candidate.**
+The superseded [production run 33938295394](https://github.com/delimatsuo/heykevin/actions/runs/33938295394),
+pinned to `c093ed6ef1c505e8d68f01d6f6f365bf2553ac55`, was **cancelled on September 14
+with Deli's explicit authorization**. It is no longer holding the dispatch queue.
+That candidate contained a delayed-summary defect: extraction could survive
+pipeline teardown and send a stale actionable alert. Do not revive that release.
 [PR #241](https://github.com/delimatsuo/heykevin/pull/241) repaired that lifecycle
 defect and merged as `66f8a446e0e873ecb280c39aaab60f7cf0448a36` on September 14
 at `14:01:59Z`; all nine required-workflow jobs passed on its exact source head
@@ -70,6 +70,11 @@ reports `407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`.
 The owner then approved **Pick up + Take a message**, passive dismissal, a
 bounded urgent-call fallback and a server-persisted Urgent alerts preference.
 That is active N1 work under the [handoff contract](superpowers/plans/2026-09-14-urgent-call-handoff.md).
+Its source merged in [PR #242](https://github.com/delimatsuo/heykevin/pull/242)
+as `2b56fdaec3eafddbd42f4ebb0516e60db812161d`. All nine required-workflow jobs passed
+on reviewed source head `66030cd41318d75b423373aebfcb6c5f3ffc63cb`; the merge has
+the same tree. The [staging record](releases/2026-09-14-urgent-staging.md) tracks
+the subsequent deployment independently from production and iPhone acceptance.
 The [interactive HTML](frontend-concept/index.html) demonstrates the experience.
 The native frontend redesign is still awaiting owner design approval; callback,
 text reply and the later-feature list are not active implementation.
@@ -87,17 +92,19 @@ text reply and the later-feature list are not active implementation.
       recovery. The [urgent-handoff packet](releases/2026-09-14-urgent-call-handoff.md)
       records local tests and the remaining release gates; its publishing PR
       records required exact-HEAD CI and the final merge candidate.
-- [ ] Stage the final reviewed N1 source after the owner clears the dispatch gate.
-- [ ] Deli cancels the superseded production run so the replacement can proceed.
+- [x] Stage the final reviewed N1 source: run `34887443367` passed all ten
+      applicable jobs, and serving revision `kevin-api-staging-00167-qiq` reports
+      the approved SHA. Anonymous smoke and runtime isolation checks passed.
+- [x] Cancel the superseded production run with Deli's explicit authorization.
 - [ ] Deli approves the reviewed candidate's production job in GitHub.
 - [ ] Confirm successful deployment and the exact production `deploy_sha`.
 - [ ] Record the owner's installed iOS build and notification/pickup checks from
       the PRD, including stale-alert and ended-call behavior.
 
 Only Deli may approve the production environment; [AGENTS.md](../AGENTS.md)
-explicitly forbids an agent or API approval. Do not dispatch a duplicate behind
-this parked run. If a repair requires a new candidate, preserve this run until
-Deli decides its disposition and prepare a new exact-SHA release packet.
+explicitly forbids an agent or API approval. Rebind the remote main SHA and
+dispatch queue before requesting a production run. The completed cancellation
+and staging authorization do not approve production or an iPhone release.
 
 ## Unfinished or unverified, not an automatic implementation queue
 

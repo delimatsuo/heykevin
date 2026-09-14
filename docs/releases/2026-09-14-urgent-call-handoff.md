@@ -9,9 +9,11 @@ is available for design review. The wider native frontend refactor and later
 features remain deferred.
 
 Base: `66f8a446e0e873ecb280c39aaab60f7cf0448a36` (merged PR #241).
-The publishing PR records the final candidate HEAD, required checks and merge
-SHA. This packet establishes local source evidence, not deployment or device
-acceptance.
+[PR #242](https://github.com/delimatsuo/heykevin/pull/242) passed its nine required
+workflow jobs on `66030cd41318d75b423373aebfcb6c5f3ffc63cb` and merged as
+`2b56fdaec3eafddbd42f4ebb0516e60db812161d` with the same tree. This packet records
+source evidence. The later [staging record](2026-09-14-urgent-staging.md) records
+the authorized cancellation and staging deployment; device acceptance remains open.
 
 ## Resulting behavior
 
@@ -95,10 +97,10 @@ carrier forwarding, physical-device behavior or production effect is proved.
 
 ## Hosted-check preflight
 
-Read-only rebind: September 14, 2026. Repository and personal billing owner:
-`delimatsuo`, public repository `delimatsuo/heykevin`. Remote main remains the
-base above. Main requires the strict, fail-closed `Test` check (GitHub Actions
-app 15368); no additional rulesets were returned.
+Historical pre-publication rebind: September 14, 2026. Repository and personal
+billing owner: `delimatsuo`, public repository `delimatsuo/heykevin`. At that
+preflight, remote main was the base above. Main requires the strict, fail-closed
+`Test` check (GitHub Actions app 15368); no additional rulesets were returned.
 
 Feature-branch pushes do not run the deployment workflow. A PR to main runs
 seven Python shards, Python quality and Test: nine standard `ubuntu-latest`
@@ -123,17 +125,19 @@ and resolve valid findings before merge.
 Production was rechecked during this work and remains
 `407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`, revision `kevin-api-00269-42l`.
 The [old production run](https://github.com/delimatsuo/heykevin/actions/runs/33938295394)
-still waits on the superseded `c093ed6ef1c505e8d68f01d6f6f365bf2553ac55`.
-It contains the earlier delayed-summary defect. Only Deli may cancel it;
-do not approve it or queue another dispatch behind it.
+on superseded `c093ed6ef1c505e8d68f01d6f6f365bf2553ac55` was cancelled on September 14
+after Deli explicitly authorized cancellation. It contains the earlier
+delayed-summary defect; do not revive it. The dispatch queue was verified clear
+before the authorized staging run began.
 
 After reviewed-clean merge:
 
-1. Deli authorizes the staging/release envelope and cancels the old run. Verify
-   cancellation before a new dispatch; record the exact remote main SHA.
-2. Deploy that SHA to staging using `candidate_sha`, then verify its health and
-   the agreed staging acceptance. Rebind main before any production dispatch;
-   production dispatch does not accept `candidate_sha`.
+1. Completed: Deli authorized staging and cancellation of the old run. Its
+   terminal cancellation and the exact remote main SHA were verified before dispatch.
+2. Completed: staging run `34887443367` deployed the approved merge SHA and
+   passed exact-SHA health, serving-traffic, isolation and anonymous static
+   smoke checks. See the [staging record](2026-09-14-urgent-staging.md). Rebind
+   main before any production dispatch; production does not accept `candidate_sha`.
 3. Only Deli approves the production environment. Verify the completed workflow,
    serving revision and exact production `deploy_sha` afterward.
 4. Prepare the authorized iOS build under a fresh signing/App Store envelope,
@@ -142,9 +146,9 @@ After reviewed-clean merge:
    known-contact answer, 30-second no-answer fallback, preference persistence,
    locked/unlocked notification behavior and failed/unknown transfers.
 
-No stage/prod dispatch, App Store action, flag change, provider spend or real
-communication was performed for this source candidate. The PRD's release
-acceptance remains open until those results are recorded.
+The source implementation itself performed no deployment. The later authorized
+staging run is recorded separately. Production deployment, App Store action,
+real-call/device qualification and the PRD's final release acceptance remain open.
 
 ## Routing and audit record
 

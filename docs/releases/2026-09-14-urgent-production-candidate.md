@@ -1,10 +1,11 @@
-# Urgent notification production candidate — September 14, 2026
+# Urgent notification production release — September 14, 2026
 
-**Production requested; deployment approval and production acceptance are not
-recorded as complete.** [Run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657)
+**Production deployed and verified at `2026-09-14T21:45:33Z`.** [Run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657)
 was dispatched at `2026-09-14T21:12:04Z` from main at exact SHA
 `7377c7ba402297625dec5de97a2250f50b1c8013`, without `candidate_sha`.
-Only Deli may approve its production environment. Do not dispatch a duplicate.
+Deli approved its production environment. The run completed successfully at
+`2026-09-14T21:39:36Z`; all ten applicable jobs passed. The serving revision is
+`kevin-api-00270-l9s`, with 100% of production traffic. No duplicate was dispatched.
 
 ## Source and staging completed
 
@@ -37,6 +38,32 @@ that merge SHA. Parent verification at `2026-09-14T21:11:16Z` established:
 The previous staging record remains historical. Its `2b56fdae...` candidate is
 superseded by this repaired source.
 
+## Production verification
+
+After the completed workflow, independent parent checks at `21:45:33Z` confirmed:
+
+- `/health` returned `status=ok`, environment `production`, service `kevin-api`,
+  revision `kevin-api-00270-l9s` and the exact dispatch SHA above. Cloud Run's
+  latest ready revision and 100% serving traffic matched; its runtime
+  `DEPLOY_SHA` matched too.
+- Production Firestore/RTDB bindings, APNs (`APNS_SANDBOX=false`) and App Store
+  environment were correct. Promotional offers and observation shadow remained
+  false; the existing lapsed-number release flag remained true. These checks
+  did not change flags or credentials.
+- Production's Gemini staging-safety controls remained disabled, with model
+  tools and automatic terminal actions enabled as before.
+- Anonymous `/admin` returned HTTP 200 with title `Kevin AI Admin` and 4,984
+  bytes; CSS/JS returned HTTP 200 and 7,795/24,575 bytes. No authenticated app
+  endpoint, caller record, notification send or live call was exercised.
+
+An independent Codex staff reviewer (`gpt-6-astra`, high) separately verified
+the completed run, both production URLs, exact SHA/revision, 100% traffic and
+Cloud Run health conditions at `21:46:27Z`, with no findings.
+
+This establishes deployed source identity and basic serving. It does not
+establish notification delivery, voice-provider behavior, installed-iPhone
+acceptance or cessation of all older workers.
+
 ## Production preflight and recovery
 
 Immediately before dispatch, main and the reviewed tree matched the candidate
@@ -51,8 +78,8 @@ The existing workflow performs nine validation jobs before its gated deployment
 job. All use bounded standard Ubuntu runners. The public repository and personal
 billing owner are `delimatsuo`; chargeable runner usage is $0 under
 [GitHub's public-repository policy](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
-The source PR used 402 runner-seconds and refreshed staging used 678. Production
-is expected to be of similar order; Cloud Build/runtime charges are separate.
+The source PR used 402 runner-seconds, refreshed staging used 678 and the
+completed production run used 650. Cloud Build/runtime charges are separate.
 No workflow, runner, billing or credentials configuration was changed.
 
 The approved plan is one normal production deployment with slower forward
@@ -71,12 +98,10 @@ proof. No maintenance, forced call termination or ingress restriction is planned
 
 ## Remaining acceptance
 
-1. Deli approves the production job; verify the completed workflow, exact
-   production `deploy_sha`, revision, traffic and basic serving afterward.
-2. Record the installed iOS version/build and perform the owner-run notification,
+1. Record the installed iOS version/build and perform the owner-run notification,
    CallKit, pickup, message, timeout and stale-alert checks in the current PRD.
    This backend release does not authorize TestFlight/App Store publication.
-3. Keep the HTML frontend proposal available for review. The broader native
+2. Keep the HTML frontend proposal available for review. The broader native
    frontend refactor and later product ideas remain deferred.
 
 A later documentation-only merge may advance main. The production run above is

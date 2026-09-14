@@ -184,6 +184,8 @@ class RelayPipeline:
 
     async def stop(self) -> None:
         self._active = False
+        if getattr(self, '_urgency_task', None):
+            self._urgency_task.cancel()
         self._turn_epoch += 1
         for task in (
             self._generate_task,
@@ -281,8 +283,12 @@ class RelayPipeline:
 
         if not self._urgency_signalled and find_urgent_signal(text):
             self._urgency_signalled = True
+            if not self._hold_task or self._hold_task.done():
+                self._hold_task = asyncio.create_task(self._owner_hold_timer())
             if self._on_urgency_detected:
-                await self._on_urgency_detected(text)
+                from app.services.urgent_handoff import start_urgency_task
+                start_urgency_task(self, self._on_urgency_detected, text)
+                await asyncio.sleep(0)  # Start the supervised notification task without awaiting delivery.
 
         # Caller speech supersedes any reply still being generated: record
         # what was actually spoken of it, then answer the fuller history.
@@ -377,6 +383,9 @@ class RelayPipeline:
             return
         try:
             contents = list(self._history)
+            message_instruction = getattr(self, '_message_instruction', '')
+            if message_instruction:
+                contents.append({'role': 'user', 'parts': [{'text': message_instruction}]})
             if extra_instruction:
                 contents.append(
                     {"role": "user", "parts": [{"text": extra_instruction}]}
@@ -424,6 +433,8 @@ class RelayPipeline:
             await self._send_current(epoch, {"type": "text", "token": "", "last": True})
 
             if reply_text:
+                if getattr(self, '_message_instruction', '') == message_instruction:
+                    self._message_instruction = ''
                 self._history.append(
                     {"role": "model", "parts": [{"text": reply_text}]}
                 )
@@ -631,9 +642,8 @@ class RelayPipeline:
             return
         if not is_owner_availability_hold(reply_text):
             return
-        if self._hold_task and not self._hold_task.done():
-            self._hold_task.cancel()
-        self._hold_task = asyncio.create_task(self._owner_hold_timer())
+        if not self._hold_task or self._hold_task.done():
+            self._hold_task = asyncio.create_task(self._owner_hold_timer())
         logger.info(
             "relay_event event=owner_hold_started call=%s",
             _call_label(self._call_sid),
@@ -682,30 +692,13 @@ class RelayPipeline:
         except Exception as e:
             logger.warning(f"relay_event event=screening_summary_push_error error={type(e).__name__} call={_call_label(self._call_sid)}")
 
-    async def _owner_hold_timer(self) -> None:
-        await asyncio.sleep(self.OWNER_AVAILABILITY_TIMEOUT_SECONDS)
-        if not self._active or self._ending or self._unavailable_said:
-            return
-        # Owner pickup redirects the call and stops the pipeline, so reaching
-        # this point means they did not take it.
-        self._unavailable_said = True
-        if self._summary_task and not self._summary_task.done():
-            self._summary_task.cancel()
-        owner_name = self._contractor_config.get("owner_name", settings.user_name)
-        pronoun = self._contractor_config.get("pronoun", "he")
-        logger.info(
-            "relay_event event=owner_hold_timeout call=%s",
-            _call_label(self._call_sid),
-        )
-        await self._supersede_in_flight()
-        self._start_generation(
-            extra_instruction=(
-                f"SYSTEM INSTRUCTION: {owner_name} has not picked up. Tell the "
-                f"caller {owner_name} is not available right now, apologize "
-                f"warmly, and offer to take a message and make sure {pronoun} "
-                "gets it."
-            )
-        )
+    async def _owner_hold_timer(self):
+        from app.services.owner_call_actions import run_owner_timeout
+        try:
+            await run_owner_timeout(self, self._deliver_message_instruction)
+        except asyncio.CancelledError:
+            pass
+
 
     # --- caller-silence watchdog ------------------------------------------
 
@@ -889,39 +882,33 @@ class RelayPipeline:
             pass
 
     async def _check_commands(self):
+        from app.services.owner_call_actions import consume_message_intent
         if not self._call_sid:
             return
         try:
-            from app.db.cache import _init_firebase
-            from firebase_admin import db as rtdb
+            await consume_message_intent(self, self._deliver_message_instruction)
+            if (getattr(self, '_message_instruction', '') and self._active and not self._ending
+                    and (self._generate_task is None or self._generate_task.done())):
+                self._start_generation()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass  # Durable intent remains available for the next poll.
 
-            _init_firebase()
-            ref = rtdb.reference(f"/call_commands/{self._call_sid}")
-            loop = asyncio.get_event_loop()
-            command = await loop.run_in_executor(None, ref.get)
-            if not command:
-                return
-            await loop.run_in_executor(None, ref.delete)
-            if command.get("type") == "take_message" and not self._unavailable_said:
-                self._unavailable_said = True
-                if self._hold_task and not self._hold_task.done():
-                    self._hold_task.cancel()
-                if self._summary_task and not self._summary_task.done():
-                    self._summary_task.cancel()
-                owner_name = self._contractor_config.get(
-                    "owner_name", settings.user_name
-                )
-                await self._supersede_in_flight()
-                self._start_generation(
-                    extra_instruction=(
-                        f"SYSTEM INSTRUCTION: The owner ({owner_name}) has declined "
-                        "the call. Tell the caller they are unavailable and offer to "
-                        "take a message. Be warm and apologetic."
-                    )
-                )
-        except Exception as error:
-            logger.error(
-                "relay_event event=command_check_error call=%s type=%s",
-                _call_label(self._call_sid),
-                type(error).__name__,
-            )
+
+    async def _deliver_message_instruction(self):
+        if self._unavailable_said:
+            return True
+        if not self._active or self._ending:
+            return False
+        owner = self._contractor_config.get("owner_name", settings.user_name)
+        # Owned instruction survives cancellation/replacement of any generated turn.
+        self._message_instruction = (
+            f"SYSTEM INSTRUCTION: {owner} is unavailable. Tell the caller and offer to take a message."
+        )
+        await self._supersede_in_flight()
+        self._start_generation()
+        self._unavailable_said = True
+        if self._summary_task and not self._summary_task.done():
+            self._summary_task.cancel()
+        return True

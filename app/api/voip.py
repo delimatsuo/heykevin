@@ -1,7 +1,9 @@
 """VoIP API — device registration, Twilio access tokens, call actions."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
+from fastapi.responses import JSONResponse
 
 from twilio.jwt.access_token import AccessToken
 from twilio.jwt.access_token.grants import VoiceGrant
@@ -104,6 +106,7 @@ async def api_get_job(job_id: str, request: Request, contractor_id: str = Query(
     return job
 
 
+
 class DeviceRegister(BaseModel):
     push_token: str = ""
     voip_token: str = ""  # VoIP push token for CallKit
@@ -111,6 +114,7 @@ class DeviceRegister(BaseModel):
     contractor_id: str = ""  # Required — store tokens per-contractor
     timezone: str = ""  # IANA timezone from device (e.g., "America/New_York")
     language: str = ""  # ISO language code from device (e.g., "en", "es", "fr")
+    urgent_handoff_v1: Optional[bool] = False
 
 
 class VoIPTokenRequest(BaseModel):
@@ -121,6 +125,7 @@ class VoIPTokenRequest(BaseModel):
 class CallAction(BaseModel):
     call_sid: str
     action: str  # accept, decline, voicemail, text_reply
+    operation_id: Optional[str] = Field(default=None, max_length=80)
     message: str = ""  # Custom message for text_reply
 
 
@@ -143,6 +148,8 @@ async def register_device(request: Request, body: DeviceRegister):
             data["push_token"] = body.push_token
         if body.voip_token:
             data["voip_token"] = body.voip_token
+        if body.urgent_handoff_v1 is not None:
+            data["urgent_handoff_v1"] = bool(body.urgent_handoff_v1)
 
         # Per-contractor device tokens: contractors/{id}/devices/primary
         db.document(f"contractors/{body.contractor_id}/devices/primary").set(data, merge=True)
@@ -234,74 +241,38 @@ async def get_voip_token(request: Request, body: VoIPTokenRequest, contractor_id
 
 @router.post("/call-action")
 async def handle_call_action(request: Request, body: CallAction, contractor_id: str = Query(..., description="Contractor ID")):
-    """Handle an action from the iOS app (accept, decline, voicemail, text_reply).
-
-    F-13: verify the contractor actually owns the call_sid being acted on.
-    Two complementary checks:
-
-    1.  The RTDB ``active_call.contractor_id`` (kept in sync by the Twilio
-        webhooks) must match the authed contractor.
-    2.  If RTDB has no record (cleanup ran, restart, etc.) we fall back to
-        the persisted Firestore call record. Without this, an attacker who
-        leaked another contractor's CallSid could no-op route the call to
-        voicemail — see F-13 in SECURITY_AUDIT.md.
-    """
+    """Handle an action from the iOS app (accept, decline, voicemail, text_reply)."""
     require_contractor_access(request, contractor_id)
+    from app.services.owner_call_actions import handle_owner_call_action
 
-    # Verify the call belongs to this contractor
-    try:
-        from app.db.cache import get_active_call
-        active_call = await get_active_call(body.call_sid)
-        rtdb_owner = active_call.contractor_id if active_call else None
-        firestore_owner = None
-        if rtdb_owner is None:
-            # F-13: RTDB record missing — fall back to Firestore. If nothing
-            # there either, refuse rather than blindly hitting Twilio.
-            from app.db.calls import get_call
+    res, status_code = await handle_owner_call_action(
+        call_sid=body.call_sid,
+        contractor_id=contractor_id,
+        action=body.action,
+        operation_id=body.operation_id,
+        message=body.message,
+    )
+    return JSONResponse(content=res, status_code=status_code)
 
-            call_doc = await get_call(body.call_sid)
-            if not call_doc:
-                logger.warning(
-                    f"Call action denied: no record for {body.call_sid} (requester={contractor_id!r})"
-                )
-                raise HTTPException(status_code=404, detail="Call not found")
-            firestore_owner = call_doc.get("contractor_id", "") or None
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Call ownership check failed: {e}", exc_info=True)
-        return {"status": "error", "message": "Internal error"}
 
-    if rtdb_owner is not None and rtdb_owner != contractor_id:
-        logger.warning(
-            f"Call action denied: call {body.call_sid} rtdb-owner={rtdb_owner!r} "
-            f"!= requester={contractor_id!r}"
-        )
-        raise HTTPException(status_code=403, detail="Access denied")
-    if rtdb_owner is None and firestore_owner and firestore_owner != contractor_id:
-        logger.warning(
-            f"Call action denied: call {body.call_sid} firestore-owner={firestore_owner!r} "
-            f"!= requester={contractor_id!r}"
-        )
-        raise HTTPException(status_code=403, detail="Access denied")
+@router.get("/call-action/{call_sid}")
+async def get_call_action(
+    call_sid: str,
+    request: Request,
+    contractor_id: str = Query(..., description="Contractor ID"),
+    operation_id: Optional[str] = Query(default="", description="Operation ID"),
+):
+    """Reconcile owner action status and retrieve exact call state."""
+    require_contractor_access(request, contractor_id)
+    from app.services.owner_call_actions import get_owner_call_action_status
 
-    logger.info(f"Call action: {body.action} for {body.call_sid}")
-
-    try:
-        if body.action == "accept":
-            return await _handle_accept(body.call_sid, contractor_id=contractor_id)
-        elif body.action == "decline":
-            return await _handle_decline(body.call_sid)
-        elif body.action == "voicemail":
-            return await _handle_voicemail(body.call_sid)
-        elif body.action == "text_reply":
-            return await _handle_text_reply(body.call_sid, body.message, contractor_id)
-        else:
-            return {"status": "error", "message": f"Unknown action: {body.action}"}
-
-    except Exception as e:
-        logger.error(f"Call action failed: {e}", exc_info=True)
-        return {"status": "error", "message": "Internal error"}
+    result = await get_owner_call_action_status(
+        call_sid=call_sid,
+        contractor_id=contractor_id,
+        operation_id=operation_id,
+    )
+    code = 202 if result["status"] == "pending" else (409 if result["status"] == "error" else 200)
+    return JSONResponse(content=result, status_code=code)
 
 
 def _generate_access_token(contractor_id: str = "") -> str:

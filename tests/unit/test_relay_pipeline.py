@@ -14,6 +14,25 @@ import pytest
 from app.services.relay_pipeline import RelayPipeline, build_greeting_text
 
 
+
+@pytest.fixture(autouse=True)
+def _isolated_owner_decisions(monkeypatch):
+    """Fake Relay sessions now exercise the durable action adapter without providers."""
+    from copy import deepcopy
+    import time
+    from app.services import owner_call_actions as actions
+    records = {}
+    async def read(sid):
+        return deepcopy(records.get(sid))
+    async def transaction(sid, callback):
+        record = records.setdefault(sid, {'contractor_id': 'test_contractor',
+            'state': 'screening', 'state_updated_at': time.time() - 1})
+        records[sid] = callback(deepcopy(record))
+        return deepcopy(records[sid])
+    monkeypatch.setattr(actions, '_run_rtdb_transaction', transaction)
+    monkeypatch.setattr(actions, 'read_record', read)
+
+
 def _contractor(**overrides) -> dict:
     config = {
         "contractor_id": "test_contractor",

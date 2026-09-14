@@ -645,6 +645,8 @@ class GeminiPipeline:
     async def stop(self):
         """Close Gemini session and cancel background tasks."""
         self._connected = False
+        if getattr(self, '_urgency_task', None):
+            self._urgency_task.cancel()
         self._audio_input_ready.set()
         self._reconnecting = False
         self._interrupt_speaking = True
@@ -1307,10 +1309,10 @@ class GeminiPipeline:
             if find_urgent_signal(full_text):
                 self._urgency_detected = True
                 self._log_voice_timing("urgency_detected")
-                asyncio.create_task(self.on_urgency_detected(full_text))
-                if self._unavailable_task and not self._unavailable_task.done():
-                    self._unavailable_task.cancel()
-                    self._unavailable_task = None
+                if not self._unavailable_task or self._unavailable_task.done():
+                    self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+                from app.services.urgent_handoff import start_urgency_task
+                start_urgency_task(self, self.on_urgency_detected, full_text)
 
         await self._refresh_live_intake_after_caller()
 
@@ -1686,9 +1688,8 @@ class GeminiPipeline:
         self._waiting_for_owner_availability = True
         self._owner_availability_wait_started_at = now
         self._caller_silence_prompted_at = None
-        if self._unavailable_task and not self._unavailable_task.done():
-            self._unavailable_task.cancel()
-        self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+        if not self._unavailable_task or self._unavailable_task.done():
+            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
         self._log_voice_timing("owner_availability_hold_started")
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
@@ -1887,36 +1888,12 @@ class GeminiPipeline:
             await self.on_call_complete()
 
     async def _unavailable_timer(self):
-        """After 30 seconds, tell the caller the owner is unavailable."""
+        from app.services.owner_call_actions import run_owner_timeout
         try:
-            await asyncio.sleep(self.OWNER_AVAILABILITY_TIMEOUT_SECONDS)
-            if not self._connected or self._unavailable_said:
-                return
-            self._unavailable_said = True
-            self._finish_owner_availability_wait()
-
-            owner_name = self._contractor_config.get("owner_name", settings.user_name)
-            pronoun = self._contractor_config.get("pronoun", "he")
-
-            if not self._ws:
-                logger.warning("unavailable_timer: Gemini WS not open")
-                return
-            try:
-                await self._send_client_instruction(
-                    f"Tell the caller that {owner_name} is not available right now. "
-                    f"Offer to take a message and make sure {pronoun} gets it. "
-                    f"Be warm and apologetic."
-                )
-                logger.info("Gemini: unavailability message triggered (30s timer)")
-            except Exception as e:
-                self._log_voice_timing(
-                    "unavailability_instruction_error",
-                    exception_type=type(e).__name__,
-                )
-                self._unavailable_said = False  # allow retry
-                self._assistant_instruction_pending = False
+            await run_owner_timeout(self, self._deliver_message_instruction)
         except asyncio.CancelledError:
             pass
+
 
     async def _command_check_loop(self):
         """Poll RTDB for commands from the iOS app (decline, take_message)."""
@@ -1928,44 +1905,26 @@ class GeminiPipeline:
             pass
 
     async def _check_commands(self):
-        """Check for pending commands."""
+        from app.services.owner_call_actions import consume_message_intent
         if not self._call_sid:
             return
         try:
-            from app.db.cache import _init_firebase
-            from firebase_admin import db as rtdb
+            await consume_message_intent(self, self._deliver_message_instruction)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass  # Durable intent remains available for the next poll.
 
-            _init_firebase()
-            ref = rtdb.reference(f"/call_commands/{self._call_sid}")
-            loop = asyncio.get_event_loop()
-            command = await loop.run_in_executor(None, ref.get)
-            if command:
-                await loop.run_in_executor(None, ref.delete)
-                cmd_type = command.get("type", "")
-                if cmd_type == "take_message" and not self._unavailable_said:
-                    if self._unavailable_task:
-                        self._unavailable_task.cancel()
-                    if not self._ws:
-                        logger.warning("take_message: Gemini WS not open — cannot inject")
-                        return
-                    owner_name = self._contractor_config.get("owner_name", settings.user_name)
-                    try:
-                        self._finish_owner_availability_wait()
-                        await self._send_client_instruction(
-                            f"The owner ({owner_name}) has declined the call. "
-                            "Tell the caller they are unavailable and offer to take a message. "
-                            "Be warm and apologetic."
-                        )
-                        self._unavailable_said = True
-                        logger.info(f"take_message injected into Gemini for {self._call_sid[:8]}")
-                    except Exception as e:
-                        self._log_voice_timing(
-                            "take_message_instruction_error",
-                            exception_type=type(e).__name__,
-                        )
-                        self._assistant_instruction_pending = False
-        except Exception as e:
-            self._log_voice_timing(
-                "command_check_error",
-                exception_type=type(e).__name__,
-            )
+
+    async def _deliver_message_instruction(self):
+        if self._unavailable_said:
+            return True
+        if not self._ws or not self._connected:
+            return False
+        owner = self._contractor_config.get("owner_name", settings.user_name)
+        await self._send_client_instruction(
+            f"The owner ({owner}) is unavailable. Offer to take a message. Be warm and apologetic."
+        )
+        self._unavailable_said = True
+        self._finish_owner_availability_wait()
+        return True

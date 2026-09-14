@@ -1,5 +1,13 @@
 # Screening notification release packet — September 14, 2026
 
+**Historical source-repair packet:** PR #241 merged as
+`66f8a446e0e873ecb280c39aaab60f7cf0448a36`; its exact source head passed the
+required workflow. Deployment/device steps below remain open. The owner later
+approved two notification actions and urgent handoff completion; use the current
+[PRD](../../kevin-prd.md) and [roadmap](../current-roadmap.md) for that expanded
+N1 scope. This packet's no-Swift and unchanged-hold statements describe PR #241
+only, not the subsequent urgent-handoff work.
+
 Scope: finish N1 in the [current PRD](../../kevin-prd.md). The same change
 reconciles the PRD and roadmap; it does not start the later-feature backlog.
 

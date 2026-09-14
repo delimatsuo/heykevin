@@ -95,6 +95,18 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         await websocket.close(code=1008)
         return
 
+    if call_data.get('kevin_redirect_nonce'):
+        from app.services.owner_call_actions import confirm_fallback_stream
+        try:
+            confirmed = await confirm_fallback_stream(
+                call_sid, contractor_id=call_data.get('contractor_id', ''),
+                ws_token=ws_token, redirect_nonce=call_data['kevin_redirect_nonce'])
+        except Exception:
+            confirmed = False
+        if not confirmed:
+            await websocket.close(code=1008)
+            return
+
     transcript_lines: list[str] = []
     transcript_pusher = LiveTranscriptPusher(call_sid, transcript_lines)
     call_redirected = False
@@ -182,54 +194,31 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
             transcript_lines[:] = transcript_lines[-500:]
         transcript_pusher.push()
 
+    _urgency_push_count = 0
+
     async def on_urgency_detected(transcript_snippet: str):
-        # Same escalation path as the media-stream engine, minus the audio
-        # plumbing: delegate to its implementation via the shared helpers.
-        from app.webhooks.media_stream import _safe_urgent_push_body
-        from app.services.push_notification import (
-            get_device_token,
-            send_urgent_push,
-            send_voip_push,
-        )
-        from app.services.conference_registry import (
-            new_conference_name,
-            register_conference,
-        )
+        nonlocal _urgency_push_count
+        if _urgency_push_count >= 1:
+            return
 
+        _urgency_push_count += 1
         _cid = contractor_config_loaded.get("contractor_id", "")
-        caller_phone = active_call.caller_phone if active_call else ""
-        caller_name = active_call.caller_name if active_call else ""
+        if not _cid:
+            return
 
-        voip_token = await get_device_token(token_type="voip", contractor_id=_cid)
-        if voip_token:
-            urgent_conf = new_conference_name("urgent")
-            if _cid:
-                await register_conference(urgent_conf, _cid, call_sid)
-            await send_voip_push(
-                device_token=voip_token,
-                caller_phone=caller_phone,
-                caller_name=f"URGENT: {caller_name or caller_phone}",
-                reason="urgent_call",
+        from app.services.urgent_handoff import dispatch_urgent_escalation
+
+        try:
+            await dispatch_urgent_escalation(
                 call_sid=call_sid,
-                conference_name=urgent_conf,
                 contractor_id=_cid,
+                transcript_snippet=transcript_snippet,
             )
-        push_token = await get_device_token(contractor_id=_cid)
-        if push_token:
-            await send_urgent_push(
-                device_token=push_token,
-                title="URGENT CALL",
-                body=_safe_urgent_push_body(
-                    caller_name=caller_name, caller_phone=caller_phone
-                ),
-                call_sid=call_sid,
-                caller_phone=caller_phone,
-                caller_name=caller_name,
-                contractor_id=_cid,
+            logger.info(
+                "relay_event event=urgency_escalated call=%s", _call_label(call_sid)
             )
-        logger.info(
-            "relay_event event=urgency_escalated call=%s", _call_label(call_sid)
-        )
+        except Exception as error:
+            _log_safe_exception("relay_urgency_escalation_error", error, call_sid)
 
     session_done = asyncio.Event()
 

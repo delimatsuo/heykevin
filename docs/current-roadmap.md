@@ -1,7 +1,7 @@
 # Hey Kevin — Current Roadmap and Release Status
 
 **Reconciled:** 2026-09-14
-**Source baseline inspected:** `15d11f3d31fa69f9d31e1c026572d58126301a41`
+**Implementation baseline:** `66f8a446e0e873ecb280c39aaab60f7cf0448a36`
 **Repository:** `delimatsuo/heykevin`
 
 The [current PRD](../kevin-prd.md) defines necessary work and later opportunities.
@@ -59,17 +59,35 @@ The existing [production run 33938295394](https://github.com/delimatsuo/heykevin
 is pinned to `c093ed6ef1c505e8d68f01d6f6f365bf2553ac55`. Its Test aggregator passed
 and the production job remains waiting at the owner approval gate. A September 14
 review confirmed that delayed summary work can survive pipeline teardown and
-send a stale actionable alert. **Do not approve this old candidate.** A narrow
-lifecycle repair and fresh exact-candidate verification are required; production
-remains at the baseline above.
+send a stale actionable alert. **Do not approve this old candidate.**
+[PR #241](https://github.com/delimatsuo/heykevin/pull/241) repaired that lifecycle
+defect and merged as `66f8a446e0e873ecb280c39aaab60f7cf0448a36` on September 14
+at `14:01:59Z`; all nine required-workflow jobs passed on its exact source head
+`43354aaca657e089e42d4a1bb529a1869996e24f`. Staging and production jobs were
+skipped. Production was rechecked during the urgent-handoff work and still
+reports `407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`.
+
+The owner then approved **Pick up + Take a message**, passive dismissal, a
+bounded urgent-call fallback and a server-persisted Urgent alerts preference.
+That is active N1 work under the [handoff contract](superpowers/plans/2026-09-14-urgent-call-handoff.md).
+The [interactive HTML](frontend-concept/index.html) demonstrates the experience.
+The native frontend redesign is still awaiting owner design approval; callback,
+text reply and the later-feature list are not active implementation.
 
 - [x] Notification source merged and staged.
 - [x] Independently reproduce the delayed-summary teardown defect with fictional
       data and mocked extraction/push.
 - [x] Repair task ownership/cancellation in all three voice pipelines and prove
       locally that ending screening prevents a delayed summary from being sent.
-- [ ] Complete independent review and required CI for the repaired candidate,
-      merge it, and stage that exact source. See the [release packet](releases/2026-09-14-screening-notification.md).
+- [x] Complete independent review and required CI for the summary lifecycle
+      repair and merge PR #241. Its [packet](releases/2026-09-14-screening-notification.md)
+      records the earlier repair; it is not evidence of urgent handoff delivery.
+- [x] Complete and independently verify the approved urgent handoff and two
+      notification actions, including iOS session/call ownership and lost-response
+      recovery. The [urgent-handoff packet](releases/2026-09-14-urgent-call-handoff.md)
+      records local tests and the remaining release gates; its publishing PR
+      records required exact-HEAD CI and the final merge candidate.
+- [ ] Stage the final reviewed N1 source after the owner clears the dispatch gate.
 - [ ] Deli cancels the superseded production run so the replacement can proceed.
 - [ ] Deli approves the reviewed candidate's production job in GitHub.
 - [ ] Confirm successful deployment and the exact production `deploy_sha`.
@@ -118,8 +136,9 @@ is not a new release signoff.
 
 ## Deferred
 
-The [current PRD](../kevin-prd.md#deferred-ideas-and-superseded-plans) records the
-former v2 redesign, WhatsApp, voice cloning, multiple numbers and other later
-ideas. These are not unfinished tasks that an agent should automatically start.
+The [current PRD](../kevin-prd.md#deferred-ideas-and-superseded-plans) distinguishes
+the approved HTML design review from a native refactor, and records the former
+v2 work-management program, WhatsApp, voice cloning, multiple numbers and other
+later ideas. These are not tasks that an agent should automatically start.
 No new provider, SMS, feature flag, pricing, or public-market commitment is created
 by this documentation update.

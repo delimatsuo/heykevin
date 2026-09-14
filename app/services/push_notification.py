@@ -153,6 +153,7 @@ async def send_voip_push(
     conference_name: str = "",
     access_token: str = "",
     contractor_id: str = "",
+    expires_at: Optional[int] = None,
 ) -> bool:
     """Send a VoIP push notification to trigger CallKit on the iOS app.
 
@@ -183,6 +184,10 @@ async def send_voip_push(
         "access_token": access_token,
         "conference_name": conference_name,
     }
+    if contractor_id:
+        payload["contractor_id"] = contractor_id
+    if expires_at is not None:
+        payload["expires_at"] = expires_at
 
     for attempt in range(2):
         try:
@@ -210,14 +215,14 @@ async def send_voip_push(
                     await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
-                    logger.error(f"APNs push failed: {response.status_code} {response.text}")
+                    logger.error("APNs push failed: status=%s", response.status_code)
                     if attempt == 0:
                         await asyncio.sleep(2)
                         continue
                     return False
 
         except Exception as e:
-            logger.error(f"APNs push error: {e}", exc_info=True)
+            logger.error("APNs push failed: type=%s", type(e).__name__)
             if attempt == 0:
                 await asyncio.sleep(2)
                 continue
@@ -257,6 +262,7 @@ async def send_regular_push(
         "call_sid": call_sid,
         "caller_phone": caller_phone,
         "caller_name": caller_name,
+        "contractor_id": contractor_id,
     }
     if category:
         payload["aps"]["category"] = category
@@ -292,14 +298,14 @@ async def send_regular_push(
                     await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
-                    logger.error(f"APNs push failed: {response.status_code} {response.text}")
+                    logger.error("APNs push failed: status=%s", response.status_code)
                     if attempt == 0:
                         await asyncio.sleep(2)
                         continue
                     return False
 
         except Exception as e:
-            logger.error(f"APNs push error: {e}", exc_info=True)
+            logger.error("APNs push failed: type=%s", type(e).__name__)
             if attempt == 0:
                 await asyncio.sleep(2)
                 continue
@@ -332,9 +338,9 @@ async def send_screening_summary_push(
 
     title = caller_name or caller_phone or "Incoming Call"
     if reason:
-        body = f"{reason} — Tap to answer"
+        body = f"{reason} — Tap to view live"
     else:
-        body = "Kevin is screening this call. Tap to answer."
+        body = "Kevin is screening this call. Tap to view live."
 
     cid = collapse_id or (f"call_{call_sid}" if call_sid else None)
 
@@ -359,11 +365,10 @@ async def send_urgent_push(
     caller_phone: str = "",
     caller_name: str = "",
     contractor_id: str = "",
+    collapse_id: Optional[str] = None,
+    category: Optional[str] = "SCREENING_CALL",
 ) -> bool:
-    """Send a critical-priority APNs push for urgent/emergency calls.
-
-    Uses interruption-level: critical to break through Do Not Disturb.
-    """
+    """Send an urgent APNs push notification (interruption-level time-sensitive, ordinary sound)."""
     if not device_token or not settings.apns_key_content:
         return False
 
@@ -376,30 +381,39 @@ async def send_urgent_push(
                 "title": title,
                 "body": body,
             },
-            "sound": {"critical": 1, "name": "default", "volume": 1.0},
-            "interruption-level": "critical",
+            "sound": "default",
+            "interruption-level": "time-sensitive",
             "content-available": 1,
         },
         "call_sid": call_sid,
         "caller_phone": caller_phone,
         "caller_name": caller_name,
+        "contractor_id": contractor_id,
         "urgent": True,
     }
+    if category:
+        payload["aps"]["category"] = category
+
+    headers = {
+        "apns-topic": topic,
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+        "apns-expiration": "0",
+    }
+    cid = collapse_id or (f"call_{call_sid}" if call_sid else None)
+    if cid:
+        headers["apns-collapse-id"] = cid
 
     for attempt in range(2):
         try:
             token = _generate_apns_token()
+            req_headers = dict(headers)
+            req_headers["authorization"] = f"bearer {token}"
 
             async with httpx.AsyncClient(http2=True) as client:
                 response = await client.post(
                     f"{apns_url}/3/device/{device_token}",
-                    headers={
-                        "authorization": f"bearer {token}",
-                        "apns-topic": topic,
-                        "apns-push-type": "alert",
-                        "apns-priority": "10",
-                        "apns-expiration": "0",
-                    },
+                    headers=req_headers,
                     content=json.dumps(payload),
                     timeout=10.0,
                 )
@@ -412,14 +426,14 @@ async def send_urgent_push(
                     await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
-                    logger.error(f"Urgent APNs push failed: {response.status_code} {response.text}")
+                    logger.error("Urgent APNs push failed: status=%s", response.status_code)
                     if attempt == 0:
                         await asyncio.sleep(2)
                         continue
                     return False
 
         except Exception as e:
-            logger.error(f"Urgent APNs push error: {e}", exc_info=True)
+            logger.error("Urgent APNs push failed: type=%s", type(e).__name__)
             if attempt == 0:
                 await asyncio.sleep(2)
                 continue

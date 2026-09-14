@@ -575,6 +575,11 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             if contractor_id:
                 await register_conference(conference_name, contractor_id, call_sid)
 
+            # Direct rings need the same durable live authority as screening calls.
+            if not await _prepare_direct_call(call_sid, contractor_id, conference_name, caller_phone,
+                                              caller_name or contact.get("name", "")):
+                return twiml_response(_forward_twiml(owner_phone or settings.user_phone, caller_id=to_number))
+
             # Start background task to send VoIP push and handle timeout
             asyncio.create_task(_ring_contractor(
                 call_sid=call_sid,
@@ -622,6 +627,21 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         return fallback_twiml_response()
 
 
+async def _prepare_direct_call(call_sid, contractor_id, conference_name, caller_phone, caller_name):
+    from app.services.owner_call_actions import _run_rtdb_transaction, live_record
+    now = time.time()
+    if not contractor_id:
+        return False
+    record = dict(call_sid=call_sid, contractor_id=contractor_id, conference_name=conference_name,
+                  caller_phone=caller_phone, caller_name=caller_name, state='pickup_ringing',
+                  state_updated_at=now, accepted=False)
+    def initialize(current):
+        return record if current is None else current
+    committed = await _run_rtdb_transaction(call_sid, initialize)
+    return (live_record(committed, contractor_id) and committed.get('conference_name') == conference_name
+            and committed.get('state') == 'pickup_ringing' and not committed.get('owner_action'))
+
+
 async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, conference_name: str, contractor_id: str = ""):
     """Send VoIP push to ring the contractor, with 20-second timeout to Kevin takeover."""
     try:
@@ -631,7 +651,7 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
         device_token = await get_device_token(token_type="voip", contractor_id=contractor_id)
         if not device_token:
             logger.warning("No VoIP token — falling back to Kevin screening")
-            await _async_redirect_to_kevin(call_sid)
+            await _async_redirect_to_kevin(call_sid, contractor_id)
             return
 
         # F-07: bind the Twilio access token's identity to this contractor so a
@@ -660,20 +680,24 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
         loop = asyncio.get_event_loop()
 
+        getattr_redirected = [False]
         for _ in range(10):  # 10 iterations × 2s = 20s
             await asyncio.sleep(2)
 
-            # Check if contractor declined via RTDB command
+            # The decision is durable on active_calls even if /call_commands is missing.
             try:
-                ref = rtdb.reference(f"/call_commands/{call_sid}")
-                command = await loop.run_in_executor(None, ref.get)
-                if command and command.get("type") == "take_message":
-                    await loop.run_in_executor(None, ref.delete)
-                    logger.info("Contractor declined — Kevin taking over")
-                    await _async_redirect_to_kevin(call_sid)
+                from app.services.owner_call_actions import pending_message_intent
+                command = await pending_message_intent(call_sid, contractor_id)
+                if command:
+                    if not getattr_redirected[0]:
+                        if await _async_redirect_to_kevin(call_sid, contractor_id) is not True:
+                            continue
+                        getattr_redirected[0] = True
+                    # The receiving voice pipeline acknowledges instruction acceptance.
+                    # A successful stream redirect is not a take-message instruction.
                     return
             except Exception:
-                pass
+                continue  # Failed delivery/ack leaves intent for the next poll.
 
             # Check if contractor joined the conference
             try:
@@ -690,29 +714,49 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
             except Exception:
                 pass
 
+        if getattr_redirected[0]:
+            return  # Never replay a successful redirect because acknowledgement failed.
+        from app.services.owner_call_actions import read_record, live_record
+        current = await read_record(call_sid)
+        if (not live_record(current, contractor_id) or current.get('accepted')
+                or current.get('owner_action') == 'accept'):
+            return  # An unresolved pickup also owns this call; timeout cannot redirect it.
         # Timeout — contractor didn't answer or decline
         logger.info("Contractor didn't answer in 20s — Kevin taking over")
         try:
-            await _async_redirect_to_kevin(call_sid)
+            await _async_redirect_to_kevin(call_sid, contractor_id)
         except Exception as e:
-            logger.error(f"Redirect to Kevin failed: {e}")
-            await _async_redirect_to_kevin(call_sid)
+            logger.error("Redirect to Kevin failed")
+            await _async_redirect_to_kevin(call_sid, contractor_id)
 
     except Exception as e:
-        logger.error(f"Ring contractor failed: {e}")
-        await _async_redirect_to_kevin(call_sid)
+        logger.error("Ring contractor failed: type=%s", type(e).__name__)
+        await _async_redirect_to_kevin(call_sid, contractor_id)
 
 
-async def _async_redirect_to_kevin(call_sid: str):
+async def _async_redirect_to_kevin(call_sid: str, contractor_id: str):
     """Redirect a call from conference to Kevin's screening stream (async version)."""
     try:
+        import time
         from twilio.rest import Client
-        from app.db.cache import update_active_call
+        from app.services.owner_call_actions import live_record, _run_rtdb_transaction
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
 
         # Generate ws_token for the media stream and save to RTDB
         ws_token = secrets.token_urlsafe(32)
-        await update_active_call(call_sid, {"ws_token": ws_token})
+        owner, nonce = contractor_id, secrets.token_hex(16)
+        now = time.time()
+        def store_token(current):
+            if (not live_record(current, owner, now) or current.get('accepted')
+                    or current.get('owner_action') == 'accept' or current.get('kevin_redirect_nonce')):
+                return current
+            return {**current, "ws_token": ws_token, 'kevin_redirect_nonce': nonce,
+                    'kevin_redirect_status': 'pending'}
+        committed = await _run_rtdb_transaction(call_sid, store_token)
+        if (not live_record(committed, owner) or committed.get('accepted') or committed.get('owner_action') == 'accept'):
+            return False
+        if committed.get('kevin_redirect_nonce') != nonce:
+            return committed.get('kevin_redirect_status') == 'succeeded'
 
         ws_url = settings.cloud_run_url.replace("https://", "wss://")
         response = VoiceResponse()
@@ -727,9 +771,20 @@ async def _async_redirect_to_kevin(call_sid: str):
         await loop.run_in_executor(
             None, lambda: client.calls(call_sid).update(twiml=twiml_str)
         )
-        logger.info(f"Call {call_sid} redirected to Kevin screening")
-    except Exception as e:
-        logger.error(f"Redirect to Kevin failed: {e}")
+        def finish(current):
+            if (not live_record(current, owner) or current.get('kevin_redirect_nonce') != nonce
+                    or current.get('owner_action') == 'accept' or current.get('accepted')):
+                return current
+            return {**current, 'kevin_redirect_status': 'succeeded'}
+        try:
+            await _run_rtdb_transaction(call_sid, finish)
+        except Exception:
+            pass  # Confirmed provider success; durable pending still prevents replay.
+        logger.info("Call redirected to Kevin screening")
+        return True
+    except Exception:
+        logger.error("Redirect to Kevin failed")
+        return False
 
 
 async def _post_routing_tasks(

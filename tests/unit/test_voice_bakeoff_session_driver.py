@@ -74,9 +74,11 @@ _EXPECTED_LIVE_HASHES = {
     # app/services/number_release.py (30-day lapsed-number release).
     Path("app/main.py"):
         "06cd4871ed673137d0d86c6f3b1f9b0ed7d3c2998e23e15a886f2ac9ef39dd6e",
-    # Re-pinned 2026-08-24 for integration token envelope enablement checks.
+    # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
+    # authenticated fallback-stream confirmation. Bakeoff imports and
+    # activation remain prohibited by the structural assertions below.
     Path("app/webhooks/media_stream.py"):
-        "cce7f37acd144358d22a03bb1a43ce46f80075eeeedfcf7e1134fc94b9eedff9",
+        "246d7d2ad55b3e8ddbe9e63c0a07f34d7c9755f4cf466812dad91893b78240ae",
     Path("app/experiments/voice_bakeoff_app.py"):
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
 }

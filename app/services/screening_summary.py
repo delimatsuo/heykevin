@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Optional
+from typing import Callable, Optional
 import httpx
 
 from app.config import settings
@@ -144,9 +144,13 @@ async def extract_and_send_screening_summary(
     known_caller_name: str = "",
     transcript: str = "",
     collapse_id: Optional[str] = None,
+    is_active: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """Extract screening details and dispatch the in-place APNs notification update."""
     if not contractor_id or not call_sid:
+        return False
+
+    if is_active is not None and not is_active():
         return False
 
     summary = await extract_screening_summary(
@@ -154,6 +158,9 @@ async def extract_and_send_screening_summary(
         caller_phone=caller_phone,
         known_caller_name=known_caller_name,
     )
+
+    if is_active is not None and not is_active():
+        return False
 
     from app.services.push_notification import send_screening_summary_push
     return await send_screening_summary_push(

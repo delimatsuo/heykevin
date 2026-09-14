@@ -1,109 +1,69 @@
-# Notification action review — September 14, 2026
+# Notification actions and urgency — September 14, 2026
 
-Status: recommendation for owner review. No native implementation or expanded
-notification action set is approved by this document. The HTML remains the
-previously delivered concept; its missing notification actions are recorded here.
+**Current decision:** The owner approved Pick up, Take a message and the urgent-call
+handoff. The HTML demonstrates that scope. The broader native frontend refactor
+still requires design approval. This replaces the earlier recommendation-only
+status and one-action release description.
 
-Baseline reviewed: `598ccc36549cb9316434135346f81f328e0cf7e8`.
+The [current PRD N1](../../kevin-prd.md#n1--finish-the-screening-notification-enhancement)
+and [handoff contract](../superpowers/plans/2026-09-14-urgent-call-handoff.md)
+are the current requirements.
 
-## What the recorded plans say
-
-The [original Telegram-first PRD](https://github.com/delimatsuo/heykevin/blob/407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc/kevin-prd.md#L69-L99)
-explicitly described five inline actions:
-
-| Original action | Original intended behavior |
-|---|---|
-| Pick Up | Join the current conversation. |
-| Call Back | Arrange an immediate callback after ending the screened call. |
-| Text Them | Send a caller-facing text. |
-| Voicemail | Ask the caller for a message and transcribe it. |
-| Ignore | Have Kevin politely explain the owner is unavailable and offer to take a message. |
-
-This confirms the broader interaction concept existed. It does not mean all five
-are approved for the current iOS release. The [current PRD N1](../../kevin-prd.md#n1--finish-the-screening-notification-enhancement)
-specifies caller/reason updates, body-tap navigation and Pick Up. The September 4
-handoff records only `PICK_UP_ACTION`; `AppDelegate.swift:140–152` registers exactly
-that one custom action. No Ignore notification action is registered.
-
-The native app already has an in-app Ignore control: `ContentView.swift:468–476`
-sends `decline`, whose backend meaning is a `take_message` command. This is
-consistent with continuing the conversation rather than hanging up.
-
-## Recommended experience
-
-Use two custom actions for the richer proposal:
+## Agreed interactions
 
 | Interaction | Meaning |
 |---|---|
-| Pick Up | Request connection to the exact screened call; show connecting until it succeeds. |
-| Take a message | Tell Kevin the owner will not join and let Kevin collect the message; keep the caller connected. |
-| Tap the notification body | Open the matching conversation without answering. An ended call opens its summary. |
-| Dismiss the notification | Dismiss presentation only. Do not silently issue a call command or promise to suppress later alerts. |
+| Pick up | Request connection to the exact live call; show pending until the server confirms the action and the connection succeeds. |
+| Take a message | Ask Kevin to continue with the caller. Stay pending until the voice engine accepts the instruction. Acceptance does not mean a complete message has been received. |
+| Tap the body | Open that conversation without answering; an ended call opens its summary or an honest unavailable state. |
+| Dismiss | Change presentation only. Do not send a call command or promise to suppress future alerts. |
 
-Take a message is a clearer label for the old Ignore/Voicemail decision. It is a
-proposed second iOS action, not an already implemented notification feature.
-The existing N1 release should not expand automatically into all five legacy
-actions. Call Back can be considered for ended-call follow-up. Text reply,
-blocking, reminders and additional live-call buttons remain outside this scope.
+Urgency starts or preserves one 30-second owner wait. Pickup, message-taking and
+timeout share one server decision. If the owner does not respond, Kevin explains
+that the owner is unavailable and takes a message. An uncertain pickup retains
+its operation and supports status checking without replaying the transfer.
 
-Show a collapsed preview focused on caller, concise reason and current stage,
-plus an expanded preview exposing the two choices. A separate View live button
-is unnecessary when the notification body already performs that navigation.
-Do not promise action buttons are always visible on every iOS notification
-surface. Apple documents that presentation varies and some surfaces show only
-two actions; put the most relevant choices first.
+Urgent alerts is persisted on the server. Turning it off suppresses extra urgent
+pushes and rings while screening continues. Urgent copy is generic. Use supported
+time-sensitive notifications and ordinary sound without promising a Critical
+Alert, Silent Mode or Do Not Disturb bypass. Urgent CallKit ringing requires
+clients advertising new handoff support and reuses the incoming call when
+answered. Legacy direct-ring behavior remains part of acceptance.
 
-## Findings to address before native delivery
+## Interactive review
 
-1. **Prototype omission:** Both HTML notification previews only open the call.
-   They omit even the documented Pick Up action and do not demonstrate the
-   collapsed/expanded interaction. The next prototype revision should show
-   both proposed buttons, pending/failure behavior and ended-call handling.
-2. **Misleading native copy:** `push_notification.py:333–337` says Tap to answer,
-   but ordinary banner tapping opens the call. Use Tap to view live or omit the
-   instruction; reserve answering for the explicit Pick Up action.
-3. **Call ownership:** Notification-selected call and active call must remain
-   separate. An old A alert must open A without replacing or answering active B.
-   `AppDelegate.swift:214–232` currently writes the payload SID into shared active
-   state before lifecycle validation.
-4. **Pending actions:** `CallManager.swift:127–140` does not visibly deduplicate
-   notification pickup or recheck its initiating account/session after awaiting
-   the response. The accept endpoint can create a fresh conference per request.
-   Bind each action to account, call and operation; validate current lifecycle
-   server-side and make retries reuse the same accepted operation.
-5. **Take-message truth:** The decline endpoint acknowledges queueing, not
-   consumption. Show requested/pending until Kevin accepts the transition;
-   failure must preserve the previous usable state. Resolve pickup versus
-   take-message races on the server.
-6. **Privacy wording:** Redacted previews should still distinguish screening,
-   waiting and taking-message states. Use Taking a message rather than Recording
-   unless actual audio recording is part of the verified feature.
+Expand the notification to see both actions. Scenarios cover urgency, failed
+pickup, failed message requests, passive dismissal, 30 seconds without an answer,
+stale alerts and preference-save failure. Disabling Urgent alerts in Kevin keeps
+View in app available. Hidden details omit caller name and reason.
 
-Findings 3–5 are source-review concerns, not reproduced production incidents.
-Qualification should cover old alerts, duplicate taps, lost responses, caller
-hangup during pickup, action conflicts and account changes while requests run.
-Then check the installed iPhone build while locked/unlocked and with the app in
-the foreground/background. No deployment or device state was changed here.
+Ended summaries distinguish a completed fictional message from a hangup.
+Callbacks check generation, call identity and phase. Automatic updates retain
+focus or choose an enabled control in the same region. See [VERIFICATION.md](VERIFICATION.md).
+This is a fictional local simulation, not APNs or CallKit qualification.
+
+## History and later options
+
+The Telegram-first PRD listed Pick Up, Call Back, Text Them, Voicemail and Ignore.
+Take a message now expresses the old Ignore/Voicemail intent clearly. Callback
+and text reply remain possible ended-call follow-ups in the PRD; they are not
+approved live-call additions.
+
+The review found missing action UI, misleading tap copy, stale-call/account
+ownership risks, duplicate transfer risks and premature acknowledgement. The
+approved implementation addresses those boundaries. Its release packet must
+record tests, independent review, the exact candidate and remaining device and
+deployment checks before claiming production completion.
 
 ## Apple constraints
 
 - [Actionable notifications](https://developer.apple.com/documentation/usernotifications/declaring-your-actionable-notification-types)
-  use registered categories/actions and payload identifiers.
-- [Notification presentation](https://developer.apple.com/library/archive/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/SupportingNotificationsinYourApp.html)
-  can show fewer actions depending on surface. This is archived Apple guidance;
-  verify the actual supported iOS presentation on device.
+  use registered categories; the preview cannot guarantee every iOS surface.
 - [Foreground actions](https://developer.apple.com/documentation/usernotifications/unnotificationactionoptions/foreground)
-  bring the app forward and request unlocking when needed. Current Pick Up uses
-  this option, so do not promise locked-screen answering without unlocking.
+  bring the app forward and may require unlocking.
+- [Time-sensitive notifications](https://developer.apple.com/documentation/usernotifications/unnotificationinterruptionlevel/timesensitive)
+  remain subject to the user's notification choices.
+- [Critical Alerts entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.usernotifications.critical-alerts)
+  is a separate capability outside this implementation.
 - [Dismissal handling](https://developer.apple.com/documentation/UserNotifications/UNNotificationDismissActionIdentifier)
-  is not the same as ignoring or flicking away a banner. A UI dismissal is not
-  reliable evidence that the owner requested a call-state change.
-
-## Review record
-
-Two independent Codex reviewers (staff engineering and product UI/UX) examined
-the source and concept. Expected/returned outputs: 2/2. The parent reconstructed
-the earlier PRD/history, checked official Apple guidance and reduced the findings.
-Both recommend Pick Up plus Take a message for the richer proposal, body tap for
-inspection and passive dismissal. Both distinguish that recommendation from the
-current one-action iOS release scope.
+  is not evidence of an owner call-state decision.

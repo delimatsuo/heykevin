@@ -1,5 +1,61 @@
 # Frontend concept verification
 
+## Current urgent-call revision
+
+Date: September 14, 2026. Artifact: `index.html`.
+SHA-256: `942c45e608987d8d539382c851b39860b1c0734e5d67bea92636d32a6a47cc21`.
+Base: `66f8a446e0e873ecb280c39aaab60f7cf0448a36`.
+
+The approved revision adds expanded Pick up / Take a message notification
+controls, passive dismissal, an urgent-call scenario, a server-preference
+simulation, explicit request failure/retry, and a bounded owner wait.
+
+The independent Codex reviewer (gpt-6-astra, high) rebound the final hash and
+approved the source with no remaining findings. Repairs addressed suppressed
+navigation, presentation-control focus, bootstrap/replay timer scheduling,
+phase-accurate suppressed/dismissed text, scenario call IDs, failed requests that
+straddle the deadline, honest ended summaries and focus during automatic updates.
+
+Parent verification on the actual source and in-app browser:
+
+- Pick up shows Connecting before connected controls. Message requests show
+  Requesting and disable competing actions; failure remains retryable.
+- Dismiss changes presentation only. Restore and expand/collapse retain focus.
+  A dismissed call continues to the 30-second fallback.
+- Saving Urgent alerts off suppresses the urgent preview; View in app opens the
+  exact call. After hangup, suppression text correctly says the call ended.
+- An old Marcus notification opens Marcus's summary while Maya remains live.
+  Its actions cannot answer Maya.
+- Hidden details omit caller name/reason on desktop and mobile. At 320px and
+  200% product text, long content wraps; document width 305px within 320px.
+  The expanded redacted notification and navigation remain reachable.
+- Immediate urgent-call hangup produces an honest incomplete-message summary.
+  Seven extracted-source outcome cases cover screening, waiting, joining,
+  requesting, taking-message, a received message and a connected call.
+- Real automatic timeout retains the live Calls back-button focus. A focused
+  notification Pick up action moves to its own enabled body control when timeout
+  disables the actions; later transcript updates preserve that focus.
+- Eight extracted-source timer probes pass. Five deliberate mutations are
+  rejected: removing generation, active-call or record-identity guards, extending
+  the original deadline, or retaining a dead timer after a pending-action failure.
+- Inline JavaScript compiles and `git diff --check` passes. No network APIs,
+  persistent browser data, real calls or platform notification services are used.
+
+These are local simulation checks. They do not qualify APNs ordering, lock-screen
+behavior, CallKit, carrier routing, native accessibility or production delivery.
+The broader native frontend remains subject to owner design approval.
+
+| Urgent HTML builder pass | Harness/model | Input tokens | Output tokens | Total tokens | Retries |
+|---|---|---:|---:|---:|---:|
+| Initial | headless agy / gemini-3.7-flash-high | 272113 | 74352 | 346465 | 0 |
+| Repair | headless agy / gemini-3.7-flash-high | 312322 | 48739 | 361061 | 0 |
+
+The parent pinned the contract, repaired reproduced timer/outcome/focus issues,
+and owns verification and Git. The prior concept's evidence below applies to
+its earlier hash; it is retained as history rather than final-revision evidence.
+
+## Earlier frontend concept verification
+
 Date: September 14, 2026.
 
 Artifact: `index.html`.

@@ -22,7 +22,7 @@
       --c-ink: #172924;
       --c-ink-light: #2C423B;
       --c-secondary: #58675F;
-      --c-secondary-light: #73837B;
+      --c-secondary-light: #58675F;
       --c-cobalt: #3159C9;
       --c-cobalt-tint: #EBF0FA;
       --c-cobalt-hover: #2647A3;
@@ -46,11 +46,11 @@
       --r-lg: 20px;
       --r-xl: 24px;
       --r-xxl: 28px;
-      --r-phone: 42px;
+      --r-phone: 34px;
 
       --shadow-subtle: 0 1px 3px rgba(23, 41, 36, 0.04), 0 4px 12px rgba(23, 41, 36, 0.03);
       --shadow-paper: 0 2px 6px rgba(23, 41, 36, 0.05), 0 12px 28px rgba(23, 41, 36, 0.04);
-      --shadow-phone: 0 24px 60px -12px rgba(23, 41, 36, 0.18), 0 4px 16px rgba(23, 41, 36, 0.06);
+      --shadow-phone: 0 24px 70px -24px rgba(23, 41, 36, 0.23), 0 2px 8px rgba(23, 41, 36, 0.05);
       --shadow-modal: 0 20px 48px rgba(23, 41, 36, 0.22);
     }
 
@@ -93,13 +93,13 @@
 
     /* Review Shell Layout */
     .shell-container {
-      max-width: 1440px;
+      max-width: 1200px;
       margin: 0 auto;
-      padding: 32px 36px 48px;
+      padding: 24px 36px 40px;
       width: 100%;
       display: flex;
       flex-direction: column;
-      gap: 32px;
+      gap: 24px;
       flex: 1;
     }
 
@@ -109,7 +109,7 @@
       align-items: center;
       justify-content: space-between;
       border-bottom: 1px solid var(--c-rules);
-      padding-bottom: 20px;
+      padding-bottom: 18px;
     }
 
     .brand-mark {
@@ -168,8 +168,9 @@
     /* Main Review Workspace */
     .shell-main {
       display: grid;
-      grid-template-columns: 1fr 410px;
-      gap: 48px;
+      grid-template-columns: minmax(300px, 450px) 410px;
+      gap: clamp(40px, 7vw, 100px);
+      justify-content: center;
       align-items: start;
     }
 
@@ -177,58 +178,56 @@
     .deck-column {
       display: flex;
       flex-direction: column;
-      gap: 28px;
-      max-width: 680px;
+      gap: 24px;
+      padding-top: 18px;
     }
 
     .editorial-header {
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 18px;
     }
 
     .editorial-eyebrow {
       font-size: calc(14px * var(--review-text-scale, 1));
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.12em;
       color: var(--c-secondary);
     }
 
     .editorial-headline {
       font-family: var(--f-editorial);
-      font-size: calc(42px * var(--review-text-scale, 1));
-      line-height: 1.15;
+      font-size: clamp(44px, 4.8vw, 62px);
+      line-height: 1.04;
       font-weight: 400;
       color: var(--c-ink);
-      letter-spacing: -0.02em;
+      letter-spacing: -0.045em;
     }
 
     .editorial-lead {
-      font-size: calc(16px * var(--review-text-scale, 1));
-      line-height: 1.55;
+      font-size: calc(17px * var(--review-text-scale, 1));
+      line-height: 1.6;
       color: var(--c-secondary);
+      max-width: 36ch;
     }
 
     /* Scenario Deck Controls */
     .control-deck {
       background-color: var(--c-paper);
       border: 1px solid var(--c-rules);
-      border-radius: var(--r-xl);
-      padding: 24px;
-      box-shadow: var(--shadow-subtle);
+      border-radius: 20px;
+      padding: 20px;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 16px;
     }
 
     .control-deck-title {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--c-rules-subtle);
-      font-size: calc(14px * var(--review-text-scale, 1));
+      font-size: calc(15px * var(--review-text-scale, 1));
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -270,12 +269,12 @@
     .deck-actions {
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
+      gap: 8px;
     }
 
     .deck-btn {
       min-height: 44px;
-      padding: 10px 18px;
+      padding: 10px 16px;
       border-radius: var(--r-md);
       font-size: calc(14px * var(--review-text-scale, 1));
       font-weight: 600;
@@ -326,12 +325,15 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 4px 12px;
     }
 
     .notif-toggle-row {
       display: flex;
       align-items: center;
       gap: 10px;
+      min-height: 44px;
       font-size: calc(14px * var(--review-text-scale, 1));
       color: var(--c-secondary);
     }
@@ -343,24 +345,36 @@
       cursor: pointer;
     }
 
-    .notif-banner-card {
+    /* Distinct Non-Nested Notification Card */
+    .notif-preview-wrapper {
       background-color: #1F2D28;
       color: #FFFEFA;
       border-radius: var(--r-lg);
-      padding: 14px 16px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .notif-body-tap-btn {
+      background: none;
+      border: none;
+      color: inherit;
+      padding: 14px 16px 10px;
       display: flex;
       align-items: flex-start;
       gap: 14px;
       cursor: pointer;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
-      transition: transform 0.15s ease, box-shadow 0.15s ease;
       text-align: left;
       width: 100%;
+      min-height: 64px;
+      transition: background-color 0.15s ease;
     }
-    .notif-banner-card:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+    .notif-body-tap-btn:hover {
+      background-color: rgba(255, 255, 255, 0.04);
     }
 
     .notif-icon-box {
@@ -373,55 +387,158 @@
       justify-content: center;
       flex-shrink: 0;
     }
+    .notif-icon-box.urgent {
+      background-color: var(--c-red);
+    }
 
     .notif-text {
       flex: 1;
       display: flex;
       flex-direction: column;
       gap: 2px;
+      min-width: 0;
     }
 
     .notif-meta {
       display: flex;
+      align-items: center;
       justify-content: space-between;
-      font-size: calc(14px * var(--review-text-scale, 1));
+      gap: 6px;
+      font-size: calc(13px * var(--review-text-scale, 1));
       font-weight: 600;
       color: #A4B8B0;
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
 
+    .notif-urgent-pill {
+      background-color: #AA342C;
+      color: #FFFFFF;
+      font-size: calc(11px * var(--review-text-scale, 1));
+      font-weight: 800;
+      padding: 2px 6px;
+      border-radius: 4px;
+      letter-spacing: 0.05em;
+    }
+
     .notif-title {
       font-size: calc(14px * var(--review-text-scale, 1));
       font-weight: 600;
       color: #FFFFFF;
+      overflow-wrap: anywhere;
     }
 
     .notif-body {
       font-size: calc(14px * var(--review-text-scale, 1));
       color: #C8D6D0;
       line-height: 1.35;
+      overflow-wrap: anywhere;
     }
 
     .notif-hint {
-      font-size: calc(14px * var(--review-text-scale, 1));
+      font-size: calc(13px * var(--review-text-scale, 1));
       color: #839990;
       margin-top: 4px;
       font-style: italic;
     }
 
+    .notif-tool-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 16px 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      gap: 8px;
+    }
+
+    .notif-expand-btn, .notif-dismiss-btn {
+      min-height: 44px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: calc(13px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: #C8D6D0;
+      background-color: rgba(255, 255, 255, 0.08);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background-color 0.15s ease, color 0.15s ease;
+    }
+    .notif-expand-btn:hover, .notif-dismiss-btn:hover {
+      background-color: rgba(255, 255, 255, 0.16);
+      color: #FFFFFF;
+    }
+
+    .notif-expanded-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 0 16px 12px;
+    }
+
+    .notif-act-btn {
+      min-height: 44px;
+      border-radius: 8px;
+      font-size: calc(13px * var(--review-text-scale, 1));
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 6px 12px;
+    }
+    .notif-act-pickup {
+      background-color: var(--c-forest);
+      color: #FFFFFF;
+    }
+    .notif-act-pickup:hover:not(:disabled) {
+      background-color: var(--c-forest-hover);
+    }
+    .notif-act-msg {
+      background-color: rgba(255, 255, 255, 0.14);
+      color: #FFFFFF;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    .notif-act-msg:hover:not(:disabled) {
+      background-color: rgba(255, 255, 255, 0.22);
+    }
+    .notif-act-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .notif-sim-footnote {
+      padding: 6px 16px 10px;
+      font-size: calc(12px * var(--review-text-scale, 1));
+      color: #839990;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      line-height: 1.35;
+    }
+
+    .notif-dismissed-card, .notif-suppressed-card {
+      background-color: var(--c-paper);
+      border: 1px dashed var(--c-rules);
+      border-radius: var(--r-lg);
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+    }
+
     /* Rationale Card */
     .rationale-card {
-      background-color: var(--c-canvas-subtle);
-      border-radius: var(--r-lg);
-      padding: 18px 20px;
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      padding: 0 2px;
       display: flex;
       flex-direction: column;
       gap: 8px;
       font-size: calc(14px * var(--review-text-scale, 1));
-      line-height: 1.5;
+      line-height: 1.65;
       color: var(--c-secondary);
-      border: 1px solid var(--c-rules);
     }
 
     .rationale-title {
@@ -430,6 +547,7 @@
       display: flex;
       align-items: center;
       gap: 6px;
+      font-size: calc(14px * var(--review-text-scale, 1));
     }
 
     /* Right Column: Native Phone Mockup Preview */
@@ -437,14 +555,15 @@
       display: flex;
       justify-content: center;
       position: sticky;
-      top: 32px;
+      top: 24px;
     }
 
     .phone-frame {
       width: 390px;
-      height: 844px;
+      height: min(844px, calc(100dvh - 126px));
+      min-height: 550px;
       background-color: var(--c-canvas);
-      border: 10px solid #1C2421;
+      border: 2px solid #B9C5BA;
       border-radius: var(--r-phone);
       box-shadow: var(--shadow-phone);
       position: relative;
@@ -455,7 +574,7 @@
 
     /* Phone Status Bar */
     .status-bar {
-      height: 44px;
+      height: 34px;
       padding: 0 24px;
       display: flex;
       align-items: center;
@@ -469,14 +588,14 @@
     }
 
     .island-pill {
-      width: 108px;
-      height: 26px;
+      width: 78px;
+      height: 18px;
       background-color: #1C2421;
       border-radius: 99px;
       position: absolute;
       left: 50%;
       transform: translateX(-50%);
-      top: 9px;
+      top: 8px;
     }
 
     .status-icons {
@@ -493,32 +612,36 @@
       position: relative;
       overflow: hidden;
       background-color: var(--c-canvas);
+      min-height: 0;
     }
 
     .app-content-scroll {
       flex: 1;
       overflow-y: auto;
       overflow-x: hidden;
-      padding: 16px 20px 100px;
+      padding: 14px 20px 24px;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 16px;
       scroll-behavior: smooth;
+      min-height: 0;
+    }
+    .app-content-scroll > * {
+      flex-shrink: 0;
     }
 
     /* Global Persistent Live Call Strip */
     .global-live-strip {
       background-color: var(--c-ink);
       color: var(--c-paper);
-      padding: 10px 16px;
+      padding: 10px 14px;
       border-radius: var(--r-md);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 8px;
       box-shadow: var(--shadow-paper);
       flex-shrink: 0;
-      margin-bottom: 4px;
       animation: fadeIn 0.2s ease-out;
     }
 
@@ -548,9 +671,16 @@
     .live-strip-text {
       font-size: calc(14px * var(--review-text-scale, 1));
       font-weight: 600;
-      white-space: nowrap;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .live-strip-text > span:first-child {
       overflow: hidden;
       text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .live-strip-actions {
@@ -560,7 +690,7 @@
     }
 
     .strip-btn {
-      padding: 6px 12px;
+      padding: 8px 10px;
       border-radius: 6px;
       font-size: calc(14px * var(--review-text-scale, 1));
       font-weight: 600;
@@ -584,12 +714,29 @@
       background-color: var(--c-forest-hover);
     }
 
+    /* Urgent Badges */
+    .urgent-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background-color: var(--c-red-bg);
+      color: var(--c-red);
+      border: 1px solid var(--c-red-border);
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-size: calc(13px * var(--review-text-scale, 1));
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
     /* Screen Headers */
     .view-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      min-height: 56px;
     }
 
     .view-title-wrap {
@@ -608,8 +755,8 @@
 
     .view-title {
       font-size: calc(30px * var(--review-text-scale, 1));
-      font-weight: 700;
-      letter-spacing: -0.025em;
+      font-weight: 600;
+      letter-spacing: -0.04em;
       color: var(--c-ink);
       line-height: 1.1;
     }
@@ -638,8 +785,8 @@
     .setup-notice-card {
       background-color: var(--c-amber-bg);
       border: 1px solid var(--c-amber-border);
-      border-radius: var(--r-md);
-      padding: 12px 14px;
+      border-radius: 12px;
+      padding: 10px 12px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -666,11 +813,11 @@
     .live-hero-card {
       background-color: var(--c-ink);
       color: var(--c-paper);
-      border-radius: var(--r-xl);
-      padding: 20px;
+      border-radius: 24px;
+      padding: 18px;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 14px;
       box-shadow: var(--shadow-paper);
       position: relative;
       overflow: hidden;
@@ -680,28 +827,33 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
     }
 
     .live-stage-badge {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 4px 10px;
+      padding: 4px 8px;
       border-radius: 99px;
       font-size: calc(14px * var(--review-text-scale, 1));
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      font-weight: 600;
+      letter-spacing: 0.01em;
     }
     .live-stage-badge.waiting {
-      background-color: rgba(35, 97, 71, 0.35);
-      color: #6EE7B7;
-      border: 1px solid rgba(110, 231, 183, 0.3);
+      background: rgba(255, 255, 255, 0.08);
+      color: #D4EADF;
+      border: 1px solid rgba(255, 255, 255, 0.15);
     }
     .live-stage-badge.screening {
       background-color: rgba(49, 89, 201, 0.35);
       color: #93C5FD;
       border: 1px solid rgba(147, 197, 253, 0.3);
+    }
+    .live-stage-badge.urgent {
+      background-color: rgba(170, 52, 44, 0.4);
+      color: #FECDD3;
+      border: 1px solid rgba(254, 205, 211, 0.35);
     }
 
     .live-hero-wave {
@@ -712,7 +864,7 @@
     }
     .live-hero-wave .pill {
       width: 3px;
-      background-color: #6EE7B7;
+      background-color: #B6DAC6;
       border-radius: 99px;
       animation: wavePulse 1.4s infinite ease-in-out;
     }
@@ -724,31 +876,25 @@
     .live-hero-body {
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
     }
 
     .live-hero-caller {
       font-size: calc(22px * var(--review-text-scale, 1));
-      font-weight: 700;
+      font-weight: 600;
       letter-spacing: -0.02em;
       color: #FFFFFF;
       line-height: 1.2;
-    }
-
-    .live-hero-phone {
-      font-size: calc(14px * var(--review-text-scale, 1));
-      color: #9FB2A9;
-      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
     }
 
     .live-hero-reason {
       font-size: calc(17px * var(--review-text-scale, 1));
-      font-weight: 500;
-      line-height: 1.4;
+      font-weight: 400;
+      line-height: 1.45;
       color: #E2ECE7;
-      margin-top: 4px;
-      padding-top: 8px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      margin: 2px 0 0;
+      overflow-wrap: anywhere;
     }
 
     .live-hero-actions {
@@ -796,15 +942,15 @@
     /* Filter Pills */
     .filter-bar {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       overflow-x: auto;
       padding-bottom: 2px;
     }
 
     .filter-pill {
       min-height: 44px;
-      padding: 8px 16px;
-      background-color: var(--c-paper);
+      padding: 7px 12px;
+      background-color: transparent;
       border: 1px solid var(--c-rules);
       border-radius: 99px;
       font-size: calc(14px * var(--review-text-scale, 1));
@@ -824,7 +970,6 @@
 
     .filter-count {
       font-size: calc(14px * var(--review-text-scale, 1));
-      opacity: 0.85;
       font-variant-numeric: tabular-nums;
     }
 
@@ -841,7 +986,7 @@
       background-color: var(--c-paper);
       border: 1px solid var(--c-rules);
       border-radius: var(--r-md);
-      padding: 8px 44px 8px 38px;
+      padding: 8px 48px 8px 38px;
       font-size: calc(14px * var(--review-text-scale, 1));
       color: var(--c-ink);
       transition: border-color 0.15s ease;
@@ -860,7 +1005,7 @@
 
     .search-clear-btn {
       position: absolute;
-      right: 4px;
+      right: 0;
       min-width: 44px;
       min-height: 44px;
       display: flex;
@@ -874,34 +1019,31 @@
     .journal-list {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 0;
     }
 
     .journal-card {
-      background-color: var(--c-paper);
-      border: 1px solid var(--c-rules);
-      border-radius: var(--r-lg);
-      padding: 14px 16px;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid var(--c-rules);
+      border-radius: 0;
+      padding: 18px 0;
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      box-shadow: var(--shadow-subtle);
+      gap: 10px;
+      box-shadow: none;
       cursor: pointer;
       text-align: left;
-      transition: transform 0.1s ease, border-color 0.15s ease;
+      transition: background-color 0.1s ease;
       position: relative;
     }
     .journal-card:hover {
-      border-color: #B4C2B9;
-      transform: translateY(-1px);
-    }
-    .journal-card.unread {
-      border-left: 4px solid var(--c-forest);
+      background-color: rgba(255, 254, 250, 0.6);
     }
 
     .card-top-row {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: 8px;
     }
@@ -927,11 +1069,6 @@
       justify-content: center;
       flex-shrink: 0;
     }
-    .journal-card.unread .caller-avatar {
-      background-color: var(--c-forest-tint);
-      color: var(--c-forest);
-      border-color: rgba(35, 97, 71, 0.2);
-    }
 
     .caller-name-block {
       display: flex;
@@ -943,9 +1080,17 @@
       font-size: calc(17px * var(--review-text-scale, 1));
       font-weight: 600;
       color: var(--c-ink);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      overflow-wrap: anywhere;
+    }
+    .journal-card.unread .caller-name::after {
+      content: '';
+      display: inline-block;
+      vertical-align: middle;
+      width: 6px;
+      height: 6px;
+      margin-left: 7px;
+      border-radius: 50%;
+      background: var(--c-cobalt);
     }
 
     .caller-time {
@@ -964,43 +1109,31 @@
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
+      overflow-wrap: anywhere;
     }
 
     .card-footer {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding-top: 6px;
-      border-top: 1px solid var(--c-rules-subtle);
+      padding-top: 0;
       font-size: calc(14px * var(--review-text-scale, 1));
       color: var(--c-secondary);
+      gap: 8px;
     }
 
     .outcome-tag {
       display: inline-flex;
       align-items: center;
       gap: 4px;
-      padding: 3px 8px;
-      border-radius: 6px;
       font-size: calc(14px * var(--review-text-scale, 1));
       font-weight: 600;
     }
-    .outcome-tag.picked-up {
-      background-color: var(--c-forest-tint);
-      color: var(--c-forest);
-    }
-    .outcome-tag.message {
-      background-color: var(--c-canvas-subtle);
-      color: var(--c-secondary);
-    }
-    .outcome-tag.appointment {
-      background-color: var(--c-amber-bg);
-      color: var(--c-amber);
-    }
-    .outcome-tag.spam {
-      background-color: var(--c-red-bg);
-      color: var(--c-red);
-    }
+    .outcome-tag.picked-up { color: var(--c-forest); }
+    .outcome-tag.message { color: var(--c-secondary); }
+    .outcome-tag.appointment { color: var(--c-amber); }
+    .outcome-tag.spam { color: var(--c-red); }
+    .outcome-tag.urgent { color: var(--c-red); font-weight: 700; }
 
     /* Skeleton Loading State */
     .skeleton-card {
@@ -1072,6 +1205,11 @@
       color: var(--c-red);
       font-size: calc(14px * var(--review-text-scale, 1));
     }
+    .error-banner .strip-btn {
+      color: var(--c-red);
+      background: var(--c-paper);
+      border: 1px solid var(--c-red-border);
+    }
 
     /* LIVE CALL SCREEN */
     .live-view-container {
@@ -1120,6 +1258,7 @@
       font-weight: 700;
       color: var(--c-ink);
       line-height: 1.2;
+      overflow-wrap: anywhere;
     }
 
     .live-caller-number {
@@ -1136,6 +1275,11 @@
       font-weight: 500;
       color: var(--c-ink);
       border-left: 3px solid var(--c-cobalt);
+      overflow-wrap: anywhere;
+    }
+    .live-reason-box.urgent {
+      border-left-color: var(--c-red);
+      background-color: #FDF4F3;
     }
 
     .live-stage-indicator {
@@ -1149,8 +1293,10 @@
     .live-stage-indicator.screening { color: var(--c-cobalt); }
     .live-stage-indicator.joining { color: var(--c-amber); }
     .live-stage-indicator.on-call { color: var(--c-forest); }
+    .live-stage-indicator.requesting-message { color: var(--c-amber); }
     .live-stage-indicator.taking-message { color: var(--c-amber); }
     .live-stage-indicator.ended { color: var(--c-secondary); }
+    .live-stage-indicator.urgent { color: var(--c-red); }
 
     /* Live Transcript Feed */
     .transcript-box {
@@ -1163,12 +1309,13 @@
       max-width: 92%;
       padding: 10px 14px;
       border-radius: var(--r-lg);
-      font-size: calc(15px * var(--review-text-scale, 1));
-      line-height: 1.45;
+      font-size: calc(16px * var(--review-text-scale, 1));
+      line-height: 1.5;
       display: flex;
       flex-direction: column;
       gap: 4px;
       box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+      overflow-wrap: anywhere;
     }
 
     .bubble-speaker {
@@ -1224,8 +1371,12 @@
       font-size: calc(14px * var(--review-text-scale, 1));
       font-weight: 600;
       color: var(--c-ink);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
     }
-    .btn-take-msg:hover {
+    .btn-take-msg:hover:not(:disabled) {
       background-color: var(--c-canvas-subtle);
     }
     .btn-take-msg:disabled {
@@ -1245,7 +1396,7 @@
       justify-content: center;
       gap: 8px;
     }
-    .btn-pickup-main:hover {
+    .btn-pickup-main:hover:not(:disabled) {
       background-color: var(--c-forest-hover);
     }
     .btn-pickup-main:disabled {
@@ -1319,6 +1470,7 @@
       font-size: calc(22px * var(--review-text-scale, 1));
       font-weight: 700;
       color: var(--c-ink);
+      overflow-wrap: anywhere;
     }
 
     .detail-meta-row {
@@ -1328,6 +1480,8 @@
       font-size: calc(14px * var(--review-text-scale, 1));
       color: var(--c-secondary);
       font-variant-numeric: tabular-nums;
+      flex-wrap: wrap;
+      gap: 4px;
     }
 
     /* Appointment Request Card */
@@ -1356,12 +1510,14 @@
       font-size: calc(16px * var(--review-text-scale, 1));
       font-weight: 700;
       color: var(--c-ink);
+      overflow-wrap: anywhere;
     }
 
     .appt-subtext {
       font-size: calc(14px * var(--review-text-scale, 1));
       color: #6C4208;
       line-height: 1.45;
+      overflow-wrap: anywhere;
     }
 
     .appt-actions {
@@ -1455,6 +1611,7 @@
       font-size: calc(14px * var(--review-text-scale, 1));
       color: var(--c-secondary);
       font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
     }
 
     .section-card {
@@ -1498,6 +1655,7 @@
       font-size: calc(14px * var(--review-text-scale, 1));
       color: var(--c-secondary);
       line-height: 1.45;
+      overflow-wrap: anywhere;
     }
 
     .btn-edit-setting {
@@ -1520,20 +1678,19 @@
 
     /* Floating Tab Navigation Bar */
     .tab-nav-bar {
-      position: absolute;
-      bottom: 18px;
-      left: 20px;
-      right: 20px;
+      position: relative;
+      margin: 0 16px 14px;
+      flex-shrink: 0;
       background-color: rgba(255, 254, 250, 0.94);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
       border: 1px solid var(--c-rules);
       border-radius: 99px;
-      padding: 6px;
+      padding: 5px;
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 6px;
-      box-shadow: var(--shadow-paper);
+      box-shadow: 0 3px 12px rgba(23, 41, 36, 0.05);
       z-index: 60;
     }
 
@@ -1585,6 +1742,7 @@
       display: flex;
       flex-direction: column;
       gap: 16px;
+      overflow-wrap: anywhere;
     }
 
     .dialog-header {
@@ -1693,9 +1851,9 @@
       display: none;
       background-color: var(--c-paper);
       border: 1px solid var(--c-rules);
-      border-radius: var(--r-lg);
-      padding: 14px 16px;
-      box-shadow: var(--shadow-subtle);
+      border-radius: 14px;
+      padding: 0 14px;
+      box-shadow: none;
     }
     .mobile-review-drawer summary {
       font-weight: 600;
@@ -1706,6 +1864,9 @@
       justify-content: space-between;
       min-height: 44px;
       gap: 10px;
+    }
+    .mobile-review-drawer[open] {
+      padding-bottom: 16px;
     }
 
     /* Keyframe Animations */
@@ -1735,135 +1896,36 @@
     }
 
     /* Responsive Adaptations */
-    @media (max-width: 1023px) {
-      .shell-main {
-        grid-template-columns: 1fr;
-      }
-      .phone-column {
-        position: static;
-        width: 100%;
-      }
-      .deck-column {
-        max-width: 100%;
-      }
-    }
-
-    @media (max-width: 767px) {
-      .shell-container {
-        padding: 16px;
-        gap: 20px;
-      }
-      .editorial-headline {
-        font-size: calc(28px * var(--review-text-scale, 1));
-      }
-      .deck-column {
-        display: none; /* Collapses into mobile drawer */
-      }
-      .mobile-review-drawer {
-        display: block;
-      }
-      .phone-frame {
-        width: 100%;
-        max-width: 100%;
-        height: auto;
-        min-height: 680px;
-        border: none;
-        border-radius: 0;
-        box-shadow: none;
-      }
-      .status-bar {
-        display: none;
-      }
-    }
-
-    /* Review refinement: calm journal, readable type, a thin device frame. */
-    :root { --c-secondary-light: #58675F; }
-    .shell-container { max-width: 1200px; padding: 24px 36px 40px; gap: 24px; }
-    .shell-header { padding-bottom: 18px; }
-    .shell-main { grid-template-columns: minmax(300px, 450px) 410px; gap: clamp(40px, 7vw, 100px); justify-content: center; }
-    .deck-column { gap: 24px; padding-top: 18px; }
-    .editorial-header { gap: 18px; }
-    .editorial-eyebrow { font-size: calc(14px * var(--review-text-scale, 1)); letter-spacing: .12em; }
-    .editorial-headline { font-size: clamp(44px, 4.8vw, 62px); line-height: 1.04; letter-spacing: -.045em; }
-    .editorial-lead { font-size: calc(17px * var(--review-text-scale, 1)); line-height: 1.6; max-width: 36ch; }
-    .control-deck { border-radius: 20px; padding: 20px; gap: 16px; box-shadow: none; }
-    .control-deck-title { font-size: calc(15px * var(--review-text-scale, 1)); padding-bottom: 0; border: 0; }
-    .control-deck-title > span:last-child { display: none; }
-    .control-label { font-size: calc(14px * var(--review-text-scale, 1)); }
-    .select-input { max-width: 100%; font-size: calc(14px * var(--review-text-scale, 1)); }
-    .deck-actions { gap: 8px; }
-    .deck-btn { min-height: 44px; font-size: calc(14px * var(--review-text-scale, 1)); }
-    .notif-header { flex-wrap: wrap; gap: 4px 12px; }
-    .notif-toggle-row { min-height: 44px; }
-    .notif-hint { margin-top: 8px; }
-    .rationale-card { background: transparent; border: 0; box-shadow: none; padding: 0 2px; }
-    .rationale-title { font-size: calc(14px * var(--review-text-scale, 1)); }
-    .rationale-card p { font-size: calc(14px * var(--review-text-scale, 1)); line-height: 1.65; }
-    .phone-column { top: 24px; }
-    .phone-frame { width: 390px; height: min(844px, calc(100dvh - 126px)); min-height: 550px; border: 2px solid #B9C5BA; border-radius: 34px; box-shadow: 0 24px 70px -24px rgba(23,41,36,.23), 0 2px 8px rgba(23,41,36,.05); position: relative; }
-    .status-bar { height: 34px; }
-    .island-pill { width: 78px; height: 18px; }
-    .app-screen, .app-content-scroll { min-height: 0; }
-    .app-content-scroll { gap: 16px; padding: 14px 20px 24px; }
-    .app-content-scroll > * { flex-shrink: 0; }
-    .view-header { min-height: 56px; }
-    .view-title { font-weight: 600; letter-spacing: -.04em; }
-    .header-btn { width: auto; min-width: 44px; min-height: 44px; padding: 0 14px; border-radius: 99px; font-size: calc(14px * var(--review-text-scale, 1)); }
-    .setup-notice-card { min-height: 44px; font-size: calc(14px * var(--review-text-scale, 1)); padding: 10px 12px; border-radius: 12px; }
-    .live-hero-card { border-radius: 24px; gap: 14px; padding: 18px; }
-    .live-hero-phone { display: none; }
-    .live-hero-caller { font-weight: 600; }
-    .live-hero-reason { font-size: calc(17px * var(--review-text-scale, 1)); margin: 2px 0 0; padding: 0; border: 0; font-weight: 400; }
-    .live-stage-badge { font-size: calc(14px * var(--review-text-scale, 1)); text-transform: none; letter-spacing: .01em; padding: 4px 8px; }
-    .live-stage-badge.waiting { background: rgba(255,255,255,.08); color: #D4EADF; border-color: rgba(255,255,255,.15); }
-    .live-hero-wave .pill { background-color: #B6DAC6; }
-    .filter-bar { gap: 6px; }
-    .filter-pill { min-height: 44px; padding: 7px 12px; font-size: calc(14px * var(--review-text-scale, 1)); background: transparent; }
-    .filter-count { font-size: calc(14px * var(--review-text-scale, 1)); opacity: 1; }
-    .search-input { min-height: 44px; padding-right: 48px; }
-    .search-clear-btn { min-width: 44px; min-height: 44px; right: 0; }
-    .journal-list { gap: 0; }
-    .journal-card, .journal-card.unread { background: transparent; border: 0; border-bottom: 1px solid var(--c-rules); border-radius: 0; padding: 18px 0; box-shadow: none; gap: 10px; }
-    .journal-card:hover { transform: none; background: rgba(255,254,250,.6); }
-    .journal-card.unread .caller-avatar { background: var(--c-canvas-subtle); border-color: var(--c-rules); color: var(--c-ink); }
-    .journal-card.unread .caller-name::after { content: ''; display: inline-block; vertical-align: middle; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--c-cobalt); }
-    .caller-name { font-size: calc(17px * var(--review-text-scale, 1)); }
-    .caller-time { font-size: calc(14px * var(--review-text-scale, 1)); }
-    .card-reason { font-size: calc(16px * var(--review-text-scale, 1)); line-height: 1.45; }
-    .card-footer { border: 0; padding-top: 0; font-size: calc(14px * var(--review-text-scale, 1)); gap: 8px; }
-    .outcome-tag { font-size: calc(14px * var(--review-text-scale, 1)); background: transparent !important; padding: 0; }
-    .tab-nav-bar { position: relative; bottom: auto; left: auto; right: auto; margin: 0 16px 14px; flex-shrink: 0; padding: 5px; box-shadow: 0 3px 12px rgba(23,41,36,.05); }
-    .tab-btn { min-height: 46px; }
-    .strip-btn { min-height: 44px; font-size: calc(14px * var(--review-text-scale, 1)); padding: 8px 10px; }
-    .global-live-strip { gap: 8px; }
-    .global-strip-main { min-width: 0; }
-    .detail-caller-title, .live-caller-name { overflow-wrap: anywhere; }
-    .transcript-bubble { font-size: calc(16px * var(--review-text-scale, 1)); line-height: 1.5; max-width: 92%; }
-    .bubble-speaker { font-size: calc(14px * var(--review-text-scale, 1)); }
-    .dialog-close { min-width: 44px; min-height: 44px; }
-    .form-input, .form-textarea { min-height: 44px; }
-    .phone-frame input, .phone-frame select, .phone-frame textarea { font-size: calc(16px * var(--review-text-scale, 1)); }
-    .setting-item-val, .kevin-hero-line, .detail-meta-row, .appt-subtext, .appt-header, .appt-confirmed-badge, .btn-edit-setting, .btn-confirm-appt, .btn-decline-appt, .btn-call-ctrl { font-size: calc(14px * var(--review-text-scale, 1)); }
-    .mobile-review-drawer summary { min-height: 44px; gap: 10px; }
     @media (min-width: 768px) and (max-width: 1023px) {
       .shell-main { grid-template-columns: minmax(260px, 1fr) 390px; gap: 28px; }
       .shell-container { padding-left: 24px; padding-right: 24px; }
       .editorial-headline { font-size: calc(44px * var(--review-text-scale, 1)); }
       .control-deck { padding: 16px; }
     }
+
     @media (max-width: 767px) {
       .shell-container { padding: 12px 16px 20px; gap: 12px; }
       .shell-header { flex-wrap: wrap; gap: 10px; padding-bottom: 12px; }
       .brand-title { font-size: calc(18px * var(--review-text-scale, 1)); }
       .concept-badge { font-size: calc(14px * var(--review-text-scale, 1)); padding: 4px 8px; }
       .shell-main { display: block; }
+      .deck-column { display: none; }
+      .mobile-review-drawer { display: block; }
       .phone-column { position: static; }
-      .phone-frame { width: 100%; height: auto; min-height: calc(100dvh - 166px); max-width: 100%; border: 0; border-radius: 0; box-shadow: none; overflow: visible; }
+      .phone-frame {
+        width: 100%;
+        height: auto;
+        min-height: calc(100dvh - 166px);
+        max-width: 100%;
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+        overflow: visible;
+      }
+      .status-bar { display: none; }
       .app-screen { overflow: visible; }
       .app-content-scroll { overflow: visible; padding: 12px 0 28px; }
       .tab-nav-bar { position: sticky; bottom: 12px; margin: 0 0 8px; z-index: 60; }
-      .mobile-review-drawer { padding: 0 14px; border-radius: 14px; box-shadow: none; }
-      .mobile-review-drawer[open] { padding-bottom: 16px; }
       .caller-name { white-space: normal; overflow-wrap: anywhere; }
       .card-top-row { align-items: start; }
       .card-footer { flex-wrap: wrap; }
@@ -1872,7 +1934,7 @@
       .dialog-content { padding: 20px; }
     }
 
-    /* A review-only text-size control; product layout remains naturally flowing. */
+    /* 200% Large Text Scaling */
     html[data-large-text="true"] .phone-frame,
     html[data-large-text="true"] .app-dialog { --review-text-scale: 2; }
     html[data-large-text="true"] .view-header,
@@ -1881,19 +1943,15 @@
     html[data-large-text="true"] .global-live-strip { flex-wrap: wrap; }
     html[data-large-text="true"] .live-hero-actions,
     html[data-large-text="true"] .live-action-grid,
-    html[data-large-text="true"] .on-call-controls { grid-template-columns: 1fr; }
+    html[data-large-text="true"] .on-call-controls,
+    html[data-large-text="true"] .notif-expanded-row { grid-template-columns: 1fr; }
     html[data-large-text="true"] .appt-actions { flex-direction: column; }
     html[data-large-text="true"] .caller-name { white-space: normal; overflow-wrap: anywhere; }
     html[data-large-text="true"] .filter-bar { flex-wrap: wrap; overflow: visible; }
     html[data-large-text="true"] .phone-frame button { padding-top: 10px; padding-bottom: 10px; }
     html[data-large-text="true"] .dialog-content { overflow-wrap: anywhere; }
     html[data-large-text="true"] .phone-frame { min-height: 550px; }
-    .live-hero-reason, .live-reason, .setting-item-val, .detail-caller-title,
-    .live-caller-name, .appt-time, .appt-subtext { overflow-wrap: anywhere; }
-    .live-strip-text { display: flex; flex-direction: column; white-space: normal; overflow: visible; gap: 2px; overflow-wrap: anywhere; }
-    .live-strip-text > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     html[data-large-text="true"] .live-strip-text > span:first-child { overflow: visible; white-space: normal; }
-    .error-banner .strip-btn { color: var(--c-red); background: var(--c-paper); border: 1px solid var(--c-red-border); }
   </style>
 </head>
 <body>
@@ -1923,7 +1981,7 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
       </summary>
       <div style="margin-top: 16px; display: flex; flex-direction: column; gap: 14px;" id="mobileDrawerContent">
-        <!-- Replicated from control deck -->
+        <!-- Injected dynamically by initReviewControls -->
       </div>
     </details>
 
@@ -1950,15 +2008,17 @@
             <select id="scenarioSelect" class="select-input" aria-label="Select demo scenario">
               <option value="normal-waiting">1. Normal waiting call (Default · Maya Chen)</option>
               <option value="screening-replay">2. Screening replay (Fresh screening → Waiting)</option>
-              <option value="pickup-failure">3. Failed pickup &amp; retry</option>
-              <option value="stale-notification">4. Stale alert (Ended Call A + Active Call B)</option>
-              <option value="pref-save-failure">5. Behavior save failure &amp; retry</option>
-              <option value="appt-confirm-failure">6. Appointment confirm failure &amp; retry</option>
-              <option value="long-content">7. Long caller name &amp; complex reason</option>
-              <option value="quiet-inbox">8. Quiet inbox (No active call, journal present)</option>
-              <option value="empty-journal">9. Empty journal (First launch state)</option>
-              <option value="loading-state">10. Loading skeleton state</option>
-              <option value="error-state">11. Retained journal error &amp; retry</option>
+              <option value="urgent-call">3. Urgent call (Emergency water leak · Urgent alert)</option>
+              <option value="pickup-failure">4. Failed pickup &amp; retry</option>
+              <option value="msg-request-failure">5. Message request failure &amp; retry</option>
+              <option value="stale-notification">6. Stale alert (Ended Call A + Active Call B)</option>
+              <option value="pref-save-failure">7. Behavior save failure &amp; retry</option>
+              <option value="appt-confirm-failure">8. Appointment confirm failure &amp; retry</option>
+              <option value="long-content">9. Long caller name &amp; complex reason</option>
+              <option value="quiet-inbox">10. Quiet inbox (No active call, journal present)</option>
+              <option value="empty-journal">11. Empty journal (First launch state)</option>
+              <option value="loading-state">12. Loading skeleton state</option>
+              <option value="error-state">13. Retained journal error &amp; retry</option>
             </select>
           </div>
 
@@ -1972,6 +2032,10 @@
             <button type="button" class="deck-btn deck-btn-outline" id="btnEndCaller">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>
               Caller hangs up
+            </button>
+            <button type="button" class="deck-btn deck-btn-outline" id="btnSimulate30sWait">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              Simulate 30 seconds without an answer
             </button>
             <button type="button" class="deck-btn deck-btn-outline" id="btnResetDemo">
               Start over
@@ -1988,25 +2052,8 @@
               </label>
             </div>
 
-            <button type="button" class="notif-banner-card" id="notifBannerBtn" aria-label="Simulated incoming notification banner. Tap to open call.">
-              <div class="notif-icon-box" aria-hidden="true">
-                <div class="brand-wave">
-                  <span class="pill" style="background:#FFF; height:6px;"></span>
-                  <span class="pill" style="background:#FFF; height:12px;"></span>
-                  <span class="pill" style="background:#FFF; height:16px;"></span>
-                  <span class="pill" style="background:#FFF; height:8px;"></span>
-                </div>
-              </div>
-              <div class="notif-text">
-                <div class="notif-meta">
-                  <span>Hey Kevin</span>
-                  <span>Now</span>
-                </div>
-                <div class="notif-title" id="notifTitle">Maya Chen</div>
-                <div class="notif-body" id="notifBody">The kitchen sink is leaking again. · Waiting for pickup</div>
-                <div class="notif-hint">Fictional notification · Tap to open</div>
-              </div>
-            </button>
+            <!-- Dynamic Notification Preview Container -->
+            <div id="notifContainerDesktop"></div>
           </div>
         </div>
 
@@ -2112,12 +2159,13 @@
             id: 'call-maya-01',
             caller: 'Maya Chen',
             phone: '+1 202 555 0142',
+            urgent: false,
             reason: 'The kitchen sink is leaking again.',
             time: '9:41 AM',
             duration: '0:48',
             read: false,
             spam: false,
-            stage: 'waiting', // 'screening' | 'waiting' | 'joining' | 'on-call' | 'taking-message' | 'ended'
+            stage: 'waiting', // 'screening' | 'waiting' | 'joining' | 'on-call' | 'requesting-message' | 'taking-message' | 'ended'
             outcome: 'Screening live',
             summary: 'Caller reports active water leaking under the double kitchen sink into the lower cabinet. Advised turning off the shut-off valve if pooling accelerates.',
             transcript: [
@@ -2132,6 +2180,7 @@
             id: 'call-david-02',
             caller: 'David Vance',
             phone: '+1 202 555 0118',
+            urgent: false,
             reason: 'Wants quote for water heater replacement tomorrow morning.',
             time: '8:15 AM',
             duration: '1m 45s',
@@ -2161,6 +2210,7 @@
             id: 'call-sarah-03',
             caller: 'Sarah Lin',
             phone: '+1 202 555 0173',
+            urgent: false,
             reason: 'Rescheduling Friday maintenance inspection to next Tuesday.',
             time: 'Yesterday',
             duration: '1m 10s',
@@ -2181,6 +2231,7 @@
             id: 'call-spam-04',
             caller: 'Unknown Commercial',
             phone: '+1 202 555 0199',
+            urgent: false,
             reason: 'Robocall: Automated commercial energy audit promotion.',
             time: 'Yesterday',
             duration: '0:22',
@@ -2201,6 +2252,7 @@
             id: 'call-marcus-05',
             caller: 'Marcus Miller',
             phone: '+1 202 555 0135',
+            urgent: false,
             reason: 'Follow-up on bathroom rough-in invoice #1042.',
             time: 'Sep 12',
             duration: '2m 15s',
@@ -2221,6 +2273,7 @@
             id: 'call-elena-06',
             caller: 'Elena Rostova',
             phone: '+1 202 555 0161',
+            urgent: false,
             reason: 'Checking availability for radiator bleeding next week.',
             time: 'Sep 11',
             duration: '1m 05s',
@@ -2252,6 +2305,8 @@
         activeCallId: 'call-maya-01',
         notificationTargetId: 'call-maya-01',
         notificationDetailsVisible: true,
+        notificationExpanded: false,
+        notificationDismissed: false,
         scenario: 'normal-waiting',
         filter: 'all', // 'all' | 'unread' | 'spam'
         searchQuery: '',
@@ -2259,6 +2314,7 @@
         listState: 'normal', // 'normal' | 'loading' | 'error' | 'empty'
         // Error scenario attempt counters
         pickupAttempts: 0,
+        msgRequestAttempts: 0,
         prefSaveAttempts: 0,
         apptConfirmAttempts: 0,
         // Modal async operation tracking
@@ -2310,19 +2366,50 @@
         if (genEl) genEl.textContent = String(state.generation);
       }
 
+      function scheduleWaitingTimeout(call) {
+        if (!call || call.stage !== 'waiting') return;
+        const myGen = state.generation;
+        const callId = call.id;
+        if (call._waitingGen !== myGen) {
+          call._waitingGen = myGen;
+          call._ownerWaitDeadline = Date.now() + 30000;
+          call._ownerWaitTimerPending = false;
+        }
+        if (call._ownerWaitTimerPending) return;
+        call._ownerWaitTimerPending = true;
+
+        scheduleGuardedTimer(() => {
+          if (state.generation !== myGen) return;
+          if (state.activeCallId !== callId) return;
+          if (state.calls.find(c => c.id === callId) !== call) return;
+          call._ownerWaitTimerPending = false;
+          if (call.stage !== 'waiting') return;
+
+          dispatch('SIMULATE_30S_WAIT', { callId });
+        }, Math.max(0, call._ownerWaitDeadline - Date.now()));
+      }
+
       // -------------------------------------------------------------------------
       // Shared Guarded Reducer Helpers
       // -------------------------------------------------------------------------
       function endCallRecord(call) {
         if (!call || call.stage === 'ended') return;
+        const wasConnected = call.stage === 'on-call';
         call.stage = 'ended';
         call.read = true;
         call.lastError = null;
         if (state.activeCallId === call.id) {
           state.activeCallId = null;
         }
-        if (call.outcome === 'Screening live' || call.outcome === 'Screened · Taking message' || call.outcome === 'Screening') {
+        if (wasConnected) {
+          call.summary = `You picked up this call. Reason: ${call.reason}`;
+        } else if (call.messageReceived) {
           call.outcome = 'Screened · Left message';
+          const message = [...call.transcript].reverse().find(item => item.role === 'caller');
+          call.summary = message ? message.text : 'A caller message is available in the transcript.';
+        } else {
+          call.outcome = 'Screened · Call ended';
+          call.summary = `The call ended before a complete message was taken. Reason: ${call.reason}`;
         }
       }
 
@@ -2339,11 +2426,11 @@
 
         switch (activeCall.stage) {
           case 'screening':
-            phaseLabel = 'Screening live';
+            phaseLabel = activeCall.urgent ? 'Screening urgent call' : 'Screening live';
             showPickup = true;
             break;
           case 'waiting':
-            phaseLabel = 'Waiting for pickup';
+            phaseLabel = activeCall.urgent ? 'Urgent · Waiting for pickup' : 'Waiting for pickup';
             showPickup = true;
             break;
           case 'joining':
@@ -2352,6 +2439,10 @@
             break;
           case 'on-call':
             phaseLabel = 'Connected';
+            showPickup = false;
+            break;
+          case 'requesting-message':
+            phaseLabel = 'Requesting message...';
             showPickup = false;
             break;
           case 'taking-message':
@@ -2387,6 +2478,8 @@
       // State Dispatcher / Reducer
       // -------------------------------------------------------------------------
       function dispatch(action, payload) {
+        payload = payload || {};
+
         switch (action) {
           case 'SET_TAB':
             state.activeTab = payload.tab;
@@ -2443,7 +2536,7 @@
           }
 
           case 'OPEN_NOTIFICATION': {
-            const targetId = state.notificationTargetId;
+            const targetId = payload.callId || state.notificationTargetId;
             const targetCall = state.calls.find(c => c.id === targetId);
             if (targetCall) {
               targetCall.read = true;
@@ -2456,6 +2549,64 @@
               }
               render({ intentionalNavigation: true });
             }
+            break;
+          }
+
+          case 'TOGGLE_NOTIF_EXPAND':
+            state.notificationExpanded = !state.notificationExpanded;
+            updateNotificationBanner();
+            break;
+
+          case 'DISMISS_NOTIFICATION':
+            // Presentation only: no call command. Live entry remains accessible in app.
+            state.notificationDismissed = true;
+            updateNotificationBanner();
+            break;
+
+          case 'RESTORE_NOTIFICATION':
+            state.notificationDismissed = false;
+            updateNotificationBanner();
+            break;
+
+          case 'SIMULATE_30S_WAIT': {
+            // Simulated 30-second owner wait without an answer
+            // If still waiting, transition to taking-message and append Kevin's unavailable line.
+            // No transition if joining, on-call, ended, requesting-message, taking-message, or newer call.
+            const targetCallId = payload.callId || state.activeCallId;
+            const call = state.calls.find(c => c.id === targetCallId);
+            if (!call || call.stage !== 'waiting' || call.id !== state.activeCallId) return;
+
+            call.stage = 'taking-message';
+            call.outcome = call.urgent ? 'Screened · Taking message (Urgent)' : 'Screened · Taking message';
+            call.lastError = null;
+
+            call.transcript.push({
+              speaker: 'Kevin',
+              role: 'ai',
+              text: 'Alex is currently unavailable to take your call. I will take down your details and have him get back to you as soon as possible.',
+              time: 'Just now'
+            });
+
+            const myGen = state.generation;
+            scheduleGuardedTimer(() => {
+              if (state.generation !== myGen) return;
+              if (state.activeCallId !== targetCallId) return;
+              if (state.calls.find(c => c.id === targetCallId) !== call) return;
+              if (call.stage !== 'taking-message') return;
+
+              call.transcript.push({
+                speaker: call.caller,
+                role: 'caller',
+                text: call.urgent
+                  ? 'Please tell him it is urgent! Water is still flowing and we need someone right away.'
+                  : 'Please ask Alex to call me back as soon as he is free. Thank you.',
+                time: 'Just now'
+              });
+              call.messageReceived = true;
+              render();
+            }, 1400);
+
+            render();
             break;
           }
 
@@ -2495,11 +2646,12 @@
                 state.pickupAttempts += 1;
                 call.stage = 'waiting';
                 call.lastError = 'Connection failed. Please retry.';
+                scheduleWaitingTimeout(call);
                 render();
               } else {
                 call.stage = 'on-call';
                 call.lastError = null;
-                call.outcome = 'Screened · Picked up';
+                call.outcome = call.urgent ? 'Screened · Picked up (Urgent)' : 'Screened · Picked up';
                 call.read = true;
                 render();
               }
@@ -2514,8 +2666,9 @@
             const call = state.calls.find(c => c.id === callId);
             if (!call || (call.stage !== 'screening' && call.stage !== 'waiting')) return;
 
-            call.stage = 'taking-message';
-            call.outcome = 'Screened · Taking message';
+            // Shared Action Lifecycle: Transition to Requesting state first
+            call.stage = 'requesting-message';
+            call.lastError = null;
             state.activeTab = 'calls';
             state.view = 'live';
             state.selectedCallId = callId;
@@ -2523,20 +2676,51 @@
 
             const myGen = state.generation;
             scheduleGuardedTimer(() => {
-              // Completion Checks: generation, identity, taking-message phase
+              // Completion Checks: generation, identity, requesting-message phase
               if (state.generation !== myGen) return;
               if (state.activeCallId !== callId) return;
               if (state.calls.find(c => c.id === callId) !== call) return;
-              if (call.stage !== 'taking-message') return;
+              if (call.stage !== 'requesting-message') return;
 
-              call.transcript.push({
-                speaker: call.caller,
-                role: 'caller',
-                text: 'Please ask Alex to call me back as soon as he is free. It is pretty wet under here.',
-                time: 'Just now'
-              });
-              render();
-            }, 2000);
+              if (state.scenario === 'msg-request-failure' && state.msgRequestAttempts === 0) {
+                state.msgRequestAttempts += 1;
+                call.stage = 'waiting';
+                call.lastError = 'Message request failed. Please retry.';
+                scheduleWaitingTimeout(call);
+                render();
+              } else {
+                call.stage = 'taking-message';
+                call.outcome = call.urgent ? 'Screened · Taking message (Urgent)' : 'Screened · Taking message';
+                call.lastError = null;
+
+                call.transcript.push({
+                  speaker: 'Kevin',
+                  role: 'ai',
+                  text: 'I am taking a message for Alex now. Please go ahead.',
+                  time: 'Just now'
+                });
+
+                scheduleGuardedTimer(() => {
+                  if (state.generation !== myGen) return;
+                  if (state.activeCallId !== callId) return;
+                  if (state.calls.find(c => c.id === callId) !== call) return;
+                  if (call.stage !== 'taking-message') return;
+
+                  call.transcript.push({
+                    speaker: call.caller,
+                    role: 'caller',
+                    text: call.urgent
+                      ? 'Please ask Alex to call me immediately. Water is still leaking near the breaker box.'
+                      : 'Please ask Alex to call me back as soon as he is free. It is pretty wet under here.',
+                    time: 'Just now'
+                  });
+                  call.messageReceived = true;
+                  render();
+                }, 1400);
+
+                render();
+              }
+            }, 800);
             break;
           }
 
@@ -2614,7 +2798,6 @@
           case 'DECLINE_APPOINTMENT': {
             if (state.accountMode !== 'business') return;
             const call = state.calls.find(c => c.id === payload.callId);
-            // Reducer rejects decline if an operation is currently confirming
             if (!call || !call.appointment || call.appointment.confirming || call.appointment.status !== 'pending') return;
             call.appointment.status = 'declined';
             call.appointment.error = null;
@@ -2666,6 +2849,7 @@
         bumpGeneration();
         state.scenario = scenarioKey;
         state.pickupAttempts = 0;
+        state.msgRequestAttempts = 0;
         state.prefSaveAttempts = 0;
         state.apptConfirmAttempts = 0;
         state.listState = 'normal';
@@ -2674,7 +2858,12 @@
         state.view = 'journal';
         state.activeTab = 'calls';
         state.settingsOriginTab = 'calls';
+        state.notificationDismissed = false;
+        state.notificationExpanded = false;
         state.calls = getInitialCalls();
+        state.activeCallId = 'call-maya-01';
+        state.notificationTargetId = 'call-maya-01';
+        state.selectedCallId = null;
         state.screeningPrefs = {
           screenAllCalls: false,
           urgentAlerts: true,
@@ -2694,6 +2883,7 @@
             if (maya) {
               maya.stage = 'waiting';
               maya.outcome = 'Screening live';
+              scheduleWaitingTimeout(maya);
             }
             break;
           }
@@ -2736,9 +2926,33 @@
                   time: 'Just now'
                 });
                 maya.stage = 'waiting';
+                scheduleWaitingTimeout(maya);
                 render();
               }
             }, 3600);
+            break;
+          }
+
+          case 'urgent-call': {
+            // Scenario 1: Urgent call using existing fictional caller fixture (Maya Chen)
+            state.activeCallId = 'call-maya-01';
+            state.notificationTargetId = 'call-maya-01';
+            const maya = state.calls.find(c => c.id === 'call-maya-01');
+            if (maya) {
+              maya.urgent = true;
+              maya.reason = 'Emergency main shutoff valve ruptured under sink; flooding rapidly.';
+              maya.outcome = 'Screening live · Urgent';
+              maya.summary = 'URGENT: Main supply valve body split. Active high-flow water flooding kitchen floor. Kevin is trying Alex; no response confirmed yet.';
+              maya.stage = 'waiting';
+              maya.transcript = [
+                { speaker: 'Kevin', role: 'ai', text: 'Hi, thanks for calling River Plumbing. This is Kevin, Alex\'s assistant. How can I help you today?', time: '9:41 AM' },
+                { speaker: 'Maya Chen', role: 'caller', text: 'Alex! The shutoff valve just split under our kitchen sink and water is flooding the whole ground floor!', time: '9:41 AM' },
+                { speaker: 'Kevin', role: 'ai', text: 'I will try Alex now. Please stay somewhere safe while I check.', time: '9:41 AM' }
+              ];
+              scheduleWaitingTimeout(maya);
+            }
+            state.view = 'live';
+            state.selectedCallId = 'call-maya-01';
             break;
           }
 
@@ -2750,18 +2964,36 @@
             const maya = state.calls.find(c => c.id === 'call-maya-01');
             if (maya) {
               maya.stage = 'waiting';
+              scheduleWaitingTimeout(maya);
+            }
+            break;
+          }
+
+          case 'msg-request-failure': {
+            // Scenario 4: Message request failure scenario with explicit retry
+            state.activeCallId = 'call-maya-01';
+            state.notificationTargetId = 'call-maya-01';
+            state.view = 'live';
+            state.selectedCallId = 'call-maya-01';
+            const maya = state.calls.find(c => c.id === 'call-maya-01');
+            if (maya) {
+              maya.stage = 'waiting';
+              scheduleWaitingTimeout(maya);
             }
             break;
           }
 
           case 'stale-notification': {
-            // Target of alert is Ended Call A (Marcus Miller), while Active Call B (Maya Chen) is active!
+            // Target of alert is Ended Call A (Marcus Miller), while Active Call B (Maya Chen) is active
             state.notificationTargetId = 'call-marcus-05';
             state.activeCallId = 'call-maya-01';
             const marcus = state.calls.find(c => c.id === 'call-marcus-05');
             if (marcus) marcus.stage = 'ended';
             const maya = state.calls.find(c => c.id === 'call-maya-01');
-            if (maya) maya.stage = 'waiting';
+            if (maya) {
+              maya.stage = 'waiting';
+              scheduleWaitingTimeout(maya);
+            }
             break;
           }
 
@@ -2785,13 +3017,14 @@
               id: 'call-long-07',
               caller: 'Dr. Elizabeth Montgomery-Braithwaite, MD (St. Jude Children\'s Hospital Care)',
               phone: '+1 202 555 0188',
+              urgent: true,
               reason: 'Urgent inquiry regarding commercial backflow preventer annual certification and emergency pressure release valve servicing for Building B main mechanical room.',
               time: '10:02 AM',
               duration: '0:55',
               read: false,
               spam: false,
               stage: 'waiting',
-              outcome: 'Screening live',
+              outcome: 'Screening live · Urgent',
               summary: 'Caller is hospital facility coordinator requesting priority backflow preventer overhaul and compliance sign-off for clinical wing.',
               transcript: [
                 { speaker: 'Kevin', role: 'ai', text: 'River Plumbing & Heating. Kevin speaking, how can I assist you?', time: '10:02 AM' },
@@ -2801,6 +3034,7 @@
               lastError: null
             };
             state.calls.unshift(longCall);
+            scheduleWaitingTimeout(longCall);
             break;
           }
 
@@ -2809,7 +3043,7 @@
             state.notificationTargetId = 'call-maya-01';
             state.calls.forEach(c => {
               c.stage = 'ended';
-              if (c.outcome === 'Screening live') c.outcome = 'Screened · Left message';
+              if (c.outcome.includes('Screening')) c.outcome = 'Screened · Left message';
             });
             break;
           }
@@ -2832,64 +3066,294 @@
           }
         }
 
+        scheduleWaitingTimeout(state.calls.find(c => c.id === state.activeCallId));
         updateNotificationBanner();
         render({ intentionalNavigation: true });
       }
 
       // -------------------------------------------------------------------------
-      // Notification Banner Synchronization & Redaction
+      // Notification Banner Synchronization, Redaction & Expanded Action Row
       // -------------------------------------------------------------------------
       function updateNotificationBanner() {
-        const notifTitle = document.getElementById('notifTitle');
-        const notifBody = document.getElementById('notifBody');
+        const desktopContainer = document.getElementById('notifContainerDesktop');
+        const mobileContainer = document.getElementById('notifContainerMobile');
         const targetCall = state.calls.find(c => c.id === state.notificationTargetId);
 
-        if (!notifTitle || !notifBody) return;
-
-        if (!state.notificationDetailsVisible) {
-          // Redaction removes caller name AND reason
-          if (targetCall) {
-            if (targetCall.stage === 'ended') {
-              notifTitle.textContent = 'Hey Kevin';
-              notifBody.textContent = 'Call ended · Tap to view journal';
-            } else if (targetCall.stage === 'waiting' || targetCall.stage === 'screening') {
-              notifTitle.textContent = 'Hey Kevin · Incoming Call';
-              notifBody.textContent = 'Screening unknown caller... · Tap to view';
-            } else if (targetCall.stage === 'joining') {
-              notifTitle.textContent = 'Hey Kevin · Active Call';
-              notifBody.textContent = 'Connecting to call... · Tap to view';
-            } else if (targetCall.stage === 'on-call') {
-              notifTitle.textContent = 'Hey Kevin · Active Call';
-              notifBody.textContent = 'Call connected · Tap to view';
-            } else if (targetCall.stage === 'taking-message') {
-              notifTitle.textContent = 'Hey Kevin · Active Call';
-              notifBody.textContent = 'Recording caller message... · Tap to view';
-            }
-          } else {
-            notifTitle.textContent = 'Hey Kevin';
-            notifBody.textContent = 'No active calls · Tap to view journal';
+        // Remember which desktop/mobile preview contained focus and its action
+        const activeEl = document.activeElement;
+        let focusedContainer = null;
+        let focusedAction = null;
+        if (activeEl) {
+          if (desktopContainer && desktopContainer.contains(activeEl)) {
+            focusedContainer = desktopContainer;
+            focusedAction = activeEl.getAttribute('data-action');
+          } else if (mobileContainer && mobileContainer.contains(activeEl)) {
+            focusedContainer = mobileContainer;
+            focusedAction = activeEl.getAttribute('data-action');
           }
-        } else if (targetCall) {
-          notifTitle.textContent = targetCall.caller;
-          let phaseText = '';
-          if (targetCall.stage === 'ended') phaseText = 'Call ended';
-          else if (targetCall.stage === 'screening') phaseText = 'Screening live';
-          else if (targetCall.stage === 'waiting') phaseText = 'Waiting for pickup';
-          else if (targetCall.stage === 'joining') phaseText = 'Connecting...';
-          else if (targetCall.stage === 'on-call') phaseText = 'Connected';
-          else if (targetCall.stage === 'taking-message') phaseText = 'Taking message';
-          notifBody.textContent = `${targetCall.reason} · ${phaseText}`;
-        } else {
-          notifTitle.textContent = 'Hey Kevin';
-          notifBody.textContent = 'No active screened calls at this time.';
         }
-        const mobileTitle = document.getElementById('notifTitleMobile');
-        const mobileBody = document.getElementById('notifBodyMobile');
-        if (mobileTitle) mobileTitle.textContent = notifTitle.textContent;
-        if (mobileBody) mobileBody.textContent = notifBody.textContent;
+
+        // Check if urgent alerts are disabled in Kevin preferences
+        const isUrgentCall = targetCall && targetCall.urgent;
+        const isUrgentSuppressed = isUrgentCall && !state.screeningPrefs.urgentAlerts;
+
+        // Generate HTML for preview
+        let html = '';
+
+        if (isUrgentSuppressed) {
+          let suppressedDesc = '';
+          if (!targetCall) {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. No active call.';
+          } else if (targetCall.stage === 'ended') {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. The call has ended. Summary available in the app.';
+          } else if (targetCall.stage === 'waiting') {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. The call is waiting for pickup inside the app.';
+          } else if (targetCall.stage === 'screening') {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. The call is screening live inside the app.';
+          } else if (targetCall.stage === 'joining' || targetCall.stage === 'requesting-message') {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. Requesting action inside the app.';
+          } else if (targetCall.stage === 'taking-message') {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. Kevin is taking a message inside the app.';
+          } else if (targetCall.stage === 'on-call') {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. The call is connected inside the app.';
+          } else {
+            suppressedDesc = 'Urgent alerts are disabled in Kevin settings. The call is accessible inside the app.';
+          }
+
+          html = `
+            <div class="notif-suppressed-card" role="region" aria-label="Urgent Notification Suppressed">
+              <div>
+                <strong style="color: var(--c-amber); display: block; margin-bottom: 2px;">Urgent alert suppressed</strong>
+                <span>${escapeHtml(suppressedDesc)}</span>
+              </div>
+              <button type="button" class="deck-btn deck-btn-outline" data-action="view-live" data-id="${targetCall ? targetCall.id : ''}">
+                View in app
+              </button>
+            </div>
+          `;
+        } else if (state.notificationDismissed) {
+          let dismissedDesc = '';
+          if (!targetCall) {
+            dismissedDesc = 'Dismissed from preview. No active call.';
+          } else if (targetCall.stage === 'ended') {
+            dismissedDesc = 'Dismissed from preview. The call has ended. Summary available in the app.';
+          } else if (targetCall.stage === 'waiting') {
+            dismissedDesc = 'Dismissed from preview. The call is waiting for pickup inside the app.';
+          } else if (targetCall.stage === 'screening') {
+            dismissedDesc = 'Dismissed from preview. The call continues screening inside the app.';
+          } else if (targetCall.stage === 'joining' || targetCall.stage === 'requesting-message') {
+            dismissedDesc = 'Dismissed from preview. Requesting action inside the app.';
+          } else if (targetCall.stage === 'taking-message') {
+            dismissedDesc = 'Dismissed from preview. Kevin is taking a message inside the app.';
+          } else if (targetCall.stage === 'on-call') {
+            dismissedDesc = 'Dismissed from preview. The call is connected inside the app.';
+          } else {
+            dismissedDesc = 'Dismissed from preview. The call is accessible inside the app.';
+          }
+
+          html = `
+            <div class="notif-dismissed-card" role="region" aria-label="Notification Dismissed">
+              <div>
+                <strong style="color: var(--c-ink); display: block; margin-bottom: 2px;">Notification dismissed</strong>
+                <span>${escapeHtml(dismissedDesc)}</span>
+              </div>
+              <button type="button" class="deck-btn deck-btn-outline" data-action="restore-notif">
+                Show notification
+              </button>
+            </div>
+          `;
+        } else {
+          // Normal interactive notification card
+          let title = '';
+          let body = '';
+          const isEnded = targetCall && targetCall.stage === 'ended';
+          const isAnswerable = targetCall && (targetCall.stage === 'waiting' || targetCall.stage === 'screening') && (targetCall.id === state.activeCallId);
+          const isJoining = targetCall && targetCall.stage === 'joining';
+          const isRequesting = targetCall && targetCall.stage === 'requesting-message';
+
+          if (!state.notificationDetailsVisible) {
+            // Details-Hidden mode: Keep current stage and Urgent label where appropriate, but NO caller name or reason
+            if (targetCall) {
+              if (targetCall.urgent) {
+                title = 'Hey Kevin · Urgent';
+                if (targetCall.stage === 'ended') body = 'Call ended · Tap to view summary';
+                else if (targetCall.stage === 'waiting') body = 'Urgent call waiting for pickup · Tap to view';
+                else if (targetCall.stage === 'screening') body = 'Screening urgent call... · Tap to view';
+                else if (targetCall.stage === 'joining') body = 'Connecting to urgent call... · Tap to view';
+                else if (targetCall.stage === 'on-call') body = 'Urgent call connected · Tap to view';
+                else if (targetCall.stage === 'requesting-message') body = 'Requesting message for urgent call... · Tap to view';
+                else if (targetCall.stage === 'taking-message') body = 'Taking message for urgent call · Tap to view';
+              } else {
+                title = 'Hey Kevin';
+                if (targetCall.stage === 'ended') body = 'Call ended · Tap to view journal';
+                else if (targetCall.stage === 'waiting') body = 'Waiting for pickup · Tap to view';
+                else if (targetCall.stage === 'screening') body = 'Screening unknown caller... · Tap to view';
+                else if (targetCall.stage === 'joining') body = 'Connecting to call... · Tap to view';
+                else if (targetCall.stage === 'on-call') body = 'Call connected · Tap to view';
+                else if (targetCall.stage === 'requesting-message') body = 'Requesting message... · Tap to view';
+                else if (targetCall.stage === 'taking-message') body = 'Taking message · Tap to view';
+              }
+            } else {
+              title = 'Hey Kevin';
+              body = 'No active calls · Tap to view journal';
+            }
+          } else if (targetCall) {
+            title = targetCall.caller;
+            let phaseText = '';
+            if (targetCall.stage === 'ended') phaseText = 'Call ended';
+            else if (targetCall.stage === 'screening') phaseText = 'Screening live';
+            else if (targetCall.stage === 'waiting') phaseText = 'Waiting for pickup';
+            else if (targetCall.stage === 'joining') phaseText = 'Connecting...';
+            else if (targetCall.stage === 'on-call') phaseText = 'Connected';
+            else if (targetCall.stage === 'requesting-message') phaseText = 'Requesting message...';
+            else if (targetCall.stage === 'taking-message') phaseText = 'Taking message';
+
+            body = `${targetCall.reason} · ${phaseText}`;
+          } else {
+            title = 'Hey Kevin';
+            body = 'No active screened calls at this time.';
+          }
+
+          html = `
+            <div class="notif-preview-wrapper" role="region" aria-label="Simulated Notification Preview">
+              <!-- Collapsed body-tap affordance (opens that exact call) -->
+              <button type="button" class="notif-body-tap-btn" data-action="open-notif" data-id="${targetCall ? targetCall.id : ''}" aria-label="Open call from notification">
+                <div class="notif-icon-box ${isUrgentCall ? 'urgent' : ''}" aria-hidden="true">
+                  <div class="brand-wave">
+                    <span class="pill" style="background:#FFF; height:6px;"></span>
+                    <span class="pill" style="background:#FFF; height:12px;"></span>
+                    <span class="pill" style="background:#FFF; height:16px;"></span>
+                    <span class="pill" style="background:#FFF; height:8px;"></span>
+                  </div>
+                </div>
+                <div class="notif-text">
+                  <div class="notif-meta">
+                    <span style="display:flex; align-items:center; gap:6px;">
+                      Hey Kevin
+                      ${isUrgentCall ? '<span class="notif-urgent-pill">URGENT</span>' : ''}
+                    </span>
+                    <span>Now</span>
+                  </div>
+                  <div class="notif-title">${escapeHtml(title)}</div>
+                  <div class="notif-body">${escapeHtml(body)}</div>
+                  <div class="notif-hint">Fictional notification · Tap body to open call</div>
+                </div>
+              </button>
+
+              <!-- Separate Toolbar with Expand & Dismiss buttons -->
+              <div class="notif-tool-bar">
+                <button type="button" class="notif-expand-btn" data-action="toggle-notif-expand" aria-expanded="${state.notificationExpanded}">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    ${state.notificationExpanded ? '<polyline points="18 15 12 9 6 15"/>' : '<polyline points="6 9 12 15 18 9"/>'}
+                  </svg>
+                  <span>${state.notificationExpanded ? 'Collapse actions' : 'Expand notification'}</span>
+                </button>
+                <button type="button" class="notif-dismiss-btn" data-action="dismiss-notif" aria-label="Dismiss notification presentation">
+                  Dismiss
+                </button>
+              </div>
+
+              <!-- Expanded Action Row (Pick up & Take a message) -->
+              ${state.notificationExpanded ? `
+                <div class="notif-expanded-row">
+                  <button type="button" class="notif-act-btn notif-act-pickup" data-action="pickup" data-id="${targetCall ? targetCall.id : ''}" ${!isAnswerable || isJoining || isRequesting ? 'disabled' : ''}>
+                    ${isJoining ? 'Connecting...' : 'Pick up'}
+                  </button>
+                  <button type="button" class="notif-act-btn notif-act-msg" data-action="take-msg" data-id="${targetCall ? targetCall.id : ''}" ${!isAnswerable || isJoining || isRequesting ? 'disabled' : ''}>
+                    ${isRequesting ? 'Requesting...' : 'Take a message'}
+                  </button>
+                </div>
+              ` : ''}
+
+              <!-- Honest Simulation Footnote -->
+              <div class="notif-sim-footnote">
+                Simulated notification · iOS notification actions depend on iOS version and interactive state.
+              </div>
+            </div>
+          `;
+        }
+
+        if (desktopContainer) desktopContainer.innerHTML = html;
+        if (mobileContainer) mobileContainer.innerHTML = html;
+
+        // Sync toggle checkboxes
         ['toggleNotifDetails', 'toggleNotifDetailsMobile'].forEach(id => {
           const input = document.getElementById(id);
           if (input) input.checked = state.notificationDetailsVisible;
+        });
+
+        bindNotificationEvents();
+
+        // Restore focus to equivalent control or successor if interaction initiated the update
+        if (focusedContainer) {
+          let nextFocusEl = null;
+          if (focusedAction === 'toggle-notif-expand') {
+            nextFocusEl = focusedContainer.querySelector('[data-action="toggle-notif-expand"]');
+          } else if (focusedAction === 'dismiss-notif') {
+            nextFocusEl = focusedContainer.querySelector('[data-action="restore-notif"]');
+          } else if (focusedAction === 'restore-notif') {
+            nextFocusEl = focusedContainer.querySelector('[data-action="dismiss-notif"]') ||
+                          focusedContainer.querySelector('[data-action="toggle-notif-expand"]');
+          } else if (focusedAction) {
+            nextFocusEl = focusedContainer.querySelector(`[data-action="${focusedAction}"]`);
+          }
+          if (!nextFocusEl || nextFocusEl.disabled) {
+            nextFocusEl = focusedContainer.querySelector('[data-action="open-notif"], [data-action="view-live"], [data-action="restore-notif"]');
+          }
+          if (nextFocusEl && !nextFocusEl.disabled) nextFocusEl.focus({ preventScroll: true });
+        }
+      }
+
+      function bindNotificationEvents() {
+        // Body tap open
+        document.querySelectorAll('[data-action="open-notif"]').forEach(btn => {
+          btn.onclick = () => {
+            const callId = btn.getAttribute('data-id');
+            dispatch('OPEN_NOTIFICATION', { callId });
+          };
+        });
+
+        // View in app (suppressed banner navigation)
+        document.querySelectorAll('#notifContainerDesktop [data-action="view-live"], #notifContainerMobile [data-action="view-live"]').forEach(btn => {
+          btn.onclick = () => {
+            const callId = btn.getAttribute('data-id') || state.notificationTargetId;
+            const target = state.calls.find(c => c.id === callId);
+            if (target && target.stage === 'ended') {
+              dispatch('VIEW_CALL_DETAIL', { callId });
+            } else {
+              dispatch('VIEW_LIVE_CALL', { callId });
+            }
+          };
+        });
+
+        // Expand toggle
+        document.querySelectorAll('[data-action="toggle-notif-expand"]').forEach(btn => {
+          btn.onclick = () => dispatch('TOGGLE_NOTIF_EXPAND');
+        });
+
+        // Dismiss
+        document.querySelectorAll('[data-action="dismiss-notif"]').forEach(btn => {
+          btn.onclick = () => dispatch('DISMISS_NOTIFICATION');
+        });
+
+        // Restore
+        document.querySelectorAll('[data-action="restore-notif"]').forEach(btn => {
+          btn.onclick = () => dispatch('RESTORE_NOTIFICATION');
+        });
+
+        // Notification actions
+        document.querySelectorAll('.notif-act-pickup').forEach(btn => {
+          btn.onclick = () => {
+            const callId = btn.getAttribute('data-id');
+            dispatch('PICKUP_CALL', { callId });
+          };
+        });
+
+        document.querySelectorAll('.notif-act-msg').forEach(btn => {
+          btn.onclick = () => {
+            const callId = btn.getAttribute('data-id');
+            dispatch('TAKE_MESSAGE', { callId });
+          };
         });
       }
 
@@ -2898,6 +3362,19 @@
       // -------------------------------------------------------------------------
       function render(options) {
         const intentionalNav = options && options.intentionalNavigation;
+
+        // Automatic phase/transcript updates retain focus only inside the replaced screen.
+        const appScreenBefore = document.getElementById('appScreen');
+        const focusedBefore = document.activeElement;
+        const preserveAppFocus = !intentionalNav && appScreenBefore && appScreenBefore.contains(focusedBefore);
+        const focusIdentity = preserveAppFocus ? {
+          id: focusedBefore.id,
+          action: focusedBefore.getAttribute('data-action'),
+          callId: focusedBefore.getAttribute('data-id')
+        } : null;
+        const focusRegion = preserveAppFocus
+          ? ['.live-action-bar', '.global-live-strip', '.appt-box'].find(selector => focusedBefore.closest(selector))
+          : null;
 
         // Preserve search input focus & caret selection
         const searchInputBefore = document.getElementById('journalSearchInput');
@@ -2960,6 +3437,19 @@
               searchInputAfter.setSelectionRange(selStart, selEnd);
             }
           }
+        } else if (focusIdentity) {
+          const controls = Array.from(appScreen.querySelectorAll('button, input, select, textarea, [tabindex]'));
+          let successor = controls.find(control => {
+            if (control.disabled) return false;
+            if (focusIdentity.id) return control.id === focusIdentity.id;
+            return focusIdentity.action && control.getAttribute('data-action') === focusIdentity.action &&
+              control.getAttribute('data-id') === focusIdentity.callId;
+          });
+          if (!successor) {
+            const region = (focusRegion && appScreen.querySelector(focusRegion)) || appScreen;
+            successor = region.querySelector('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])');
+          }
+          if (successor) successor.focus({ preventScroll: true });
         }
       }
 
@@ -3050,8 +3540,8 @@
             ${isHeroShown ? `
               <div class="live-hero-card" role="region" aria-label="Active Screened Call">
                 <div class="live-hero-badge-row">
-                  <span class="live-stage-badge ${activeCall.stage}">
-                    ● ${activeCall.stage === 'waiting' ? 'Waiting for pickup' : 'Screening live'}
+                  <span class="live-stage-badge ${activeCall.urgent ? 'urgent' : activeCall.stage}">
+                    ● ${activeCall.urgent ? 'Urgent · ' : ''}${activeCall.stage === 'waiting' ? 'Waiting for pickup' : 'Screening live'}
                   </span>
                   <div class="live-hero-wave" aria-hidden="true">
                     <span class="pill"></span>
@@ -3062,7 +3552,6 @@
                 </div>
                 <div class="live-hero-body">
                   <div class="live-hero-caller">${escapeHtml(activeCall.caller)}</div>
-                  <div class="live-hero-phone">${escapeHtml(activeCall.phone)}</div>
                   <div class="live-hero-reason">"${escapeHtml(activeCall.reason)}"</div>
                 </div>
                 <div class="live-hero-actions">
@@ -3122,7 +3611,8 @@
             .toUpperCase() || 'UN';
 
           let tagClass = 'message';
-          if (call.outcome.includes('Picked up')) tagClass = 'picked-up';
+          if (call.urgent) tagClass = 'urgent';
+          else if (call.outcome.includes('Picked up')) tagClass = 'picked-up';
           else if (call.outcome.includes('Appointment')) tagClass = 'appointment';
           else if (call.spam) tagClass = 'spam';
 
@@ -3132,7 +3622,10 @@
                 <div class="caller-identity">
                   <div class="caller-avatar" aria-hidden="true">${initials}</div>
                   <div class="caller-name-block">
-                    <div class="caller-name">${escapeHtml(call.caller)}</div>
+                    <div class="caller-name">
+                      ${escapeHtml(call.caller)}
+                      ${call.urgent ? '<span class="urgent-badge" style="margin-left:6px;">Urgent</span>' : ''}
+                    </div>
                     <div style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-secondary); font-variant-numeric: tabular-nums;">${escapeHtml(call.phone)}</div>
                   </div>
                 </div>
@@ -3153,6 +3646,7 @@
         const call = state.calls.find(c => c.id === (state.selectedCallId || state.activeCallId)) || state.calls[0];
         const isJoining = call.stage === 'joining';
         const isOnCall = call.stage === 'on-call';
+        const isRequestingMsg = call.stage === 'requesting-message';
         const isTakingMsg = call.stage === 'taking-message';
         const isEnded = call.stage === 'ended';
         const isAnswerable = (call.stage === 'waiting' || call.stage === 'screening');
@@ -3172,19 +3666,23 @@
             <div class="live-caller-hero">
               <div class="live-caller-header">
                 <div>
-                  <h2 class="live-caller-name">${escapeHtml(call.caller)}</h2>
+                  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <h2 class="live-caller-name">${escapeHtml(call.caller)}</h2>
+                    ${call.urgent ? '<span class="urgent-badge">Urgent</span>' : ''}
+                  </div>
                   <div class="live-caller-number">${escapeHtml(call.phone)}</div>
                 </div>
-                <div class="live-stage-indicator ${call.stage}">
-                  ${call.stage === 'waiting' ? '● Waiting for pickup' :
-                    call.stage === 'screening' ? '● Kevin answering...' :
+                <div class="live-stage-indicator ${call.urgent && (call.stage === 'waiting' || call.stage === 'screening') ? 'urgent' : call.stage}">
+                  ${call.stage === 'waiting' ? (call.urgent ? '● Urgent · Waiting' : '● Waiting for pickup') :
+                    call.stage === 'screening' ? (call.urgent ? '● Screening urgent call...' : '● Kevin answering...') :
                     call.stage === 'joining' ? '● Connecting...' :
                     call.stage === 'on-call' ? '● Connected' :
+                    call.stage === 'requesting-message' ? '● Requesting message...' :
                     call.stage === 'taking-message' ? '● Taking message' : '● Call ended'}
                 </div>
               </div>
 
-              <div class="live-reason-box">
+              <div class="live-reason-box ${call.urgent ? 'urgent' : ''}">
                 <strong>Reason:</strong> "${escapeHtml(call.reason)}"
               </div>
 
@@ -3207,12 +3705,12 @@
 
             <!-- Context-Sensitive Action Bar -->
             <div class="live-action-bar">
-              ${isAnswerable || isJoining ? `
+              ${isAnswerable || isJoining || isRequestingMsg ? `
                 <div class="live-action-grid">
-                  <button type="button" class="btn-take-msg" data-action="take-msg" data-id="${call.id}" ${isJoining ? 'disabled' : ''}>
-                    Take Message
+                  <button type="button" class="btn-take-msg" data-action="take-msg" data-id="${call.id}" ${isJoining || isRequestingMsg ? 'disabled' : ''}>
+                    ${isRequestingMsg ? 'Requesting...' : 'Take Message'}
                   </button>
-                  <button type="button" class="btn-pickup-main" data-action="pickup" data-id="${call.id}" ${isJoining ? 'disabled' : ''}>
+                  <button type="button" class="btn-pickup-main" data-action="pickup" data-id="${call.id}" ${isJoining || isRequestingMsg ? 'disabled' : ''}>
                     ${isJoining ? `
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>
                       Connecting...
@@ -3284,14 +3782,17 @@
             <!-- Detail Header Card -->
             <div class="detail-card">
               <div class="detail-header">
-                <h2 class="detail-caller-title">${escapeHtml(call.caller)}</h2>
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                  <h2 class="detail-caller-title">${escapeHtml(call.caller)}</h2>
+                  ${call.urgent ? '<span class="urgent-badge">Urgent</span>' : ''}
+                </div>
                 <div class="detail-meta-row">
                   <span>${escapeHtml(call.phone)}</span>
                   <span>${escapeHtml(call.time)} · ${escapeHtml(call.duration)}</span>
                 </div>
               </div>
 
-              <div class="live-reason-box">
+              <div class="live-reason-box ${call.urgent ? 'urgent' : ''}">
                 <strong>Reason:</strong> ${escapeHtml(call.reason)}
               </div>
 
@@ -4012,6 +4513,11 @@
           endCallerBtn.addEventListener('click', () => dispatch('SIMULATE_CALLER_END'));
         }
 
+        const sim30sBtn = document.getElementById('btnSimulate30sWait');
+        if (sim30sBtn) {
+          sim30sBtn.addEventListener('click', () => dispatch('SIMULATE_30S_WAIT'));
+        }
+
         const resetBtn = document.getElementById('btnResetDemo');
         if (resetBtn) {
           resetBtn.addEventListener('click', () => dispatch('RESET_DEMO'));
@@ -4022,11 +4528,6 @@
           toggleNotif.addEventListener('change', (e) => {
             dispatch('TOGGLE_NOTIF_DETAILS', { visible: e.target.checked });
           });
-        }
-
-        const notifBannerBtn = document.getElementById('notifBannerBtn');
-        if (notifBannerBtn) {
-          notifBannerBtn.addEventListener('click', () => dispatch('OPEN_NOTIFICATION'));
         }
 
         // Primary Tab Navigation
@@ -4049,27 +4550,28 @@
               <select id="scenarioSelectMobile" class="select-input">
                 <option value="normal-waiting">1. Normal waiting call (Default · Maya Chen)</option>
                 <option value="screening-replay">2. Screening replay (Fresh screening → Waiting)</option>
-                <option value="pickup-failure">3. Failed pickup & retry</option>
-                <option value="stale-notification">4. Stale alert (Ended Call A + Active Call B)</option>
-                <option value="pref-save-failure">5. Behavior save failure & retry</option>
-                <option value="appt-confirm-failure">6. Appointment confirm failure & retry</option>
-                <option value="long-content">7. Long caller name & complex reason</option>
-                <option value="quiet-inbox">8. Quiet inbox (No active call)</option>
-                <option value="empty-journal">9. Empty journal (First launch)</option>
-                <option value="loading-state">10. Loading skeleton state</option>
-                <option value="error-state">11. Retained journal error & retry</option>
+                <option value="urgent-call">3. Urgent call (Emergency water leak · Urgent alert)</option>
+                <option value="pickup-failure">4. Failed pickup &amp; retry</option>
+                <option value="msg-request-failure">5. Message request failure &amp; retry</option>
+                <option value="stale-notification">6. Stale alert (Ended Call A + Active Call B)</option>
+                <option value="pref-save-failure">7. Behavior save failure &amp; retry</option>
+                <option value="appt-confirm-failure">8. Appointment confirm failure &amp; retry</option>
+                <option value="long-content">9. Long caller name &amp; complex reason</option>
+                <option value="quiet-inbox">10. Quiet inbox (No active call)</option>
+                <option value="empty-journal">11. Empty journal (First launch)</option>
+                <option value="loading-state">12. Loading skeleton state</option>
+                <option value="error-state">13. Retained journal error &amp; retry</option>
               </select>
             </div>
             <label class="notif-toggle-row"><input type="checkbox" data-review-text> Larger app text (200%)</label>
             <div style="display:flex; flex-wrap:wrap; gap:8px;">
               <button type="button" class="deck-btn deck-btn-primary" id="btnReplayMobile" style="flex:1;">New call</button>
               <button type="button" class="deck-btn deck-btn-outline" id="btnEndMobile" style="flex:1;">Caller hangs up</button>
+              <button type="button" class="deck-btn deck-btn-outline" id="btnSimulate30sMobile" style="flex:100%;">Simulate 30 seconds without an answer</button>
               <button type="button" class="deck-btn deck-btn-outline" id="btnResetMobile" style="flex:1;">Start over</button>
             </div>
             <label class="notif-toggle-row"><input type="checkbox" id="toggleNotifDetailsMobile" checked> Details visible</label>
-            <button type="button" class="notif-banner-card" id="notifBannerMobile" aria-label="Simulated notification. Tap to open call.">
-              <div class="notif-text"><div class="notif-meta">Hey Kevin · Fictional notification</div><div class="notif-title" id="notifTitleMobile"></div><div class="notif-body" id="notifBodyMobile"></div></div>
-            </button>
+            <div id="notifContainerMobile"></div>
           `;
 
           const mobileSelect = document.getElementById('scenarioSelectMobile');
@@ -4084,14 +4586,29 @@
             mobileReplay.addEventListener('click', () => dispatch('REPLAY_INCOMING'));
           }
 
+          const mobileEnd = document.getElementById('btnEndMobile');
+          if (mobileEnd) {
+            mobileEnd.addEventListener('click', () => dispatch('SIMULATE_CALLER_END'));
+          }
+
+          const mobile30s = document.getElementById('btnSimulate30sMobile');
+          if (mobile30s) {
+            mobile30s.addEventListener('click', () => dispatch('SIMULATE_30S_WAIT'));
+          }
+
           const mobileReset = document.getElementById('btnResetMobile');
           if (mobileReset) {
             mobileReset.addEventListener('click', () => dispatch('RESET_DEMO'));
           }
-          document.getElementById('btnEndMobile').addEventListener('click', () => dispatch('SIMULATE_CALLER_END'));
-          document.getElementById('notifBannerMobile').addEventListener('click', () => dispatch('OPEN_NOTIFICATION'));
-          document.getElementById('toggleNotifDetailsMobile').addEventListener('change', event => dispatch('TOGGLE_NOTIF_DETAILS', { visible: event.target.checked }));
+
+          const toggleMobileNotif = document.getElementById('toggleNotifDetailsMobile');
+          if (toggleMobileNotif) {
+            toggleMobileNotif.addEventListener('change', (e) => {
+              dispatch('TOGGLE_NOTIF_DETAILS', { visible: e.target.checked });
+            });
+          }
         }
+
         document.querySelectorAll('[data-review-text]').forEach(input => {
           input.addEventListener('change', () => {
             document.documentElement.dataset.largeText = String(input.checked);
@@ -4106,6 +4623,10 @@
       initReviewControls();
       updateNotificationBanner();
       render();
+      const initialWaiting = state.calls.find(c => c.id === state.activeCallId && c.stage === 'waiting');
+      if (initialWaiting) {
+        scheduleWaitingTimeout(initialWaiting);
+      }
 
     })();
   </script>

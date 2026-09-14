@@ -5,8 +5,12 @@ message commands when an existing call's WebSocket stayed on the older backend.
 This repair adds compatibility in both directions. It does not add a product
 feature or approve the native frontend redesign.
 
-The repair starts from `ef9adafda38967fefcf974604e02b22912fcca66`. The publishing
-PR identifies its final source HEAD, exact-HEAD CI and merge. The earlier staging
+The repair starts from `ef9adafda38967fefcf974604e02b22912fcca66`. [PR #244](https://github.com/delimatsuo/heykevin/pull/244) passed all nine
+required jobs on `bfb4584c6b3cb80855062aa2165505b8547f7ab6` in
+[run 34896280482](https://github.com/delimatsuo/heykevin/actions/runs/34896280482)
+and merged as `7377c7ba402297625dec5de97a2250f50b1c8013` with the same tree,
+`01420cd531b617cfe193c686355af1091563f81e`. The refreshed staging and production
+request are recorded in the [candidate record](2026-09-14-urgent-production-candidate.md). The earlier staging
 revision `kevin-api-staging-00167-qiq` / `2b56fdaec3eafddbd42f4ebb0516e60db812161d`
 does not contain this repair and is superseded as a production candidate.
 
@@ -103,6 +107,12 @@ current operations remain live. That version ignores durable operation ownership
 The containment patch addresses notification behavior only; a defect in shared
 call arbitration requires a targeted forward fix. Recovery cannot retroactively
 stop tasks already executing on a previous revision.
+
+Automatic GitHub reviews on PR #244 were unavailable: Cursor returned neutral
+because usage-based pricing and at least $2 of remaining budget were required;
+Codex reported its code-review usage limit. No review rerun or billing change
+was made. Independent exact-HEAD source and release reviews completed with no
+outstanding findings. Required CI completed separately (402 runner-seconds).
 
 ## Hosted validation and scope
 

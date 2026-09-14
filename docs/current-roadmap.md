@@ -1,7 +1,7 @@
 # Hey Kevin — Current Roadmap and Release Status
 
 **Reconciled:** 2026-09-14
-**Implementation baseline:** `2b56fdaec3eafddbd42f4ebb0516e60db812161d`
+**Implementation baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
 **Repository:** `delimatsuo/heykevin`
 
 The [current PRD](../kevin-prd.md) defines necessary work and later opportunities.
@@ -19,7 +19,7 @@ Read-only checks on September 14 found:
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
 | Production backend | `kevin-api-00269-42l`, SHA `407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`, deployed September 4 | Live [production health](https://kevin-api-752910912062.us-central1.run.app/health) and successful [production run 33915568182](https://github.com/delimatsuo/heykevin/actions/runs/33915568182). This establishes the deployed source, not real-call/device acceptance. |
-| Staging backend | `kevin-api-staging-00167-qiq`, SHA `2b56fdaec3eafddbd42f4ebb0516e60db812161d`, verified September 14 at `19:40:27Z` | Successful [staging run 34887443367](https://github.com/delimatsuo/heykevin/actions/runs/34887443367), live health identity, 100% serving traffic and anonymous static smoke. Staging has different safety controls and is not equivalent to a production caller test. |
+| Staging backend | `kevin-api-staging-00169-muy`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:11:16Z` | Successful [staging run 34896587160](https://github.com/delimatsuo/heykevin/actions/runs/34896587160), live health identity, 100% serving traffic, runtime isolation and anonymous static smoke. Includes the rolling-call compatibility repair. Staging remains distinct from real caller/device acceptance. |
 | Public iOS | Version `1.2.11`, released September 5 (`2026-09-05T20:50:20Z`) | Live [Apple lookup](https://itunes.apple.com/lookup?id=6761427495&country=us) and [App Store page](https://apps.apple.com/us/app/hey-kevin/id6761427495). Public metadata does not expose the build number. |
 | iOS build 37 | The September 4 handoff records `1.2.11 (37)` uploaded and in internal TestFlight testing | Historical [build 37 handoff](handoffs/2026-09-04-screening-push-feedback-b37-handoff.md). No fresh authenticated Apple inspection; do not infer which build backs public version 1.2.11. |
 | Development inventory | No open PRs at the initial status audit; issue #33 remains open | Read-only GitHub inventory, before this reconciliation is published. Old worktrees and retained branches are not evidence of new active feature work. |
@@ -92,15 +92,20 @@ text reply and the later-feature list are not active implementation.
       recovery. The [urgent-handoff packet](releases/2026-09-14-urgent-call-handoff.md)
       records local tests and the remaining release gates; its publishing PR
       records required exact-HEAD CI and the final merge candidate.
-- [x] Stage the final reviewed N1 source: run `34887443367` passed all ten
+- [x] Stage the initial N1 source (subsequently superseded): run `34887443367` passed all ten
       applicable jobs, and serving revision `kevin-api-staging-00167-qiq` reports
       the approved SHA. Anonymous smoke and runtime isolation checks passed.
 - [x] Cancel the superseded production run with Deli's explicit authorization.
-- [ ] Merge and restage the [rolling-call compatibility repair](releases/2026-09-14-rolling-call-compatibility.md).
-      The initial staged N1 source can miss Take a message across backend
-      revisions and is superseded as a production candidate. The repair passed
-      7,869 offline tests and all eight safeguard mutation probes.
-- [ ] Deli approves the reviewed candidate's production job in GitHub.
+- [x] Merge and restage the [rolling-call compatibility repair](releases/2026-09-14-rolling-call-compatibility.md).
+      PR #244 passed all nine CI jobs and merged as `7377c7ba...`. Staging run
+      `34896587160` passed all ten jobs; revision `kevin-api-staging-00169-muy`
+      serves that exact SHA. The repair also passed 7,869 offline tests and
+      all eight safeguard mutation probes.
+- [x] Request one [production run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657)
+      from main at exact candidate `7377c7ba402297625dec5de97a2250f50b1c8013`.
+      The [candidate record](releases/2026-09-14-urgent-production-candidate.md)
+      preserves source, staging, recovery and approval boundaries.
+- [ ] Deli approves that production job in GitHub.
 - [ ] Confirm successful deployment and the exact production `deploy_sha`.
 - [ ] Record the owner's installed iOS build and notification/pickup checks from
       the PRD, including stale-alert and ended-call behavior.

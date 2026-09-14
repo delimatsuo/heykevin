@@ -24,6 +24,28 @@ from app.services import push_notification
 from app.services import screening_summary
 
 
+@pytest.fixture(autouse=True)
+def _isolated_owner_decisions(monkeypatch):
+    """Keep lifecycle fixtures on an in-memory version of the durable adapter."""
+    from copy import deepcopy
+    import time
+    from app.services import owner_call_actions as actions
+    owners = {
+        'CA_relay_test_100': 'c_relay_test', 'CA_gemini_test_200': 'c_gemini_test',
+        'CA_voice_test_300': 'c_voice_test', 'CA_spanish_test_400': 'c_spanish_test',
+        'CA_system_quote_test_500': 'c_system_quote_test',
+    }
+    records = {sid: {'contractor_id': owner, 'state': 'screening',
+                    'state_updated_at': time.time() - 1} for sid, owner in owners.items()}
+    async def read(sid):
+        return deepcopy(records.get(sid))
+    async def transaction(sid, callback):
+        records[sid] = callback(deepcopy(records.get(sid)))
+        return deepcopy(records[sid])
+    monkeypatch.setattr(actions, '_run_rtdb_transaction', transaction)
+    monkeypatch.setattr(actions, 'read_record', read)
+
+
 # --- Helpers and Fixtures ---
 
 

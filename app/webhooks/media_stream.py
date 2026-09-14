@@ -695,6 +695,19 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         await websocket.close(code=1008)
         return
 
+    if call_data.get('kevin_redirect_nonce'):
+        from app.services.owner_call_actions import confirm_fallback_stream
+        try:
+            confirmed = await confirm_fallback_stream(
+                call_sid, contractor_id=call_data.get('contractor_id', ''),
+                ws_token=ws_token, redirect_nonce=call_data['kevin_redirect_nonce'])
+        except Exception:
+            confirmed = False
+        if not confirmed:
+            await _cancel_task(ingress_task)
+            await websocket.close(code=1008)
+            return
+
     if ingress.ended:
         await _cancel_task(ingress_task)
         try:
@@ -891,56 +904,27 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     _urgency_push_count = 0
 
     async def on_urgency_detected(transcript_snippet: str):
-        """Emergency keyword detected — send VoIP push + critical alert."""
+        """Emergency keyword detected — delegate to urgent_handoff."""
         nonlocal _urgency_push_count
         if _urgency_push_count >= 1:
             return  # Rate limit: max 1 urgency push per call
 
         _urgency_push_count += 1
         _cid = contractor_config_loaded.get("contractor_id", "")
+        if not _cid:
+            return
 
-        # Send VoIP push to ring the contractor's phone
-        from app.services.push_notification import send_voip_push, send_urgent_push, get_device_token
-        from app.services.conference_registry import (
-            new_conference_name,
-            register_conference,
-        )
+        from app.services.urgent_handoff import dispatch_urgent_escalation
 
-        voip_token = await get_device_token(token_type="voip", contractor_id=_cid)
-        if voip_token:
-            caller_phone = active_call.caller_phone if active_call else ""
-            caller_name = active_call.caller_name if active_call else ""
-            # F-07/F-13: opaque random conference name (was f"urgent_{call_sid}").
-            urgent_conf = new_conference_name("urgent")
-            if _cid:
-                await register_conference(urgent_conf, _cid, call_sid)
-            await send_voip_push(
-                device_token=voip_token,
-                caller_phone=caller_phone,
-                caller_name=f"URGENT: {caller_name or caller_phone}",
-                reason="urgent_call",
+        try:
+            await dispatch_urgent_escalation(
                 call_sid=call_sid,
-                conference_name=urgent_conf,
                 contractor_id=_cid,
+                transcript_snippet=transcript_snippet,
             )
-
-        # Also send critical push notification without lock-screen-sensitive context.
-        push_token = await get_device_token(contractor_id=_cid)
-        if push_token:
-            caller_name = active_call.caller_name if active_call else ""
-            caller_phone = active_call.caller_phone if active_call else ""
-            body = _safe_urgent_push_body(caller_name=caller_name, caller_phone=caller_phone)
-            await send_urgent_push(
-                device_token=push_token,
-                title="URGENT CALL",
-                body=body,
-                call_sid=call_sid,
-                caller_phone=caller_phone,
-                caller_name=caller_name,
-                contractor_id=_cid,
-            )
-
-        logger.info("media_event event=urgency_escalated call=%s", _call_label(call_sid))
+            logger.info("media_event event=urgency_escalated call=%s", _call_label(call_sid))
+        except Exception as error:
+            _log_safe_exception("urgency_escalation_error", error, call_sid)
 
     MAX_CALL_DURATION = 5400  # 90 minutes in seconds
 

@@ -808,43 +808,36 @@ class VoicePipeline:
                 pass
 
     async def trigger_take_message(self):
-        """Immediately tell the caller that Deli is unavailable and offer to take a message.
-        Called when the user presses 'Ignore' in the app."""
+        """Tell the caller the owner is unavailable after 'Take a message'."""
         if self._unavailable_said:
             return
-        # Cancel the 45-second timer if running
+        # Cancel the owner-availability timer if running
         if self._unavailable_task:
             self._unavailable_task.cancel()
         # Fire the unavailability message immediately
         asyncio.create_task(self._unavailable_now())
 
     async def _unavailable_now(self):
-        """Immediately deliver the unavailability message."""
+        return await self._deliver_message_instruction()
+
+    async def _deliver_message_instruction(self):
         async with self._response_lock:
             if self._unavailable_said:
-                return
+                return True
+            owner = self._contractor_config.get("owner_name", settings.user_name)
+            msg = f"I'm sorry, {owner} is not available right now. You can leave me a message and I'll make sure they get it."
+            if await self._speak(msg) is False:
+                return False
             self._unavailable_said = True
             self._finish_owner_availability_wait()
-
-            owner_name = self._contractor_config.get("owner_name", settings.user_name)
-            pronoun = self._contractor_config.get("pronoun", "he")
-            msg = (
-                f"I'm sorry, it looks like {owner_name} is not available to take the call right now. "
-                f"But if you'd like, you can leave me a message and I'll make sure {pronoun} gets it."
-            )
             self._conversation.append({"role": "assistant", "content": msg})
-            _log_voice_event(
-                "assistant_message_ready",
-                self._call_sid,
-                source="ignore",
-                chars=len(msg),
-                words=len(msg.split()),
-            )
             await self.on_transcript("Kevin", msg)
-            await self._speak(msg)
+            return True
 
     async def stop(self):
         self._connected = False
+        if getattr(self, '_urgency_task', None):
+            self._urgency_task.cancel()
         self._audio_input_ready.set()
         self._interrupt_speaking = True
         # Cancel RTDB command polling
@@ -1107,14 +1100,14 @@ class VoicePipeline:
             len(transcript),
         )
 
-        # Fire callback non-blocking
-        asyncio.create_task(self.on_urgency_detected(transcript))
+        # Start or preserve the 30-second owner availability timer
+        if not self._unavailable_task or self._unavailable_task.done():
+            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
 
-        # Cancel the owner availability timer (give contractor time to respond)
-        if self._unavailable_task and not self._unavailable_task.done():
-            self._unavailable_task.cancel()
-            self._unavailable_task = None
-            logger.info("Unavailability timer cancelled due to urgency")
+        # Fire callback non-blocking (don't await APNs before caller continues)
+        if self.on_urgency_detected:
+            from app.services.urgent_handoff import start_urgency_task
+            start_urgency_task(self, self.on_urgency_detected, transcript)
 
         # Interrupt current TTS if Kevin is speaking
         if self._is_speaking:
@@ -1901,9 +1894,8 @@ class VoicePipeline:
         self._waiting_for_owner_availability = True
         self._owner_availability_wait_started_at = now
         self._caller_silence_prompted_at = None
-        if self._unavailable_task and not self._unavailable_task.done():
-            self._unavailable_task.cancel()
-        self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+        if not self._unavailable_task or self._unavailable_task.done():
+            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
         _log_voice_event("owner_availability_hold_started", self._call_sid)
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
@@ -2065,66 +2057,30 @@ class VoicePipeline:
             pass
 
     async def _check_commands(self):
-        """Check RTDB for pending commands (decline, take_message, hangup)."""
+        from app.services.owner_call_actions import consume_message_intent
         if not self._call_sid:
             return
         try:
-            from firebase_admin import db as rtdb
-
-            from app.db.cache import _init_firebase
-
-            _init_firebase()
-            ref = rtdb.reference(f"/call_commands/{self._call_sid}")
-            loop = asyncio.get_event_loop()
-            command = await loop.run_in_executor(None, ref.get)
-            if command:
-                # Clear the command
-                await loop.run_in_executor(None, ref.delete)
-                cmd_type = command.get("type", "")
-                if cmd_type == "take_message" and not self._unavailable_said:
-                    # Cancel the owner availability timer if running
-                    if self._unavailable_task:
-                        self._unavailable_task.cancel()
-                    asyncio.create_task(self._unavailable_now())
+            await consume_message_intent(self, self._deliver_message_instruction)
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            pass  # Non-critical, will retry next check
+            pass  # Durable intent remains available for the next poll.
+
 
     async def _unavailable_timer(self):
-        """After 30 seconds, tell the caller the owner is unavailable."""
+        from app.services.owner_call_actions import run_owner_timeout
         try:
-            await asyncio.sleep(self.OWNER_AVAILABILITY_TIMEOUT_SECONDS)
-            if not self._connected or self._unavailable_said:
-                return
-
-            async with self._response_lock:
-                if self._unavailable_said:
-                    return
-                self._unavailable_said = True
-                self._finish_owner_availability_wait()
-
-                owner_name = self._contractor_config.get("owner_name", settings.user_name)
-                pronoun = self._contractor_config.get("pronoun", "he")
-                msg = (
-                    f"I'm sorry, it looks like {owner_name} is not available to take the call right now. "
-                    f"But if you'd like, you can leave me a message and I'll make sure {pronoun} gets it."
-                )
-                self._conversation.append({"role": "assistant", "content": msg})
-                _log_voice_event(
-                    "assistant_message_ready",
-                    self._call_sid,
-                    source="unavailable_timer",
-                    chars=len(msg),
-                    words=len(msg.split()),
-                )
-                await self.on_transcript("Kevin", msg)
-                await self._speak(msg)
+            await run_owner_timeout(self, self._deliver_message_instruction)
         except asyncio.CancelledError:
             pass
+
 
     # --- ElevenLabs TTS (interruptible) ---
 
     async def _speak(self, text: str):
         """Convert text to speech. Supports barge-in (stops if caller interrupts)."""
+        delivered_ok = False
         self._is_speaking = True
         self._interrupt_speaking = False
 
@@ -2204,6 +2160,7 @@ class VoicePipeline:
                 ):
                     await asyncio.sleep(min(chunk_duration, 0.5))
 
+                delivered_ok = not delivery_failed and not self._interrupt_speaking and self._connected
                 # Update silence timeout — Kevin spoke
                 if not delivery_failed:
                     self._mark_kevin_activity()
@@ -2220,3 +2177,4 @@ class VoicePipeline:
 
         self._is_speaking = False
         self._interrupt_speaking = False
+        return delivered_ok

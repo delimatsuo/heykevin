@@ -248,9 +248,9 @@ class _FakeActiveCall:
 @pytest.mark.asyncio
 async def test_call_action_rejects_cross_contractor_when_rtdb_present(monkeypatch):
     async def fake_get_active_call(_sid):
-        return _FakeActiveCall(contractor_id="contractor-victim")
+        return {"contractor_id": "contractor-victim"}
 
-    monkeypatch.setattr("app.db.cache.get_active_call", fake_get_active_call)
+    monkeypatch.setattr("app.services.owner_call_actions.read_record", fake_get_active_call)
 
     body = voip_module.CallAction(call_sid="CA-victim-1", action="voicemail")
     request = _FakeRequest("contractor-attacker")
@@ -266,7 +266,7 @@ async def test_call_action_rejects_cross_contractor_when_rtdb_present(monkeypatc
 async def test_call_action_rejects_when_rtdb_missing_but_firestore_owned_elsewhere(monkeypatch):
     """F-13: an attacker leaking another contractor's call_sid cannot no-op
     route the call once the RTDB record has been cleaned up — Firestore
-    is consulted as a fallback."""
+    cannot authorize a live action. Missing live records now return 404."""
 
     async def fake_get_active_call(_sid):
         return None
@@ -274,7 +274,7 @@ async def test_call_action_rejects_when_rtdb_missing_but_firestore_owned_elsewhe
     async def fake_get_call(_sid):
         return {"contractor_id": "contractor-victim"}
 
-    monkeypatch.setattr("app.db.cache.get_active_call", fake_get_active_call)
+    monkeypatch.setattr("app.services.owner_call_actions.read_record", fake_get_active_call)
     monkeypatch.setattr("app.db.calls.get_call", fake_get_call)
 
     body = voip_module.CallAction(call_sid="CA-victim-1", action="voicemail")
@@ -284,7 +284,7 @@ async def test_call_action_rejects_when_rtdb_missing_but_firestore_owned_elsewhe
         await voip_module.handle_call_action(
             request=request, body=body, contractor_id="contractor-attacker"
         )
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -298,7 +298,7 @@ async def test_call_action_returns_404_when_no_record_exists(monkeypatch):
     async def fake_get_call(_sid):
         return None
 
-    monkeypatch.setattr("app.db.cache.get_active_call", fake_get_active_call)
+    monkeypatch.setattr("app.services.owner_call_actions.read_record", fake_get_active_call)
     monkeypatch.setattr("app.db.calls.get_call", fake_get_call)
 
     body = voip_module.CallAction(call_sid="CA-unknown", action="voicemail")
@@ -316,13 +316,16 @@ async def test_call_action_allows_owner_when_rtdb_record_present(monkeypatch):
     """Sanity: legitimate contractor can still operate on their own call."""
 
     async def fake_get_active_call(_sid):
-        return _FakeActiveCall(contractor_id="contractor-owner")
+        active = _FakeActiveCall(contractor_id="contractor-owner")
+        active.state = "screening"
+        active.accepted = False
+        return active
 
-    async def fake_decline(call_sid):
-        return {"status": "ok"}
+    async def fake_handle_owner_call_action(**kwargs):
+        return {"status": "message_requested"}, 202
 
-    monkeypatch.setattr("app.db.cache.get_active_call", fake_get_active_call)
-    monkeypatch.setattr(voip_module, "_handle_decline", fake_decline)
+    monkeypatch.setattr("app.services.owner_call_actions.read_record", fake_get_active_call)
+    monkeypatch.setattr("app.services.owner_call_actions.handle_owner_call_action", fake_handle_owner_call_action)
 
     body = voip_module.CallAction(call_sid="CA-owner-1", action="decline")
     request = _FakeRequest("contractor-owner")
@@ -330,7 +333,8 @@ async def test_call_action_allows_owner_when_rtdb_record_present(monkeypatch):
     response = await voip_module.handle_call_action(
         request=request, body=body, contractor_id="contractor-owner"
     )
-    assert response == {"status": "ok"}
+    assert response.status_code == 202
+    assert json.loads(response.body) == {"status": "message_requested"}
 
 
 # ---------------------------------------------------------------------------

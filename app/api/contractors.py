@@ -1,7 +1,7 @@
 """Contractor management API."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 from typing import Optional
 from urllib.parse import urlparse
 import ipaddress
@@ -160,6 +160,7 @@ class ContractorUpdate(BaseModel):
     apple_user_id: Optional[str] = Field(default=None, max_length=100)
     dial_in_pin: Optional[str] = Field(default=None, max_length=10)
     cnam_lookup_enabled: Optional[bool] = None
+    smart_interruption: Optional[StrictBool] = None
     # Forwarding-step intent. Deliberately NOT in PROTECTED_FIELDS: these record
     # what the user told us they did, which is client-side by definition. Server
     # truth about forwarding lives in forwarding_last_seen_at, which IS protected.

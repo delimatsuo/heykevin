@@ -115,6 +115,10 @@ schemes:
       config: Debug
       targets:
         - KevinTests
+      environmentVariables:
+        - variable: KEVIN_UNIT_TESTS
+          value: "1"
+          isEnabled: true
     profile:
       config: Staging
     analyze:
@@ -134,6 +138,10 @@ schemes:
       config: Debug
       targets:
         - KevinTests
+      environmentVariables:
+        - variable: KEVIN_UNIT_TESTS
+          value: "1"
+          isEnabled: true
     profile:
       config: Staging
     analyze:

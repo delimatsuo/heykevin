@@ -91,7 +91,7 @@ async def test_send_screening_summary_push(monkeypatch):
     assert sent is True
     assert captured_args["device_token"] == "push-token-456"
     assert captured_args["title"] == "Jonathan from Geico"
-    assert captured_args["body"] == "Calling regarding insurance policy renewal — Tap to answer"
+    assert captured_args["body"] == "Calling regarding insurance policy renewal — Tap to view live"
     assert captured_args["collapse_id"] == "call_CA999"
     assert captured_args["category"] == "SCREENING_CALL"
 

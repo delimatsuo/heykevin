@@ -105,6 +105,13 @@ class ActiveCall:
         contractor_id: str = "",
         ws_token: str = "",
         caller_name_trusted: bool = False,
+        owner_action: str = "",
+        owner_action_status: str = "",
+        owner_operation_id: str = "",
+        urgent: bool = False,
+        urgency_escalated: bool = False,
+        urgent_at: float = 0.0,
+        accepted: bool = False,
     ):
         self.call_sid = call_sid
         self.caller_phone = caller_phone
@@ -122,6 +129,13 @@ class ActiveCall:
         self.contractor_id = contractor_id
         self.ws_token = ws_token
         self.caller_name_trusted = caller_name_trusted is True
+        self.owner_action = owner_action
+        self.owner_action_status = owner_action_status
+        self.owner_operation_id = owner_operation_id
+        self.urgent = urgent is True
+        self.urgency_escalated = urgency_escalated is True
+        self.urgent_at = float(urgent_at or 0.0)
+        self.accepted = accepted is True
         self.state_updated_at = time.time()
 
     def to_dict(self) -> dict:
@@ -142,6 +156,13 @@ class ActiveCall:
             "contractor_id": self.contractor_id,
             "ws_token": self.ws_token,
             "caller_name_trusted": self.caller_name_trusted,
+            "owner_action": self.owner_action,
+            "owner_action_status": self.owner_action_status,
+            "owner_operation_id": self.owner_operation_id,
+            "urgent": self.urgent,
+            "urgency_escalated": self.urgency_escalated,
+            "urgent_at": self.urgent_at,
+            "accepted": self.accepted,
             "state_updated_at": time.time(),
         }
 
@@ -164,7 +185,13 @@ class ActiveCall:
             contractor_id=data.get("contractor_id", ""),
             ws_token=data.get("ws_token", ""),
             caller_name_trusted=data.get("caller_name_trusted", False) is True,
+            owner_action=data.get("owner_action", ""),
+            owner_action_status=data.get("owner_action_status", ""),
+            owner_operation_id=data.get("owner_operation_id", ""),
+            urgent=data.get("urgent", False) is True,
+            urgency_escalated=data.get("urgency_escalated", False) is True,
+            urgent_at=data.get("urgent_at", 0.0),
+            accepted=data.get("accepted", False) is True,
         )
         call.state_updated_at = data.get("state_updated_at", time.time())
-        call.accepted = data.get("accepted", False)
         return call

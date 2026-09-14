@@ -59,15 +59,20 @@ class AppState: ObservableObject {
         return ""
     }
 
+    // Session generation incremented on logout, contractor change, and credential change
+    var sessionGeneration: Int { CallSessionEpoch.shared.generation }
+
     // Onboarding
     @Published var isOnboarded: Bool = UserDefaults.standard.bool(forKey: "isOnboarded") {
         didSet {
+            if oldValue && !isOnboarded { CallSessionEpoch.shared.advance(); callLifecycleRevision += 1 }
             if inScreenshotFixture { return }
             DispatchQueue.main.async { UserDefaults.standard.set(self.isOnboarded, forKey: "isOnboarded") }
         }
     }
     @Published var contractorId: String = migrateToKeychain("contractorId") {
         didSet {
+            if oldValue != contractorId { CallSessionEpoch.shared.advance(); callLifecycleRevision += 1 }
             if inScreenshotFixture { return }
             if contractorId.isEmpty {
                 KeychainManager.shared.delete("contractorId")
@@ -153,7 +158,13 @@ class AppState: ObservableObject {
     @Published var selectedTab: AppTab = .recents
 
     // Active call
-    @Published var activeCallSid: String = ""
+    private(set) var callLifecycleRevision = 0
+    var callLifecycleSnapshot: CallLifecycleSnapshot { CallLifecycleSnapshot(callSid: activeCallSid, revision: callLifecycleRevision) }
+    @Published var notificationCallSid = ""
+    @Published var notificationCallMessage = ""
+    @Published var activeCallSid: String = "" {
+        didSet { if oldValue != activeCallSid { callLifecycleRevision += 1 } }
+    }
     @Published var activeCallerPhone: String = ""
     @Published var activeCallerName: String = ""
     @Published var showActiveCall: Bool = false
@@ -290,6 +301,15 @@ class AppState: ObservableObject {
     }
 
 
+    /// Current snapshot of authorization context
+    func currentAuthContext() -> CallAuthContext {
+        CallAuthContext(
+            contractorId: contractorId,
+            bearerToken: APIClient.shared.contractorToken,
+            generation: sessionGeneration
+        )
+    }
+
     /// Whether there's an active call (even if the full-screen view is dismissed)
     var hasActiveCall: Bool {
         !activeCallSid.isEmpty
@@ -297,11 +317,12 @@ class AppState: ObservableObject {
 
     /// Set active call state from any source (push notification, API check)
     func setActiveCall(callSid: String, callerPhone: String, callerName: String) {
+        let isSameCall = activeCallSid == callSid
         activeCallSid = callSid
         activeCallerPhone = callerPhone
         activeCallerName = callerName
-        callIgnored = false
-        if callStartTime == nil {
+        if !isSameCall {
+            callIgnored = false
             callStartTime = Date()
         }
     }
@@ -320,30 +341,27 @@ class AppState: ObservableObject {
 
     /// Check backend for an active call (used on app foreground)
     func checkForActiveCall() {
-        Task {
-            await MainActor.run {
-                self.refreshSecureStorageForActiveUse()
+        Task { @MainActor in
+            self.refreshSecureStorageForActiveUse()
+            let auth = currentAuthContext(), scope = callLifecycleSnapshot
+            guard auth.isValid else { return }
+            if !scope.callSid.isEmpty {
+                do {
+                    let status = try await APIClient.shared.getCallAction(callSid: scope.callSid,
+                        contractorId: auth.contractorId, bearerToken: auth.bearerToken, sessionGeneration: auth.generation)
+                    guard currentAuthContext() == auth, callLifecycleSnapshot == scope,
+                          let status, status.validNavigation(callSid: scope.callSid, contractorId: auth.contractorId) else { return }
+                    if status.isEnded { clearActiveCall(); return }
+                    if let text = status.transcript { transcriptLines = text.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) } }
+                    CallActionCoordinator.shared.observeStatus(status, auth: auth)
+                } catch { /* Unknown is not ended. */ }
+                return
             }
-            if let call = await APIClient.shared.getActiveCall() {
-                guard !call.callSid.isEmpty else { return }
-                await MainActor.run {
-                    if activeCallSid != call.callSid {
-                        setActiveCall(
-                            callSid: call.callSid,
-                            callerPhone: call.callerPhone,
-                            callerName: call.callerName
-                        )
-                    }
-                    // Parse transcript if available
-                    if !call.transcript.isEmpty {
-                        transcriptLines = call.transcript
-                            .components(separatedBy: "\n")
-                            .filter { !$0.isEmpty }
-                            .map { TranscriptLine(text: $0) }
-                    }
-                    showActiveCall = true
-                }
-            }
+            guard let call = await APIClient.shared.getActiveCall(authContext: auth), !call.callSid.isEmpty,
+                  currentAuthContext() == auth, callLifecycleSnapshot == scope else { return }
+            setActiveCall(callSid: call.callSid, callerPhone: call.callerPhone, callerName: call.callerName)
+            transcriptLines = call.transcript.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) }
+            showActiveCall = true
         }
     }
 

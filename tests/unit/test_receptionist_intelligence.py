@@ -409,7 +409,8 @@ async def test_voice_pipeline_silence_waits_for_owner_availability_before_prompt
     await pipeline._http_client.aclose()
 
     spoken = " ".join(text for _, text in transcripts)
-    assert "not available to take the call right now" in spoken
+    assert "not available right now" in spoken
+    assert "leave me a message" in spoken
     assert "Are you still there?" in spoken
     assert "hang up for now" in spoken
 

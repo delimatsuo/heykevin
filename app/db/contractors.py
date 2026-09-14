@@ -506,6 +506,7 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("customer_memory_capture_enabled", False)
     data.setdefault("customer_memory_personalization_enabled", False)
     data.setdefault("service_request_mutations_enabled", False)
+    data.setdefault("smart_interruption", True)
     # Generate a random 6-digit dial-in PIN
     data.setdefault("dial_in_pin", f"{secrets.randbelow(1000000):06d}")
     trial_start = data.setdefault("trial_start", time.time())

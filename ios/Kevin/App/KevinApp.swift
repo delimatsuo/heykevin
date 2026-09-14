@@ -19,7 +19,9 @@ struct KevinApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if AppStoreScreenshotFixtures.isEnabled {
+            if ProcessInfo.processInfo.environment["KEVIN_UNIT_TESTS"] == "1" {
+                Color.clear
+            } else if AppStoreScreenshotFixtures.isEnabled {
                 AppStoreScreenshotRoot()
                     .environmentObject(appState)
             } else {
@@ -44,6 +46,7 @@ struct KevinApp: App {
             }
         }
         .onChange(of: scenePhase) {
+            if ProcessInfo.processInfo.environment["KEVIN_UNIT_TESTS"] == "1" { return }
             if scenePhase == .active {
                 guard !AppStoreScreenshotFixtures.isEnabled else { return }
                 appState.refreshSecureStorageForActiveUse()

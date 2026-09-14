@@ -1,0 +1,4113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none';">
+  <title>Hey Kevin — Frontend Concept &amp; Design Study</title>
+  <style>
+    /* ==========================================================================
+       HEY KEVIN — FRONTEND CONCEPT DESIGN STUDY
+       Palette:
+         Canvas: #F6F3EC | Paper: #FFFEFA | Ink: #172924 | Secondary: #58675F
+         Cobalt: #3159C9 | Pickup Forest: #236147 | Amber: #8B530D on #FFF0D2
+         Red: #AA342C on #FDF0EE | Rules: #D8DED6
+       ========================================================================== */
+
+    :root {
+      --c-canvas: #F6F3EC;
+      --c-canvas-subtle: #EFEBE1;
+      --c-paper: #FFFEFA;
+      --c-paper-elevated: #FFFFFF;
+      --c-ink: #172924;
+      --c-ink-light: #2C423B;
+      --c-secondary: #58675F;
+      --c-secondary-light: #73837B;
+      --c-cobalt: #3159C9;
+      --c-cobalt-tint: #EBF0FA;
+      --c-cobalt-hover: #2647A3;
+      --c-forest: #236147;
+      --c-forest-tint: #E8F2EC;
+      --c-forest-hover: #1B4D38;
+      --c-amber: #8B530D;
+      --c-amber-bg: #FFF0D2;
+      --c-amber-border: #E8CBA0;
+      --c-red: #AA342C;
+      --c-red-bg: #FDF0EE;
+      --c-red-border: #ECCBC8;
+      --c-rules: #D8DED6;
+      --c-rules-subtle: #E8EDE6;
+
+      --f-editorial: Georgia, Cambria, "Times New Roman", Times, serif;
+      --f-sans: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+      --r-sm: 8px;
+      --r-md: 14px;
+      --r-lg: 20px;
+      --r-xl: 24px;
+      --r-xxl: 28px;
+      --r-phone: 42px;
+
+      --shadow-subtle: 0 1px 3px rgba(23, 41, 36, 0.04), 0 4px 12px rgba(23, 41, 36, 0.03);
+      --shadow-paper: 0 2px 6px rgba(23, 41, 36, 0.05), 0 12px 28px rgba(23, 41, 36, 0.04);
+      --shadow-phone: 0 24px 60px -12px rgba(23, 41, 36, 0.18), 0 4px 16px rgba(23, 41, 36, 0.06);
+      --shadow-modal: 0 20px 48px rgba(23, 41, 36, 0.22);
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--c-canvas);
+      color: var(--c-ink);
+      font-family: var(--f-sans);
+      font-size: calc(15px * var(--review-text-scale, 1));
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Accessibility Focus Styling */
+    :focus-visible {
+      outline: 2px solid var(--c-cobalt);
+      outline-offset: 2px;
+    }
+
+    button, input, select, textarea {
+      font: inherit;
+      color: inherit;
+    }
+
+    button {
+      cursor: pointer;
+      border: none;
+      background: none;
+      touch-action: manipulation;
+    }
+
+    /* Review Shell Layout */
+    .shell-container {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 32px 36px 48px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 32px;
+      flex: 1;
+    }
+
+    /* Review Header */
+    .shell-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--c-rules);
+      padding-bottom: 20px;
+    }
+
+    .brand-mark {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--c-ink);
+    }
+
+    .brand-wave {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 22px;
+    }
+
+    .brand-wave .pill {
+      width: 4px;
+      background-color: var(--c-ink);
+      border-radius: 99px;
+      transition: height 0.3s ease;
+    }
+    .brand-wave .pill:nth-child(1) { height: 8px; }
+    .brand-wave .pill:nth-child(2) { height: 18px; }
+    .brand-wave .pill:nth-child(3) { height: 22px; }
+    .brand-wave .pill:nth-child(4) { height: 12px; }
+
+    .brand-title {
+      font-size: calc(20px * var(--review-text-scale, 1));
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .concept-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: 99px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 500;
+      color: var(--c-secondary);
+      letter-spacing: 0.01em;
+    }
+
+    .concept-badge-dot {
+      width: 7px;
+      height: 7px;
+      background-color: var(--c-cobalt);
+      border-radius: 50%;
+    }
+
+    /* Main Review Workspace */
+    .shell-main {
+      display: grid;
+      grid-template-columns: 1fr 410px;
+      gap: 48px;
+      align-items: start;
+    }
+
+    /* Left Column: Editorial context and scenario control deck */
+    .deck-column {
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+      max-width: 680px;
+    }
+
+    .editorial-header {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .editorial-eyebrow {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--c-secondary);
+    }
+
+    .editorial-headline {
+      font-family: var(--f-editorial);
+      font-size: calc(42px * var(--review-text-scale, 1));
+      line-height: 1.15;
+      font-weight: 400;
+      color: var(--c-ink);
+      letter-spacing: -0.02em;
+    }
+
+    .editorial-lead {
+      font-size: calc(16px * var(--review-text-scale, 1));
+      line-height: 1.55;
+      color: var(--c-secondary);
+    }
+
+    /* Scenario Deck Controls */
+    .control-deck {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-xl);
+      padding: 24px;
+      box-shadow: var(--shadow-subtle);
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .control-deck-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--c-rules-subtle);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--c-secondary);
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .control-label {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+    }
+
+    .select-input {
+      width: 100%;
+      min-height: 44px;
+      padding: 10px 14px;
+      background-color: var(--c-canvas);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-ink);
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 24 24' fill='none' stroke='%2358675F' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+      cursor: pointer;
+    }
+    .select-input:focus {
+      border-color: var(--c-cobalt);
+      outline: none;
+    }
+
+    .deck-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .deck-btn {
+      min-height: 44px;
+      padding: 10px 18px;
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+    }
+
+    .deck-btn-primary {
+      background-color: var(--c-ink);
+      color: var(--c-paper);
+    }
+    .deck-btn-primary:hover {
+      background-color: var(--c-ink-light);
+    }
+
+    .deck-btn-outline {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      color: var(--c-ink);
+    }
+    .deck-btn-outline:hover {
+      background-color: var(--c-canvas);
+    }
+
+    .deck-btn-accent {
+      background-color: var(--c-forest-tint);
+      color: var(--c-forest);
+      border: 1px solid var(--c-forest);
+    }
+    .deck-btn-accent:hover {
+      background-color: var(--c-forest);
+      color: var(--c-paper);
+    }
+
+    /* Notification Simulation in Review Shell */
+    .notif-section {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-top: 14px;
+      border-top: 1px solid var(--c-rules-subtle);
+    }
+
+    .notif-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .notif-toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+    }
+
+    .notif-toggle-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--c-cobalt);
+      cursor: pointer;
+    }
+
+    .notif-banner-card {
+      background-color: #1F2D28;
+      color: #FFFEFA;
+      border-radius: var(--r-lg);
+      padding: 14px 16px;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      cursor: pointer;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+      text-align: left;
+      width: 100%;
+    }
+    .notif-banner-card:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+    }
+
+    .notif-icon-box {
+      width: 36px;
+      height: 36px;
+      background-color: var(--c-forest);
+      border-radius: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .notif-text {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .notif-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: #A4B8B0;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .notif-title {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: #FFFFFF;
+    }
+
+    .notif-body {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: #C8D6D0;
+      line-height: 1.35;
+    }
+
+    .notif-hint {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: #839990;
+      margin-top: 4px;
+      font-style: italic;
+    }
+
+    /* Rationale Card */
+    .rationale-card {
+      background-color: var(--c-canvas-subtle);
+      border-radius: var(--r-lg);
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      line-height: 1.5;
+      color: var(--c-secondary);
+      border: 1px solid var(--c-rules);
+    }
+
+    .rationale-title {
+      font-weight: 600;
+      color: var(--c-ink);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Right Column: Native Phone Mockup Preview */
+    .phone-column {
+      display: flex;
+      justify-content: center;
+      position: sticky;
+      top: 32px;
+    }
+
+    .phone-frame {
+      width: 390px;
+      height: 844px;
+      background-color: var(--c-canvas);
+      border: 10px solid #1C2421;
+      border-radius: var(--r-phone);
+      box-shadow: var(--shadow-phone);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Phone Status Bar */
+    .status-bar {
+      height: 44px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+      flex-shrink: 0;
+      z-index: 50;
+      user-select: none;
+    }
+
+    .island-pill {
+      width: 108px;
+      height: 26px;
+      background-color: #1C2421;
+      border-radius: 99px;
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      top: 9px;
+    }
+
+    .status-icons {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Phone App Container */
+    .app-screen {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+      background-color: var(--c-canvas);
+    }
+
+    .app-content-scroll {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 16px 20px 100px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      scroll-behavior: smooth;
+    }
+
+    /* Global Persistent Live Call Strip */
+    .global-live-strip {
+      background-color: var(--c-ink);
+      color: var(--c-paper);
+      padding: 10px 16px;
+      border-radius: var(--r-md);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      box-shadow: var(--shadow-paper);
+      flex-shrink: 0;
+      margin-bottom: 4px;
+      animation: fadeIn 0.2s ease-out;
+    }
+
+    .live-strip-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .live-strip-wave {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      height: 14px;
+    }
+    .live-strip-wave .pill {
+      width: 3px;
+      background-color: #4ADE80;
+      border-radius: 99px;
+      animation: wavePulse 1.2s infinite ease-in-out;
+    }
+    .live-strip-wave .pill:nth-child(1) { height: 6px; animation-delay: 0.1s; }
+    .live-strip-wave .pill:nth-child(2) { height: 14px; animation-delay: 0.3s; }
+    .live-strip-wave .pill:nth-child(3) { height: 10px; animation-delay: 0.2s; }
+
+    .live-strip-text {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .live-strip-actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .strip-btn {
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .strip-btn-view {
+      background-color: rgba(255, 255, 255, 0.15);
+      color: #FFFFFF;
+    }
+    .strip-btn-view:hover {
+      background-color: rgba(255, 255, 255, 0.22);
+    }
+    .strip-btn-pickup {
+      background-color: var(--c-forest);
+      color: #FFFFFF;
+    }
+    .strip-btn-pickup:hover {
+      background-color: var(--c-forest-hover);
+    }
+
+    /* Screen Headers */
+    .view-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .view-title-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .view-date {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 500;
+      color: var(--c-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .view-title {
+      font-size: calc(30px * var(--review-text-scale, 1));
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      color: var(--c-ink);
+      line-height: 1.1;
+    }
+
+    .header-btn {
+      min-width: 44px;
+      min-height: 44px;
+      border-radius: 99px;
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--c-ink);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      padding: 0 14px;
+      box-shadow: var(--shadow-subtle);
+      transition: background-color 0.15s ease;
+    }
+    .header-btn:hover {
+      background-color: var(--c-canvas-subtle);
+    }
+
+    /* Warning / Setup Notice Row */
+    .setup-notice-card {
+      background-color: var(--c-amber-bg);
+      border: 1px solid var(--c-amber-border);
+      border-radius: var(--r-md);
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      cursor: pointer;
+      text-decoration: none;
+      color: var(--c-amber);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 500;
+      min-height: 44px;
+      transition: background-color 0.15s ease;
+    }
+    .setup-notice-card:hover {
+      background-color: #FFE6B8;
+    }
+
+    .setup-notice-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Live Hero Feature Card (Waiting / Screening on Calls tab) */
+    .live-hero-card {
+      background-color: var(--c-ink);
+      color: var(--c-paper);
+      border-radius: var(--r-xl);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      box-shadow: var(--shadow-paper);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .live-hero-badge-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .live-stage-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 99px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .live-stage-badge.waiting {
+      background-color: rgba(35, 97, 71, 0.35);
+      color: #6EE7B7;
+      border: 1px solid rgba(110, 231, 183, 0.3);
+    }
+    .live-stage-badge.screening {
+      background-color: rgba(49, 89, 201, 0.35);
+      color: #93C5FD;
+      border: 1px solid rgba(147, 197, 253, 0.3);
+    }
+
+    .live-hero-wave {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 16px;
+    }
+    .live-hero-wave .pill {
+      width: 3px;
+      background-color: #6EE7B7;
+      border-radius: 99px;
+      animation: wavePulse 1.4s infinite ease-in-out;
+    }
+    .live-hero-wave .pill:nth-child(1) { height: 6px; animation-delay: 0.1s; }
+    .live-hero-wave .pill:nth-child(2) { height: 16px; animation-delay: 0.3s; }
+    .live-hero-wave .pill:nth-child(3) { height: 12px; animation-delay: 0.2s; }
+    .live-hero-wave .pill:nth-child(4) { height: 8px; animation-delay: 0.4s; }
+
+    .live-hero-body {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .live-hero-caller {
+      font-size: calc(22px * var(--review-text-scale, 1));
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #FFFFFF;
+      line-height: 1.2;
+    }
+
+    .live-hero-phone {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: #9FB2A9;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .live-hero-reason {
+      font-size: calc(17px * var(--review-text-scale, 1));
+      font-weight: 500;
+      line-height: 1.4;
+      color: #E2ECE7;
+      margin-top: 4px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .live-hero-actions {
+      display: grid;
+      grid-template-columns: 1fr 1.3fr;
+      gap: 10px;
+      padding-top: 4px;
+    }
+
+    .btn-live-view {
+      min-height: 48px;
+      background-color: rgba(255, 255, 255, 0.12);
+      color: #FFFFFF;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background-color 0.15s ease;
+    }
+    .btn-live-view:hover {
+      background-color: rgba(255, 255, 255, 0.18);
+    }
+
+    .btn-live-pickup {
+      min-height: 48px;
+      background-color: var(--c-forest);
+      color: #FFFFFF;
+      border-radius: var(--r-md);
+      font-size: calc(15px * var(--review-text-scale, 1));
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: background-color 0.15s ease;
+    }
+    .btn-live-pickup:hover {
+      background-color: var(--c-forest-hover);
+    }
+
+    /* Filter Pills */
+    .filter-bar {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+
+    .filter-pill {
+      min-height: 44px;
+      padding: 8px 16px;
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: 99px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-secondary);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+    .filter-pill.active {
+      background-color: var(--c-ink);
+      color: var(--c-paper);
+      border-color: var(--c-ink);
+    }
+
+    .filter-count {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      opacity: 0.85;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Search Box */
+    .search-box {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-input {
+      width: 100%;
+      min-height: 44px;
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-md);
+      padding: 8px 44px 8px 38px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-ink);
+      transition: border-color 0.15s ease;
+    }
+    .search-input:focus {
+      border-color: var(--c-cobalt);
+      outline: none;
+    }
+
+    .search-icon-left {
+      position: absolute;
+      left: 12px;
+      color: var(--c-secondary);
+      pointer-events: none;
+    }
+
+    .search-clear-btn {
+      position: absolute;
+      right: 4px;
+      min-width: 44px;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--c-secondary);
+      border-radius: 50%;
+    }
+
+    /* Journal Call List */
+    .journal-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .journal-card {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-lg);
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: var(--shadow-subtle);
+      cursor: pointer;
+      text-align: left;
+      transition: transform 0.1s ease, border-color 0.15s ease;
+      position: relative;
+    }
+    .journal-card:hover {
+      border-color: #B4C2B9;
+      transform: translateY(-1px);
+    }
+    .journal-card.unread {
+      border-left: 4px solid var(--c-forest);
+    }
+
+    .card-top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .caller-identity {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .caller-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background-color: var(--c-canvas-subtle);
+      border: 1px solid var(--c-rules);
+      color: var(--c-ink);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .journal-card.unread .caller-avatar {
+      background-color: var(--c-forest-tint);
+      color: var(--c-forest);
+      border-color: rgba(35, 97, 71, 0.2);
+    }
+
+    .caller-name-block {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .caller-name {
+      font-size: calc(17px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .caller-time {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 500;
+      color: var(--c-secondary);
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+
+    .card-reason {
+      font-size: calc(16px * var(--review-text-scale, 1));
+      color: var(--c-ink-light);
+      line-height: 1.45;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 6px;
+      border-top: 1px solid var(--c-rules-subtle);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+    }
+
+    .outcome-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+    }
+    .outcome-tag.picked-up {
+      background-color: var(--c-forest-tint);
+      color: var(--c-forest);
+    }
+    .outcome-tag.message {
+      background-color: var(--c-canvas-subtle);
+      color: var(--c-secondary);
+    }
+    .outcome-tag.appointment {
+      background-color: var(--c-amber-bg);
+      color: var(--c-amber);
+    }
+    .outcome-tag.spam {
+      background-color: var(--c-red-bg);
+      color: var(--c-red);
+    }
+
+    /* Skeleton Loading State */
+    .skeleton-card {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-lg);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .skeleton-line {
+      height: 14px;
+      background: linear-gradient(90deg, #EBE6DC 25%, #F4F0E8 50%, #EBE6DC 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 4px;
+    }
+    .skeleton-line.w-40 { width: 40%; height: 18px; }
+    .skeleton-line.w-80 { width: 80%; }
+    .skeleton-line.w-60 { width: 60%; }
+
+    /* Empty & Error States */
+    .empty-state {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-xl);
+      padding: 36px 24px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .empty-icon-wrap {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background-color: var(--c-canvas);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--c-secondary);
+    }
+
+    .empty-title {
+      font-size: calc(17px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-ink);
+    }
+
+    .empty-desc {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+      max-width: 260px;
+      line-height: 1.45;
+    }
+
+    .error-banner {
+      background-color: var(--c-red-bg);
+      border: 1px solid var(--c-red-border);
+      border-radius: var(--r-md);
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--c-red);
+      font-size: calc(14px * var(--review-text-scale, 1));
+    }
+
+    /* LIVE CALL SCREEN */
+    .live-view-container {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .sub-nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .back-btn {
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: calc(15px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-cobalt);
+      padding: 0 4px;
+    }
+
+    .live-caller-hero {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-xl);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-shadow: var(--shadow-subtle);
+    }
+
+    .live-caller-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .live-caller-name {
+      font-size: calc(22px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-ink);
+      line-height: 1.2;
+    }
+
+    .live-caller-number {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .live-reason-box {
+      background-color: var(--c-canvas);
+      border-radius: var(--r-md);
+      padding: 10px 12px;
+      font-size: calc(15px * var(--review-text-scale, 1));
+      font-weight: 500;
+      color: var(--c-ink);
+      border-left: 3px solid var(--c-cobalt);
+    }
+
+    .live-stage-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+    }
+    .live-stage-indicator.waiting { color: var(--c-forest); }
+    .live-stage-indicator.screening { color: var(--c-cobalt); }
+    .live-stage-indicator.joining { color: var(--c-amber); }
+    .live-stage-indicator.on-call { color: var(--c-forest); }
+    .live-stage-indicator.taking-message { color: var(--c-amber); }
+    .live-stage-indicator.ended { color: var(--c-secondary); }
+
+    /* Live Transcript Feed */
+    .transcript-box {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .transcript-bubble {
+      max-width: 92%;
+      padding: 10px 14px;
+      border-radius: var(--r-lg);
+      font-size: calc(15px * var(--review-text-scale, 1));
+      line-height: 1.45;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+    }
+
+    .bubble-speaker {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .bubble-kevin {
+      align-self: flex-end;
+      background-color: var(--c-cobalt-tint);
+      color: var(--c-ink);
+      border-bottom-right-radius: 4px;
+    }
+    .bubble-kevin .bubble-speaker {
+      color: var(--c-cobalt);
+    }
+
+    .bubble-caller {
+      align-self: flex-start;
+      background-color: var(--c-paper);
+      color: var(--c-ink);
+      border: 1px solid var(--c-rules);
+      border-bottom-left-radius: 4px;
+    }
+    .bubble-caller .bubble-speaker {
+      color: var(--c-secondary);
+    }
+
+    /* Live Action Bar */
+    .live-action-bar {
+      position: sticky;
+      bottom: 0;
+      background-color: var(--c-canvas);
+      padding: 12px 0 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .live-action-grid {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr;
+      gap: 10px;
+    }
+
+    .btn-take-msg {
+      min-height: 52px;
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+    }
+    .btn-take-msg:hover {
+      background-color: var(--c-canvas-subtle);
+    }
+    .btn-take-msg:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .btn-pickup-main {
+      min-height: 52px;
+      background-color: var(--c-forest);
+      color: #FFFFFF;
+      border-radius: var(--r-md);
+      font-size: calc(16px * var(--review-text-scale, 1));
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn-pickup-main:hover {
+      background-color: var(--c-forest-hover);
+    }
+    .btn-pickup-main:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .on-call-controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1.2fr;
+      gap: 8px;
+    }
+
+    .btn-call-ctrl {
+      min-height: 48px;
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .btn-call-ctrl.active {
+      background-color: var(--c-cobalt-tint);
+      border-color: var(--c-cobalt);
+      color: var(--c-cobalt);
+    }
+
+    .btn-end-call {
+      min-height: 48px;
+      background-color: var(--c-red);
+      color: #FFFFFF;
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    /* CALL DETAIL SCREEN */
+    .detail-container {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .detail-card {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-xl);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: var(--shadow-subtle);
+    }
+
+    .detail-header {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .detail-caller-title {
+      font-size: calc(22px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-ink);
+    }
+
+    .detail-meta-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Appointment Request Card */
+    .appt-box {
+      background-color: var(--c-amber-bg);
+      border: 1px solid var(--c-amber-border);
+      border-radius: var(--r-lg);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .appt-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-amber);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .appt-time {
+      font-size: calc(16px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-ink);
+    }
+
+    .appt-subtext {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: #6C4208;
+      line-height: 1.45;
+    }
+
+    .appt-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .btn-confirm-appt {
+      min-height: 44px;
+      background-color: var(--c-forest);
+      color: #FFFFFF;
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 700;
+      padding: 0 16px;
+      flex: 1;
+    }
+    .btn-confirm-appt:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .btn-decline-appt {
+      min-height: 44px;
+      background-color: transparent;
+      border: 1px solid var(--c-amber-border);
+      color: var(--c-amber);
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      padding: 0 14px;
+    }
+    .btn-decline-appt:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .appt-confirmed-badge {
+      background-color: var(--c-forest-tint);
+      border: 1px solid rgba(35, 97, 71, 0.3);
+      color: var(--c-forest);
+      border-radius: var(--r-md);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+    }
+    .appt-confirmed-badge strong {
+      font-size: calc(15px * var(--review-text-scale, 1));
+    }
+
+    /* KEVIN ASSISTANT & SETTINGS SCREENS */
+    .kevin-hero-card {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-xl);
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: var(--shadow-subtle);
+    }
+
+    .kevin-big-avatar {
+      width: 54px;
+      height: 54px;
+      border-radius: 16px;
+      background-color: var(--c-ink);
+      color: #FFFFFF;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .kevin-hero-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .kevin-hero-name {
+      font-size: calc(18px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-ink);
+    }
+
+    .kevin-hero-line {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .section-card {
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-xl);
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: var(--shadow-subtle);
+    }
+
+    .section-title {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .setting-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--c-rules-subtle);
+    }
+    .setting-item:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .setting-item-label {
+      font-size: calc(15px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+    }
+
+    .setting-item-val {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+      line-height: 1.45;
+    }
+
+    .btn-edit-setting {
+      min-height: 44px;
+      background-color: var(--c-canvas);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .btn-edit-setting:hover {
+      background-color: var(--c-canvas-subtle);
+    }
+
+    /* Floating Tab Navigation Bar */
+    .tab-nav-bar {
+      position: absolute;
+      bottom: 18px;
+      left: 20px;
+      right: 20px;
+      background-color: rgba(255, 254, 250, 0.94);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--c-rules);
+      border-radius: 99px;
+      padding: 6px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      box-shadow: var(--shadow-paper);
+      z-index: 60;
+    }
+
+    .tab-btn {
+      min-height: 46px;
+      border-radius: 99px;
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+      position: relative;
+    }
+    .tab-btn.active {
+      background-color: var(--c-ink);
+      color: var(--c-paper);
+    }
+
+    .tab-badge-dot {
+      width: 6px;
+      height: 6px;
+      background-color: var(--c-forest);
+      border-radius: 50%;
+    }
+
+    /* Modals & Dialogs */
+    dialog.app-dialog {
+      border: none;
+      background: transparent;
+      padding: 20px;
+      max-width: 480px;
+      width: 100%;
+      margin: auto;
+    }
+    dialog.app-dialog::backdrop {
+      background-color: rgba(23, 41, 36, 0.5);
+      backdrop-filter: blur(4px);
+    }
+
+    .dialog-content {
+      background-color: var(--c-paper);
+      border-radius: var(--r-xxl);
+      padding: 24px;
+      box-shadow: var(--shadow-modal);
+      border: 1px solid var(--c-rules);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .dialog-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .dialog-title {
+      font-size: calc(18px * var(--review-text-scale, 1));
+      font-weight: 700;
+      color: var(--c-ink);
+    }
+
+    .dialog-close {
+      min-width: 44px;
+      min-height: 44px;
+      border-radius: 50%;
+      background-color: var(--c-canvas);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--c-secondary);
+    }
+    .dialog-close:hover {
+      background-color: var(--c-canvas-subtle);
+    }
+
+    .dialog-body {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-ink-light);
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .dialog-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      padding-top: 8px;
+    }
+
+    .form-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .form-label {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      font-weight: 600;
+      color: var(--c-ink);
+    }
+    .form-input, .form-textarea {
+      padding: 10px 12px;
+      background-color: var(--c-canvas);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-md);
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-ink);
+      min-height: 44px;
+    }
+    .form-textarea {
+      min-height: 84px;
+      resize: vertical;
+    }
+    .form-input:focus, .form-textarea:focus {
+      border-color: var(--c-cobalt);
+      outline: none;
+    }
+
+    /* Screening Preferences Checkbox Rows */
+    .pref-checkbox-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 0;
+      min-height: 44px;
+      cursor: pointer;
+    }
+    .pref-checkbox-row input[type="checkbox"] {
+      width: 22px;
+      height: 22px;
+      margin-top: 2px;
+      accent-color: var(--c-forest);
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .pref-checkbox-label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: calc(15px * var(--review-text-scale, 1));
+      color: var(--c-ink);
+    }
+    .pref-checkbox-desc {
+      font-size: calc(14px * var(--review-text-scale, 1));
+      color: var(--c-secondary);
+      line-height: 1.45;
+    }
+
+    /* Mobile Review Controls Disclosure */
+    .mobile-review-drawer {
+      display: none;
+      background-color: var(--c-paper);
+      border: 1px solid var(--c-rules);
+      border-radius: var(--r-lg);
+      padding: 14px 16px;
+      box-shadow: var(--shadow-subtle);
+    }
+    .mobile-review-drawer summary {
+      font-weight: 600;
+      color: var(--c-ink);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 44px;
+      gap: 10px;
+    }
+
+    /* Keyframe Animations */
+    @keyframes wavePulse {
+      0%, 100% { transform: scaleY(0.5); }
+      50% { transform: scaleY(1); }
+    }
+
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Reduced Motion */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+
+    /* Responsive Adaptations */
+    @media (max-width: 1023px) {
+      .shell-main {
+        grid-template-columns: 1fr;
+      }
+      .phone-column {
+        position: static;
+        width: 100%;
+      }
+      .deck-column {
+        max-width: 100%;
+      }
+    }
+
+    @media (max-width: 767px) {
+      .shell-container {
+        padding: 16px;
+        gap: 20px;
+      }
+      .editorial-headline {
+        font-size: calc(28px * var(--review-text-scale, 1));
+      }
+      .deck-column {
+        display: none; /* Collapses into mobile drawer */
+      }
+      .mobile-review-drawer {
+        display: block;
+      }
+      .phone-frame {
+        width: 100%;
+        max-width: 100%;
+        height: auto;
+        min-height: 680px;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+      }
+      .status-bar {
+        display: none;
+      }
+    }
+
+    /* Review refinement: calm journal, readable type, a thin device frame. */
+    :root { --c-secondary-light: #58675F; }
+    .shell-container { max-width: 1200px; padding: 24px 36px 40px; gap: 24px; }
+    .shell-header { padding-bottom: 18px; }
+    .shell-main { grid-template-columns: minmax(300px, 450px) 410px; gap: clamp(40px, 7vw, 100px); justify-content: center; }
+    .deck-column { gap: 24px; padding-top: 18px; }
+    .editorial-header { gap: 18px; }
+    .editorial-eyebrow { font-size: calc(14px * var(--review-text-scale, 1)); letter-spacing: .12em; }
+    .editorial-headline { font-size: clamp(44px, 4.8vw, 62px); line-height: 1.04; letter-spacing: -.045em; }
+    .editorial-lead { font-size: calc(17px * var(--review-text-scale, 1)); line-height: 1.6; max-width: 36ch; }
+    .control-deck { border-radius: 20px; padding: 20px; gap: 16px; box-shadow: none; }
+    .control-deck-title { font-size: calc(15px * var(--review-text-scale, 1)); padding-bottom: 0; border: 0; }
+    .control-deck-title > span:last-child { display: none; }
+    .control-label { font-size: calc(14px * var(--review-text-scale, 1)); }
+    .select-input { max-width: 100%; font-size: calc(14px * var(--review-text-scale, 1)); }
+    .deck-actions { gap: 8px; }
+    .deck-btn { min-height: 44px; font-size: calc(14px * var(--review-text-scale, 1)); }
+    .notif-header { flex-wrap: wrap; gap: 4px 12px; }
+    .notif-toggle-row { min-height: 44px; }
+    .notif-hint { margin-top: 8px; }
+    .rationale-card { background: transparent; border: 0; box-shadow: none; padding: 0 2px; }
+    .rationale-title { font-size: calc(14px * var(--review-text-scale, 1)); }
+    .rationale-card p { font-size: calc(14px * var(--review-text-scale, 1)); line-height: 1.65; }
+    .phone-column { top: 24px; }
+    .phone-frame { width: 390px; height: min(844px, calc(100dvh - 126px)); min-height: 550px; border: 2px solid #B9C5BA; border-radius: 34px; box-shadow: 0 24px 70px -24px rgba(23,41,36,.23), 0 2px 8px rgba(23,41,36,.05); position: relative; }
+    .status-bar { height: 34px; }
+    .island-pill { width: 78px; height: 18px; }
+    .app-screen, .app-content-scroll { min-height: 0; }
+    .app-content-scroll { gap: 16px; padding: 14px 20px 24px; }
+    .app-content-scroll > * { flex-shrink: 0; }
+    .view-header { min-height: 56px; }
+    .view-title { font-weight: 600; letter-spacing: -.04em; }
+    .header-btn { width: auto; min-width: 44px; min-height: 44px; padding: 0 14px; border-radius: 99px; font-size: calc(14px * var(--review-text-scale, 1)); }
+    .setup-notice-card { min-height: 44px; font-size: calc(14px * var(--review-text-scale, 1)); padding: 10px 12px; border-radius: 12px; }
+    .live-hero-card { border-radius: 24px; gap: 14px; padding: 18px; }
+    .live-hero-phone { display: none; }
+    .live-hero-caller { font-weight: 600; }
+    .live-hero-reason { font-size: calc(17px * var(--review-text-scale, 1)); margin: 2px 0 0; padding: 0; border: 0; font-weight: 400; }
+    .live-stage-badge { font-size: calc(14px * var(--review-text-scale, 1)); text-transform: none; letter-spacing: .01em; padding: 4px 8px; }
+    .live-stage-badge.waiting { background: rgba(255,255,255,.08); color: #D4EADF; border-color: rgba(255,255,255,.15); }
+    .live-hero-wave .pill { background-color: #B6DAC6; }
+    .filter-bar { gap: 6px; }
+    .filter-pill { min-height: 44px; padding: 7px 12px; font-size: calc(14px * var(--review-text-scale, 1)); background: transparent; }
+    .filter-count { font-size: calc(14px * var(--review-text-scale, 1)); opacity: 1; }
+    .search-input { min-height: 44px; padding-right: 48px; }
+    .search-clear-btn { min-width: 44px; min-height: 44px; right: 0; }
+    .journal-list { gap: 0; }
+    .journal-card, .journal-card.unread { background: transparent; border: 0; border-bottom: 1px solid var(--c-rules); border-radius: 0; padding: 18px 0; box-shadow: none; gap: 10px; }
+    .journal-card:hover { transform: none; background: rgba(255,254,250,.6); }
+    .journal-card.unread .caller-avatar { background: var(--c-canvas-subtle); border-color: var(--c-rules); color: var(--c-ink); }
+    .journal-card.unread .caller-name::after { content: ''; display: inline-block; vertical-align: middle; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--c-cobalt); }
+    .caller-name { font-size: calc(17px * var(--review-text-scale, 1)); }
+    .caller-time { font-size: calc(14px * var(--review-text-scale, 1)); }
+    .card-reason { font-size: calc(16px * var(--review-text-scale, 1)); line-height: 1.45; }
+    .card-footer { border: 0; padding-top: 0; font-size: calc(14px * var(--review-text-scale, 1)); gap: 8px; }
+    .outcome-tag { font-size: calc(14px * var(--review-text-scale, 1)); background: transparent !important; padding: 0; }
+    .tab-nav-bar { position: relative; bottom: auto; left: auto; right: auto; margin: 0 16px 14px; flex-shrink: 0; padding: 5px; box-shadow: 0 3px 12px rgba(23,41,36,.05); }
+    .tab-btn { min-height: 46px; }
+    .strip-btn { min-height: 44px; font-size: calc(14px * var(--review-text-scale, 1)); padding: 8px 10px; }
+    .global-live-strip { gap: 8px; }
+    .global-strip-main { min-width: 0; }
+    .detail-caller-title, .live-caller-name { overflow-wrap: anywhere; }
+    .transcript-bubble { font-size: calc(16px * var(--review-text-scale, 1)); line-height: 1.5; max-width: 92%; }
+    .bubble-speaker { font-size: calc(14px * var(--review-text-scale, 1)); }
+    .dialog-close { min-width: 44px; min-height: 44px; }
+    .form-input, .form-textarea { min-height: 44px; }
+    .phone-frame input, .phone-frame select, .phone-frame textarea { font-size: calc(16px * var(--review-text-scale, 1)); }
+    .setting-item-val, .kevin-hero-line, .detail-meta-row, .appt-subtext, .appt-header, .appt-confirmed-badge, .btn-edit-setting, .btn-confirm-appt, .btn-decline-appt, .btn-call-ctrl { font-size: calc(14px * var(--review-text-scale, 1)); }
+    .mobile-review-drawer summary { min-height: 44px; gap: 10px; }
+    @media (min-width: 768px) and (max-width: 1023px) {
+      .shell-main { grid-template-columns: minmax(260px, 1fr) 390px; gap: 28px; }
+      .shell-container { padding-left: 24px; padding-right: 24px; }
+      .editorial-headline { font-size: calc(44px * var(--review-text-scale, 1)); }
+      .control-deck { padding: 16px; }
+    }
+    @media (max-width: 767px) {
+      .shell-container { padding: 12px 16px 20px; gap: 12px; }
+      .shell-header { flex-wrap: wrap; gap: 10px; padding-bottom: 12px; }
+      .brand-title { font-size: calc(18px * var(--review-text-scale, 1)); }
+      .concept-badge { font-size: calc(14px * var(--review-text-scale, 1)); padding: 4px 8px; }
+      .shell-main { display: block; }
+      .phone-column { position: static; }
+      .phone-frame { width: 100%; height: auto; min-height: calc(100dvh - 166px); max-width: 100%; border: 0; border-radius: 0; box-shadow: none; overflow: visible; }
+      .app-screen { overflow: visible; }
+      .app-content-scroll { overflow: visible; padding: 12px 0 28px; }
+      .tab-nav-bar { position: sticky; bottom: 12px; margin: 0 0 8px; z-index: 60; }
+      .mobile-review-drawer { padding: 0 14px; border-radius: 14px; box-shadow: none; }
+      .mobile-review-drawer[open] { padding-bottom: 16px; }
+      .caller-name { white-space: normal; overflow-wrap: anywhere; }
+      .card-top-row { align-items: start; }
+      .card-footer { flex-wrap: wrap; }
+      .global-live-strip { border-radius: 14px; flex-wrap: wrap; }
+      .live-action-grid { grid-template-columns: 1fr 1fr; }
+      .dialog-content { padding: 20px; }
+    }
+
+    /* A review-only text-size control; product layout remains naturally flowing. */
+    html[data-large-text="true"] .phone-frame,
+    html[data-large-text="true"] .app-dialog { --review-text-scale: 2; }
+    html[data-large-text="true"] .view-header,
+    html[data-large-text="true"] .card-top-row,
+    html[data-large-text="true"] .detail-meta-row,
+    html[data-large-text="true"] .global-live-strip { flex-wrap: wrap; }
+    html[data-large-text="true"] .live-hero-actions,
+    html[data-large-text="true"] .live-action-grid,
+    html[data-large-text="true"] .on-call-controls { grid-template-columns: 1fr; }
+    html[data-large-text="true"] .appt-actions { flex-direction: column; }
+    html[data-large-text="true"] .caller-name { white-space: normal; overflow-wrap: anywhere; }
+    html[data-large-text="true"] .filter-bar { flex-wrap: wrap; overflow: visible; }
+    html[data-large-text="true"] .phone-frame button { padding-top: 10px; padding-bottom: 10px; }
+    html[data-large-text="true"] .dialog-content { overflow-wrap: anywhere; }
+    html[data-large-text="true"] .phone-frame { min-height: 550px; }
+    .live-hero-reason, .live-reason, .setting-item-val, .detail-caller-title,
+    .live-caller-name, .appt-time, .appt-subtext { overflow-wrap: anywhere; }
+    .live-strip-text { display: flex; flex-direction: column; white-space: normal; overflow: visible; gap: 2px; overflow-wrap: anywhere; }
+    .live-strip-text > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    html[data-large-text="true"] .live-strip-text > span:first-child { overflow: visible; white-space: normal; }
+    .error-banner .strip-btn { color: var(--c-red); background: var(--c-paper); border: 1px solid var(--c-red-border); }
+  </style>
+</head>
+<body>
+
+  <div class="shell-container">
+    <!-- Desktop & Review Header -->
+    <header class="shell-header">
+      <a href="#" class="brand-mark" aria-label="Hey Kevin Concept Home">
+        <div class="brand-wave" aria-hidden="true">
+          <span class="pill"></span>
+          <span class="pill"></span>
+          <span class="pill"></span>
+          <span class="pill"></span>
+        </div>
+        <span class="brand-title">Hey Kevin</span>
+      </a>
+      <div class="concept-badge">
+        <span class="concept-badge-dot"></span>
+        Concept 01 · Fictional calls
+      </div>
+    </header>
+
+    <!-- Mobile Drawer for Review Controls -->
+    <details class="mobile-review-drawer" id="mobileDrawer">
+      <summary>
+        <span>Explore this concept</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div style="margin-top: 16px; display: flex; flex-direction: column; gap: 14px;" id="mobileDrawerContent">
+        <!-- Replicated from control deck -->
+      </div>
+    </details>
+
+    <main class="shell-main">
+      <!-- Left Column: Editorial Rationale & Review Controls -->
+      <section class="deck-column" aria-label="Review Scenario Deck">
+        <div class="editorial-header">
+          <span class="editorial-eyebrow">A new rhythm for your calls</span>
+          <h1 class="editorial-headline">A little quieter.<br>A lot clearer.</h1>
+          <p class="editorial-lead">
+            Know who’s calling and why. Pick up when it matters, or let Kevin take a message. Your calls, with a little more breathing room.
+          </p>
+        </div>
+
+        <!-- Interactive Scenario Control Deck -->
+        <div class="control-deck">
+          <div class="control-deck-title">
+            <span>Try it for yourself</span>
+            <span style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-secondary); font-weight: normal;">Generation <span id="genCount">1</span></span>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label" for="scenarioSelect">Choose a moment</label>
+            <select id="scenarioSelect" class="select-input" aria-label="Select demo scenario">
+              <option value="normal-waiting">1. Normal waiting call (Default · Maya Chen)</option>
+              <option value="screening-replay">2. Screening replay (Fresh screening → Waiting)</option>
+              <option value="pickup-failure">3. Failed pickup &amp; retry</option>
+              <option value="stale-notification">4. Stale alert (Ended Call A + Active Call B)</option>
+              <option value="pref-save-failure">5. Behavior save failure &amp; retry</option>
+              <option value="appt-confirm-failure">6. Appointment confirm failure &amp; retry</option>
+              <option value="long-content">7. Long caller name &amp; complex reason</option>
+              <option value="quiet-inbox">8. Quiet inbox (No active call, journal present)</option>
+              <option value="empty-journal">9. Empty journal (First launch state)</option>
+              <option value="loading-state">10. Loading skeleton state</option>
+              <option value="error-state">11. Retained journal error &amp; retry</option>
+            </select>
+          </div>
+
+          <label class="notif-toggle-row"><input type="checkbox" data-review-text> Larger app text (200%)</label>
+
+          <div class="deck-actions">
+            <button type="button" class="deck-btn deck-btn-primary" id="btnReplayCall">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+              New call
+            </button>
+            <button type="button" class="deck-btn deck-btn-outline" id="btnEndCaller">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>
+              Caller hangs up
+            </button>
+            <button type="button" class="deck-btn deck-btn-outline" id="btnResetDemo">
+              Start over
+            </button>
+          </div>
+
+          <!-- Notification Preview Widget -->
+          <div class="notif-section">
+            <div class="notif-header">
+              <span class="control-label">Notification preview</span>
+              <label class="notif-toggle-row">
+                <input type="checkbox" id="toggleNotifDetails" checked>
+                <span>Details visible</span>
+              </label>
+            </div>
+
+            <button type="button" class="notif-banner-card" id="notifBannerBtn" aria-label="Simulated incoming notification banner. Tap to open call.">
+              <div class="notif-icon-box" aria-hidden="true">
+                <div class="brand-wave">
+                  <span class="pill" style="background:#FFF; height:6px;"></span>
+                  <span class="pill" style="background:#FFF; height:12px;"></span>
+                  <span class="pill" style="background:#FFF; height:16px;"></span>
+                  <span class="pill" style="background:#FFF; height:8px;"></span>
+                </div>
+              </div>
+              <div class="notif-text">
+                <div class="notif-meta">
+                  <span>Hey Kevin</span>
+                  <span>Now</span>
+                </div>
+                <div class="notif-title" id="notifTitle">Maya Chen</div>
+                <div class="notif-body" id="notifBody">The kitchen sink is leaking again. · Waiting for pickup</div>
+                <div class="notif-hint">Fictional notification · Tap to open</div>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Rationale & State Invariants -->
+        <div class="rationale-card">
+          <div class="rationale-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            The panel’s proposal
+          </div>
+          <p>
+            <strong>Calls</strong> brings the conversation into focus.<br>
+            <strong>Kevin</strong> puts you in charge of how he answers.<br>
+            Everything here is fictional and stays in this page.
+          </p>
+        </div>
+      </section>
+
+      <!-- Right Column: Interactive Mobile App Mockup -->
+      <section class="phone-column" aria-label="Interactive Phone Preview">
+        <div class="phone-frame">
+          <!-- iPhone Status Bar -->
+          <div class="status-bar" aria-hidden="true">
+            <span>9:41</span>
+            <div class="island-pill"></div>
+            <div class="status-icons">
+              <svg width="14" height="12" viewBox="0 0 16 12" fill="currentColor"><path d="M1 9.5h2v2.5H1v-2.5zm4-3h2v5.5H5V6.5zm4-3h2v8.5H9V3.5zm4-3.5h2v12h-2V0z"/></svg>
+              <svg width="14" height="12" viewBox="0 0 16 12" fill="currentColor"><path d="M8 2.5C4.8 2.5 2 4.2.4 6.7L8 15.6l7.6-8.9C14 4.2 11.2 2.5 8 2.5z"/></svg>
+              <svg width="20" height="12" viewBox="0 0 24 12" fill="currentColor"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><rect x="3" y="3" width="12" height="6" rx="1.5"/><path d="M21 4.5v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </div>
+          </div>
+
+          <!-- Application Root Screen -->
+          <div class="app-screen" id="appScreen">
+            <!-- App Content Rendered Dynamically by State Reducer -->
+          </div>
+
+          <!-- Bottom Floating 2-Tab Navigation -->
+          <nav class="tab-nav-bar" id="tabNav" aria-label="Primary Navigation">
+            <button type="button" class="tab-btn active" id="tabBtnCalls" aria-label="Calls Tab">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+              <span>Calls</span>
+              <span class="tab-badge-dot" id="callsUnreadBadge" style="display:inline-block;"></span>
+            </button>
+            <button type="button" class="tab-btn" id="tabBtnKevin" aria-label="Kevin Assistant Tab">
+              <div class="brand-wave" style="height:14px; gap:2px;">
+                <span class="pill" style="width:2.5px; height:5px; background:currentColor;"></span>
+                <span class="pill" style="width:2.5px; height:12px; background:currentColor;"></span>
+                <span class="pill" style="width:2.5px; height:14px; background:currentColor;"></span>
+                <span class="pill" style="width:2.5px; height:8px; background:currentColor;"></span>
+              </div>
+              <span>Kevin</span>
+            </button>
+          </nav>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Reusable Concept Dialog Container -->
+  <dialog class="app-dialog" id="conceptDialog" aria-labelledby="dialogTitle">
+    <div class="dialog-content">
+      <div class="dialog-header">
+        <h2 class="dialog-title" id="dialogTitle">Dialog Title</h2>
+        <button type="button" class="dialog-close" id="dialogCloseBtn" aria-label="Close dialog">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="dialog-body" id="dialogBody">
+        <!-- Dynamically injected -->
+      </div>
+      <div class="dialog-footer" id="dialogFooter">
+        <button type="button" class="deck-btn deck-btn-primary" id="dialogConfirmBtn">Understood</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==========================================================================
+       STANDALONE JAVASCRIPT STATE ENGINE & SCENARIOS
+       ========================================================================== -->
+  <script>
+    (function () {
+      'use strict';
+
+      // -------------------------------------------------------------------------
+      // HTML Escaping Utility
+      // -------------------------------------------------------------------------
+      function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      // -------------------------------------------------------------------------
+      // Initial Data Fixtures
+      // -------------------------------------------------------------------------
+      function getInitialCalls() {
+        return [
+          {
+            id: 'call-maya-01',
+            caller: 'Maya Chen',
+            phone: '+1 202 555 0142',
+            reason: 'The kitchen sink is leaking again.',
+            time: '9:41 AM',
+            duration: '0:48',
+            read: false,
+            spam: false,
+            stage: 'waiting', // 'screening' | 'waiting' | 'joining' | 'on-call' | 'taking-message' | 'ended'
+            outcome: 'Screening live',
+            summary: 'Caller reports active water leaking under the double kitchen sink into the lower cabinet. Advised turning off the shut-off valve if pooling accelerates.',
+            transcript: [
+              { speaker: 'Kevin', role: 'ai', text: 'Hi, thanks for calling River Plumbing. This is Kevin, Alex\'s assistant. How can I help you today?', time: '9:41 AM' },
+              { speaker: 'Maya Chen', role: 'caller', text: 'Hi! My kitchen sink is leaking again under the cabinet and water is starting to pool. Can Alex come take a look?', time: '9:41 AM' },
+              { speaker: 'Kevin', role: 'ai', text: 'I\'ll notify Alex right away. One moment while I see if he can pick up.', time: '9:41 AM' }
+            ],
+            appointment: null,
+            lastError: null
+          },
+          {
+            id: 'call-david-02',
+            caller: 'David Vance',
+            phone: '+1 202 555 0118',
+            reason: 'Wants quote for water heater replacement tomorrow morning.',
+            time: '8:15 AM',
+            duration: '1m 45s',
+            read: false,
+            spam: false,
+            stage: 'ended',
+            outcome: 'Appointment requested',
+            summary: 'Customer\'s 50-gallon water heater is 12 years old and rusting at base. Requested on-site quote between 9:00 AM and 11:00 AM tomorrow.',
+            transcript: [
+              { speaker: 'Kevin', role: 'ai', text: 'Thanks for calling River Plumbing. How can I help you?', time: '8:15 AM' },
+              { speaker: 'David Vance', role: 'caller', text: 'Hi, our water heater started leaking at the bottom. Looking for a replacement estimate tomorrow morning if possible.', time: '8:15 AM' },
+              { speaker: 'Kevin', role: 'ai', text: 'I can note that request for Alex. What time window works best?', time: '8:16 AM' },
+              { speaker: 'David Vance', role: 'caller', text: 'Between 9 and 11 AM would be perfect. Address is 412 Maple Ave NW.', time: '8:16 AM' }
+            ],
+            appointment: {
+              id: 'appt-david-02',
+              status: 'pending', // 'pending' | 'confirmed' | 'declined'
+              proposedTime: 'Tomorrow (Tue, Sep 15) · 9:00 AM – 11:00 AM',
+              serviceType: '50-gallon water heater replacement estimate',
+              address: '412 Maple Ave NW',
+              confirming: false,
+              error: null
+            },
+            lastError: null
+          },
+          {
+            id: 'call-sarah-03',
+            caller: 'Sarah Lin',
+            phone: '+1 202 555 0173',
+            reason: 'Rescheduling Friday maintenance inspection to next Tuesday.',
+            time: 'Yesterday',
+            duration: '1m 10s',
+            read: true,
+            spam: false,
+            stage: 'ended',
+            outcome: 'Screened · Left message',
+            summary: 'Sarah called to reschedule the annual boiler inspection from Friday 3 PM to Tuesday Sep 22 at 10 AM. No active leak.',
+            transcript: [
+              { speaker: 'Kevin', role: 'ai', text: 'River Plumbing, Kevin speaking.', time: 'Yesterday' },
+              { speaker: 'Sarah Lin', role: 'caller', text: 'Hi, I need to reschedule our boiler inspection to next Tuesday morning if that works.', time: 'Yesterday' },
+              { speaker: 'Kevin', role: 'ai', text: 'Got it. I\'ve recorded Tuesday morning as your preference and notified Alex.', time: 'Yesterday' }
+            ],
+            appointment: null,
+            lastError: null
+          },
+          {
+            id: 'call-spam-04',
+            caller: 'Unknown Commercial',
+            phone: '+1 202 555 0199',
+            reason: 'Robocall: Automated commercial energy audit promotion.',
+            time: 'Yesterday',
+            duration: '0:22',
+            read: true,
+            spam: true,
+            stage: 'ended',
+            outcome: 'Screened · Spam blocked',
+            summary: 'Automated robocall offering commercial LED lighting retrofits. Kevin identified synthetic pattern and safely ended screening.',
+            transcript: [
+              { speaker: 'Kevin', role: 'ai', text: 'River Plumbing, how can I help you?', time: 'Yesterday' },
+              { speaker: 'Unknown Commercial', role: 'caller', text: 'Press 1 now to receive your municipal utility energy discount rebate voucher...', time: 'Yesterday' },
+              { speaker: 'Kevin', role: 'ai', text: 'This line is for plumbing service dispatch. Disconnecting.', time: 'Yesterday' }
+            ],
+            appointment: null,
+            lastError: null
+          },
+          {
+            id: 'call-marcus-05',
+            caller: 'Marcus Miller',
+            phone: '+1 202 555 0135',
+            reason: 'Follow-up on bathroom rough-in invoice #1042.',
+            time: 'Sep 12',
+            duration: '2m 15s',
+            read: true,
+            spam: false,
+            stage: 'ended',
+            outcome: 'Screened · Picked up',
+            summary: 'Marcus inquired about invoice payment confirmation and signed inspection card. Alex picked up at 11:31 AM.',
+            transcript: [
+              { speaker: 'Kevin', role: 'ai', text: 'River Plumbing, Kevin speaking.', time: 'Sep 12' },
+              { speaker: 'Marcus Miller', role: 'caller', text: 'Hey Alex, Marcus here about the invoice for the rough-in inspection.', time: 'Sep 12' },
+              { speaker: 'Kevin', role: 'ai', text: 'One moment Marcus, connecting you to Alex now.', time: 'Sep 12' }
+            ],
+            appointment: null,
+            lastError: null
+          },
+          {
+            id: 'call-elena-06',
+            caller: 'Elena Rostova',
+            phone: '+1 202 555 0161',
+            reason: 'Checking availability for radiator bleeding next week.',
+            time: 'Sep 11',
+            duration: '1m 05s',
+            read: false,
+            spam: false,
+            stage: 'ended',
+            outcome: 'Screened · Left message',
+            summary: 'Elena asked about cost and scheduling for bleeding 6 cast iron radiators before winter heating startup.',
+            transcript: [
+              { speaker: 'Kevin', role: 'ai', text: 'River Plumbing. How can I help you?', time: 'Sep 11' },
+              { speaker: 'Elena Rostova', role: 'caller', text: 'Hi! Wondering if you have time next week to bleed radiators in my townhouse.', time: 'Sep 11' }
+            ],
+            appointment: null,
+            lastError: null
+          }
+        ];
+      }
+
+      // -------------------------------------------------------------------------
+      // Core State
+      // -------------------------------------------------------------------------
+      const state = {
+        generation: 1,
+        activeTimers: [],
+        activeTab: 'calls', // 'calls' | 'kevin'
+        view: 'journal', // 'journal' | 'live' | 'detail' | 'settings'
+        settingsOriginTab: 'calls', // 'calls' | 'kevin'
+        selectedCallId: null,
+        activeCallId: 'call-maya-01',
+        notificationTargetId: 'call-maya-01',
+        notificationDetailsVisible: true,
+        scenario: 'normal-waiting',
+        filter: 'all', // 'all' | 'unread' | 'spam'
+        searchQuery: '',
+        accountMode: 'business', // 'business' | 'personal'
+        listState: 'normal', // 'normal' | 'loading' | 'error' | 'empty'
+        // Error scenario attempt counters
+        pickupAttempts: 0,
+        prefSaveAttempts: 0,
+        apptConfirmAttempts: 0,
+        // Modal async operation tracking
+        modalOpCounter: 0,
+        appointmentOpCounter: 0,
+        activeModalOpId: null,
+        // Live on-call states
+        isMuted: false,
+        isSpeaker: false,
+        // Preferences & Profiles (pinned booleans)
+        screeningPrefs: {
+          screenAllCalls: false, // off means contacts ring through directly
+          urgentAlerts: true,    // immediate push notification for active emergencies
+          blockRobocalls: true   // silently drop automated robocalls
+        },
+        businessProfile: {
+          name: 'River Plumbing & Heating',
+          phone: '+1 202 555 0124',
+          greeting: 'Thanks for calling River Plumbing. Kevin speaking, how can I help you today?',
+          hours: 'Mon–Fri: 8:00 AM – 6:00 PM · Emergency service on-call',
+          knowledge: 'Residential plumbing, gas line piping, drain clearing, water heaters, boiler repair.'
+        },
+        calls: getInitialCalls()
+      };
+
+      // -------------------------------------------------------------------------
+      // Generation-Guarded Timer Helpers
+      // -------------------------------------------------------------------------
+      function scheduleGuardedTimer(callback, delayMs) {
+        const currentGen = state.generation;
+        const timerId = setTimeout(() => {
+          if (state.generation !== currentGen) return;
+          callback();
+        }, delayMs);
+        state.activeTimers.push(timerId);
+        return timerId;
+      }
+
+      function clearAllTimers() {
+        state.activeTimers.forEach(id => clearTimeout(id));
+        state.activeTimers = [];
+      }
+
+      function bumpGeneration() {
+        clearAllTimers();
+        state.generation += 1;
+        state.activeModalOpId = null;
+        const genEl = document.getElementById('genCount');
+        if (genEl) genEl.textContent = String(state.generation);
+      }
+
+      // -------------------------------------------------------------------------
+      // Shared Guarded Reducer Helpers
+      // -------------------------------------------------------------------------
+      function endCallRecord(call) {
+        if (!call || call.stage === 'ended') return;
+        call.stage = 'ended';
+        call.read = true;
+        call.lastError = null;
+        if (state.activeCallId === call.id) {
+          state.activeCallId = null;
+        }
+        if (call.outcome === 'Screening live' || call.outcome === 'Screened · Taking message' || call.outcome === 'Screening') {
+          call.outcome = 'Screened · Left message';
+        }
+      }
+
+      // -------------------------------------------------------------------------
+      // Reusable Phase-Aware Global Live Strip
+      // -------------------------------------------------------------------------
+      function renderGlobalLiveStrip() {
+        if (!state.activeCallId) return '';
+        const activeCall = state.calls.find(c => c.id === state.activeCallId);
+        if (!activeCall || activeCall.stage === 'ended') return '';
+
+        let phaseLabel = '';
+        let showPickup = false;
+
+        switch (activeCall.stage) {
+          case 'screening':
+            phaseLabel = 'Screening live';
+            showPickup = true;
+            break;
+          case 'waiting':
+            phaseLabel = 'Waiting for pickup';
+            showPickup = true;
+            break;
+          case 'joining':
+            phaseLabel = 'Connecting...';
+            showPickup = false;
+            break;
+          case 'on-call':
+            phaseLabel = 'Connected';
+            showPickup = false;
+            break;
+          case 'taking-message':
+            phaseLabel = 'Taking message';
+            showPickup = false;
+            break;
+          default:
+            return '';
+        }
+
+        return `
+          <div class="global-live-strip" role="region" aria-label="Active Screened Call: ${escapeHtml(activeCall.caller)}">
+            <div class="live-strip-left">
+              <div class="live-strip-wave" aria-hidden="true">
+                <span class="pill"></span><span class="pill"></span><span class="pill"></span>
+              </div>
+              <div class="live-strip-text">
+                <span style="font-weight: 700;">${escapeHtml(activeCall.caller)}</span>
+                <span style="opacity: 0.85; font-weight: 400; font-size: calc(14px * var(--review-text-scale, 1));"> · ${phaseLabel}</span>
+              </div>
+            </div>
+            <div class="live-strip-actions">
+              <button type="button" class="strip-btn strip-btn-view" data-action="view-live" data-id="${activeCall.id}">View</button>
+              ${showPickup ? `
+                <button type="button" class="strip-btn strip-btn-pickup" data-action="pickup" data-id="${activeCall.id}">Pick up</button>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }
+
+      // -------------------------------------------------------------------------
+      // State Dispatcher / Reducer
+      // -------------------------------------------------------------------------
+      function dispatch(action, payload) {
+        switch (action) {
+          case 'SET_TAB':
+            state.activeTab = payload.tab;
+            if (payload.tab === 'calls') {
+              state.view = 'journal';
+            } else if (payload.tab === 'kevin') {
+              state.view = 'kevin';
+            }
+            render({ intentionalNavigation: true });
+            break;
+
+          case 'OPEN_SETTINGS':
+            state.settingsOriginTab = state.activeTab;
+            state.view = 'settings';
+            render({ intentionalNavigation: true });
+            break;
+
+          case 'BACK_FROM_SETTINGS':
+            state.activeTab = state.settingsOriginTab || 'calls';
+            state.view = (state.activeTab === 'kevin') ? 'kevin' : 'journal';
+            render({ intentionalNavigation: true });
+            break;
+
+          case 'BACK_TO_CALLS':
+            state.activeTab = 'calls';
+            state.view = 'journal';
+            render({ intentionalNavigation: true });
+            break;
+
+          case 'VIEW_CALL_DETAIL': {
+            const callId = payload.callId;
+            const target = state.calls.find(c => c.id === callId);
+            if (target) {
+              target.read = true;
+              state.selectedCallId = callId;
+              state.activeTab = 'calls';
+              state.view = 'detail';
+              render({ intentionalNavigation: true });
+            }
+            break;
+          }
+
+          case 'VIEW_LIVE_CALL': {
+            const callId = payload.callId || state.activeCallId;
+            const target = state.calls.find(c => c.id === callId);
+            if (target) {
+              target.read = true;
+              state.selectedCallId = callId;
+              state.activeTab = 'calls';
+              state.view = 'live';
+              render({ intentionalNavigation: true });
+            }
+            break;
+          }
+
+          case 'OPEN_NOTIFICATION': {
+            const targetId = state.notificationTargetId;
+            const targetCall = state.calls.find(c => c.id === targetId);
+            if (targetCall) {
+              targetCall.read = true;
+              state.activeTab = 'calls';
+              state.selectedCallId = targetId;
+              if (targetCall.stage === 'ended') {
+                state.view = 'detail';
+              } else {
+                state.view = 'live';
+              }
+              render({ intentionalNavigation: true });
+            }
+            break;
+          }
+
+          case 'SET_FILTER':
+            state.filter = payload.filter;
+            render();
+            break;
+
+          case 'SET_SEARCH':
+            state.searchQuery = payload.query;
+            render();
+            break;
+
+          case 'PICKUP_CALL': {
+            const callId = payload.callId;
+            // Entry Guards: callId must equal activeCallId, current record identity, phase screening or waiting
+            if (callId !== state.activeCallId) return;
+            const call = state.calls.find(c => c.id === callId);
+            if (!call || (call.stage !== 'screening' && call.stage !== 'waiting')) return;
+
+            call.stage = 'joining';
+            call.lastError = null;
+            state.activeTab = 'calls';
+            state.view = 'live';
+            state.selectedCallId = callId;
+            render({ intentionalNavigation: true });
+
+            const myGen = state.generation;
+            scheduleGuardedTimer(() => {
+              // Completion Guards: same generation, same active ID, same record, and still joining
+              if (state.generation !== myGen) return;
+              if (state.activeCallId !== callId) return;
+              if (state.calls.find(c => c.id === callId) !== call) return;
+              if (call.stage !== 'joining') return; // Ending during joining leaves it permanently ended
+
+              if (state.scenario === 'pickup-failure' && state.pickupAttempts === 0) {
+                state.pickupAttempts += 1;
+                call.stage = 'waiting';
+                call.lastError = 'Connection failed. Please retry.';
+                render();
+              } else {
+                call.stage = 'on-call';
+                call.lastError = null;
+                call.outcome = 'Screened · Picked up';
+                call.read = true;
+                render();
+              }
+            }, 1200);
+            break;
+          }
+
+          case 'TAKE_MESSAGE': {
+            const callId = payload.callId;
+            // Entry Guards: active ID and answerable phase
+            if (callId !== state.activeCallId) return;
+            const call = state.calls.find(c => c.id === callId);
+            if (!call || (call.stage !== 'screening' && call.stage !== 'waiting')) return;
+
+            call.stage = 'taking-message';
+            call.outcome = 'Screened · Taking message';
+            state.activeTab = 'calls';
+            state.view = 'live';
+            state.selectedCallId = callId;
+            render();
+
+            const myGen = state.generation;
+            scheduleGuardedTimer(() => {
+              // Completion Checks: generation, identity, taking-message phase
+              if (state.generation !== myGen) return;
+              if (state.activeCallId !== callId) return;
+              if (state.calls.find(c => c.id === callId) !== call) return;
+              if (call.stage !== 'taking-message') return;
+
+              call.transcript.push({
+                speaker: call.caller,
+                role: 'caller',
+                text: 'Please ask Alex to call me back as soon as he is free. It is pretty wet under here.',
+                time: 'Just now'
+              });
+              render();
+            }, 2000);
+            break;
+          }
+
+          case 'END_CALL': {
+            const callId = payload.callId;
+            const call = state.calls.find(c => c.id === callId);
+            if (!call) return;
+            endCallRecord(call);
+            render();
+            break;
+          }
+
+          case 'SIMULATE_CALLER_END': {
+            if (state.activeCallId) {
+              const activeCall = state.calls.find(c => c.id === state.activeCallId);
+              if (activeCall) {
+                endCallRecord(activeCall);
+                render();
+              }
+            }
+            break;
+          }
+
+          case 'TOGGLE_MUTE':
+            state.isMuted = !state.isMuted;
+            render();
+            break;
+
+          case 'TOGGLE_SPEAKER':
+            state.isSpeaker = !state.isSpeaker;
+            render();
+            break;
+
+          case 'CONFIRM_APPOINTMENT': {
+            // Appointment Entry Guards: business mode, record identity, pending status, not already confirming
+            if (state.accountMode !== 'business') return;
+            const call = state.calls.find(c => c.id === payload.callId);
+            if (!call || !call.appointment || call.appointment.status !== 'pending' || call.appointment.confirming) return;
+
+            call.appointment.confirming = true;
+            const appointmentOpId = ++state.appointmentOpCounter;
+            call.appointment.operationId = appointmentOpId;
+            call.appointment.error = null;
+            render();
+
+            const myGen = state.generation;
+            const reqIdentity = call.appointment;
+            scheduleGuardedTimer(() => {
+              // Completion Checks: generation, request identity, mode, pending status, operation ownership
+              if (state.generation !== myGen) return;
+              if (state.accountMode !== 'business') return;
+              if (state.calls.find(c => c.id === call.id) !== call) return;
+              if (call.appointment !== reqIdentity) return;
+              if (call.appointment.operationId !== appointmentOpId) return;
+              if (call.appointment.status !== 'pending') return;
+              if (!call.appointment.confirming) return;
+
+              call.appointment.confirming = false;
+              call.appointment.operationId = null;
+
+              if (state.scenario === 'appt-confirm-failure' && state.apptConfirmAttempts === 0) {
+                state.apptConfirmAttempts += 1;
+                call.appointment.error = 'Unable to record confirmation · Please retry.';
+                render();
+              } else {
+                call.appointment.status = 'confirmed';
+                call.appointment.error = null;
+                call.outcome = 'Appointment confirmed';
+                render();
+              }
+            }, 1000);
+            break;
+          }
+
+          case 'DECLINE_APPOINTMENT': {
+            if (state.accountMode !== 'business') return;
+            const call = state.calls.find(c => c.id === payload.callId);
+            // Reducer rejects decline if an operation is currently confirming
+            if (!call || !call.appointment || call.appointment.confirming || call.appointment.status !== 'pending') return;
+            call.appointment.status = 'declined';
+            call.appointment.error = null;
+            render();
+            break;
+          }
+
+          case 'SWITCH_MODE': {
+            state.accountMode = payload.mode;
+            // Mode switch invalidates pending business operations cleanly
+            state.calls.forEach(c => {
+              if (c.appointment) {
+                c.appointment.confirming = false;
+                c.appointment.operationId = null;
+                c.appointment.error = null;
+              }
+            });
+            render();
+            break;
+          }
+
+          case 'SELECT_SCENARIO': {
+            applyScenario(payload.scenario);
+            break;
+          }
+
+          case 'REPLAY_INCOMING': {
+            applyScenario('screening-replay');
+            break;
+          }
+
+          case 'RESET_DEMO': {
+            applyScenario('normal-waiting');
+            break;
+          }
+
+          case 'TOGGLE_NOTIF_DETAILS': {
+            state.notificationDetailsVisible = payload.visible;
+            updateNotificationBanner();
+            break;
+          }
+        }
+      }
+
+      // -------------------------------------------------------------------------
+      // Scenario Applicator
+      // -------------------------------------------------------------------------
+      function applyScenario(scenarioKey) {
+        bumpGeneration();
+        state.scenario = scenarioKey;
+        state.pickupAttempts = 0;
+        state.prefSaveAttempts = 0;
+        state.apptConfirmAttempts = 0;
+        state.listState = 'normal';
+        state.searchQuery = '';
+        state.filter = 'all';
+        state.view = 'journal';
+        state.activeTab = 'calls';
+        state.settingsOriginTab = 'calls';
+        state.calls = getInitialCalls();
+        state.screeningPrefs = {
+          screenAllCalls: false,
+          urgentAlerts: true,
+          blockRobocalls: true
+        };
+
+        const scenarioSelect = document.getElementById('scenarioSelect');
+        if (scenarioSelect) scenarioSelect.value = scenarioKey;
+        const mobileSelect = document.getElementById('scenarioSelectMobile');
+        if (mobileSelect) mobileSelect.value = scenarioKey;
+
+        switch (scenarioKey) {
+          case 'normal-waiting': {
+            state.activeCallId = 'call-maya-01';
+            state.notificationTargetId = 'call-maya-01';
+            const maya = state.calls.find(c => c.id === 'call-maya-01');
+            if (maya) {
+              maya.stage = 'waiting';
+              maya.outcome = 'Screening live';
+            }
+            break;
+          }
+
+          case 'screening-replay': {
+            state.activeCallId = 'call-maya-01';
+            state.notificationTargetId = 'call-maya-01';
+            const maya = state.calls.find(c => c.id === 'call-maya-01');
+            if (maya) {
+              maya.stage = 'screening';
+              maya.outcome = 'Screening live';
+              maya.transcript = [
+                { speaker: 'Kevin', role: 'ai', text: 'Hi, thanks for calling River Plumbing. This is Kevin, Alex\'s assistant. How can I help you today?', time: 'Just now' }
+              ];
+            }
+            state.view = 'live';
+            state.selectedCallId = 'call-maya-01';
+
+            const myGen = state.generation;
+            scheduleGuardedTimer(() => {
+              if (state.generation !== myGen) return;
+              if (maya && maya.stage === 'screening') {
+                maya.transcript.push({
+                  speaker: 'Maya Chen',
+                  role: 'caller',
+                  text: 'Hi! My kitchen sink is leaking again under the cabinet and water is starting to pool.',
+                  time: 'Just now'
+                });
+                render();
+              }
+            }, 1800);
+
+            scheduleGuardedTimer(() => {
+              if (state.generation !== myGen) return;
+              if (maya && maya.stage === 'screening') {
+                maya.transcript.push({
+                  speaker: 'Kevin',
+                  role: 'ai',
+                  text: 'I\'ll notify Alex right away. One moment while I see if he can pick up.',
+                  time: 'Just now'
+                });
+                maya.stage = 'waiting';
+                render();
+              }
+            }, 3600);
+            break;
+          }
+
+          case 'pickup-failure': {
+            state.activeCallId = 'call-maya-01';
+            state.notificationTargetId = 'call-maya-01';
+            state.view = 'live';
+            state.selectedCallId = 'call-maya-01';
+            const maya = state.calls.find(c => c.id === 'call-maya-01');
+            if (maya) {
+              maya.stage = 'waiting';
+            }
+            break;
+          }
+
+          case 'stale-notification': {
+            // Target of alert is Ended Call A (Marcus Miller), while Active Call B (Maya Chen) is active!
+            state.notificationTargetId = 'call-marcus-05';
+            state.activeCallId = 'call-maya-01';
+            const marcus = state.calls.find(c => c.id === 'call-marcus-05');
+            if (marcus) marcus.stage = 'ended';
+            const maya = state.calls.find(c => c.id === 'call-maya-01');
+            if (maya) maya.stage = 'waiting';
+            break;
+          }
+
+          case 'pref-save-failure': {
+            state.activeTab = 'kevin';
+            state.view = 'kevin';
+            break;
+          }
+
+          case 'appt-confirm-failure': {
+            state.activeTab = 'calls';
+            state.view = 'detail';
+            state.selectedCallId = 'call-david-02';
+            break;
+          }
+
+          case 'long-content': {
+            state.activeCallId = 'call-long-07';
+            state.notificationTargetId = 'call-long-07';
+            const longCall = {
+              id: 'call-long-07',
+              caller: 'Dr. Elizabeth Montgomery-Braithwaite, MD (St. Jude Children\'s Hospital Care)',
+              phone: '+1 202 555 0188',
+              reason: 'Urgent inquiry regarding commercial backflow preventer annual certification and emergency pressure release valve servicing for Building B main mechanical room.',
+              time: '10:02 AM',
+              duration: '0:55',
+              read: false,
+              spam: false,
+              stage: 'waiting',
+              outcome: 'Screening live',
+              summary: 'Caller is hospital facility coordinator requesting priority backflow preventer overhaul and compliance sign-off for clinical wing.',
+              transcript: [
+                { speaker: 'Kevin', role: 'ai', text: 'River Plumbing & Heating. Kevin speaking, how can I assist you?', time: '10:02 AM' },
+                { speaker: 'Dr. Montgomery-Braithwaite', role: 'caller', text: 'Hello, this is Dr. Montgomery-Braithwaite from St. Jude Children\'s Hospital. We require immediate inspection of the secondary boiler pressure relief valve.', time: '10:02 AM' }
+              ],
+              appointment: null,
+              lastError: null
+            };
+            state.calls.unshift(longCall);
+            break;
+          }
+
+          case 'quiet-inbox': {
+            state.activeCallId = null;
+            state.notificationTargetId = 'call-maya-01';
+            state.calls.forEach(c => {
+              c.stage = 'ended';
+              if (c.outcome === 'Screening live') c.outcome = 'Screened · Left message';
+            });
+            break;
+          }
+
+          case 'empty-journal': {
+            state.activeCallId = null;
+            state.calls = [];
+            state.listState = 'empty';
+            break;
+          }
+
+          case 'loading-state': {
+            state.listState = 'loading';
+            break;
+          }
+
+          case 'error-state': {
+            state.listState = 'error';
+            break;
+          }
+        }
+
+        updateNotificationBanner();
+        render({ intentionalNavigation: true });
+      }
+
+      // -------------------------------------------------------------------------
+      // Notification Banner Synchronization & Redaction
+      // -------------------------------------------------------------------------
+      function updateNotificationBanner() {
+        const notifTitle = document.getElementById('notifTitle');
+        const notifBody = document.getElementById('notifBody');
+        const targetCall = state.calls.find(c => c.id === state.notificationTargetId);
+
+        if (!notifTitle || !notifBody) return;
+
+        if (!state.notificationDetailsVisible) {
+          // Redaction removes caller name AND reason
+          if (targetCall) {
+            if (targetCall.stage === 'ended') {
+              notifTitle.textContent = 'Hey Kevin';
+              notifBody.textContent = 'Call ended · Tap to view journal';
+            } else if (targetCall.stage === 'waiting' || targetCall.stage === 'screening') {
+              notifTitle.textContent = 'Hey Kevin · Incoming Call';
+              notifBody.textContent = 'Screening unknown caller... · Tap to view';
+            } else if (targetCall.stage === 'joining') {
+              notifTitle.textContent = 'Hey Kevin · Active Call';
+              notifBody.textContent = 'Connecting to call... · Tap to view';
+            } else if (targetCall.stage === 'on-call') {
+              notifTitle.textContent = 'Hey Kevin · Active Call';
+              notifBody.textContent = 'Call connected · Tap to view';
+            } else if (targetCall.stage === 'taking-message') {
+              notifTitle.textContent = 'Hey Kevin · Active Call';
+              notifBody.textContent = 'Recording caller message... · Tap to view';
+            }
+          } else {
+            notifTitle.textContent = 'Hey Kevin';
+            notifBody.textContent = 'No active calls · Tap to view journal';
+          }
+        } else if (targetCall) {
+          notifTitle.textContent = targetCall.caller;
+          let phaseText = '';
+          if (targetCall.stage === 'ended') phaseText = 'Call ended';
+          else if (targetCall.stage === 'screening') phaseText = 'Screening live';
+          else if (targetCall.stage === 'waiting') phaseText = 'Waiting for pickup';
+          else if (targetCall.stage === 'joining') phaseText = 'Connecting...';
+          else if (targetCall.stage === 'on-call') phaseText = 'Connected';
+          else if (targetCall.stage === 'taking-message') phaseText = 'Taking message';
+          notifBody.textContent = `${targetCall.reason} · ${phaseText}`;
+        } else {
+          notifTitle.textContent = 'Hey Kevin';
+          notifBody.textContent = 'No active screened calls at this time.';
+        }
+        const mobileTitle = document.getElementById('notifTitleMobile');
+        const mobileBody = document.getElementById('notifBodyMobile');
+        if (mobileTitle) mobileTitle.textContent = notifTitle.textContent;
+        if (mobileBody) mobileBody.textContent = notifBody.textContent;
+        ['toggleNotifDetails', 'toggleNotifDetailsMobile'].forEach(id => {
+          const input = document.getElementById(id);
+          if (input) input.checked = state.notificationDetailsVisible;
+        });
+      }
+
+      // -------------------------------------------------------------------------
+      // Render Functions & Scroll/Focus Preservation
+      // -------------------------------------------------------------------------
+      function render(options) {
+        const intentionalNav = options && options.intentionalNavigation;
+
+        // Preserve search input focus & caret selection
+        const searchInputBefore = document.getElementById('journalSearchInput');
+        const isSearchFocused = searchInputBefore && document.activeElement === searchInputBefore;
+        const selStart = isSearchFocused ? searchInputBefore.selectionStart : null;
+        const selEnd = isSearchFocused ? searchInputBefore.selectionEnd : null;
+
+        // Preserve scroll position on same-view updates
+        const scrollContainerBefore = document.querySelector('.app-content-scroll');
+        const savedScrollTop = (scrollContainerBefore && !intentionalNav) ? scrollContainerBefore.scrollTop : 0;
+
+        // Update Tab Navigation State
+        const tabBtnCalls = document.getElementById('tabBtnCalls');
+        const tabBtnKevin = document.getElementById('tabBtnKevin');
+        const unreadBadge = document.getElementById('callsUnreadBadge');
+
+        const isCallsTabActive = (state.activeTab === 'calls');
+        const isKevinTabActive = (state.activeTab === 'kevin');
+
+        if (tabBtnCalls) tabBtnCalls.className = 'tab-btn ' + (isCallsTabActive ? 'active' : '');
+        if (tabBtnKevin) tabBtnKevin.className = 'tab-btn ' + (isKevinTabActive ? 'active' : '');
+
+        const hasUnread = state.calls.some(c => !c.read);
+        if (unreadBadge) unreadBadge.style.display = hasUnread ? 'inline-block' : 'none';
+
+        // Render Screen Inside Phone
+        const appScreen = document.getElementById('appScreen');
+        if (!appScreen) return;
+
+        let html = '';
+
+        if (state.view === 'settings') {
+          html = renderSettingsView();
+        } else if (state.activeTab === 'kevin') {
+          html = renderKevinTab();
+        } else if (state.view === 'live') {
+          html = renderLiveView();
+        } else if (state.view === 'detail') {
+          html = renderDetailView();
+        } else {
+          html = renderCallsTab();
+        }
+
+        appScreen.innerHTML = html;
+        bindAppScreenEvents();
+        updateNotificationBanner();
+
+        // Restore scroll position
+        const scrollContainerAfter = document.querySelector('.app-content-scroll');
+        if (scrollContainerAfter) {
+          scrollContainerAfter.scrollTop = savedScrollTop;
+        }
+
+        // Restore search focus & selection range
+        if (isSearchFocused) {
+          const searchInputAfter = document.getElementById('journalSearchInput');
+          if (searchInputAfter) {
+            searchInputAfter.focus();
+            if (selStart !== null && selEnd !== null) {
+              searchInputAfter.setSelectionRange(selStart, selEnd);
+            }
+          }
+        }
+      }
+
+      // 1. CALLS TAB VIEW
+      function renderCallsTab() {
+        const activeCall = state.activeCallId ? state.calls.find(c => c.id === state.activeCallId) : null;
+        const isHeroShown = activeCall && (activeCall.stage === 'waiting' || activeCall.stage === 'screening');
+
+        // Filter calls
+        let filtered = state.calls;
+        if (state.filter === 'unread') {
+          filtered = filtered.filter(c => !c.read);
+        } else if (state.filter === 'spam') {
+          filtered = filtered.filter(c => c.spam);
+        }
+
+        if (state.searchQuery) {
+          const q = state.searchQuery.toLowerCase();
+          filtered = filtered.filter(c =>
+            c.caller.toLowerCase().includes(q) ||
+            c.reason.toLowerCase().includes(q) ||
+            c.phone.includes(q)
+          );
+        }
+
+        const unreadCount = state.calls.filter(c => !c.read).length;
+        const spamCount = state.calls.filter(c => c.spam).length;
+        const allCount = state.calls.length;
+
+        let listHtml = '';
+
+        if (state.listState === 'loading') {
+          listHtml = `
+            <div class="skeleton-card"><div class="skeleton-line w-40"></div><div class="skeleton-line w-80"></div><div class="skeleton-line w-60"></div></div>
+            <div class="skeleton-card"><div class="skeleton-line w-40"></div><div class="skeleton-line w-80"></div><div class="skeleton-line w-60"></div></div>
+            <div class="skeleton-card"><div class="skeleton-line w-40"></div><div class="skeleton-line w-80"></div><div class="skeleton-line w-60"></div></div>
+          `;
+        } else if (state.listState === 'error') {
+          listHtml = `
+            <div class="error-banner">
+              <span>Failed to refresh journal. Retained offline list.</span>
+              <button type="button" class="strip-btn strip-btn-view" id="btnRetryJournal">Retry</button>
+            </div>
+            ${renderJournalCards(filtered)}
+          `;
+        } else if (state.listState === 'empty' || filtered.length === 0) {
+          listHtml = `
+            <div class="empty-state">
+              <div class="empty-icon-wrap" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+              </div>
+              <div class="empty-title">${state.searchQuery ? 'No matching calls' : 'Quiet Journal'}</div>
+              <div class="empty-desc">
+                ${state.searchQuery ? 'No callers or reasons match "' + escapeHtml(state.searchQuery) + '".' : 'When an unknown caller dials your Kevin line, screening will appear here in real time.'}
+              </div>
+              ${state.searchQuery ? '<button type="button" class="deck-btn deck-btn-outline" id="btnClearSearch">Clear search</button>' : ''}
+            </div>
+          `;
+        } else {
+          listHtml = renderJournalCards(filtered);
+        }
+
+        return `
+          <div class="app-content-scroll">
+            ${!isHeroShown ? renderGlobalLiveStrip() : ''}
+
+            <!-- Top View Header -->
+            <div class="view-header">
+              <div class="view-title-wrap">
+                <span class="view-date">Monday, Sep 14</span>
+                <h2 class="view-title">Calls</h2>
+              </div>
+              <button type="button" class="header-btn" id="btnOpenSettings" aria-label="Settings">
+                <span>Settings</span>
+              </button>
+            </div>
+
+            <!-- Setup Warning Banner -->
+            <button type="button" class="setup-notice-card" id="btnOpenSetupGuide">
+              <div class="setup-notice-left">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>Setup needs checking</span>
+              </div>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+
+            <!-- Prominent Live Feature Panel (When active screening/waiting call exists) -->
+            ${isHeroShown ? `
+              <div class="live-hero-card" role="region" aria-label="Active Screened Call">
+                <div class="live-hero-badge-row">
+                  <span class="live-stage-badge ${activeCall.stage}">
+                    ● ${activeCall.stage === 'waiting' ? 'Waiting for pickup' : 'Screening live'}
+                  </span>
+                  <div class="live-hero-wave" aria-hidden="true">
+                    <span class="pill"></span>
+                    <span class="pill"></span>
+                    <span class="pill"></span>
+                    <span class="pill"></span>
+                  </div>
+                </div>
+                <div class="live-hero-body">
+                  <div class="live-hero-caller">${escapeHtml(activeCall.caller)}</div>
+                  <div class="live-hero-phone">${escapeHtml(activeCall.phone)}</div>
+                  <div class="live-hero-reason">"${escapeHtml(activeCall.reason)}"</div>
+                </div>
+                <div class="live-hero-actions">
+                  <button type="button" class="btn-live-view" data-action="view-live" data-id="${activeCall.id}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    View Call
+                  </button>
+                  <button type="button" class="btn-live-pickup" data-action="pickup" data-id="${activeCall.id}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                    Pick Up
+                  </button>
+                </div>
+              </div>
+            ` : ''}
+
+            <!-- Filter Tabs -->
+            <div class="filter-bar" role="group" aria-label="Filter calls">
+              <button type="button" class="filter-pill ${state.filter === 'all' ? 'active' : ''}" data-filter="all" aria-pressed="${state.filter === 'all'}">
+                All <span class="filter-count">(${allCount})</span>
+              </button>
+              <button type="button" class="filter-pill ${state.filter === 'unread' ? 'active' : ''}" data-filter="unread" aria-pressed="${state.filter === 'unread'}">
+                Unread <span class="filter-count">(${unreadCount})</span>
+              </button>
+              <button type="button" class="filter-pill ${state.filter === 'spam' ? 'active' : ''}" data-filter="spam" aria-pressed="${state.filter === 'spam'}">
+                Spam <span class="filter-count">(${spamCount})</span>
+              </button>
+            </div>
+
+            <!-- Search Field -->
+            <div class="search-box">
+              <span class="search-icon-left" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              </span>
+              <input type="text" class="search-input" id="journalSearchInput" placeholder="Search calls, reasons, numbers..." value="${escapeHtml(state.searchQuery)}" aria-label="Search calls">
+              ${state.searchQuery ? `
+                <button type="button" class="search-clear-btn" id="btnClearSearchIcon" aria-label="Clear search">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              ` : ''}
+            </div>
+
+            <!-- Call Journal List -->
+            <div class="journal-list" role="list">
+              ${listHtml}
+            </div>
+          </div>
+        `;
+      }
+
+      function renderJournalCards(callsList) {
+        return callsList.map(call => {
+          const initials = call.caller
+            .split(' ')
+            .map(n => n[0])
+            .slice(0, 2)
+            .join('')
+            .toUpperCase() || 'UN';
+
+          let tagClass = 'message';
+          if (call.outcome.includes('Picked up')) tagClass = 'picked-up';
+          else if (call.outcome.includes('Appointment')) tagClass = 'appointment';
+          else if (call.spam) tagClass = 'spam';
+
+          return `
+            <div class="journal-card ${!call.read ? 'unread' : ''}" data-action="open-detail" data-id="${call.id}" role="button" tabindex="0" aria-label="Call from ${escapeHtml(call.caller)}: ${escapeHtml(call.reason)}">
+              <div class="card-top-row">
+                <div class="caller-identity">
+                  <div class="caller-avatar" aria-hidden="true">${initials}</div>
+                  <div class="caller-name-block">
+                    <div class="caller-name">${escapeHtml(call.caller)}</div>
+                    <div style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-secondary); font-variant-numeric: tabular-nums;">${escapeHtml(call.phone)}</div>
+                  </div>
+                </div>
+                <div class="caller-time">${escapeHtml(call.time)}</div>
+              </div>
+              <div class="card-reason">${escapeHtml(call.reason)}</div>
+              <div class="card-footer">
+                <span class="outcome-tag ${tagClass}">${escapeHtml(call.outcome)}</span>
+                <span>${escapeHtml(call.duration)}</span>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      // 2. LIVE CALL VIEW
+      function renderLiveView() {
+        const call = state.calls.find(c => c.id === (state.selectedCallId || state.activeCallId)) || state.calls[0];
+        const isJoining = call.stage === 'joining';
+        const isOnCall = call.stage === 'on-call';
+        const isTakingMsg = call.stage === 'taking-message';
+        const isEnded = call.stage === 'ended';
+        const isAnswerable = (call.stage === 'waiting' || call.stage === 'screening');
+
+        return `
+          <div class="app-content-scroll">
+            <div class="sub-nav-bar">
+              <button type="button" class="back-btn" id="btnBackToJournal">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                <span>Calls</span>
+              </button>
+              <span style="font-size: calc(14px * var(--review-text-scale, 1)); font-weight: 600; color: var(--c-secondary);">Live Call</span>
+              <div style="width: 44px;"></div>
+            </div>
+
+            <!-- Caller Identity Card -->
+            <div class="live-caller-hero">
+              <div class="live-caller-header">
+                <div>
+                  <h2 class="live-caller-name">${escapeHtml(call.caller)}</h2>
+                  <div class="live-caller-number">${escapeHtml(call.phone)}</div>
+                </div>
+                <div class="live-stage-indicator ${call.stage}">
+                  ${call.stage === 'waiting' ? '● Waiting for pickup' :
+                    call.stage === 'screening' ? '● Kevin answering...' :
+                    call.stage === 'joining' ? '● Connecting...' :
+                    call.stage === 'on-call' ? '● Connected' :
+                    call.stage === 'taking-message' ? '● Taking message' : '● Call ended'}
+                </div>
+              </div>
+
+              <div class="live-reason-box">
+                <strong>Reason:</strong> "${escapeHtml(call.reason)}"
+              </div>
+
+              ${call.lastError ? `
+                <div class="error-banner">
+                  <span>${escapeHtml(call.lastError)}</span>
+                </div>
+              ` : ''}
+            </div>
+
+            <!-- Transcript Feed -->
+            <div class="transcript-box" aria-label="Live screening transcript">
+              ${call.transcript.map(item => `
+                <div class="transcript-bubble ${item.role === 'ai' ? 'bubble-kevin' : 'bubble-caller'}">
+                  <span class="bubble-speaker">${escapeHtml(item.speaker)}</span>
+                  <span>${escapeHtml(item.text)}</span>
+                </div>
+              `).join('')}
+            </div>
+
+            <!-- Context-Sensitive Action Bar -->
+            <div class="live-action-bar">
+              ${isAnswerable || isJoining ? `
+                <div class="live-action-grid">
+                  <button type="button" class="btn-take-msg" data-action="take-msg" data-id="${call.id}" ${isJoining ? 'disabled' : ''}>
+                    Take Message
+                  </button>
+                  <button type="button" class="btn-pickup-main" data-action="pickup" data-id="${call.id}" ${isJoining ? 'disabled' : ''}>
+                    ${isJoining ? `
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>
+                      Connecting...
+                    ` : `
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                      Pick Up Call
+                    `}
+                  </button>
+                </div>
+              ` : ''}
+
+              ${isOnCall ? `
+                <div class="on-call-controls">
+                  <button type="button" class="btn-call-ctrl ${state.isMuted ? 'active' : ''}" id="btnToggleMute">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                    ${state.isMuted ? 'Muted' : 'Mute'}
+                  </button>
+                  <button type="button" class="btn-call-ctrl ${state.isSpeaker ? 'active' : ''}" id="btnToggleSpeaker">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                    ${state.isSpeaker ? 'Speaker on' : 'Speaker'}
+                  </button>
+                  <button type="button" class="btn-end-call" data-action="end-call" data-id="${call.id}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>
+                    End Call
+                  </button>
+                </div>
+              ` : ''}
+
+              ${isTakingMsg ? `
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                  <div style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-secondary); text-align: center;">Kevin is taking a message. You can come back to this conversation anytime.</div>
+                  <button type="button" class="deck-btn deck-btn-outline" data-action="end-call" data-id="${call.id}">
+                    Caller hangs up (demo)
+                  </button>
+                </div>
+              ` : ''}
+
+              ${isEnded ? `
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                  <div style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-secondary); text-align: center;">This conversation is now in your call journal.</div>
+                  <button type="button" class="deck-btn deck-btn-primary" id="btnReturnToCalls">
+                    Return to Journal
+                  </button>
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }
+
+      // 3. CALL DETAIL VIEW
+      function renderDetailView() {
+        const call = state.calls.find(c => c.id === state.selectedCallId) || state.calls[0];
+        const hasAppt = call && call.appointment && state.accountMode === 'business';
+
+        return `
+          <div class="app-content-scroll">
+            ${renderGlobalLiveStrip()}
+
+            <div class="sub-nav-bar">
+              <button type="button" class="back-btn" id="btnBackToJournal">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                <span>Calls</span>
+              </button>
+              <span style="font-size: calc(14px * var(--review-text-scale, 1)); font-weight: 600; color: var(--c-secondary);">Call Summary</span>
+              <div style="width: 44px;"></div>
+            </div>
+
+            <!-- Detail Header Card -->
+            <div class="detail-card">
+              <div class="detail-header">
+                <h2 class="detail-caller-title">${escapeHtml(call.caller)}</h2>
+                <div class="detail-meta-row">
+                  <span>${escapeHtml(call.phone)}</span>
+                  <span>${escapeHtml(call.time)} · ${escapeHtml(call.duration)}</span>
+                </div>
+              </div>
+
+              <div class="live-reason-box">
+                <strong>Reason:</strong> ${escapeHtml(call.reason)}
+              </div>
+
+              <div style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-secondary); line-height: 1.5;">
+                <strong>Summary:</strong> ${escapeHtml(call.summary)}
+              </div>
+
+              <div style="display: flex; gap: 8px;">
+                <button type="button" class="deck-btn deck-btn-outline" id="btnCallBackExplanatory" style="flex:1;">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                  Call Back
+                </button>
+              </div>
+            </div>
+
+            <!-- Appointment Section (Only in Business Mode) -->
+            ${hasAppt ? `
+              <div class="appt-box">
+                <div class="appt-header">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                  <span>Requested Appointment</span>
+                </div>
+                <div class="appt-time">${escapeHtml(call.appointment.proposedTime)}</div>
+                <div class="appt-subtext">
+                  ${escapeHtml(call.appointment.serviceType)}<br>
+                  <em>Nothing is booked until you confirm.</em>
+                </div>
+
+                ${call.appointment.error ? `
+                  <div class="error-banner">
+                    <span>${escapeHtml(call.appointment.error)}</span>
+                  </div>
+                ` : ''}
+
+                ${call.appointment.status === 'pending' ? `
+                  <div class="appt-actions">
+                    <button type="button" class="btn-confirm-appt" data-action="confirm-appt" data-id="${call.id}" ${call.appointment.confirming ? 'disabled' : ''}>
+                      ${call.appointment.confirming ? 'Confirming...' : 'Confirm in demo'}
+                    </button>
+                    <button type="button" class="btn-decline-appt" data-action="decline-appt" data-id="${call.id}" ${call.appointment.confirming ? 'disabled' : ''}>
+                      Decline
+                    </button>
+                  </div>
+                ` : ''}
+
+                ${call.appointment.status === 'confirmed' ? `
+                  <div class="appt-confirmed-badge">
+                    <strong>✓ Confirmed in demo (simulated)</strong>
+                    <span>Saved for this demo only.</span>
+                  </div>
+                ` : ''}
+
+                ${call.appointment.status === 'declined' ? `
+                  <div style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-secondary);">Appointment request was declined.</div>
+                ` : ''}
+              </div>
+            ` : ''}
+
+            <!-- Expandable Transcript -->
+            <details class="section-card" open>
+              <summary style="font-size: calc(14px * var(--review-text-scale, 1)); font-weight: 700; color: var(--c-ink); cursor: pointer;">
+                Screening Transcript (${call.transcript.length} turns)
+              </summary>
+              <div class="transcript-box" style="margin-top: 14px;">
+                ${call.transcript.map(item => `
+                  <div class="transcript-bubble ${item.role === 'ai' ? 'bubble-kevin' : 'bubble-caller'}">
+                    <span class="bubble-speaker">${escapeHtml(item.speaker)}</span>
+                    <span>${escapeHtml(item.text)}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </details>
+          </div>
+        `;
+      }
+
+      // 4. KEVIN ASSISTANT TAB VIEW
+      function renderKevinTab() {
+        const isBiz = state.accountMode === 'business';
+
+        const screenRuleText = state.screeningPrefs.screenAllCalls
+          ? 'Screen all incoming calls, including known contacts.'
+          : 'Screen unknown callers. Known contacts in your address book ring through directly.';
+
+        const urgentAlertText = state.screeningPrefs.urgentAlerts
+          ? 'Kevin alerts you when a caller needs urgent attention.'
+          : 'Standard notifications without urgent priority alerts.';
+
+        const robocallText = state.screeningPrefs.blockRobocalls
+          ? 'Use a disconnect tone for calls Kevin identifies as spam.'
+          : 'Screen commercial telemarketers normally.';
+
+        return `
+          <div class="app-content-scroll">
+            ${renderGlobalLiveStrip()}
+
+            <div class="view-header">
+              <div class="view-title-wrap">
+                <span class="view-date">AI Receptionist</span>
+                <h2 class="view-title">Kevin</h2>
+              </div>
+              <button type="button" class="header-btn" id="btnOpenSettings" aria-label="Settings">
+                <span>Settings</span>
+              </button>
+            </div>
+
+            <!-- Identity Header -->
+            <div class="kevin-hero-card">
+              <div class="kevin-big-avatar" aria-hidden="true">
+                <div class="brand-wave" style="height:22px; gap:3px;">
+                  <span class="pill" style="background:#FFF; height:8px;"></span>
+                  <span class="pill" style="background:#FFF; height:18px;"></span>
+                  <span class="pill" style="background:#FFF; height:22px;"></span>
+                  <span class="pill" style="background:#FFF; height:12px;"></span>
+                </div>
+              </div>
+              <div class="kevin-hero-info">
+                <div class="kevin-hero-name">Kevin Assistant</div>
+                <div class="kevin-hero-line">${isBiz ? 'River Plumbing line · ' + state.businessProfile.phone : 'Personal screening · ' + state.businessProfile.phone}</div>
+              </div>
+            </div>
+
+            <!-- Setup Warning Notice -->
+            <button type="button" class="setup-notice-card" id="btnOpenSetupGuide">
+              <div class="setup-notice-left">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>Setup needs checking</span>
+              </div>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+
+            <!-- Mode Selector Card -->
+            <div class="section-card">
+              <div class="section-title">Operating Mode</div>
+              <div class="setting-item">
+                <div class="setting-item-label">${isBiz ? 'Business Receptionist' : 'Personal Call Screening'}</div>
+                <div class="setting-item-val">${isBiz ? 'Intake questions, business hours, greeting & appointment tracking active.' : 'Unknown caller screening only. Business rules & appointment requests are hidden.'}</div>
+              </div>
+              <button type="button" class="btn-edit-setting" id="btnToggleMode">
+                Switch to ${isBiz ? 'Personal Mode' : 'Business Mode'}
+              </button>
+            </div>
+
+            <!-- How Kevin Answers -->
+            <div class="section-card">
+              <div class="section-title">How Kevin Answers</div>
+              <div class="setting-item">
+                <div class="setting-item-label">Screening Rule</div>
+                <div class="setting-item-val">${escapeHtml(screenRuleText)}</div>
+              </div>
+              <div class="setting-item">
+                <div class="setting-item-label">Urgent alerts</div>
+                <div class="setting-item-val">${escapeHtml(urgentAlertText)}</div>
+              </div>
+              <div class="setting-item">
+                <div class="setting-item-label">Spam Handling</div>
+                <div class="setting-item-val">${escapeHtml(robocallText)}</div>
+              </div>
+              <button type="button" class="btn-edit-setting" id="btnEditScreeningRules">
+                Edit Screening Rules
+              </button>
+            </div>
+
+            <!-- Business Profile (Only in Business Mode) -->
+            ${isBiz ? `
+              <div class="section-card">
+                <div class="section-title">Business Profile &amp; Knowledge</div>
+                <div class="setting-item">
+                  <div class="setting-item-label">Company Name</div>
+                  <div class="setting-item-val">${escapeHtml(state.businessProfile.name)}</div>
+                </div>
+                <div class="setting-item">
+                  <div class="setting-item-label">Service Hours</div>
+                  <div class="setting-item-val">${escapeHtml(state.businessProfile.hours)}</div>
+                </div>
+                <div class="setting-item">
+                  <div class="setting-item-label">Answering Greeting</div>
+                  <div class="setting-item-val">"${escapeHtml(state.businessProfile.greeting)}"</div>
+                </div>
+                <button type="button" class="btn-edit-setting" id="btnEditBusinessProfile">
+                  Edit Business Info
+                </button>
+              </div>
+
+              <div class="section-card">
+                <div class="section-title">Connections</div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                  <button type="button" class="btn-edit-setting" id="btnCalendarConcept">
+                    Calendar availability
+                  </button>
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }
+
+      // 5. SETTINGS VIEW
+      function renderSettingsView() {
+        return `
+          <div class="app-content-scroll">
+            ${renderGlobalLiveStrip()}
+
+            <div class="sub-nav-bar">
+              <button type="button" class="back-btn" id="btnBackFromSettings" aria-label="Back to previous screen">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                <span>${state.settingsOriginTab === 'kevin' ? 'Kevin' : 'Calls'}</span>
+              </button>
+              <span style="font-size: calc(14px * var(--review-text-scale, 1)); font-weight: 600; color: var(--c-secondary);">Settings</span>
+              <div style="width: 44px;"></div>
+            </div>
+
+            <div class="section-card">
+              <div class="section-title">Account Profile</div>
+              <div class="setting-item">
+                <div class="setting-item-label">Alex Rivera</div>
+                <div class="setting-item-val">alex@riverplumbing.example.com · ${escapeHtml(state.businessProfile.phone)}</div>
+              </div>
+              <div class="setting-item">
+                <div class="setting-item-label">Subscription Tier</div>
+                <div class="setting-item-val">Business Plan · $49.99/mo (Sample Active Subscription)</div>
+              </div>
+              <button type="button" class="btn-edit-setting" id="btnManageSub">
+                Manage App Store Subscription
+              </button>
+            </div>
+
+            <div class="section-card">
+              <div class="section-title">Fictional Prototype Storage</div>
+              <div class="setting-item">
+                <div class="setting-item-label">In-Memory Simulation</div>
+                <div class="setting-item-val">All data in this concept is fictional and stored only in browser memory. Reloading the page or tapping Start over resets all records.</div>
+              </div>
+              <button type="button" class="btn-edit-setting" id="btnSignOut" style="color: var(--c-secondary);">
+                Sign Out (Concept)
+              </button>
+            </div>
+          </div>
+        `;
+      }
+
+      // -------------------------------------------------------------------------
+      // Event Binding for App Screen
+      // -------------------------------------------------------------------------
+      function bindAppScreenEvents() {
+        // Back from Settings button
+        const backSettingsBtn = document.getElementById('btnBackFromSettings');
+        if (backSettingsBtn) {
+          backSettingsBtn.addEventListener('click', () => dispatch('BACK_FROM_SETTINGS'));
+        }
+
+        // Back to journal buttons (from Live or Detail)
+        const backBtn = document.getElementById('btnBackToJournal');
+        if (backBtn) {
+          backBtn.addEventListener('click', () => dispatch('BACK_TO_CALLS'));
+        }
+
+        const returnBtn = document.getElementById('btnReturnToCalls');
+        if (returnBtn) {
+          returnBtn.addEventListener('click', () => dispatch('BACK_TO_CALLS'));
+        }
+
+        // Open Settings
+        const settingsBtn = document.getElementById('btnOpenSettings');
+        if (settingsBtn) {
+          settingsBtn.addEventListener('click', () => dispatch('OPEN_SETTINGS'));
+        }
+
+        // Setup warning modal
+        const setupBtn = document.getElementById('btnOpenSetupGuide');
+        if (setupBtn) {
+          setupBtn.addEventListener('click', openSetupModal);
+        }
+
+        // Filter pills
+        document.querySelectorAll('.filter-pill').forEach(pill => {
+          pill.addEventListener('click', () => {
+            dispatch('SET_FILTER', { filter: pill.getAttribute('data-filter') });
+          });
+        });
+
+        // Search input
+        const searchInput = document.getElementById('journalSearchInput');
+        if (searchInput) {
+          searchInput.addEventListener('input', (e) => {
+            dispatch('SET_SEARCH', { query: e.target.value });
+          });
+        }
+
+        const clearSearchBtn = document.getElementById('btnClearSearch');
+        if (clearSearchBtn) {
+          clearSearchBtn.addEventListener('click', () => dispatch('SET_SEARCH', { query: '' }));
+        }
+
+        const clearSearchIcon = document.getElementById('btnClearSearchIcon');
+        if (clearSearchIcon) {
+          clearSearchIcon.addEventListener('click', () => dispatch('SET_SEARCH', { query: '' }));
+        }
+
+        const retryJournalBtn = document.getElementById('btnRetryJournal');
+        if (retryJournalBtn) {
+          retryJournalBtn.addEventListener('click', () => {
+            state.listState = 'normal';
+            render();
+          });
+        }
+
+        // Call detail cards
+        document.querySelectorAll('[data-action="open-detail"]').forEach(card => {
+          card.addEventListener('click', () => {
+            dispatch('VIEW_CALL_DETAIL', { callId: card.getAttribute('data-id') });
+          });
+          card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              dispatch('VIEW_CALL_DETAIL', { callId: card.getAttribute('data-id') });
+            }
+          });
+        });
+
+        // View Live buttons
+        document.querySelectorAll('[data-action="view-live"]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            dispatch('VIEW_LIVE_CALL', { callId: btn.getAttribute('data-id') });
+          });
+        });
+
+        // Pickup Call buttons
+        document.querySelectorAll('[data-action="pickup"]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            dispatch('PICKUP_CALL', { callId: btn.getAttribute('data-id') });
+          });
+        });
+
+        // Take Message buttons
+        document.querySelectorAll('[data-action="take-msg"]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            dispatch('TAKE_MESSAGE', { callId: btn.getAttribute('data-id') });
+          });
+        });
+
+        // End Call buttons
+        document.querySelectorAll('[data-action="end-call"]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            dispatch('END_CALL', { callId: btn.getAttribute('data-id') });
+          });
+        });
+
+        // Mute / Speaker buttons
+        const muteBtn = document.getElementById('btnToggleMute');
+        if (muteBtn) {
+          muteBtn.addEventListener('click', () => dispatch('TOGGLE_MUTE'));
+        }
+
+        const speakerBtn = document.getElementById('btnToggleSpeaker');
+        if (speakerBtn) {
+          speakerBtn.addEventListener('click', () => dispatch('TOGGLE_SPEAKER'));
+        }
+
+        // Call back explanatory modal
+        const callBackBtn = document.getElementById('btnCallBackExplanatory');
+        if (callBackBtn) {
+          callBackBtn.addEventListener('click', () => {
+            showModal(
+              'Call Back',
+              '<p>In the native iOS application, tapping <strong>Call Back</strong> initiates a standard phone call to the customer from your mobile dialer.</p><p>No outbound phone call is made in this browser prototype.</p>',
+              'Understood',
+              null,
+              'btnCallBackExplanatory'
+            );
+          });
+        }
+
+        // Appointment actions
+        document.querySelectorAll('[data-action="confirm-appt"]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            dispatch('CONFIRM_APPOINTMENT', { callId: btn.getAttribute('data-id') });
+          });
+        });
+
+        document.querySelectorAll('[data-action="decline-appt"]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            dispatch('DECLINE_APPOINTMENT', { callId: btn.getAttribute('data-id') });
+          });
+        });
+
+        // Mode switch
+        const toggleModeBtn = document.getElementById('btnToggleMode');
+        if (toggleModeBtn) {
+          toggleModeBtn.addEventListener('click', openModeSwitchModal);
+        }
+
+        // Edit Screening Rules
+        const editRulesBtn = document.getElementById('btnEditScreeningRules');
+        if (editRulesBtn) {
+          editRulesBtn.addEventListener('click', openScreeningPrefsModal);
+        }
+
+        // Edit Business Profile
+        const editBizBtn = document.getElementById('btnEditBusinessProfile');
+        if (editBizBtn) {
+          editBizBtn.addEventListener('click', openBusinessProfileModal);
+        }
+
+        // Concept modals
+        const calBtn = document.getElementById('btnCalendarConcept');
+        if (calBtn) {
+          calBtn.addEventListener('click', () => {
+            showModal(
+              'Calendar Availability Concept',
+              '<p>In a native application, Kevin could check busy/free times in Apple Calendar or Google Calendar to offer available appointment slots.</p><p>No third-party calendar service is connected in this prototype.</p>',
+              'Close',
+              null,
+              'btnCalendarConcept'
+            );
+          });
+        }
+
+        const manageSubBtn = document.getElementById('btnManageSub');
+        if (manageSubBtn) {
+          manageSubBtn.addEventListener('click', () => {
+            showModal(
+              'App Store Subscription',
+              '<p>Subscriptions are managed in your Apple ID settings on iOS. Fictional account tier: <strong>Business ($49.99/mo)</strong>.</p>',
+              'Close',
+              null,
+              'btnManageSub'
+            );
+          });
+        }
+
+        const signOutBtn = document.getElementById('btnSignOut');
+        if (signOutBtn) {
+          signOutBtn.addEventListener('click', () => {
+            showModal(
+              'Sign Out Concept',
+              '<p>In the native app, signing out disconnects your account session. In this browser prototype, state is memory-only and resets when reloading the page.</p>',
+              'Close',
+              null,
+              'btnSignOut'
+            );
+          });
+        }
+      }
+
+      // -------------------------------------------------------------------------
+      // Modal Management & Focus Restoration
+      // -------------------------------------------------------------------------
+      const dialogEl = document.getElementById('conceptDialog');
+      const dialogTitle = document.getElementById('dialogTitle');
+      const dialogBody = document.getElementById('dialogBody');
+      const dialogConfirmBtn = document.getElementById('dialogConfirmBtn');
+      const dialogCloseBtn = document.getElementById('dialogCloseBtn');
+      let lastTriggerId = null;
+      let lastFocusedElement = null;
+
+      function showModal(title, bodyHtml, confirmText, onConfirm, triggerId) {
+        const modalOpId = ++state.modalOpCounter;
+        state.activeModalOpId = modalOpId;
+        lastFocusedElement = document.activeElement;
+        lastTriggerId = triggerId || (lastFocusedElement ? lastFocusedElement.id : null);
+
+        dialogTitle.textContent = title;
+        dialogBody.innerHTML = bodyHtml;
+        dialogConfirmBtn.textContent = confirmText || 'OK';
+        dialogConfirmBtn.disabled = false;
+        dialogConfirmBtn.style.display = confirmText ? 'inline-flex' : 'none';
+
+        dialogConfirmBtn.onclick = () => {
+          if (onConfirm) {
+            const result = onConfirm();
+            if (result === false) {
+              return; // Retains dialog and draft!
+            }
+          }
+          closeModal();
+        };
+
+        dialogCloseBtn.onclick = closeModal;
+
+        if (dialogEl && typeof dialogEl.showModal === 'function') {
+          if (!dialogEl.open) {
+            dialogEl.showModal();
+          }
+        }
+        return modalOpId;
+      }
+
+      function closeModal() {
+        state.activeModalOpId = null;
+        if (dialogEl && dialogEl.open) {
+          dialogEl.close();
+        }
+        // Return focus to triggering control
+        if (lastTriggerId) {
+          const el = document.getElementById(lastTriggerId);
+          if (el) {
+            el.focus();
+            return;
+          }
+        }
+        if (lastFocusedElement && document.body.contains(lastFocusedElement)) {
+          lastFocusedElement.focus();
+        }
+      }
+
+      if (dialogEl) {
+        dialogEl.addEventListener('cancel', (event) => {
+          event.preventDefault();
+          closeModal();
+        });
+        dialogEl.addEventListener('close', () => {
+          if (!dialogEl.open) state.activeModalOpId = null;
+        });
+        dialogEl.addEventListener('click', (e) => {
+          if (e.target === dialogEl) closeModal();
+        });
+      }
+
+      // Setup Modal
+      function openSetupModal() {
+        showModal(
+          'Call Forwarding Setup',
+          `
+            <p>To have Kevin answer missed calls, call forwarding is configured on your iPhone in iOS Phone Settings or through your carrier.</p>
+            <p>In this browser concept, the line is a fictional sample number (<strong>+1 202 555 0124</strong>).</p>
+            <p style="font-size: calc(14px * var(--review-text-scale, 1)); color: var(--c-amber); font-weight: 500; background: var(--c-amber-bg); border: 1px solid var(--c-amber-border); padding: 10px 12px; border-radius: 8px;">
+              Notice: Status remains "Setup needs checking" to reflect that carrier forwarding cannot be verified inside a web prototype.
+            </p>
+          `,
+          'Done',
+          null,
+          'btnOpenSetupGuide'
+        );
+      }
+
+      // Mode Switch Modal
+      function openModeSwitchModal() {
+        const nextMode = state.accountMode === 'business' ? 'personal' : 'business';
+        showModal(
+          'Switch App Mode',
+          `
+            <p>Switching to <strong>${nextMode === 'personal' ? 'Personal Mode' : 'Business Mode'}</strong> will:</p>
+            <ul style="padding-left: 20px; font-size: calc(14px * var(--review-text-scale, 1)); line-height: 1.5; margin-top: 8px; display: flex; flex-direction: column; gap: 6px;">
+              ${nextMode === 'personal' ? `
+                <li>Hide business profile, hours, and custom greeting.</li>
+                <li>Hide appointment requests and intake workflows.</li>
+                <li>Retain your active subscription tier and existing call history.</li>
+              ` : `
+                <li>Enable business greeting and business hours.</li>
+                <li>Enable appointment requests and caller intake.</li>
+                <li>Retain your active subscription tier and existing call history.</li>
+              `}
+            </ul>
+          `,
+          'Confirm Switch',
+          () => {
+            dispatch('SWITCH_MODE', { mode: nextMode });
+            return true;
+          },
+          'btnToggleMode'
+        );
+      }
+
+      // Screening Preferences Modal
+      function openScreeningPrefsModal() {
+        const currentGen = state.generation;
+        let opId;
+
+        const draft = {
+          screenAllCalls: state.screeningPrefs.screenAllCalls,
+          urgentAlerts: state.screeningPrefs.urgentAlerts,
+          blockRobocalls: state.screeningPrefs.blockRobocalls
+        };
+
+        const bodyHtml = `
+          <div style="display: flex; flex-direction: column; gap: 14px;">
+            <label class="pref-checkbox-row">
+              <input type="checkbox" id="chkScreenAll" ${draft.screenAllCalls ? 'checked' : ''}>
+              <div class="pref-checkbox-label">
+                <strong>Screen all calls</strong>
+                <span class="pref-checkbox-desc">When turned off, known contacts in your address book ring through directly.</span>
+              </div>
+            </label>
+
+            <label class="pref-checkbox-row">
+              <input type="checkbox" id="chkUrgent" ${draft.urgentAlerts ? 'checked' : ''}>
+              <div class="pref-checkbox-label">
+                <strong>Urgent alerts</strong>
+                <span class="pref-checkbox-desc">Let Kevin alert you about urgent calls.</span>
+              </div>
+            </label>
+
+            <label class="pref-checkbox-row">
+              <input type="checkbox" id="chkRobocalls" ${draft.blockRobocalls ? 'checked' : ''}>
+              <div class="pref-checkbox-label">
+                <strong>Block robocalls</strong>
+                <span class="pref-checkbox-desc">Use a disconnect tone for calls Kevin identifies as spam.</span>
+              </div>
+            </label>
+
+            <div id="prefSaveErrorContainer"></div>
+          </div>
+        `;
+
+        opId = showModal(
+          'Answering Rules',
+          bodyHtml,
+          'Save changes',
+          () => {
+            const chkScreenAll = document.getElementById('chkScreenAll');
+            const chkUrgent = document.getElementById('chkUrgent');
+            const chkRobocalls = document.getElementById('chkRobocalls');
+
+            if (!chkScreenAll || !chkUrgent || !chkRobocalls) return true;
+
+            // Update draft from inputs
+            draft.screenAllCalls = chkScreenAll.checked;
+            draft.urgentAlerts = chkUrgent.checked;
+            draft.blockRobocalls = chkRobocalls.checked;
+
+            // Disable button, show pending label
+            dialogConfirmBtn.disabled = true;
+            dialogConfirmBtn.textContent = 'Saving...';
+            [chkScreenAll, chkUrgent, chkRobocalls].forEach(input => { input.disabled = true; });
+
+            const errEl = document.getElementById('prefSaveErrorContainer');
+            if (errEl) errEl.innerHTML = '';
+
+            scheduleGuardedTimer(() => {
+              // Scoped check: generation and modal operation ID
+              if (state.generation !== currentGen || state.activeModalOpId !== opId || !dialogEl.open) {
+                return;
+              }
+
+              if (state.scenario === 'pref-save-failure' && state.prefSaveAttempts === 0) {
+                state.prefSaveAttempts += 1;
+                dialogConfirmBtn.disabled = false;
+                dialogConfirmBtn.textContent = 'Save changes';
+                [chkScreenAll, chkUrgent, chkRobocalls].forEach(input => { input.disabled = false; });
+                const errContainer = document.getElementById('prefSaveErrorContainer');
+                if (errContainer) {
+                  errContainer.innerHTML = '<div class="error-banner" style="margin-top:10px;"><span>Failed to save preferences · Please retry.</span></div>';
+                }
+                // Effective values on Kevin remain UNCHANGED!
+              } else {
+                // Success!
+                state.screeningPrefs.screenAllCalls = draft.screenAllCalls;
+                state.screeningPrefs.urgentAlerts = draft.urgentAlerts;
+                state.screeningPrefs.blockRobocalls = draft.blockRobocalls;
+                render();
+                closeModal();
+              }
+            }, 700);
+
+            // Return false so showModal does NOT close dialog synchronously
+            return false;
+          },
+          'btnEditScreeningRules'
+        );
+      }
+
+      // Business Profile Modal
+      function openBusinessProfileModal() {
+        const bodyHtml = `
+          <div style="display: flex; flex-direction: column; gap: 12px;">
+            <div class="form-field">
+              <label class="form-label" for="inputBizName">Business Name</label>
+              <input type="text" class="form-input" id="inputBizName" value="${escapeHtml(state.businessProfile.name)}">
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="inputBizHours">Service Hours</label>
+              <input type="text" class="form-input" id="inputBizHours" value="${escapeHtml(state.businessProfile.hours)}">
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="inputBizGreeting">Custom Greeting</label>
+              <textarea class="form-textarea" id="inputBizGreeting">${escapeHtml(state.businessProfile.greeting)}</textarea>
+            </div>
+          </div>
+        `;
+
+        showModal(
+          'Edit Business Info',
+          bodyHtml,
+          'Save profile',
+          () => {
+            const nameEl = document.getElementById('inputBizName');
+            const hoursEl = document.getElementById('inputBizHours');
+            const greetEl = document.getElementById('inputBizGreeting');
+            if (nameEl) state.businessProfile.name = nameEl.value;
+            if (hoursEl) state.businessProfile.hours = hoursEl.value;
+            if (greetEl) state.businessProfile.greeting = greetEl.value;
+            render();
+            return true;
+          },
+          'btnEditBusinessProfile'
+        );
+      }
+
+      // -------------------------------------------------------------------------
+      // Review Deck Global Controls Binding
+      // -------------------------------------------------------------------------
+      function initReviewControls() {
+        const scenarioSelect = document.getElementById('scenarioSelect');
+        if (scenarioSelect) {
+          scenarioSelect.addEventListener('change', (e) => {
+            dispatch('SELECT_SCENARIO', { scenario: e.target.value });
+          });
+        }
+
+        const replayBtn = document.getElementById('btnReplayCall');
+        if (replayBtn) {
+          replayBtn.addEventListener('click', () => dispatch('REPLAY_INCOMING'));
+        }
+
+        const endCallerBtn = document.getElementById('btnEndCaller');
+        if (endCallerBtn) {
+          endCallerBtn.addEventListener('click', () => dispatch('SIMULATE_CALLER_END'));
+        }
+
+        const resetBtn = document.getElementById('btnResetDemo');
+        if (resetBtn) {
+          resetBtn.addEventListener('click', () => dispatch('RESET_DEMO'));
+        }
+
+        const toggleNotif = document.getElementById('toggleNotifDetails');
+        if (toggleNotif) {
+          toggleNotif.addEventListener('change', (e) => {
+            dispatch('TOGGLE_NOTIF_DETAILS', { visible: e.target.checked });
+          });
+        }
+
+        const notifBannerBtn = document.getElementById('notifBannerBtn');
+        if (notifBannerBtn) {
+          notifBannerBtn.addEventListener('click', () => dispatch('OPEN_NOTIFICATION'));
+        }
+
+        // Primary Tab Navigation
+        const tabBtnCalls = document.getElementById('tabBtnCalls');
+        if (tabBtnCalls) {
+          tabBtnCalls.addEventListener('click', () => dispatch('SET_TAB', { tab: 'calls' }));
+        }
+
+        const tabBtnKevin = document.getElementById('tabBtnKevin');
+        if (tabBtnKevin) {
+          tabBtnKevin.addEventListener('click', () => dispatch('SET_TAB', { tab: 'kevin' }));
+        }
+
+        // Mobile drawer replication
+        const mobileDrawerContent = document.getElementById('mobileDrawerContent');
+        if (mobileDrawerContent) {
+          mobileDrawerContent.innerHTML = `
+            <div class="control-group">
+              <label class="control-label" for="scenarioSelectMobile">Select Scenario</label>
+              <select id="scenarioSelectMobile" class="select-input">
+                <option value="normal-waiting">1. Normal waiting call (Default · Maya Chen)</option>
+                <option value="screening-replay">2. Screening replay (Fresh screening → Waiting)</option>
+                <option value="pickup-failure">3. Failed pickup & retry</option>
+                <option value="stale-notification">4. Stale alert (Ended Call A + Active Call B)</option>
+                <option value="pref-save-failure">5. Behavior save failure & retry</option>
+                <option value="appt-confirm-failure">6. Appointment confirm failure & retry</option>
+                <option value="long-content">7. Long caller name & complex reason</option>
+                <option value="quiet-inbox">8. Quiet inbox (No active call)</option>
+                <option value="empty-journal">9. Empty journal (First launch)</option>
+                <option value="loading-state">10. Loading skeleton state</option>
+                <option value="error-state">11. Retained journal error & retry</option>
+              </select>
+            </div>
+            <label class="notif-toggle-row"><input type="checkbox" data-review-text> Larger app text (200%)</label>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+              <button type="button" class="deck-btn deck-btn-primary" id="btnReplayMobile" style="flex:1;">New call</button>
+              <button type="button" class="deck-btn deck-btn-outline" id="btnEndMobile" style="flex:1;">Caller hangs up</button>
+              <button type="button" class="deck-btn deck-btn-outline" id="btnResetMobile" style="flex:1;">Start over</button>
+            </div>
+            <label class="notif-toggle-row"><input type="checkbox" id="toggleNotifDetailsMobile" checked> Details visible</label>
+            <button type="button" class="notif-banner-card" id="notifBannerMobile" aria-label="Simulated notification. Tap to open call.">
+              <div class="notif-text"><div class="notif-meta">Hey Kevin · Fictional notification</div><div class="notif-title" id="notifTitleMobile"></div><div class="notif-body" id="notifBodyMobile"></div></div>
+            </button>
+          `;
+
+          const mobileSelect = document.getElementById('scenarioSelectMobile');
+          if (mobileSelect) {
+            mobileSelect.addEventListener('change', (e) => {
+              dispatch('SELECT_SCENARIO', { scenario: e.target.value });
+            });
+          }
+
+          const mobileReplay = document.getElementById('btnReplayMobile');
+          if (mobileReplay) {
+            mobileReplay.addEventListener('click', () => dispatch('REPLAY_INCOMING'));
+          }
+
+          const mobileReset = document.getElementById('btnResetMobile');
+          if (mobileReset) {
+            mobileReset.addEventListener('click', () => dispatch('RESET_DEMO'));
+          }
+          document.getElementById('btnEndMobile').addEventListener('click', () => dispatch('SIMULATE_CALLER_END'));
+          document.getElementById('notifBannerMobile').addEventListener('click', () => dispatch('OPEN_NOTIFICATION'));
+          document.getElementById('toggleNotifDetailsMobile').addEventListener('change', event => dispatch('TOGGLE_NOTIF_DETAILS', { visible: event.target.checked }));
+        }
+        document.querySelectorAll('[data-review-text]').forEach(input => {
+          input.addEventListener('change', () => {
+            document.documentElement.dataset.largeText = String(input.checked);
+            document.querySelectorAll('[data-review-text]').forEach(other => { other.checked = input.checked; });
+          });
+        });
+      }
+
+      // -------------------------------------------------------------------------
+      // Bootstrap Application
+      // -------------------------------------------------------------------------
+      initReviewControls();
+      updateNotificationBanner();
+      render();
+
+    })();
+  </script>
+</body>
+</html>

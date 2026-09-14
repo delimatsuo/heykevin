@@ -2,7 +2,7 @@
 
 **Updated:** 2026-09-14
 **Owner:** Deli Matsuo
-**Implementation baseline:** `66f8a446e0e873ecb280c39aaab60f7cf0448a36`
+**Implementation baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
 **Scope decision:** Finish the planned screening notification and urgent-call handoff. Work
 only on necessary improvements; keep valuable later features in this PRD rather
 than starting them automatically.
@@ -70,8 +70,11 @@ completion on September 14, 2026.
 
 **Release acceptance:**
 
-- [ ] The reviewed notification backend is deployed to production and `/health`
-      identifies the approved SHA.
+- [x] The reviewed notification backend is deployed to production and `/health`
+      identifies the approved SHA: `7377c7ba402297625dec5de97a2250f50b1c8013`,
+      revision `kevin-api-00270-l9s`, verified September 14 at `21:45:33Z`.
+      See the [production record](docs/releases/2026-09-14-urgent-production-candidate.md).
+      iOS publication and device acceptance below remain separate.
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or

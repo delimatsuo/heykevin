@@ -18,7 +18,7 @@ Read-only checks on September 14 found:
 
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
-| Production backend | `kevin-api-00269-42l`, SHA `407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`, deployed September 4 | Live [production health](https://kevin-api-752910912062.us-central1.run.app/health) and successful [production run 33915568182](https://github.com/delimatsuo/heykevin/actions/runs/33915568182). This establishes the deployed source, not real-call/device acceptance. |
+| Production backend | `kevin-api-00270-l9s`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:45:33Z` | Successful [production run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657), exact live health/runtime identity, 100% serving traffic and anonymous smoke. See the [release record](releases/2026-09-14-urgent-production-candidate.md). iOS release and real-call/device acceptance remain open. |
 | Staging backend | `kevin-api-staging-00169-muy`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:11:16Z` | Successful [staging run 34896587160](https://github.com/delimatsuo/heykevin/actions/runs/34896587160), live health identity, 100% serving traffic, runtime isolation and anonymous static smoke. Includes the rolling-call compatibility repair. Staging remains distinct from real caller/device acceptance. |
 | Public iOS | Version `1.2.11`, released September 5 (`2026-09-05T20:50:20Z`) | Live [Apple lookup](https://itunes.apple.com/lookup?id=6761427495&country=us) and [App Store page](https://apps.apple.com/us/app/hey-kevin/id6761427495). Public metadata does not expose the build number. |
 | iOS build 37 | The September 4 handoff records `1.2.11 (37)` uploaded and in internal TestFlight testing | Historical [build 37 handoff](handoffs/2026-09-04-screening-push-feedback-b37-handoff.md). No fresh authenticated Apple inspection; do not infer which build backs public version 1.2.11. |
@@ -48,7 +48,10 @@ Read-only checks on September 14 found:
 
 ## Pending notification release
 
-**Active priority:** N1 in the [current PRD](../kevin-prd.md).
+**Active priority:** Complete iOS release and device acceptance for N1 in the
+[current PRD](../kevin-prd.md). The notification backend, urgent handoff and
+rolling-call compatibility repair are now deployed to production. This does
+not mark the full PRD or notification experience accepted on a physical iPhone.
 
 [PR #239](https://github.com/delimatsuo/heykevin/pull/239) adds caller/reason summary
 updates to an existing notification and the matching Pick Up action. The same
@@ -64,8 +67,9 @@ pipeline teardown and send a stale actionable alert. Do not revive that release.
 defect and merged as `66f8a446e0e873ecb280c39aaab60f7cf0448a36` on September 14
 at `14:01:59Z`; all nine required-workflow jobs passed on its exact source head
 `43354aaca657e089e42d4a1bb529a1869996e24f`. Staging and production jobs were
-skipped. Production was rechecked during the urgent-handoff work and still
-reports `407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`.
+skipped. At that earlier preflight, production reported
+`407bf0bc7b6604f33f0113e28c3a2ba82e48b7dc`; the later production release below
+supersedes that observation.
 
 The owner then approved **Pick up + Take a message**, passive dismissal, a
 bounded urgent-call fallback and a server-persisted Urgent alerts preference.
@@ -103,19 +107,20 @@ text reply and the later-feature list are not active implementation.
       all eight safeguard mutation probes.
 - [x] Request one [production run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657)
       from main at exact candidate `7377c7ba402297625dec5de97a2250f50b1c8013`.
-      The [candidate record](releases/2026-09-14-urgent-production-candidate.md)
+      The [release record](releases/2026-09-14-urgent-production-candidate.md)
       preserves source, staging, recovery and approval boundaries.
-- [ ] Deli approves that production job in GitHub.
-- [ ] Confirm successful deployment and the exact production `deploy_sha`.
+- [x] Deli approves that production job in GitHub.
+- [x] Confirm successful deployment: all ten applicable jobs passed. Production
+      revision `kevin-api-00270-l9s` serves the exact candidate SHA with 100%
+      traffic; runtime, health and anonymous serving checks passed at `21:45:33Z`.
+- [ ] Release the new iOS implementation under its separate publication approval.
 - [ ] Record the owner's installed iOS build and notification/pickup checks from
       the PRD, including stale-alert and ended-call behavior.
 
 Only Deli may approve the production environment; [AGENTS.md](../AGENTS.md)
-explicitly forbids an agent or API approval. Rebind the remote main SHA and
-dispatch queue before requesting a production run. Deli's latest continuation authorizes proceeding with production preparation
-and dispatch after the repair is qualified; Deli still approves the environment.
-It does not authorize an iPhone release. The reviewed plan uses one deployment
-and a tested forward-recovery patch, with another build and approval if needed;
+explicitly forbids an agent or API approval. Deli's approval and the completed
+production deployment above do not authorize an iPhone release. The tested
+forward-recovery patch still requires another build and approval if needed;
 it does not rely on returning live operations to the older backend.
 
 ## Unfinished or unverified, not an automatic implementation queue

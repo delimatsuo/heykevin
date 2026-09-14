@@ -66,8 +66,11 @@ remains at the baseline above.
 - [x] Notification source merged and staged.
 - [x] Independently reproduce the delayed-summary teardown defect with fictional
       data and mocked extraction/push.
-- [ ] Repair task ownership/cancellation in all three voice pipelines and prove
-      that ending screening prevents a delayed summary from being sent.
+- [x] Repair task ownership/cancellation in all three voice pipelines and prove
+      locally that ending screening prevents a delayed summary from being sent.
+- [ ] Complete independent review and required CI for the repaired candidate,
+      merge it, and stage that exact source. See the [release packet](releases/2026-09-14-screening-notification.md).
+- [ ] Deli cancels the superseded production run so the replacement can proceed.
 - [ ] Deli approves the reviewed candidate's production job in GitHub.
 - [ ] Confirm successful deployment and the exact production `deploy_sha`.
 - [ ] Record the owner's installed iOS build and notification/pickup checks from

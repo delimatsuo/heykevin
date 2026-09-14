@@ -1,5 +1,11 @@
 # Hey Kevin iOS 1.2.11 Release Preparation
 
+> **Historical build-36 preparation record.** The candidate-status statements
+> below describe that preparation session. Public version 1.2.11 was subsequently
+> released on September 5; public metadata does not identify its build number.
+> See the [current roadmap](../current-roadmap.md) and the separate
+> [build-37 handoff](../handoffs/2026-09-04-screening-push-feedback-b37-handoff.md).
+
 ## Status
 
 **Source candidate only.** This candidate has not been archived, signed with a distribution identity, uploaded, submitted, approved, deployed, or released. Build 36 remains source/local only, does not exist in App Store Connect, and has not been uploaded, validated, tested in TestFlight, submitted, approved, or released.

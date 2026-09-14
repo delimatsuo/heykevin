@@ -3,6 +3,7 @@
 **Updated:** 2026-09-14
 **Owner:** Deli Matsuo
 **Implementation baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
+**iPhone test candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Finish the planned screening notification and urgent-call handoff. Work
 only on necessary improvements; keep valuable later features in this PRD rather
 than starting them automatically.
@@ -75,6 +76,9 @@ completion on September 14, 2026.
       revision `kevin-api-00270-l9s`, verified September 14 at `21:45:33Z`.
       See the [production record](docs/releases/2026-09-14-urgent-production-candidate.md).
       iOS publication and device acceptance below remain separate.
+- [x] The iPhone candidate **1.2.12 (38)** passed Apple processing and is
+      available in the existing internal TestFlight QA group, verified September
+      14 at `23:18:44Z`. See the [candidate record and test sequence](docs/releases/2026-09-14-notification-ios-38.md).
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or
@@ -93,6 +97,8 @@ completion on September 14, 2026.
       summary after pickup, hangup, or the end of the screening wait.
 - [ ] Record the installed iOS version and build used for this check. Public App
       Store version metadata alone does not identify that build.
+- [ ] Publish the validated iPhone build to the App Store after the device checks
+      and owner release approval.
 
 PR #239 contains the initial summary notification and feedback/review code;
 PR #241 repairs delayed summary cancellation. The approved urgent handoff extends

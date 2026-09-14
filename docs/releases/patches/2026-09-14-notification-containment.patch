@@ -1,0 +1,14 @@
+--- a/app/services/urgent_handoff.py
++++ b/app/services/urgent_handoff.py
+@@ -22,2 +22,4 @@
+ async def dispatch_urgent_escalation(*, call_sid, contractor_id, transcript_snippet=''):
++    # Temporary notification containment; keep call ownership and screening intact.
++    return {'status': 'suppressed'}
+     try:
+--- a/app/services/screening_summary.py
++++ b/app/services/screening_summary.py
+@@ -149,2 +149,4 @@
+     """Extract screening details and dispatch the in-place APNs notification update."""
++    # Temporary notification containment; keep call ownership and screening intact.
++    return False
+     if not contractor_id or not call_sid:

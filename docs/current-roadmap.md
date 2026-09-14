@@ -96,6 +96,10 @@ text reply and the later-feature list are not active implementation.
       applicable jobs, and serving revision `kevin-api-staging-00167-qiq` reports
       the approved SHA. Anonymous smoke and runtime isolation checks passed.
 - [x] Cancel the superseded production run with Deli's explicit authorization.
+- [ ] Merge and restage the [rolling-call compatibility repair](releases/2026-09-14-rolling-call-compatibility.md).
+      The initial staged N1 source can miss Take a message across backend
+      revisions and is superseded as a production candidate. The repair passed
+      7,869 offline tests and all eight safeguard mutation probes.
 - [ ] Deli approves the reviewed candidate's production job in GitHub.
 - [ ] Confirm successful deployment and the exact production `deploy_sha`.
 - [ ] Record the owner's installed iOS build and notification/pickup checks from
@@ -103,8 +107,11 @@ text reply and the later-feature list are not active implementation.
 
 Only Deli may approve the production environment; [AGENTS.md](../AGENTS.md)
 explicitly forbids an agent or API approval. Rebind the remote main SHA and
-dispatch queue before requesting a production run. The completed cancellation
-and staging authorization do not approve production or an iPhone release.
+dispatch queue before requesting a production run. Deli's latest continuation authorizes proceeding with production preparation
+and dispatch after the repair is qualified; Deli still approves the environment.
+It does not authorize an iPhone release. The reviewed plan uses one deployment
+and a tested forward-recovery patch, with another build and approval if needed;
+it does not rely on returning live operations to the older backend.
 
 ## Unfinished or unverified, not an automatic implementation queue
 

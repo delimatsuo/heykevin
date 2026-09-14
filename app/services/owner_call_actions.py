@@ -128,7 +128,10 @@ async def _release_preparation(call_sid, expected):
     """Release only a claim whose provider redirect has definitely not started."""
     now = time.time()
     def txn(current):
-        if not _same_claim(current, expected, now) or current.get('owner_action_status') != STATUS_ACCEPTING:
+        if (not _same_claim(current, expected, now)
+                or current.get('owner_action_status') != STATUS_ACCEPTING
+                or current.get('accepted') is True
+                or current.get('redirect_started_at') is not None):
             return current
         updated = dict(current)
         updated['conference_name'] = updated.pop('previous_conference_name', '')
@@ -140,6 +143,7 @@ async def _release_preparation(call_sid, expected):
     result = await _run_rtdb_transaction(call_sid, txn)
     if not (live_record(result, expected.get('contractor_id'))
             and not result.get('owner_action') and result.get('accepted') is False
+            and result.get('redirect_started_at') is None
             and result.get('preparation_release_nonce') == expected['claim_nonce']):
         raise RuntimeError('preparation_release_unconfirmed')
 
@@ -264,6 +268,14 @@ async def handle_owner_call_action(*, call_sid, contractor_id, action, operation
             # Never issue credentials if the call ended/reassigned or finalization is unconfirmed.
             return _response({**committed, 'owner_action_status': STATUS_UNCERTAIN}, call_sid, contractor_id, op), 202
         committed = final
+    if action == ACTION_DECLINE and committed.get('owner_action') == ACTION_DECLINE:
+        try:
+            from app.services.legacy_call_commands import publish_message_intent
+            await publish_message_intent(call_sid, committed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
     result = _response(committed, call_sid, contractor_id, op, credentials=True)
     return result, 202 if result['status'] == 'pending' else 200
 
@@ -313,38 +325,67 @@ async def arbitrate_owner_timeout(call_sid, contractor_id):
         return reduce_active_call_action(current, action=ACTION_TIMEOUT, contractor_id=contractor_id,
             operation_id=f'timeout_{call_sid}'[:80], claim_nonce=nonce, now=now)[0]
     record = await _run_rtdb_transaction(call_sid, txn)
-    return (live_record(record, contractor_id) and record.get('owner_action') == ACTION_TIMEOUT
-            and record.get('owner_action_status') in {STATUS_MESSAGE_REQUESTED, STATUS_TAKING_MESSAGE})
+    won = (live_record(record, contractor_id) and record.get('owner_action') == ACTION_TIMEOUT
+           and record.get('owner_action_status') in {STATUS_MESSAGE_REQUESTED, STATUS_TAKING_MESSAGE})
+    if won and record.get('owner_action_status') == STATUS_MESSAGE_REQUESTED:
+        try:
+            from app.services.legacy_call_commands import publish_message_intent
+            await publish_message_intent(call_sid, record)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+    return won
 
 
-async def pending_message_intent(call_sid, contractor_id):
-    record = await read_record(call_sid)
-    if not live_record(record, contractor_id) or record.get('owner_action_status') != STATUS_MESSAGE_REQUESTED:
+def message_intent_from_record(record, contractor_id, *, statuses=(STATUS_MESSAGE_REQUESTED,),
+                               operation_id=None, action=None, claim_nonce=None,
+                               ws_token='', conference_name=None, now=None):
+    """Read one exact durable message claim without granting new authority."""
+    if (not live_record(record, contractor_id, now) or record.get('accepted')
+            or record.get('state') not in DECISION_STATES
+            or record.get('kevin_redirect_status') in {'pending', 'uncertain'}
+            or record.get('owner_action_status') not in statuses):
         return None
     intent = record.get('message_intent')
-    if not isinstance(intent, dict) or intent.get('contractor_id') != contractor_id:
+    if (not isinstance(intent, dict) or intent.get('type') != 'take_message'
+            or intent.get('contractor_id') != contractor_id
+            or intent.get('action') not in {ACTION_DECLINE, ACTION_TIMEOUT}
+            or intent.get('action') != record.get('owner_action')
+            or not isinstance(intent.get('operation_id'), str) or not intent['operation_id']
+            or intent['operation_id'] != record.get('owner_operation_id')
+            or not isinstance(record.get('claim_nonce'), str) or not record['claim_nonce']):
         return None
-    if (intent.get('operation_id') != record.get('owner_operation_id') or
-            intent.get('action') != record.get('owner_action') or intent.get('action') not in {ACTION_DECLINE, ACTION_TIMEOUT}):
+    if ((operation_id is not None and intent['operation_id'] != operation_id)
+            or (action is not None and intent['action'] != action)
+            or (claim_nonce is not None and record['claim_nonce'] != claim_nonce)
+            or (ws_token and record.get('ws_token') != ws_token)
+            or (conference_name is not None and record.get('conference_name', '') != conference_name)):
         return None
-    return intent
+    return {**intent, 'claim_nonce': record['claim_nonce']}
 
 
-async def acknowledge_owner_action(call_sid, new_status=STATUS_TAKING_MESSAGE, *, contractor_id, operation_id, action):
+async def pending_message_intent(call_sid, contractor_id, *, conference_name=None):
+    record = await read_record(call_sid)
+    return message_intent_from_record(record, contractor_id, conference_name=conference_name)
+
+
+async def acknowledge_owner_action(call_sid, new_status=STATUS_TAKING_MESSAGE, *, contractor_id,
+                                   operation_id, action, ws_token='', claim_nonce=None):
     if new_status != STATUS_TAKING_MESSAGE:
         return False
     now = time.time()
+    def matches(current):
+        return message_intent_from_record(current, contractor_id,
+            statuses=(STATUS_MESSAGE_REQUESTED, STATUS_TAKING_MESSAGE),
+            operation_id=operation_id, action=action, claim_nonce=claim_nonce,
+            ws_token=ws_token, now=now)
     def txn(current):
-        if not live_record(current, contractor_id, now):
-            return current
-        if (current.get('owner_operation_id') != operation_id or current.get('owner_action') != action
-                or action not in {ACTION_DECLINE, ACTION_TIMEOUT}
-                or current.get('owner_action_status') not in {STATUS_MESSAGE_REQUESTED, STATUS_TAKING_MESSAGE}):
+        if not matches(current):
             return current
         return {**current, 'owner_action_status': STATUS_TAKING_MESSAGE, 'action_acknowledged_at': now}
     result = await _run_rtdb_transaction(call_sid, txn)
-    return bool(live_record(result, contractor_id) and result.get('owner_operation_id') == operation_id
-                and result.get('owner_action') == action and result.get('owner_action_status') == new_status)
+    return bool(matches(result) and result.get('owner_action_status') == new_status)
 
 
 async def consume_message_intent(pipeline, deliver):
@@ -356,18 +397,62 @@ async def consume_message_intent(pipeline, deliver):
 
 
 async def _consume_message_intent(pipeline, deliver):
-    """Delivery accepted once per pipeline/operation; failed acknowledgements retry alone."""
-    cid = pipeline._contractor_config.get('contractor_id', '')
-    intent = await pending_message_intent(pipeline._call_sid, cid)
+    """Fence delivery and acknowledgment to the same claim and authenticated stream."""
+    cid = getattr(pipeline, '_contractor_config', {}).get('contractor_id', '')
+    sid = getattr(pipeline, '_call_sid', '')
+    ws_token = getattr(pipeline, '_command_ws_token', '') or ''
+    legacy_snapshot = None
+    if sid and cid and ws_token:
+        try:
+            from app.services.legacy_call_commands import adopt_legacy_message_intent
+            legacy_snapshot = await adopt_legacy_message_intent(sid, cid, ws_token=ws_token)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    intent = await pending_message_intent(sid, cid)
     if not intent:
+        # An acknowledged instruction may still need exact-command cleanup after
+        # a lost cleanup response or a projection that arrived after acknowledgment.
+        if legacy_snapshot:
+            current = await read_record(sid)
+            expected = legacy_snapshot.intent
+            completed = message_intent_from_record(current, cid, statuses=(STATUS_TAKING_MESSAGE,),
+                operation_id=expected['operation_id'], action=expected['action'],
+                claim_nonce=expected['claim_nonce'], ws_token=ws_token)
+            if completed:
+                await _cleanup_legacy_snapshot(sid, legacy_snapshot)
         return False
-    key = (cid, intent['operation_id'], intent['action'])
+
+    current = await read_record(sid)
+    if not message_intent_from_record(current, cid, operation_id=intent['operation_id'],
+            action=intent['action'], claim_nonce=intent['claim_nonce'], ws_token=ws_token):
+        return False
+    if legacy_snapshot and legacy_snapshot.intent != intent:
+        return False
+
+    key = (cid, intent['operation_id'], intent['action'], intent['claim_nonce'])
     if getattr(pipeline, '_message_delivery_key', None) != key:
         if await deliver() is False:
             return False
         pipeline._message_delivery_key = key
-    return await acknowledge_owner_action(pipeline._call_sid, contractor_id=cid,
-        operation_id=intent['operation_id'], action=intent['action'])
+    acked = await acknowledge_owner_action(sid, contractor_id=cid,
+        operation_id=intent['operation_id'], action=intent['action'], ws_token=ws_token,
+        claim_nonce=intent['claim_nonce'])
+    if acked and legacy_snapshot:
+        await _cleanup_legacy_snapshot(sid, legacy_snapshot)
+    return acked
+
+
+async def _cleanup_legacy_snapshot(call_sid, snapshot):
+    try:
+        from app.services.legacy_call_commands import delete_legacy_command_conditional
+        await delete_legacy_command_conditional(call_sid, snapshot.command)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass  # Future polls may retry cleanup; instruction delivery stays acknowledged.
 
 
 async def confirm_fallback_stream(call_sid, *, contractor_id, ws_token, redirect_nonce):

@@ -113,7 +113,7 @@ _BASELINE_HASHES = {
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.
     "app/webhooks/media_stream.py":
-        "246d7d2ad55b3e8ddbe9e63c0a07f34d7c9755f4cf466812dad91893b78240ae",
+        "e34b315dee73cbffe6cb7fe36b862c58a96be5319414f7e9b125d7d88c84fb72",
 }
 
 

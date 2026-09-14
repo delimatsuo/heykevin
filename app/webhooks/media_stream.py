@@ -968,6 +968,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                 "media_event event=pipeline_selected call=%s engine=elevenlabs",
                 _call_label(call_sid),
             )
+        pipeline._command_ws_token = ws_token
         started = await _serve_pipeline_ingress(
             pipeline,
             ingress,

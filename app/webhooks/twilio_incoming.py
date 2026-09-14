@@ -651,7 +651,7 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
         device_token = await get_device_token(token_type="voip", contractor_id=contractor_id)
         if not device_token:
             logger.warning("No VoIP token — falling back to Kevin screening")
-            await _async_redirect_to_kevin(call_sid, contractor_id)
+            await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
             return
 
         # F-07: bind the Twilio access token's identity to this contractor so a
@@ -686,11 +686,13 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
 
             # The decision is durable on active_calls even if /call_commands is missing.
             try:
+                from app.services.legacy_call_commands import adopt_legacy_message_intent
+                await adopt_legacy_message_intent(call_sid, contractor_id, conference_name=conference_name)
                 from app.services.owner_call_actions import pending_message_intent
-                command = await pending_message_intent(call_sid, contractor_id)
+                command = await pending_message_intent(call_sid, contractor_id, conference_name=conference_name)
                 if command:
                     if not getattr_redirected[0]:
-                        if await _async_redirect_to_kevin(call_sid, contractor_id) is not True:
+                        if await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name) is not True:
                             continue
                         getattr_redirected[0] = True
                     # The receiving voice pipeline acknowledges instruction acceptance.
@@ -719,22 +721,23 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
         from app.services.owner_call_actions import read_record, live_record
         current = await read_record(call_sid)
         if (not live_record(current, contractor_id) or current.get('accepted')
-                or current.get('owner_action') == 'accept'):
+                or current.get('owner_action') == 'accept'
+                or current.get('conference_name') != conference_name):
             return  # An unresolved pickup also owns this call; timeout cannot redirect it.
         # Timeout — contractor didn't answer or decline
         logger.info("Contractor didn't answer in 20s — Kevin taking over")
         try:
-            await _async_redirect_to_kevin(call_sid, contractor_id)
+            await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
         except Exception as e:
             logger.error("Redirect to Kevin failed")
-            await _async_redirect_to_kevin(call_sid, contractor_id)
+            await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
 
     except Exception as e:
         logger.error("Ring contractor failed: type=%s", type(e).__name__)
-        await _async_redirect_to_kevin(call_sid, contractor_id)
+        await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
 
 
-async def _async_redirect_to_kevin(call_sid: str, contractor_id: str):
+async def _async_redirect_to_kevin(call_sid: str, contractor_id: str, *, expected_conference: str | None = None):
     """Redirect a call from conference to Kevin's screening stream (async version)."""
     try:
         import time
@@ -748,12 +751,14 @@ async def _async_redirect_to_kevin(call_sid: str, contractor_id: str):
         now = time.time()
         def store_token(current):
             if (not live_record(current, owner, now) or current.get('accepted')
-                    or current.get('owner_action') == 'accept' or current.get('kevin_redirect_nonce')):
+                    or current.get('owner_action') == 'accept' or current.get('kevin_redirect_nonce')
+                    or (expected_conference is not None and current.get('conference_name') != expected_conference)):
                 return current
             return {**current, "ws_token": ws_token, 'kevin_redirect_nonce': nonce,
                     'kevin_redirect_status': 'pending'}
         committed = await _run_rtdb_transaction(call_sid, store_token)
-        if (not live_record(committed, owner) or committed.get('accepted') or committed.get('owner_action') == 'accept'):
+        if (not live_record(committed, owner) or committed.get('accepted') or committed.get('owner_action') == 'accept'
+                or (expected_conference is not None and committed.get('conference_name') != expected_conference)):
             return False
         if committed.get('kevin_redirect_nonce') != nonce:
             return committed.get('kevin_redirect_status') == 'succeeded'
@@ -773,7 +778,8 @@ async def _async_redirect_to_kevin(call_sid: str, contractor_id: str):
         )
         def finish(current):
             if (not live_record(current, owner) or current.get('kevin_redirect_nonce') != nonce
-                    or current.get('owner_action') == 'accept' or current.get('accepted')):
+                    or current.get('owner_action') == 'accept' or current.get('accepted')
+                    or (expected_conference is not None and current.get('conference_name') != expected_conference)):
                 return current
             return {**current, 'kevin_redirect_status': 'succeeded'}
         try:

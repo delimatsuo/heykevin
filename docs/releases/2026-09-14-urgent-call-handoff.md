@@ -1,5 +1,9 @@
 # Urgent call handoff release candidate — September 14, 2026
 
+**Later qualification:** The [rolling-call compatibility repair](2026-09-14-rolling-call-compatibility.md)
+supersedes this candidate for production. The evidence below remains a dated
+record of the earlier source and staging checks.
+
 This completes the approved N1 source work: Pick up and Take a message,
 passive notification dismissal, one bounded urgent owner wait, and a saved
 Urgent alerts preference. The [current PRD](../../kevin-prd.md) defines scope;

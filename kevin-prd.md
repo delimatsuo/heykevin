@@ -153,8 +153,9 @@ records the expert panel, competitor research and verification contract.
 - [x] Native unit, lifecycle/ownership mutation and fixture UI checks pass.
       The [candidate record](docs/releases/2026-09-15-native-frontend-ios-39.md)
       records 269 native unit tests, 9 UI tests and the mutation results.
-- [ ] Independent review and required CI pass for the final source.
-- [ ] The new native candidate is available in the internal TestFlight QA group.
+- [x] Independent source/package review and required CI pass for the packaged source.
+- [x] **1.3.0 (39)** is VALID / IN_BETA_TESTING in the internal TestFlight QA group;
+      exact build and What to Test readback verified September 15 at `03:51:07Z`.
 - [ ] Owner checks the installed frontend and the remaining N1 phone scenarios.
 
 Apple Phone uses filters and per-call details; Google Voice offers search and

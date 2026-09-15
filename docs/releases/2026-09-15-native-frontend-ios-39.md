@@ -1,5 +1,8 @@
 # Native frontend candidate — 1.3.0 (39)
 
+**Delivered to internal TestFlight QA:** Apple reports VALID / IN_BETA_TESTING,
+verified September 15, 2026 at `03:51:07Z`. Owner iPhone acceptance remains open.
+
 The owner approved translating the reviewed HTML into native SwiftUI and
 providing another internal TestFlight build on September 14, 2026. This is the
 [N3 scope](../../kevin-prd.md): Calls + Kevin navigation, preserved call actions
@@ -104,7 +107,11 @@ verify the compiled language tables. The initial IPA SHA-256
 `ca483fed23f639bdce096bc9b1de648771df190c839b2e2114fb027f8ef83087`
 is withdrawn. Its exact scratch directory was cleaned.
 
-CI for the catalog correction and signed-package delivery are pending.
+The corrected source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b` passed all nine
+required jobs in [run 34926028253](https://github.com/delimatsuo/heykevin/actions/runs/34926028253),
+using 401 runner seconds; deployment jobs were skipped. Independent replacement
+package review approved with no findings and closed the localization P2.
+
 The September 15 preflight
 bound public repository and billing owner to `delimatsuo/heykevin` and
 `delimatsuo`. Required check `Test` remains strict and fail closed, backed by
@@ -126,9 +133,52 @@ build 39 was unused, build 38 remained VALID / IN_BETA_TESTING, and existing
 internal QA group `ce552be4-c362-4021-9a90-b77d2e910d15` automatically receives
 builds. This is preparation evidence, not an upload claim.
 
+## Signed package and upload
+
+- Packaged source: `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`; source tree
+  `0d64bf4d53601b59f5c1e4769a21e8d79e36d250`; iOS tree
+  `dcf196ba5136527e7490d02ad7c3ff9c781a63a1`; production app tree
+  `a2e505258c5cd1182b5214b4b0c01e23f4fca0f9`.
+- IPA: **6,598,270 bytes**, SHA-256
+  `4be09e45a2fb10b00183653660ee934eae609ba0e05a1c171d1f9e6284d46b87`.
+  Independent inspection recomputed the hash and checked all 18 packaged app
+  files against the ZIP, extraction and manifest. All 35 file-backed Mach-O
+  sections match archive/export, with executable/dSYM UUID
+  `7EF1A8CF-F93A-3B24-B5E4-A3C52277D7A4`.
+- Both apps pass deep strict signature verification. Automatic signing creates
+  a development-signed archive, then export signs the same compiled code with
+  Apple Distribution: Travel Advisory LLC (`3FLG8W6B95`). The exported app and
+  profile have production APNs, Time Sensitive and Apple sign-in, with
+  `get-task-allow=false` and no Critical Alerts. Distribution profile
+  `639cf43f-e398-42cb-9927-3b610eb59e4c` expires July 15, 2027.
+- Archive and export agree on version `1.3.0`, build `39`, the expected bundle,
+  production environment/backend, remote-notification/VoIP background modes
+  and permission declarations. TwilioVoice is `6.13.6 (179124)`; build SDK is
+  iPhoneOS 26.0, Xcode `17A400`. Screenshot/native-review activation is disabled
+  in Release; this does not claim every test-related metadata byte is absent.
+- English source fallback and all **272** compiled Spanish and Portuguese
+  translations match the catalog. Both previously missing labels are present.
+- Wrapper archive result: `kevin-native-39-archive-r2-20260915T034127Z-2874`;
+  export result: `kevin-native-39-export-r2-20260915T034158Z-6779`.
+- Apple validation passed at `2026-09-15T03:42:39Z` using altool
+  `26.0.18 (170018)`. Independent validation-log SHA-256:
+  `4c136a5b87425df020391adcd8c3fcad811238a42c83bde37676683d0f85e0b0`.
+- One upload succeeded without errors at `2026-09-15T03:47:26Z`; delivery UUID
+  `7ebb5e58-9016-498b-b43e-75ec3383786e`.
+- At `2026-09-15T03:51:07Z`, authenticated Apple readback bound that exact build
+  ID to app `6761427495`, version `1.3.0`, build `39`, VALID processing,
+  IN_BETA_TESTING and unexpired status. The build is present in existing internal
+  QA group `ce552be4-c362-4021-9a90-b77d2e910d15`. English What to Test was
+  published and read back under localization `05b1350a-040b-4ca7-82e4-3587ba3b8cb5`.
+  Existing external groups and public distribution were not changed.
+
+Durable evidence is recorded here. Archives, IPAs, extracts and raw delivery
+logs use the configured ephemeral scratch directory with exact-directory
+cleanup; XcodeStorage manages its own cache/result bundles.
+
 ## Remaining owner acceptance
 
-Install 1.3.0 (39) once delivery is confirmed. Check the Calls + Kevin design,
+Install the available 1.3.0 (39) internal candidate. Check the Calls + Kevin design,
 history/search/details and Settings on the owner's phone. With an owner-controlled
 fictional test call, check access to the live transcript and Pick up / Take a
 message from both tabs and Account. Complete the remaining
@@ -159,5 +209,7 @@ receipts, Account presentation order, deletion-flight ownership and duplicate
 localization entries. Test/visual
 harness corrections are described above.
 Audit disposition: Source and final test-delta reviews approved; all 269 native
-unit tests, 9 UI tests and targeted mutation checks passed. Initial CI passed;
-the catalog correction needs current-head CI and package delivery.
+unit tests, 9 UI tests and targeted mutation checks passed. Corrected-source CI,
+replacement package review and Apple validation passed; upload succeeded.
+Internal QA availability and What to Test readback are verified. Owner-device
+acceptance and public App Store approval remain open.

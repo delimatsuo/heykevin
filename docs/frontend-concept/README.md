@@ -7,6 +7,9 @@ This folder is the interactive design reviewed by the owner. On September 14,
 the owner approved the native Calls + Kevin implementation and bounded history.
 The [native plan](../superpowers/plans/2026-09-14-native-frontend.md) defines that
 work; the current PRD records its acceptance and release status.
+The native design is available in internal TestFlight **1.3.0 (39)**; its
+[release record](../releases/2026-09-15-native-frontend-ios-39.md) contains the
+compiled-app evidence and remaining owner checks.
 All calls, people, appointments and account details
 are fictional. Changes last only for the current page session.
 

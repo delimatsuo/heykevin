@@ -4145,6 +4145,22 @@
         }
       }
     },
+    "Search calls" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Buscar llamadas"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Buscar ligações"
+          }
+        }
+      }
+    },
     "Server error (%lld). Please try again later." : {
       "localizations" : {
         "es" : {

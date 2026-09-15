@@ -439,10 +439,10 @@ final class FrontendNavigation: ObservableObject {
         let currentAuth = authProvider()
         if lastKnownAuth != currentAuth {
             // Any context change (A->B, A->B->A, or invalidation) clears all stale sheets and state
+            isAccountDismissalInProgress = isAccountDismissalInProgress || isAccountPresented
             presentedSheet = nil
             isAccountPresented = false
             pendingAccountDestination = nil
-            isAccountDismissalInProgress = false
             pendingCallPresentationLease = nil
             shouldScrollToGoogleCalendar = false
             isCallConnectedPendingPresentation = false

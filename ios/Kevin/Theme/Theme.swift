@@ -7,8 +7,12 @@ extension Color {
     /// brightens automatically in dark mode for legibility.
     static let hkBlue = Color(uiColor: .systemBlue)
 
-    /// Restrained Cobalt.
-    static let hkCobalt = Color(red: 0.11, green: 0.35, blue: 0.85)
+    /// Restrained Cobalt adapted for dark legibility.
+    static let hkCobalt = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.45, green: 0.65, blue: 1.0, alpha: 1.0)
+            : UIColor(red: 0.11, green: 0.35, blue: 0.85, alpha: 1.0)
+    })
 
     /// Clear Line Green. The go signal. Pick Up CTA, Live indicator.
     static let hkGreen = Color(uiColor: .systemGreen)

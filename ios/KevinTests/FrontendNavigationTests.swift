@@ -771,4 +771,199 @@ final class FrontendNavigationTests: XCTestCase {
         nav.openHistoricalDetail(call: record)
         XCTAssertNil(nav.presentedSheet, "Historical detail presentation rejected while in-call")
     }
+
+    func testAuthRotationPreservesAccountDismissalFenceForHistoricalDetailQueuing() {
+        // Case A: Account initially open with old Auth A destination queued, rotating to Auth B
+        var currentAuth = makeAuth(contractorId: "c-A", generation: 1)
+        var currentScope = makeScope(callSid: "CA_A_1", revision: 1)
+        var ownedLease: CallPresentationLease? = nil
+        let nav = FrontendNavigation(
+            authProvider: { currentAuth },
+            scopeProvider: { currentScope },
+            ownedLeaseProvider: { ownedLease }
+        )
+
+        nav.openAccount()
+        XCTAssertTrue(nav.isAccountPresented)
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+
+        // Queue old Auth A historical destination before rotation
+        let recordA = makeRecord(id: "CA_OLD_A")
+        nav.openHistoricalDetail(call: recordA, expectedAuth: currentAuth)
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+        XCTAssertNotNil(nav.pendingAccountDestination)
+
+        // Provider changes to Auth B
+        currentAuth = makeAuth(contractorId: "c-B", generation: 2)
+        currentScope = makeScope(callSid: "CA_B_1", revision: 1)
+        ownedLease = CallPresentationLease(auth: currentAuth, scope: currentScope)
+        nav.handleAuthChange()
+
+        // Old Auth A destination must be cleared, but physical dismissal fence remains active
+        XCTAssertNil(nav.pendingAccountDestination, "Old auth destination must be cleared and not leaked")
+        XCTAssertTrue(nav.isAccountDismissalInProgress, "Physical dismissal fence must be preserved across auth change")
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertNil(nav.presentedSheet)
+
+        // Create valid new Auth B historical destination and request presentation
+        let recordB = makeRecord(id: "CA_NEW_B")
+        nav.openHistoricalDetail(call: recordB, expectedAuth: currentAuth)
+
+        // Root sheet must remain nil while dismissal is in progress; destination is queued for Auth B
+        XCTAssertNil(nav.presentedSheet, "Root sheet must remain nil while account dismissal is in progress")
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+        if case .historicalDetail(let queuedLease) = nav.pendingAccountDestination {
+            XCTAssertEqual(queuedLease.callId, "CA_NEW_B")
+            XCTAssertEqual(queuedLease.auth, currentAuth)
+        } else {
+            XCTFail("Expected new Auth B historical destination queued behind dismissal fence")
+        }
+
+        // Account physically finishes dismissal
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+        XCTAssertNil(nav.pendingAccountDestination)
+        if case .historicalDetail(let presentedLease) = nav.presentedSheet {
+            XCTAssertEqual(presentedLease.callId, "CA_NEW_B")
+            XCTAssertEqual(presentedLease.auth, currentAuth)
+        } else {
+            XCTFail("Expected exact Auth B lease presented after dismissal completion")
+        }
+
+        // Case B: Account already closing via setAccountPresented(false) under Auth A, rotating to Auth B
+        currentAuth = makeAuth(contractorId: "c-A2", generation: 1)
+        currentScope = makeScope(callSid: "CA_A2_1", revision: 1)
+        ownedLease = nil
+        nav.handleAuthChange()
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        nav.dismissSheet()
+
+        nav.openAccount()
+        XCTAssertTrue(nav.isAccountPresented)
+
+        // Begin dismissal via setter
+        nav.setAccountPresented(false)
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+
+        // Provider changes to Auth B while account is already closing
+        currentAuth = makeAuth(contractorId: "c-B2", generation: 2)
+        currentScope = makeScope(callSid: "CA_B2_1", revision: 1)
+        ownedLease = CallPresentationLease(auth: currentAuth, scope: currentScope)
+        nav.handleAuthChange()
+
+        XCTAssertTrue(nav.isAccountDismissalInProgress, "Dismissal fence must be preserved when auth changes while already closing")
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertNil(nav.pendingAccountDestination)
+        XCTAssertNil(nav.presentedSheet)
+
+        // New Auth B historical destination requested during animation
+        let recordB2 = makeRecord(id: "CA_NEW_B2")
+        nav.openHistoricalDetail(call: recordB2, expectedAuth: currentAuth)
+
+        XCTAssertNil(nav.presentedSheet, "Root sheet must remain nil while closing animation is active")
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+        XCTAssertNotNil(nav.pendingAccountDestination)
+
+        // Physical dismissal finishes
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+        XCTAssertNil(nav.pendingAccountDestination)
+        if case .historicalDetail(let presentedLease) = nav.presentedSheet {
+            XCTAssertEqual(presentedLease.callId, "CA_NEW_B2")
+            XCTAssertEqual(presentedLease.auth, currentAuth)
+        } else {
+            XCTFail("Expected exact Auth B lease presented after closing dismissal completion")
+        }
+    }
+
+    func testAuthRotationPreservesAccountDismissalFenceForConnectedCallPresentation() {
+        // Case A: Account open under Auth A, rotates to Auth B, then connected call arrives with dismissal fence
+        var currentAuth = makeAuth(contractorId: "c-A", generation: 1)
+        var currentScope = makeScope(callSid: "CA_A_1", revision: 1)
+        var ownedLease: CallPresentationLease? = nil
+        let nav = FrontendNavigation(
+            authProvider: { currentAuth },
+            scopeProvider: { currentScope },
+            ownedLeaseProvider: { ownedLease }
+        )
+
+        nav.openAccount()
+        XCTAssertTrue(nav.isAccountPresented)
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+
+        // Rotate to Auth B
+        currentAuth = makeAuth(contractorId: "c-B", generation: 2)
+        currentScope = makeScope(callSid: "CA_B_1", revision: 1)
+        let leaseB = CallPresentationLease(auth: currentAuth, scope: currentScope)
+        ownedLease = leaseB
+        nav.handleAuthChange()
+
+        XCTAssertTrue(nav.isAccountDismissalInProgress, "Dismissal fence must be preserved on auth rotation while account was open")
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+
+        // Connected call event for Auth B occurs; hasOpenSheets incorporates the physical dismissal fence
+        let hasOpenSheets = nav.isAccountDismissalInProgress || nav.isAccountPresented || nav.presentedSheet != nil
+        XCTAssertTrue(hasOpenSheets)
+        nav.handleCallConnectionStarted(lease: leaseB, hasOpenSheets: hasOpenSheets)
+
+        // shouldPresentInCall must remain false until physical dismissal callback
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+        XCTAssertFalse(nav.shouldPresentInCall, "shouldPresentInCall must be false until actual account dismissal")
+        XCTAssertNil(nav.presentedSheet)
+
+        // Physical account dismissal finishes
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+        XCTAssertTrue(nav.shouldPresentInCall, "shouldPresentInCall becomes true once account is physically dismissed")
+        XCTAssertNil(nav.presentedSheet, "Root presented sheet is nil")
+
+        // Later historical detail presentation must be rejected due to connected call priority
+        let laterRecord = makeRecord(id: "CA_HIST_LATER")
+        nav.openHistoricalDetail(call: laterRecord, expectedAuth: currentAuth)
+        XCTAssertNil(nav.presentedSheet, "Historical presentation rejected by connected call priority")
+        XCTAssertNil(nav.pendingAccountDestination)
+        XCTAssertTrue(nav.shouldPresentInCall)
+
+        // Case B: Account closing via setAccountPresented(false) under Auth A, rotates to Auth B, connected call arrives
+        nav.handleInCallDismissed()
+        currentAuth = makeAuth(contractorId: "c-A2", generation: 1)
+        currentScope = makeScope(callSid: "CA_A2_1", revision: 1)
+        ownedLease = nil
+        nav.handleAuthChange()
+
+        nav.openAccount()
+        nav.setAccountPresented(false)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+
+        currentAuth = makeAuth(contractorId: "c-B2", generation: 2)
+        currentScope = makeScope(callSid: "CA_B2_1", revision: 1)
+        let leaseB2 = CallPresentationLease(auth: currentAuth, scope: currentScope)
+        ownedLease = leaseB2
+        nav.handleAuthChange()
+
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+
+        let closingHasOpenSheets = nav.isAccountDismissalInProgress || nav.isAccountPresented || nav.presentedSheet != nil
+        XCTAssertTrue(closingHasOpenSheets)
+        nav.handleCallConnectionStarted(lease: leaseB2, hasOpenSheets: closingHasOpenSheets)
+
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+        XCTAssertFalse(nav.shouldPresentInCall)
+
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+        XCTAssertTrue(nav.shouldPresentInCall)
+        XCTAssertNil(nav.presentedSheet)
+
+        nav.openHistoricalDetail(call: laterRecord, expectedAuth: currentAuth)
+        XCTAssertNil(nav.presentedSheet, "Historical presentation rejected by connected call priority")
+    }
 }

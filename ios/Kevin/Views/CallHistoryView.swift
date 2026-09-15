@@ -35,34 +35,22 @@ struct CallHistoryView: View {
                     }
                 }
 
-                // Search Bar Section
+                // Search, Filter, and Count Header Section
                 Section {
-                    searchBar
-                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                }
-
-                // Filter tabs (All, Unread, Spam)
-                Section {
-                    filterPicker
-                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                }
-
-                // Header Count Label
-                if !historyModel.showingCountLabel.isEmpty {
-                    Section {
-                        Text(historyModel.showingCountLabel)
-                            .font(.footnote)
-                            .foregroundStyle(Color.hkInkSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityIdentifier("calls.count")
-                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
+                    VStack(alignment: .leading, spacing: 12) {
+                        searchBar
+                        filterPicker
+                        if !historyModel.showingCountLabel.isEmpty {
+                            Text(historyModel.showingCountLabel)
+                                .font(.footnote)
+                                .foregroundStyle(Color.hkInkSecondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("calls.count")
+                        }
                     }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
 
                 // Retained error banner on reload failure while existing calls stay visible
@@ -171,7 +159,7 @@ struct CallHistoryView: View {
                 .font(.subheadline)
 
             TextField(
-                String(localized: "Search by name, number or excerpt"),
+                String(localized: "Search calls"),
                 text: Binding(
                     get: { historyModel.searchQuery },
                     set: { historyModel.setSearchQuery($0) }

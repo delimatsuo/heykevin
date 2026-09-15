@@ -4,7 +4,6 @@ import SwiftUI
 /// Backed by the actual live transcript, coordinator states, and an immutable presentation lease.
 struct ActiveCallCard: View {
     @EnvironmentObject var appState: AppState
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject var coordinator = CallActionCoordinator.shared
     let lease: CallPresentationLease
     var onOpenLive: ((CallPresentationLease) -> Void)? = nil
@@ -67,10 +66,7 @@ struct ActiveCallCard: View {
                 .accessibilityElement(children: .combine)
 
                 // Caller Identity
-                let isAX = dynamicTypeSize.isAccessibilitySize
-                let identityLayout = isAX ? AnyLayout(VStackLayout(alignment: .leading, spacing: HKSpace.sm)) : AnyLayout(HStackLayout(spacing: HKSpace.md))
-
-                identityLayout {
+                VStack(alignment: .leading, spacing: HKSpace.sm) {
                     HStack(spacing: HKSpace.md) {
                         HKAvatar(
                             name: appState.activeCallerName,
@@ -89,10 +85,6 @@ struct ActiveCallCard: View {
                                 .foregroundStyle(Color.white.opacity(0.7))
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                    }
-
-                    if !isAX {
-                        Spacer(minLength: 0)
                     }
 
                     // Visible 'View live call' control
@@ -237,7 +229,7 @@ struct ActiveCallCard: View {
             }
             .frame(maxWidth: .infinity, minHeight: 46)
         }
-        .buttonStyle(HKPrimaryButtonStyle(tint: .hkGreen))
+        .buttonStyle(HKPrimaryButtonStyle(tint: .hkForest))
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.pickup")
     }
@@ -606,7 +598,7 @@ struct LiveCallDetailView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 46)
         }
-        .buttonStyle(HKPrimaryButtonStyle(tint: .hkGreen))
+        .buttonStyle(HKPrimaryButtonStyle(tint: .hkForest))
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.livePickup")
     }

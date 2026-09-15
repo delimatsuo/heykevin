@@ -2,11 +2,12 @@
 
 **Updated:** 2026-09-14
 **Owner:** Deli Matsuo
-**Implementation baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
+**Backend release baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
 **iPhone test candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
-**Scope decision:** Finish the planned screening notification and urgent-call handoff. Work
-only on necessary improvements; keep valuable later features in this PRD rather
-than starting them automatically.
+**Native frontend candidate:** `1.3.0 (39)` in development; release evidence is separate.
+**Scope decision:** Complete the screening notification and urgent-call handoff,
+and implement the approved Calls + Kevin native design with bounded history.
+Keep valuable later features in this PRD rather than starting them automatically.
 
 This is the current product scope. It replaces the original Telegram-first,
 single-user PRD and the broader unapproved Business Dispatch v2 plan as the guide
@@ -103,8 +104,8 @@ completion on September 14, 2026.
 PR #239 contains the initial summary notification and feedback/review code;
 PR #241 repairs delayed summary cancellation. The approved urgent handoff extends
 that work using the [implementation contract](docs/superpowers/plans/2026-09-14-urgent-call-handoff.md).
-The HTML frontend concept is separately available for owner design review;
-the native navigation refactor still requires that approval. No new feedback
+The owner approved translating the reviewed HTML into the native experience on
+September 14; N3 below defines that work. No new feedback
 system, caller SMS or callback action is included. Release evidence is recorded in the
 [current roadmap](docs/current-roadmap.md#pending-notification-release).
 
@@ -114,6 +115,54 @@ Repair a reproducible defect that blocks setup, screening, transcript delivery,
 correct call pickup, or subscription access. A proposed improvement does not
 become a regression simply because an older plan listed it. Each repair needs a
 concrete failing case, a bounded change, and verification of the affected flow.
+
+### N3 — Deliver the approved native frontend with bounded history
+
+**Approval:** On September 14, after testing notification build 38 and reviewing
+the interactive HTML, the owner approved the native enhancements and required a
+history limit. The [native implementation plan](docs/superpowers/plans/2026-09-14-native-frontend.md)
+records the expert panel, competitor research and verification contract.
+
+**Required experience:**
+
+1. Use **Calls** and **Kevin** as the two tabs. Calls opens first; Kevin contains
+   answering behavior and business setup. A labeled Settings entry preserves
+   account, subscription, country, support and deletion controls.
+2. Keep the current call reachable from both tabs and account Settings, with
+   the full live transcript and the existing Pick up / Take a message behavior.
+   Historical details and notification actions remain bound to the exact call
+   and account. Preserve forced paywall and personal/business behavior.
+3. Show **20 calls initially**, then **Show 20 more**, up to the **100 most recent
+   calls within 90 days** supplied by the existing history API. Twenty is our
+   display choice. The retrieval cap does not delete the 101st stored call.
+   This work does not change retention or add archive/deletion controls.
+4. Search the entire bounded history before limiting visible rows. Support
+   caller name, formatted phone number and available caller transcript text,
+   with All, Unread and Spam filters. Keep query, filter and expansion when
+   returning from details; reset expansion on an explicit search/filter change.
+5. Show honest counts, distinct empty states and retained rows with Retry on
+   observable refresh failures. Mark all read covers the fetched history,
+   including hidden pages. Clear old-account content on authentication changes.
+6. Preserve controls and unsaved settings drafts across navigation. Delayed
+   responses cannot overwrite a newer save, revive a dismissed deletion
+   confirmation or apply another account's state.
+
+**Delivery acceptance:**
+
+- [x] Owner approved the expert-reviewed design and bounded-history direction.
+- [x] Native unit, lifecycle/ownership mutation and fixture UI checks pass.
+      The [candidate record](docs/releases/2026-09-15-native-frontend-ios-39.md)
+      records 269 native unit tests, 9 UI tests and the mutation results.
+- [x] Independent source/package review and required CI pass for the packaged source.
+- [x] **1.3.0 (39)** is VALID / IN_BETA_TESTING in the internal TestFlight QA group;
+      exact build and What to Test readback verified September 15 at `03:51:07Z`.
+- [ ] Owner checks the installed frontend and the remaining N1 phone scenarios.
+
+Apple Phone uses filters and per-call details; Google Voice offers search and
+separates archiving from deletion; Quo offers searchable, filterable call logs.
+The plan links their official documentation. These examples inform navigation,
+not Kevin's retention policy. Public App Store publication remains a separate
+owner release decision.
 
 ## Valuable later features — not active implementation
 
@@ -135,10 +184,9 @@ former v2 program.
 
 ## Deferred ideas and superseded plans
 
-- **Native frontend refactor:** an expert-reviewed Calls / Kevin HTML proposal
-  is approved for interactive design review. Replacing native navigation needs
-  the owner's subsequent approval. The former Dispatch work-management program
-  remains deferred; it is not automatically part of the visual refresh.
+- **Dispatch work-management program:** persistent lead/action states and the
+  former three-tab workflow remain deferred. The approved N3 visual refresh
+  implements the existing call-screening product, without adding that program.
 - **WhatsApp notifications, voice cloning, and multiple forwarding numbers:**
   historical future ideas, with no current implementation commitment.
 - **A new voice architecture or another public-demo iteration:** not part of this
@@ -154,7 +202,9 @@ former v2 program.
 
 N1 is complete only when deployment and the relevant owner-device checks are
 recorded. A green unit suite, merged PR, TestFlight upload, and production release
-are different facts. The later-feature list is not a checklist that must be
+are different facts. N3 delivery requires the reviewed native candidate and
+internal TestFlight evidence above; its owner acceptance remains explicit.
+The later-feature list is not a checklist that must be
 exhausted before the current product can be called shipped.
 
 Measure whether owners receive useful caller information and can choose the

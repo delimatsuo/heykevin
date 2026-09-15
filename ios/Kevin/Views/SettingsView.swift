@@ -1,5 +1,7 @@
 import SwiftUI
 import UserNotifications
+import AVFoundation
+import Speech
 
 private func debugLog(_ message: String) {
     #if DEBUG
@@ -23,20 +25,46 @@ private func regulatoryAddressErrorMessage(for result: RegulatoryAddress.Validat
     }
 }
 
-struct SettingsView: View {
+/// Persistent single state owner for all Settings and Assistant configuration.
+/// Supplies the Kevin tab (assistantScreen) as a stable AnyView to the root and
+/// owns the presentation of the Account sheet.
+struct SettingsHost<Root: View>: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.scenePhase) private var scenePhase
-    @State private var showPaywall = false
+
+    @Binding var isAccountPresented: Bool
+    var shouldScrollToGoogleCalendar: Binding<Bool>? = nil
+    var onDismissAccount: (() -> Void)? = nil
+    let assistantIsSelected: Bool
+    let onOpenCall: (CallPresentationLease) -> Void
+    let root: (AnyView) -> Root
+
+    // MARK: - State
+
+    @State private var activePaywallDestination: SettingsPaywallDestination? = nil
+    @State private var loadCoordinator = SettingsLoadCoordinator()
+    @State private var confirmedBaseline = SettingsConfirmedBaseline(
+        regulatoryAddress: AppState.shared.businessAddress,
+        regulatoryCity: AppState.shared.businessCity,
+        businessHoursStart: "08:00",
+        businessHoursEnd: "17:00",
+        smartInterruption: AppState.shared.smartInterruption,
+        ringThroughContacts: AppState.shared.ringThroughContacts,
+        sitToneEnabled: AppState.shared.sitToneEnabled,
+        countryCode: AppState.shared.countryCode,
+        mode: AppState.shared.isPersonalMode ? "personal" : "business"
+    )
+    @State private var isKnowledgeDirty = false
+    @State private var deletionLoader = SettingsDeletionConfirmationLoader()
+
     @State private var showDeleteAccountAlert = false
     @State private var showDeleteAccountError = false
-    @State private var isDeletingAccount = false
+    @State private var accountDeletionFence = AccountDeletionFence()
     @State private var showSubscriptionWarningAlert = false
     @State private var confirmDeleteTask: Task<Void, Never>?
 
-    /// Delay before presenting a follow-up alert: flipping a second alert's
-    /// isPresented during another's ~300ms dismissal can silently drop it.
-    /// Shared by the continue-deleting and deletion-error paths.
     private let alertRedismissalDelay: UInt64 = 700_000_000
+
     @State private var showAboutDebug = false
     @State private var showKnowledgeEditor = false
     @State private var knowledgeText = ""
@@ -49,11 +77,12 @@ struct SettingsView: View {
     @State private var modeChangeError = ""
     @State private var isSaving = false
     @State private var saveError = ""
-    @State private var knowledgeLengthWarning = ""
     @State private var pushPermission: UNAuthorizationStatus = .notDetermined
     @State private var isProvisioningNumber = false
     @State private var businessHoursStart = Calendar.current.date(from: DateComponents(hour: 8, minute: 0)) ?? Date()
     @State private var businessHoursEnd = Calendar.current.date(from: DateComponents(hour: 17, minute: 0)) ?? Date()
+    @State private var isSavingBusinessHours = false
+    @State private var businessHoursSaveError = ""
     @State private var forwardingInstructions: ForwardingInstructions?
     @State private var countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: "")
     @State private var isSavingCountry = false
@@ -61,698 +90,297 @@ struct SettingsView: View {
     @State private var smartInterruptionSelection = AppState.shared.smartInterruption
     @State private var isSavingSmartInterruption = false
     @State private var smartInterruptionSaveError = ""
+
+    // Fences
     @State private var urgentPreferenceFence = PreferenceWriteFence()
-    // Local drafts for the business address fields, mirroring how
-    // countrySelection tracks appState.countryCode: the fields edit these,
-    // not appState directly, so an unsaved keystroke or a failed server
-    // save never becomes the value createContractor/updateBusinessAddress
-    // read back out of appState. appState.businessAddress/businessCity are
-    // written only after the server confirms the save (saveRegulatoryAddress)
-    // or a profile load reports a confirmed value (loadKnowledge).
+    @State private var screenAllCallsFence = PreferenceWriteFence()
+    @State private var sitToneFence = PreferenceWriteFence()
+    @State private var businessHoursFence = PreferenceWriteFence()
+
+    // Screen all calls state
+    @State private var isSavingScreenAllCalls = false
+    @State private var screenAllCallsSaveError = ""
+
+    // SIT Tone save state
+    @State private var isSavingSitTone = false
+    @State private var sitToneSaveError = ""
+
+    // Regulatory address drafts
     @State private var regulatoryAddressDraft = AppState.shared.businessAddress
     @State private var regulatoryCityDraft = AppState.shared.businessCity
     @State private var isSavingRegulatoryAddress = false
     @State private var regulatoryAddressError = ""
-    private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
 
-    private var kevinNumber: String {
-        appState.kevinNumber
+    @State private var pendingCallLeaseToOpen: CallPresentationLease? = nil
+
+    private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
+    private var kevinNumber: String { appState.kevinNumber }
+
+    private var isFixtureMode: Bool {
+        #if DEBUG
+        return AppStoreScreenshotFixtures.isEnabled
+        #else
+        return false
+        #endif
+    }
+
+    private var assistantPaywallBinding: Binding<Bool> {
+        Binding(
+            get: { activePaywallDestination == .assistant },
+            set: { isPresented in
+                if !isPresented && activePaywallDestination == .assistant {
+                    activePaywallDestination = nil
+                }
+            }
+        )
+    }
+
+    private var accountPaywallBinding: Binding<Bool> {
+        Binding(
+            get: { activePaywallDestination == .account },
+            set: { isPresented in
+                if !isPresented && activePaywallDestination == .account {
+                    activePaywallDestination = nil
+                }
+            }
+        )
+    }
+
+    private func presentPaywall(from destination: SettingsPaywallDestination) {
+        #if DEBUG
+        if isFixtureMode { return }
+        #endif
+        activePaywallDestination = destination
+    }
+
+    init(
+        isAccountPresented: Binding<Bool>,
+        shouldScrollToGoogleCalendar: Binding<Bool>? = nil,
+        onDismissAccount: (() -> Void)? = nil,
+        assistantIsSelected: Bool,
+        onOpenCall: @escaping (CallPresentationLease) -> Void,
+        root: @escaping (AnyView) -> Root
+    ) {
+        self._isAccountPresented = isAccountPresented
+        self.shouldScrollToGoogleCalendar = shouldScrollToGoogleCalendar
+        self.onDismissAccount = onDismissAccount
+        self.assistantIsSelected = assistantIsSelected
+        self.onOpenCall = onOpenCall
+        self.root = root
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                // MARK: - Kevin Status
-
-                setupStatusSection
-
-                // MARK: - Account & Plan
-                //
-                // The one place billing lives. "Plan" is what the user pays for;
-                // how Kevin answers calls is a separate concept and lives in the
-                // sections below — keeping them apart is deliberate.
-
-                Section {
-                    HStack {
-                        Text(String(localized: "Name"))
-                        Spacer()
-                        Text(appState.userName)
-                            .foregroundStyle(Color.secondary)
-                    }
-
-                    HStack {
-                        Text(String(localized: "Plan"))
-                        Spacer()
-                        // Deliberately not status-colored: a green "Business"
-                        // reads as "OK" and re-conflates plan with status, which
-                        // is the confusion this section exists to remove.
-                        Text(planLabel)
-                            .foregroundStyle(Color.secondary)
-                    }
-
-                    // Only a user pick reaches the binding's setter and can write;
-                    // profile load and failure-revert assign countrySelection
-                    // directly and therefore never write to the server.
-                    Picker(selection: countryBinding) {
-                        ForEach(SettingsCountry.supported, id: \.self) { code in
-                            Text(SettingsCountry.displayName(code)).tag(code)
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(String(localized: "Country"))
-                            Text(String(localized: "Sets the call forwarding codes Kevin shows you."))
-                                .font(.caption)
-                                .foregroundStyle(Color.secondary)
-                        }
-                    }
-                    .disabled(isSavingCountry)
-
-                    if !countrySaveError.isEmpty {
-                        Text(countrySaveError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-
-                    // Business street address and city: required before
-                    // Twilio number provisioning can succeed in the six
-                    // regulatory countries (RegulatoryAddress.countries).
-                    // Keyed on account country, not on business/personal
-                    // mode — Twilio requires this for the number, not for
-                    // business mode, so a personal-mode account in a
-                    // regulatory country must still be able to view and
-                    // correct it. Hidden entirely for every other account
-                    // country.
-                    if RegulatoryAddress.requiresAddress(countryCode: appState.countryCode) {
-                        TextField(String(localized: "Business Address"), text: $regulatoryAddressDraft)
-                            .textContentType(.fullStreetAddress)
-                            .font(.subheadline)
-                        TextField(String(localized: "City"), text: $regulatoryCityDraft)
-                            .textContentType(.addressCity)
-                            .font(.subheadline)
-
-                        if !regulatoryAddressError.isEmpty {
-                            Text(regulatoryAddressError)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                        }
-
-                        Button {
-                            saveRegulatoryAddress()
-                        } label: {
-                            if isSavingRegulatoryAddress {
-                                ProgressView()
-                            } else {
-                                Text(String(localized: "Save Address"))
-                            }
-                        }
-                        .disabled(isSavingRegulatoryAddress)
-                    }
-
-                    Button {
-                        showPaywall = true
-                    } label: {
-                        HStack {
-                            Text(viewPlansLabel)
-                                .foregroundStyle(.blue)
-                            Spacer()
-                            Image(systemName: "arrow.right.circle.fill")
-                                .foregroundStyle(.blue)
-                        }
-                    }
-
-                    if appState.subscriptionStatus == "active" {
-                        Button {
-                            if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
-                                UIApplication.shared.open(url)
-                            }
-                        } label: {
-                            HStack {
-                                Text(String(localized: "Manage Subscription"))
-                                Spacer()
-                                Image(systemName: "arrow.up.right.square")
-                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                            }
-                        }
-                        .foregroundStyle(.primary)
-                    }
-                } header: {
-                    Text(String(localized: "Account & Plan"))
+        root(AnyView(assistantScreenView))
+            .sheet(isPresented: $isAccountPresented, onDismiss: {
+                cancelPendingDeleteConfirmation()
+                if activePaywallDestination == .account {
+                    activePaywallDestination = nil
                 }
-                .sheet(isPresented: $showPaywall) {
-                    PaywallView(canDismiss: true)
-                        .environmentObject(appState)
-                }
-
-                // MARK: - How Kevin Answers
-                //
-                // Answering behavior for both modes. The old "Mode" status row
-                // read like a second plan ("Active — Business" vs "Business
-                // Assistant"); it is now a directional action instead, so plan
-                // and behavior can't be confused.
-
-                Section {
-                    Toggle(String(localized: "Block spam with disconnect tone"), isOn: $appState.sitToneEnabled)
-                        .onChange(of: appState.sitToneEnabled) { _, newValue in
-                            Task {
-                                isSaving = true
-                                saveError = ""
-                                await updateSitToneEnabled(newValue)
-                                isSaving = false
-                            }
-                        }
-
-                    Toggle(String(localized: "Alert me for urgent calls"), isOn: smartInterruptionBinding)
-                        .disabled(isSavingSmartInterruption)
-
-                    if !smartInterruptionSaveError.isEmpty {
-                        Text(smartInterruptionSaveError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-
-                    if appState.isPersonalMode {
-                        Button {
-                            Task {
-                                appState.contactsUploadConsent = true
-                                let result = await ContactSyncManager.shared.syncContacts(
-                                    contractorId: appState.contractorId,
-                                    force: true
-                                )
-                                switch result {
-                                case .success(let synced, _):
-                                    syncMessage = String(localized: "Synced \(synced) contacts")
-                                case .permissionDenied:
-                                    syncMessage = String(localized: "Contacts permission denied")
-                                case .rateLimited:
-                                    syncMessage = String(localized: "Please wait before syncing again")
-                                case .error(let msg):
-                                    syncMessage = String(localized: "Error: \(msg)")
-                                }
-                            }
-                        } label: {
-                            HStack {
-                                Text(String(localized: "Sync Contacts"))
-                                    .font(.subheadline)
-                                Spacer()
-                                if !syncMessage.isEmpty {
-                                    Text(syncMessage)
-                                        .font(.caption)
-                                        .foregroundStyle(syncMessage.contains("Error") || syncMessage.contains("denied") ? .red : .green)
-                                }
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(.blue)
-                            }
-                        }
-                    }
-
-                    Button {
-                        showModeChangeAlert = true
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(appState.isPersonalMode
-                                     ? String(localized: "Use Kevin for Your Business")
-                                     : String(localized: "Switch to Personal Screening"))
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.blue)
-                                Text(appState.isPersonalMode
-                                     ? String(localized: "Receptionist mode: intake questions, business hours, knowledge base. Requires a Business plan.")
-                                     : String(localized: "Kevin only screens unknown callers and takes messages. Your business setup is kept."))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                            Spacer()
-                            if isSwitchingMode {
-                                ProgressView()
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                                    .font(.caption)
-                            }
-                        }
-                    }
-                    .disabled(isSwitchingMode)
-
-                    if !modeChangeError.isEmpty {
-                        Text(modeChangeError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-
-                    if !saveError.isEmpty {
-                        Text(saveError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                } header: {
-                    Text(String(localized: "How Kevin Answers"))
-                } footer: {
-                    Text(appState.isPersonalMode
-                         ? String(localized: "Kevin screens unknown callers; contacts from your iPhone ring through. Urgent calls (flooding, fire, gas leak) ring you immediately when alerts are on.")
-                         : String(localized: "Kevin answers as your business receptionist, using the business setup below. Urgent calls (flooding, fire, gas leak) ring you immediately when alerts are on."))
-                }
-                .disabled(isSaving)
-
-                // MARK: - Your Business (business mode only)
-                //
-                // Everything Kevin needs to know about the customer's business,
-                // grouped in one contiguous block — kept apart from the product
-                // settings above. Personal-mode users never see any of this.
-
-                if !appState.isPersonalMode {
-                    Section {
-                        HStack {
-                            Text(String(localized: "Business"))
-                            Spacer()
-                            Text(appState.businessName.isEmpty ? String(localized: "Not set") : appState.businessName)
-                                .foregroundStyle(appState.businessName.isEmpty ? .tertiary : .secondary)
-                        }
-
-                        DatePicker(String(localized: "Open"), selection: $businessHoursStart, displayedComponents: .hourAndMinute)
-                            .onChange(of: businessHoursStart) { _, _ in saveBusinessHours() }
-                        DatePicker(String(localized: "Close"), selection: $businessHoursEnd, displayedComponents: .hourAndMinute)
-                            .onChange(of: businessHoursEnd) { _, _ in saveBusinessHours() }
-                    } header: {
-                        Text(String(localized: "Your Business"))
-                    } footer: {
-                        Text(String(localized: "Outside these hours, Kevin will tell callers you're closed and take a message."))
-                    }
-
-                    // MARK: - Knowledge Base
-                    //
-                    // Services and knowledge are the same job — teaching Kevin
-                    // about the business — so they share one card. They open
-                    // differently (push vs sheet), so both titles are styled
-                    // primary with a trailing chevron to read as one list.
-
-                    Section {
-                        NavigationLink {
-                            ServicesView()
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(localized: "Services & Pricing"))
-                                    .font(.subheadline)
-                                Text(String(localized: "Add your services so Kevin can quote estimates"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                        }
-
-                        Button {
-                            showKnowledgeEditor = true
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(String(localized: "Business Knowledge"))
-                                        .font(.subheadline)
-                                        .foregroundStyle(Color.primary)
-                                    Text(String(localized: "Tell Kevin about your business so he can answer questions"))
-                                        .font(.caption)
-                                        .foregroundStyle(Color.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.footnote.weight(.semibold))
-                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                            }
-                        }
-
-                        HStack {
-                            TextField(String(localized: "Website URL"), text: $websiteURL)
-                                .textContentType(.URL)
-                                .keyboardType(.URL)
-                                .autocapitalization(.none)
-                                .font(.subheadline)
-
-                            if isImporting {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                            } else {
-                                Button(String(localized: "Import")) {
-                                    Task { await importWebsite() }
-                                }
-                                .disabled(websiteURL.isEmpty)
-                            }
-                        }
-
-                        if !importMessage.isEmpty {
-                            Text(importMessage)
-                                .font(.caption)
-                                .foregroundStyle(importMessage.contains("Failed") ? .red : .green)
-                        }
-                    } header: {
-                        Text(String(localized: "Knowledge Base"))
-                    } footer: {
-                        Text(String(localized: "Kevin uses this info to answer caller questions about your services, pricing, and hours."))
-                    }
-
-                    // MARK: - Integrations
-
-                    Section {
-                        // Jobber row
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(localized: "Jobber"))
-                                    .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Schedule checking, job creation, customer lookup"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                            Spacer()
-                            if appState.jobberConnected {
-                                Button(role: .destructive) {
-                                    Task { await disconnectJobber() }
-                                } label: {
-                                    Text(String(localized: "Disconnect"))
-                                        .font(.caption)
-                                }
-                                .buttonStyle(.borderless)
-                            } else {
-                                Button {
-                                    Task { await connectJobber() }
-                                } label: {
-                                    Text(String(localized: "Connect"))
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(.blue)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 5)
-                                        .background(Color.blue.opacity(0.12))
-                                        .clipShape(Capsule())
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                        }
-
-                        // Google Calendar row
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(localized: "Google Calendar"))
-                                    .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Availability checking, appointment requests"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                            Spacer()
-                            if appState.googleCalendarConnected {
-                                Button(role: .destructive) {
-                                    Task { await disconnectGoogleCalendar() }
-                                } label: {
-                                    Text(String(localized: "Disconnect"))
-                                        .font(.caption)
-                                }
-                                .buttonStyle(.borderless)
-                            } else {
-                                Button {
-                                    Task { await connectGoogleCalendar() }
-                                } label: {
-                                    Text(String(localized: "Connect"))
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(.blue)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 5)
-                                        .background(Color.blue.opacity(0.12))
-                                        .clipShape(Capsule())
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                        }
-                    } header: {
-                        Text(String(localized: "Integrations"))
-                    } footer: {
-                        Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm."))
+                onDismissAccount?()
+                if let lease = pendingCallLeaseToOpen {
+                    pendingCallLeaseToOpen = nil
+                    let currentAuth = appState.currentAuthContext()
+                    let currentScope = appState.callLifecycleSnapshot
+                    if lease.isValid(auth: currentAuth, scope: currentScope) {
+                        onOpenCall(lease)
                     }
                 }
-
-                // MARK: - Call Forwarding
-
-                Section {
-                    Group {
-                        if !ForwardingCountry.isNANP(forwardingCountry) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(localized: "Carrier codes"))
-                                    .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Using the call forwarding codes for \(forwardingCountryName)"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                        } else {
-                            Toggle(isOn: $appState.isVerizonCarrier) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(String(localized: "I'm a Verizon customer"))
-                                        .font(.subheadline.weight(.medium))
-                                    Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
-                                        .font(.caption)
-                                        .foregroundStyle(Color.secondary)
-                                }
-                            }
-                        }
-                    }
-                    .task(id: forwardingCountry) {
-                        guard !ForwardingCountry.isNANP(forwardingCountry) else { return }
-                        // Keep good instructions if a re-run is cancelled or fails;
-                        // overwriting with nil would silently revert the dialed codes.
-                        if let fetched = await APIClient.shared.getForwardingInstructions(countryCode: forwardingCountry) {
-                            forwardingInstructions = fetched
-                        }
-                    }
-
-                    Button {
-                        // Activate — no-answer forward for the resolved country and carrier.
-                        dialCode(forwardingCodes.activate)
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(localized: "Activate Kevin"))
-                                    .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Forward missed calls to Kevin"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "phone.arrow.right")
-                                .foregroundStyle(.green)
-                        }
-                    }
-
-                    Button(role: .destructive) {
-                        // Deactivate — must cancel exactly what activate set up.
-                        dialCode(forwardingCodes.deactivate)
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(localized: "Deactivate Kevin"))
-                                    .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Stop forwarding, calls ring normally"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "xmark.circle")
-                                .foregroundStyle(.red)
-                        }
-                    }
-
-                    Button(role: .destructive) {
-                        // Erases every forwarding type (unconditional, busy,
-                        // no-answer, not-reachable) on GSM networks — including the
-                        // carrier's own voicemail forwards. Useful when prior
-                        // forwarding from another source is still active.
-                        if let code = forwardingCodes.clearAll { dialCode(code) }
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(localized: "Clear All Forwarding"))
-                                    .font(.subheadline.weight(.medium))
-                                Text(String(localized: "Nuclear option — clears every forwarding type at once"))
-                                    .font(.caption)
-                                    .foregroundStyle(Color.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "exclamationmark.octagon")
-                                .foregroundStyle(.red)
-                        }
-                    }
-                    .disabled(forwardingCodes.clearAll == nil)
-                } header: {
-                    Text(String(localized: "Call Forwarding"))
-                } footer: {
-                    if appState.kevinNumber.isEmpty {
-                        Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
-                            .foregroundStyle(.orange)
-                    } else {
-                        // The Verizon hint only makes sense where the toggle is shown.
-                        Text(ForwardingCountry.isNANP(forwardingCountry)
-                            ? String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used.")
-                            : String(localized: "Tapping opens your phone dialer. Tap Call to confirm."))
-                    }
-                }
-                .disabled(appState.kevinNumber.isEmpty)
-
-                // MARK: - Account
-
-                Section {
-                    Button(role: .destructive) {
-                        // Fetch the authoritative subscription state before
-                        // deciding which alert to show — the cached status
-                        // defaults to "trial" and a stale cache would skip
-                        // the billing warning for an active subscriber.
-                        Task {
-                            let profile = await APIClient.shared.getContractorProfile(
-                                contractorId: appState.contractorId
-                            )
-                            let resolved = AccountDeletionFlow.resolve(
-                                freshStatus: profile?["subscription_status"] as? String,
-                                freshTier: profile?["subscription_tier"] as? String,
-                                cachedStatus: appState.subscriptionStatus,
-                                cachedTier: appState.subscriptionTier
-                            )
-                            await MainActor.run {
-                                switch AccountDeletionFlow.firstStep(
-                                    subscriptionStatus: resolved.status,
-                                    subscriptionTier: resolved.tier
-                                ) {
-                                case .warnActiveSubscription:
-                                    showSubscriptionWarningAlert = true
-                                case .confirmDelete:
-                                    showDeleteAccountAlert = true
-                                }
-                            }
-                        }
-                    } label: {
-                        if isDeletingAccount {
-                            HStack {
-                                Text(String(localized: "Deleting Account…"))
-                                Spacer()
-                                ProgressView()
-                            }
-                        } else {
-                            Text(String(localized: "Delete Account"))
-                        }
-                    }
-                    .disabled(isDeletingAccount || confirmDeleteTask != nil)
-                } footer: {
-                    Text(String(localized: "Releases your Kevin number. Your data is permanently deleted within 30 days. You will need to disable call forwarding manually."))
-                }
-                .alert(String(localized: "Delete Account"), isPresented: $showDeleteAccountAlert) {
-                    Button(String(localized: "Delete"), role: .destructive) {
-                        Task { await deleteAccount() }
-                    }
-                    Button(String(localized: "Cancel"), role: .cancel) {}
-                } message: {
-                    Text(String(localized: "This will delete your Kevin account and release your Kevin number. All your data is permanently deleted within 30 days. Make sure to deactivate call forwarding first."))
-                }
-                .alert(String(localized: AccountDeletionFlow.warningTitle), isPresented: $showSubscriptionWarningAlert) {
-                    Button(String(localized: "Manage Subscription")) {
-                        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
-                            UIApplication.shared.open(url)
-                        }
-                    }
-                    Button(String(localized: "Continue Deleting"), role: .destructive) {
-                        confirmDeleteTask?.cancel()
-                        confirmDeleteTask = Task {
-                            try? await Task.sleep(nanoseconds: alertRedismissalDelay)
-                            guard !Task.isCancelled else { return }
-                            await MainActor.run {
-                                // Re-check inside the MainActor hop: a cancel
-                                // landing during the suspension (onDisappear)
-                                // must not pop the destructive confirmation
-                                // on a later reappearance.
-                                guard !Task.isCancelled else { return }
-                                confirmDeleteTask = nil
-                                showDeleteAccountAlert = true
-                            }
-                        }
-                    }
-                    Button(String(localized: "Cancel"), role: .cancel) {}
-                } message: {
-                    Text(String(localized: AccountDeletionFlow.warningBody))
-                }
-                .alert(String(localized: "Couldn't Delete Account"), isPresented: $showDeleteAccountError) {
-                    Button(String(localized: "OK"), role: .cancel) {}
-                } message: {
-                    Text(String(localized: "The server couldn't complete the deletion, so your account is unchanged. Please check your connection and try again."))
-                }
-
-                // MARK: - Feedback & Support
-
-                Section {
-                    Button {
-                        FeedbackSupport.sendFeedback(contractorId: appState.contractorId)
-                    } label: {
-                        HStack {
-                            Text(String(localized: "Send Feedback"))
-                            Spacer()
-                            Image(systemName: "envelope")
-                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                        }
-                    }
-                    .foregroundStyle(.primary)
-                } header: {
-                    Text(String(localized: "Feedback & Support"))
-                }
-
-                // MARK: - Legal
-
-                Section {
-                    Link(destination: URL(string: "https://heykevin.one/privacy")!) {
-                        HStack {
-                            Text(String(localized: "Privacy Policy"))
-                            Spacer()
-                            Image(systemName: "arrow.up.right.square")
-                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                        }
-                    }
-                    .foregroundStyle(.primary)
-
-                    Link(destination: URL(string: "https://heykevin.one/terms")!) {
-                        HStack {
-                            Text(String(localized: "Terms of Service"))
-                            Spacer()
-                            Image(systemName: "arrow.up.right.square")
-                                .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                        }
-                    }
-                    .foregroundStyle(.primary)
-                } header: {
-                    Text(String(localized: "Legal"))
-                }
-
-                // MARK: - About
-
-                Section {
-                    HStack {
-                        Text(String(localized: "Version"))
-                        Spacer()
-                        Text(AppVersionService.marketingVersion())
-                            .foregroundStyle(Color.secondary)
-                    }
-
-                    #if DEBUG
-                    DisclosureGroup(String(localized: "Debug"), isExpanded: $showAboutDebug) {
-                        if appState.pushToken.isEmpty {
-                            Text(String(localized: "Push: Not registered"))
-                                .foregroundStyle(.red)
-                        } else {
-                            Text(String(localized: "Push: \(appState.pushToken.prefix(16))..."))
-                                .font(.system(.caption2, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
-                        if !appState.contractorId.isEmpty {
-                            Text(String(localized: "ID: \(appState.contractorId)"))
-                                .font(.system(.caption2, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .font(.subheadline)
-                    #endif
-                } header: {
-                    Text(String(localized: "About"))
+            }) {
+                NavigationStack {
+                    accountSheetView
                 }
             }
-            .navigationTitle(String(localized: "Settings"))
-            .onDisappear { cancelPendingDeleteConfirmation() }
-            .sheet(isPresented: $showKnowledgeEditor) {
+            .task {
+                await coalesceLoad()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    Task { await coalesceLoad(isForegroundOrTabSwitch: true) }
+                }
+            }
+            .onChange(of: assistantIsSelected) { _, isSelected in
+                if isSelected {
+                    Task { await coalesceLoad(isForegroundOrTabSwitch: true) }
+                }
+            }
+            .onChange(of: appState.countryCode) { _, newCode in
+                countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: newCode)
+            }
+            .onChange(of: appState.currentAuthContext()) { _, newAuth in
+                handleAuthChange(newAuth: newAuth)
+            }
+    }
+
+    // MARK: - Coalesced Loading
+
+    private func coalesceLoad(isForegroundOrTabSwitch: Bool = false) async {
+        #if DEBUG
+        if isFixtureMode {
+            return
+        }
+        #endif
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
+
+        guard let plan = loadCoordinator.beginLoad(
+            auth: auth,
+            isBusinessMode: !appState.isPersonalMode,
+            isForegroundOrTabSwitch: isForegroundOrTabSwitch
+        ) else {
+            return
+        }
+
+        var profileSuccess = false
+        if plan.shouldFetchProfile {
+            profileSuccess = await loadProfileAndHydrate(capturedAuth: plan.authContext)
+        } else {
+            profileSuccess = true
+        }
+
+        if plan.shouldCheckIntegrations {
+            await checkIntegrationsStatus(capturedAuth: plan.authContext)
+        }
+
+        await refreshPushPermission()
+
+        _ = loadCoordinator.finishLoad(
+            flightToken: plan.flightToken,
+            auth: plan.authContext,
+            profileFetchSucceeded: profileSuccess
+        )
+    }
+
+    private func handleAuthChange(newAuth: CallAuthContext) {
+        activePaywallDestination = nil
+        cancelPendingDeleteConfirmation()
+        loadCoordinator.handleAuthChange(newAuth: newAuth)
+
+        urgentPreferenceFence = PreferenceWriteFence()
+        screenAllCallsFence = PreferenceWriteFence()
+        sitToneFence = PreferenceWriteFence()
+        businessHoursFence = PreferenceWriteFence()
+
+        isSavingScreenAllCalls = false
+        screenAllCallsSaveError = ""
+        isSavingSitTone = false
+        sitToneSaveError = ""
+        isSavingSmartInterruption = false
+        smartInterruptionSaveError = ""
+        isSavingCountry = false
+        countrySaveError = ""
+        isSavingRegulatoryAddress = false
+        regulatoryAddressError = ""
+        isSavingBusinessHours = false
+        businessHoursSaveError = ""
+        isSwitchingMode = false
+        modeChangeError = ""
+        isImporting = false
+        importMessage = ""
+        syncMessage = ""
+        isProvisioningNumber = false
+        accountDeletionFence.reset(for: newAuth)
+        showDeleteAccountAlert = false
+        showDeleteAccountError = false
+        showSubscriptionWarningAlert = false
+
+        let reset = SettingsRefreshPolicy.resetStateOnAuthChange(
+            businessAddress: appState.businessAddress,
+            businessCity: appState.businessCity,
+            smartInterruption: appState.smartInterruption,
+            ringThroughContacts: appState.ringThroughContacts,
+            sitToneEnabled: appState.sitToneEnabled,
+            countryCode: appState.countryCode,
+            mode: appState.isPersonalMode ? "personal" : "business"
+        )
+        confirmedBaseline = reset.baseline
+        knowledgeText = reset.drafts.knowledgeText
+        isKnowledgeDirty = reset.drafts.isKnowledgeDirty
+        regulatoryAddressDraft = reset.drafts.regulatoryAddress
+        regulatoryCityDraft = reset.drafts.regulatoryCity
+        businessHoursStart = SettingsRefreshPolicy.defaultBusinessHoursStartDate()
+        businessHoursEnd = SettingsRefreshPolicy.defaultBusinessHoursEndDate()
+        countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: appState.countryCode)
+        smartInterruptionSelection = appState.smartInterruption
+
+        Task {
+            await coalesceLoad()
+        }
+    }
+
+    // MARK: - Assistant Screen (Kevin Tab)
+
+    private var assistantScreenView: some View {
+        ScrollViewReader { proxy in
+            Form {
+                if let lease = appState.ownedActiveCallLease {
+                    Section {
+                        CompactReturnToCallCard(lease: lease) { validLease in
+                            onOpenCall(validLease)
+                        }
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                }
+
+                setupStatusSection
+                    .disabled(isFixtureMode)
+                    .accessibilityIdentifier("settings.section.setup")
+
+                howKevinAnswersSection
+                    .disabled(isFixtureMode)
+                    .accessibilityIdentifier("settings.section.howKevinAnswers")
+
+                if !appState.isPersonalMode {
+                    yourBusinessSection
+                        .disabled(isFixtureMode)
+                        .accessibilityIdentifier("settings.section.yourBusiness")
+                    knowledgeBaseSection
+                        .disabled(isFixtureMode)
+                        .accessibilityIdentifier("settings.section.knowledgeBase")
+                    integrationsSection
+                        .disabled(isFixtureMode)
+                        .accessibilityIdentifier("settings.section.integrations")
+                }
+
+                callForwardingSection
+                    .disabled(isFixtureMode)
+                    .accessibilityIdentifier("settings.section.callForwarding")
+            }
+            .navigationTitle(String(localized: "Kevin"))
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        isAccountPresented = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle")
+                            Text(String(localized: "Settings"))
+                        }
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .accessibilityIdentifier("nav.settings")
+                    .accessibilityLabel(String(localized: "Settings"))
+                }
+            }
+            .onChange(of: shouldScrollToGoogleCalendar?.wrappedValue ?? false) { _, shouldScroll in
+                if shouldScroll {
+                    withAnimation {
+                        proxy.scrollTo("google_calendar_section", anchor: .top)
+                    }
+                    shouldScrollToGoogleCalendar?.wrappedValue = false
+                }
+            }
+            .sheet(isPresented: $showKnowledgeEditor, onDismiss: {
+                if knowledgeText != confirmedBaseline.knowledgeText {
+                    isKnowledgeDirty = true
+                }
+            }) {
                 KnowledgeEditorView(knowledgeText: $knowledgeText)
+            }
+            .sheet(isPresented: assistantPaywallBinding) {
+                PaywallView(canDismiss: true)
+                    .environmentObject(appState)
             }
             .alert(String(localized: "Change How Kevin Answers"), isPresented: $showModeChangeAlert) {
                 Button(String(localized: "Switch")) {
@@ -764,29 +392,62 @@ struct SettingsView: View {
                      ? String(localized: "Kevin will become your business receptionist: smart intake questions, business hours, and a knowledge base for FAQs. Your Kevin number will be kept.")
                      : String(localized: "Kevin will switch to personal screening: unknown callers are screened, saved contacts ring through. Your business setup and Kevin number will be kept."))
             }
-            .task {
-                await loadKnowledge()
-                await checkJobberStatus()
-                await checkGoogleCalendarStatus()
-                await refreshPushPermission()
-            }
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active {
-                    Task {
-                        await checkJobberStatus()
-                        await checkGoogleCalendarStatus()
-                        await refreshPushPermission()
-                    }
-                }
-            }
         }
     }
 
-    private var formattedKevinNumber: String {
-        PhoneFormatter.format(kevinNumber)
+    // MARK: - Account Sheet View
+
+    private var accountSheetView: some View {
+        Form {
+            if let lease = appState.ownedActiveCallLease {
+                Section {
+                    CompactReturnToCallCard(lease: lease) { validLease in
+                        pendingCallLeaseToOpen = validLease
+                        isAccountPresented = false
+                    }
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            }
+
+            accountAndPlanSection
+                .disabled(isFixtureMode)
+                .accessibilityIdentifier("settings.section.accountAndPlan")
+
+            deleteAccountSection
+                .disabled(isFixtureMode)
+                .accessibilityIdentifier("settings.section.deleteAccount")
+
+            feedbackSection
+                .disabled(isFixtureMode)
+                .accessibilityIdentifier("settings.section.feedback")
+
+            legalSection
+                .disabled(isFixtureMode)
+                .accessibilityIdentifier("settings.section.legal")
+
+            aboutSection
+                .disabled(isFixtureMode)
+                .accessibilityIdentifier("settings.section.about")
+        }
+        .navigationTitle(String(localized: "Account"))
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(String(localized: "Done")) {
+                    isAccountPresented = false
+                }
+                .font(.headline)
+                .accessibilityIdentifier("settings.done")
+            }
+        }
+        .sheet(isPresented: accountPaywallBinding) {
+            PaywallView(canDismiss: true)
+                .environmentObject(appState)
+        }
     }
 
-    // MARK: - Kevin Status
+    // MARK: - Sections: Kevin Tab
 
     private var setupStatusSection: some View {
         let numberOK = !appState.kevinNumber.isEmpty
@@ -796,36 +457,33 @@ struct SettingsView: View {
 
         return Section {
             if allGood {
-                Label("Kevin is set up and ready", systemImage: "checkmark.circle.fill")
+                Label(String(localized: "Setup steps completed"), systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.subheadline.weight(.medium))
             }
 
-            // Kevin number — always visible; this is the number calls forward
-            // to (and the number businesses hand out).
             if numberOK {
                 HStack(spacing: 12) {
-                    // Invisible stand-in for SetupRow's status icon. This row
-                    // has nothing to warn about, but without the gutter its
-                    // text sits flush-left while every row below is indented,
-                    // leaving the card with a ragged left edge.
                     Image(systemName: "checkmark.circle.fill")
                         .font(.title3)
                         .hidden()
 
                     Text(String(localized: "Kevin Number"))
                     Spacer()
-                    Text(formattedKevinNumber)
+                    Text(PhoneFormatter.format(kevinNumber))
                         .foregroundStyle(Color.secondary)
                         .textSelection(.enabled)
                 }
             } else {
                 SetupRow(
-                    title: "Kevin Number",
+                    title: String(localized: "Kevin Number"),
                     ok: false,
-                    okLabel: formattedKevinNumber,
-                    failLabel: "No number assigned"
+                    okLabel: PhoneFormatter.format(kevinNumber),
+                    failLabel: String(localized: "No number assigned")
                 ) {
+                    #if DEBUG
+                    if isFixtureMode { return }
+                    #endif
                     if isProvisioningNumber { return }
                     isProvisioningNumber = true
                     Task {
@@ -836,47 +494,38 @@ struct SettingsView: View {
                     if isProvisioningNumber {
                         AnyView(ProgressView().scaleEffect(0.8))
                     } else {
-                        AnyView(Text("Get Number").font(.caption.weight(.medium)).foregroundStyle(.blue))
+                        AnyView(Text(String(localized: "Get Number")).font(.caption.weight(.medium)).foregroundStyle(.blue))
                     }
                 }
             }
 
-            // The checklist below shows only while something still needs
-            // attention; once every step passes it collapses to the ready
-            // row above, keeping the screen short for set-up users.
             if !allGood {
-                // Call forwarding — track activation locally (carrier state not queryable)
                 HStack(spacing: 12) {
                     Image(systemName: appState.forwardingActivated ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                         .foregroundStyle(appState.forwardingActivated ? Color.green : Color.orange)
                         .font(.title3)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Call Forwarding")
+                        Text(String(localized: "Call Forwarding"))
                             .font(.subheadline)
-                        Text(appState.forwardingActivated ? "Activated" : "Missed calls must route to Kevin")
+                        Text(appState.forwardingActivated ? String(localized: "Activation requested") : String(localized: "Missed calls must route to Kevin"))
                             .font(.caption)
                             .foregroundStyle(appState.forwardingActivated ? Color.secondary : Color.orange)
                     }
                     Spacer()
                     Button {
+                        #if DEBUG
+                        if isFixtureMode { return }
+                        #endif
                         if !appState.kevinNumber.isEmpty {
-                            // Match the code to the country and carrier. Hardcoding
-                            // the GSM code here sent Verizon users a code their
-                            // network ignores — and then showed them a green
-                            // checkmark for it.
                             dialCode(forwardingCodes.activate)
-                            // Set the optimistic flag only after dialing is attempted.
-                            // This still records intent rather than fact — the device
-                            // cannot read forwarding state — but it no longer claims
-                            // success before anything has happened. Ground truth is
-                            // the server's forwarding_last_seen_at, derived from
-                            // Twilio's ForwardedFrom on a real forwarded call.
+                            #if !DEBUG
                             UserDefaults.standard.set(appState.kevinNumber, forKey: "forwardingActivatedFor")
+                            #endif
                             appState.forwardingActivated = true
                         }
                     } label: {
-                        Text(appState.forwardingActivated ? "Re-activate" : "Unverified")
+                        Text(appState.forwardingActivated ? String(localized: "Re-activate") : String(localized: "Set up forwarding"))
                             .font(.caption.weight(.medium))
                             .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : (appState.forwardingActivated ? Color.blue : Color.orange))
                             .padding(.horizontal, 10)
@@ -888,24 +537,15 @@ struct SettingsView: View {
                     .disabled(appState.kevinNumber.isEmpty)
                 }
 
-                // Push notifications.
-                //
-                // The action depends on whether iOS has a decision on file:
-                //
-                // - notDetermined: nobody has ever asked. Settings shows no
-                //   Notifications row for an app in this state, so sending the user
-                //   there strands them on a pane with Siri, Search, and Language and
-                //   no way to enable anything. Ask for permission instead.
-                // - denied: the row exists, so deep-link straight to it with
-                //   openNotificationSettingsURLString (iOS 15.4+). The general
-                //   openSettingsURLString only opens the app's top-level pane and
-                //   makes the user hunt.
                 SetupRow(
-                    title: "Push Notifications",
+                    title: String(localized: "Push Notifications"),
                     ok: pushOK,
-                    okLabel: "Enabled",
-                    failLabel: pushPermission == .denied ? "Blocked in iOS Settings" : "Not enabled"
+                    okLabel: String(localized: "Enabled"),
+                    failLabel: pushPermission == .denied ? String(localized: "Blocked in iOS Settings") : String(localized: "Not enabled")
                 ) {
+                    #if DEBUG
+                    if isFixtureMode { return }
+                    #endif
                     if pushPermission == .denied {
                         if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
                             UIApplication.shared.open(url)
@@ -925,20 +565,15 @@ struct SettingsView: View {
                     )
                 }
 
-                // Subscription state as a setup step; the Account & Plan
-                // section below is where plans are viewed and managed.
                 SetupRow(
-                    title: "Subscription",
+                    title: String(localized: "Subscription"),
                     ok: subOK,
-                    // Both labels come from planLabel so this row and the
-                    // Account & Plan row can never contradict each other; the
-                    // check/warning icon already carries the pass-fail signal.
                     okLabel: planLabel,
                     failLabel: planLabel
                 ) {
-                    showPaywall = true
+                    presentPaywall(from: .assistant)
                 } actionLabel: {
-                    AnyView(Text("Subscribe").font(.caption.weight(.medium)).foregroundStyle(.blue))
+                    AnyView(Text(String(localized: "Subscribe")).font(.caption.weight(.medium)).foregroundStyle(.blue))
                 }
             }
         } header: {
@@ -946,217 +581,817 @@ struct SettingsView: View {
         }
     }
 
-    private func refreshPushPermission() async {
-        let settings = await UNUserNotificationCenter.current().notificationSettings()
-        await MainActor.run { pushPermission = settings.authorizationStatus }
-    }
+    private var howKevinAnswersSection: some View {
+        Section {
+            // Screen all calls toggle (moved from Recents)
+            Toggle(isOn: screenAllCallsBinding) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "Screen all calls"))
+                        .font(.subheadline.weight(.medium))
+                    Text(!appState.ringThroughContacts
+                         ? String(localized: "Kevin screens everyone, including contacts")
+                         : String(localized: "Contacts bypass Kevin and ring directly"))
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                }
+            }
+            .disabled(isSavingScreenAllCalls || isFixtureMode)
+            .accessibilityIdentifier("kevin.screenAllCalls")
 
-    private func provisionNumberFromSettings() async {
-        guard !appState.contractorId.isEmpty else { return }
-        do {
-            let url = URL(string: "\(APIClient.shared.baseURL)/api/contractors/\(appState.contractorId)/provision-number")!
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.timeoutInterval = 30
-            APIClient.shared.authorize(&request)
-            let (data, _) = try await URLSession.shared.data(for: request)
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let number = json["phone_number"] as? String, !number.isEmpty {
-                let country = SettingsCountry.accountCountry(from: json)
-                await MainActor.run {
-                    appState.kevinNumber = number
-                    if let country {
-                        appState.countryCode = country
-                        countrySelection = country
+            if !screenAllCallsSaveError.isEmpty {
+                Text(screenAllCallsSaveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            Toggle(String(localized: "Block spam with disconnect tone"), isOn: sitToneBinding)
+                .disabled(isSavingSitTone || isFixtureMode)
+
+            if !sitToneSaveError.isEmpty {
+                Text(sitToneSaveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            Toggle(String(localized: "Alert me for urgent calls"), isOn: smartInterruptionBinding)
+                .disabled(isSavingSmartInterruption || isFixtureMode)
+
+            if !smartInterruptionSaveError.isEmpty {
+                Text(smartInterruptionSaveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            if appState.isPersonalMode {
+                Button {
+                    #if DEBUG
+                    if isFixtureMode {
+                        syncMessage = String(localized: "Synced 42 contacts")
+                        return
+                    }
+                    #endif
+                    Task {
+                        appState.contactsUploadConsent = true
+                        let result = await ContactSyncManager.shared.syncContacts(
+                            contractorId: appState.contractorId,
+                            force: true
+                        )
+                        switch result {
+                        case .success(let synced, _):
+                            syncMessage = String(localized: "Synced \(synced) contacts")
+                        case .permissionDenied:
+                            syncMessage = String(localized: "Contacts permission denied")
+                        case .rateLimited:
+                            syncMessage = String(localized: "Please wait before syncing again")
+                        case .error(let msg):
+                            syncMessage = String(localized: "Error: \(msg)")
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(String(localized: "Sync Contacts"))
+                            .font(.subheadline)
+                        Spacer()
+                        if !syncMessage.isEmpty {
+                            Text(syncMessage)
+                                .font(.caption)
+                                .foregroundStyle(syncMessage.contains("Error") || syncMessage.contains("denied") ? .red : .green)
+                        }
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(.blue)
+                    }
+                }
+                .disabled(isFixtureMode)
+            }
+
+            Button {
+                #if DEBUG
+                if isFixtureMode { return }
+                #endif
+                showModeChangeAlert = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(appState.isPersonalMode
+                             ? String(localized: "Use Kevin for Your Business")
+                             : String(localized: "Switch to Personal Screening"))
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.blue)
+                        Text(appState.isPersonalMode
+                             ? String(localized: "Receptionist mode: intake questions, business hours, knowledge base. Requires a Business plan.")
+                             : String(localized: "Kevin only screens unknown callers and takes messages. Your business setup is kept."))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
+                    Spacer()
+                    if isSwitchingMode {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                            .font(.caption)
                     }
                 }
             }
-        } catch {
-            debugLog("Provision from settings failed: \(error)")
-        }
-    }
+            .disabled(isSwitchingMode || isFixtureMode)
 
-    private var forwardingCodes: ForwardingCodes {
-        ForwardingDialCodes.codes(
-            countryCode: forwardingCountry,
-            instructions: forwardingInstructions,
-            number: dialNumber,
-            isVerizon: appState.isVerizonCarrier
-        )
-    }
-
-    private var forwardingCountryName: String {
-        Locale.current.localizedString(forRegionCode: forwardingCountry) ?? forwardingCountry
-    }
-
-    private var dialNumber: String {
-        // Strip + and any non-digit characters for carrier codes
-        let digits = kevinNumber.filter { $0.isNumber }
-        // Ensure it starts with 1 for US numbers
-        if digits.count == 10 {
-            return "1\(digits)"
-        }
-        return digits
-    }
-
-    /// `code` is the raw carrier string (with literal `#`); encoding is
-    /// centralised in `ForwardingDialCodes.telURL`.
-    private func dialCode(_ code: String) {
-        if let url = ForwardingDialCodes.telURL(code) {
-            UIApplication.shared.open(url)
-        }
-    }
-
-    // MARK: - Subscription computed properties
-
-    /// Value for the "Plan" row. Shows the tier by name when active — the old
-    /// "Active — Business" wording read like a mode and collided with the
-    /// business-assistant concept elsewhere on this screen.
-    private var planLabel: String {
-        switch appState.subscriptionStatus {
-        case "trial": return "Free Trial"
-        case "active": return tierLabel
-        case "expired": return "Expired"
-        case "cancelled": return "Cancelled"
-        default: return appState.subscriptionStatus.isEmpty ? "Free Trial" : appState.subscriptionStatus.capitalized
-        }
-    }
-
-    /// Label for the paywall entry point, phrased for the current state:
-    /// browsing during trial, changing while active, subscribing otherwise.
-    private var viewPlansLabel: String {
-        switch appState.subscriptionStatus {
-        case "trial": return String(localized: "View Plans")
-        case "active": return String(localized: "Change Plan")
-        default: return String(localized: "Subscribe to Kevin AI")
-        }
-    }
-
-    private var tierLabel: String {
-        switch appState.subscriptionTier {
-        case "personal": return "Personal"
-        case "business": return "Business"
-        case "businessPro": return "Business Pro"
-        default: return "Kevin AI"
-        }
-    }
-
-    private func loadKnowledge() async {
-        let auth = appState.currentAuthContext()
-        let readRevision = urgentPreferenceFence.revision
-        guard auth.isValid else { return }
-        if let contractor = await APIClient.shared.getContractorProfile(contractorId: auth.contractorId, bearerToken: auth.bearerToken) {
-            guard appState.currentAuthContext() == auth, urgentPreferenceFence.permitsLoad(readRevision) else { return }
-            knowledgeText = contractor["knowledge"] as? String ?? ""
-            let name = contractor["owner_name"] as? String ?? ""
-            let biz = contractor["business_name"] as? String ?? ""
-            let bizAddress = contractor["business_address"] as? String ?? ""
-            let bizCity = contractor["business_city"] as? String ?? ""
-            let svc = contractor["service_type"] as? String ?? ""
-            let mode = contractor["effective_mode"] as? String ?? contractor["mode"] as? String ?? "personal"
-            let ringThrough = contractor["ring_through_contacts"] as? Bool ?? true
-            await MainActor.run {
-                guard appState.currentAuthContext() == auth, urgentPreferenceFence.permitsLoad(readRevision) else { return }
-                if !name.isEmpty { appState.userName = name }
-                if !biz.isEmpty { appState.businessName = biz }
-                if !bizAddress.isEmpty {
-                    appState.businessAddress = bizAddress
-                    regulatoryAddressDraft = bizAddress
-                }
-                if !bizCity.isEmpty {
-                    appState.businessCity = bizCity
-                    regulatoryCityDraft = bizCity
-                }
-                if !svc.isEmpty { appState.serviceType = svc }
-                appState.mode = (mode == "personal") ? "personal" : "business"
-                appState.ringThroughContacts = ringThrough
-                let sitTone = contractor["sit_tone_enabled"] as? Bool ?? false
-                appState.sitToneEnabled = sitTone
-                let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
-                appState.autoReplySms = autoReply
-                let smartInterruption = contractor["smart_interruption"] as? Bool ?? true
-                appState.smartInterruption = smartInterruption
-                smartInterruptionSelection = smartInterruption
-
-                // Load account country (root-authoritative on the server)
-                if let country = SettingsCountry.accountCountry(from: contractor) {
-                    appState.countryCode = country
-                    countrySelection = country
-                }
-
-                // Load business hours
-                let formatter = DateFormatter()
-                formatter.dateFormat = "HH:mm"
-                if let startStr = contractor["business_hours_start"] as? String,
-                   let startDate = formatter.date(from: startStr) {
-                    businessHoursStart = startDate
-                }
-                if let endStr = contractor["business_hours_end"] as? String,
-                   let endDate = formatter.date(from: endStr) {
-                    businessHoursEnd = endDate
-                }
-
-                // Load subscription state
-                let subStatus = contractor["subscription_status"] as? String ?? ""
-                let subTier = contractor["subscription_tier"] as? String ?? ""
-                if !subStatus.isEmpty { appState.subscriptionStatus = subStatus }
-                if !subTier.isEmpty { appState.subscriptionTier = subTier }
+            if !modeChangeError.isEmpty {
+                Text(modeChangeError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
+
+            if !saveError.isEmpty {
+                Text(saveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text(String(localized: "How Kevin Answers"))
+        } footer: {
+            Text(appState.isPersonalMode
+                 ? String(localized: "Choose how Kevin screens your calls. Enable urgent call alerts to be notified about urgent issues.")
+                 : String(localized: "Kevin answers using your business setup. Enable urgent call alerts to be notified about urgent issues."))
         }
     }
 
-    private func updateRingThrough(_ value: Bool) async {
-        guard !appState.contractorId.isEmpty else { return }
-        do {
-            _ = try await APIClient.shared.patchContractor(appState.contractorId, body: ["ring_through_contacts": value])
-        } catch {
-            debugLog("Update ring through failed: \(error)")
-            await MainActor.run { saveError = String(localized: "Failed to save setting. Please try again.") }
-        }
-    }
+    private var yourBusinessSection: some View {
+        Section {
+            HStack {
+                Text(String(localized: "Business"))
+                Spacer()
+                Text(appState.businessName.isEmpty ? String(localized: "Not set") : appState.businessName)
+                    .foregroundStyle(appState.businessName.isEmpty ? .tertiary : .secondary)
+            }
 
-    private func updateSitToneEnabled(_ value: Bool) async {
-        guard !appState.contractorId.isEmpty else { return }
-        do {
-            _ = try await APIClient.shared.patchContractor(appState.contractorId, body: ["sit_tone_enabled": value])
-        } catch {
-            debugLog("Update SIT tone setting failed: \(error)")
-            await MainActor.run { saveError = String(localized: "Failed to save setting. Please try again.") }
-        }
-    }
+            HStack {
+                DatePicker(String(localized: "Open"), selection: Binding(
+                    get: { businessHoursStart },
+                    set: { newDate in
+                        businessHoursStart = newDate
+                        saveBusinessHoursExplicitly()
+                    }
+                ), displayedComponents: .hourAndMinute)
+                .disabled(isSavingBusinessHours || isFixtureMode)
+                .accessibilityIdentifier("settings.businessHours.start")
 
-    private var countryBinding: Binding<String> {
-        Binding(
-            get: { countrySelection },
-            set: { picked in
-                countrySelection = picked
-                if SettingsCountryFlow.shouldWrite(picked: picked, accountCountry: appState.countryCode) {
-                    saveCountry(picked)
+                if isSavingBusinessHours {
+                    ProgressView()
+                        .scaleEffect(0.8)
                 }
             }
-        )
+
+            HStack {
+                DatePicker(String(localized: "Close"), selection: Binding(
+                    get: { businessHoursEnd },
+                    set: { newDate in
+                        businessHoursEnd = newDate
+                        saveBusinessHoursExplicitly()
+                    }
+                ), displayedComponents: .hourAndMinute)
+                .disabled(isSavingBusinessHours || isFixtureMode)
+                .accessibilityIdentifier("settings.businessHours.end")
+
+                if isSavingBusinessHours {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                }
+            }
+
+            if !businessHoursSaveError.isEmpty {
+                HStack {
+                    Text(businessHoursSaveError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    Spacer()
+                    Button(String(localized: "Retry")) {
+                        saveBusinessHoursExplicitly()
+                    }
+                    .font(.caption.weight(.medium))
+                    .accessibilityIdentifier("settings.businessHours.retry")
+                }
+            }
+        } header: {
+            Text(String(localized: "Your Business"))
+        } footer: {
+            Text(String(localized: "Outside these hours, Kevin will tell callers you're closed and take a message."))
+        }
     }
 
-    private func saveCountry(_ code: String) {
-        guard !appState.contractorId.isEmpty, !isSavingCountry else { return }
-        countrySaveError = ""
-        isSavingCountry = true
-        Task {
-            let returned = await APIClient.shared.updateCountryCode(
-                contractorId: appState.contractorId,
-                countryCode: code
-            )
-            await MainActor.run {
-                isSavingCountry = false
-                if SettingsCountryFlow.isConfirmed(requested: code, returned: returned) {
-                    appState.countryCode = code
+    private var knowledgeBaseSection: some View {
+        Section {
+            NavigationLink {
+                ServicesView()
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "Services & Pricing"))
+                        .font(.subheadline)
+                    Text(String(localized: "Add your services so Kevin can quote estimates"))
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                }
+            }
+
+            Button {
+                #if DEBUG
+                if isFixtureMode { return }
+                #endif
+                showKnowledgeEditor = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Business Knowledge"))
+                            .font(.subheadline)
+                            .foregroundStyle(Color.primary)
+                        Text(String(localized: "Tell Kevin about your business so he can answer questions"))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                }
+            }
+
+            HStack {
+                TextField(String(localized: "Website URL"), text: $websiteURL)
+                    .textContentType(.URL)
+                    .keyboardType(.URL)
+                    .autocapitalization(.none)
+                    .font(.subheadline)
+                    .disabled(isFixtureMode)
+
+                if isImporting {
+                    ProgressView()
+                        .scaleEffect(0.8)
                 } else {
-                    // Revert without writing: assigning the state directly
-                    // bypasses the binding's setter. The forwarding codes must
-                    // never follow a country the server did not confirm.
-                    countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: appState.countryCode)
-                    countrySaveError = String(localized: "Failed to save setting. Please try again.")
+                    Button(String(localized: "Import")) {
+                        Task { await importWebsite() }
+                    }
+                    .disabled(websiteURL.isEmpty || isFixtureMode)
                 }
+            }
+
+            if !importMessage.isEmpty {
+                Text(importMessage)
+                    .font(.caption)
+                    .foregroundStyle(importMessage.contains("Failed") ? .red : .green)
+            }
+        } header: {
+            Text(String(localized: "Knowledge Base"))
+        } footer: {
+            Text(String(localized: "Kevin uses this info to answer caller questions about your services, pricing, and hours."))
+        }
+    }
+
+    private var integrationsSection: some View {
+        Section {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "Jobber"))
+                        .font(.subheadline.weight(.medium))
+                    Text(String(localized: "Schedule checking, job creation, customer lookup"))
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                }
+                Spacer()
+                if appState.jobberConnected {
+                    Button(role: .destructive) {
+                        Task { await disconnectJobber() }
+                    } label: {
+                        Text(String(localized: "Disconnect"))
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isFixtureMode)
+                } else {
+                    Button {
+                        Task { await connectJobber() }
+                    } label: {
+                        Text(String(localized: "Connect"))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isFixtureMode)
+                }
+            }
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "Google Calendar"))
+                        .font(.subheadline.weight(.medium))
+                    Text(String(localized: "Availability checking, appointment requests"))
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                }
+                Spacer()
+                if appState.googleCalendarConnected {
+                    Button(role: .destructive) {
+                        Task { await disconnectGoogleCalendar() }
+                    } label: {
+                        Text(String(localized: "Disconnect"))
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isFixtureMode)
+                } else {
+                    Button {
+                        Task { await connectGoogleCalendar() }
+                    } label: {
+                        Text(String(localized: "Connect"))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isFixtureMode)
+                }
+            }
+            .id("google_calendar_section")
+        } header: {
+            Text(String(localized: "Integrations"))
+        } footer: {
+            Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm."))
+        }
+    }
+
+    private var callForwardingSection: some View {
+        Section {
+            Group {
+                if !ForwardingCountry.isNANP(forwardingCountry) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Carrier codes"))
+                            .font(.subheadline.weight(.medium))
+                        Text(String(localized: "Using the call forwarding codes for \(forwardingCountryName)"))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
+                } else {
+                    Toggle(isOn: $appState.isVerizonCarrier) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "I'm a Verizon customer"))
+                                .font(.subheadline.weight(.medium))
+                            Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        }
+                    }
+                }
+            }
+            .task(id: forwardingCountry) {
+                #if DEBUG
+                if isFixtureMode { return }
+                #endif
+                guard !ForwardingCountry.isNANP(forwardingCountry) else { return }
+                if let fetched = await APIClient.shared.getForwardingInstructions(countryCode: forwardingCountry) {
+                    forwardingInstructions = fetched
+                }
+            }
+
+            Button {
+                dialCode(forwardingCodes.activate)
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Activate Kevin"))
+                            .font(.subheadline.weight(.medium))
+                        Text(String(localized: "Forward missed calls to Kevin"))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "phone.arrow.right")
+                        .foregroundStyle(.green)
+                }
+            }
+            .disabled(isFixtureMode)
+
+            Button(role: .destructive) {
+                dialCode(forwardingCodes.deactivate)
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Deactivate Kevin"))
+                            .font(.subheadline.weight(.medium))
+                        Text(String(localized: "Stop forwarding, calls ring normally"))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "xmark.circle")
+                        .foregroundStyle(.red)
+                }
+            }
+            .disabled(isFixtureMode)
+
+            Button(role: .destructive) {
+                if let code = forwardingCodes.clearAll { dialCode(code) }
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Clear All Forwarding"))
+                            .font(.subheadline.weight(.medium))
+                        Text(String(localized: "Nuclear option — clears every forwarding type at once"))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "exclamationmark.octagon")
+                        .foregroundStyle(.red)
+                }
+            }
+            .disabled(forwardingCodes.clearAll == nil || isFixtureMode)
+        } header: {
+            Text(String(localized: "Call Forwarding"))
+        } footer: {
+            if appState.kevinNumber.isEmpty {
+                Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
+                    .foregroundStyle(.orange)
+            } else {
+                Text(ForwardingCountry.isNANP(forwardingCountry)
+                    ? String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used.")
+                    : String(localized: "Tapping opens your phone dialer. Tap Call to confirm."))
+            }
+        }
+        .disabled(appState.kevinNumber.isEmpty)
+    }
+
+    // MARK: - Sections: Account Sheet
+
+    private var accountAndPlanSection: some View {
+        Section {
+            HStack {
+                Text(String(localized: "Name"))
+                Spacer()
+                Text(appState.userName)
+                    .foregroundStyle(Color.secondary)
+            }
+
+            HStack {
+                Text(String(localized: "Plan"))
+                Spacer()
+                Text(planLabel)
+                    .foregroundStyle(Color.secondary)
+            }
+
+            Picker(selection: countryBinding) {
+                ForEach(SettingsCountry.supported, id: \.self) { code in
+                    Text(SettingsCountry.displayName(code)).tag(code)
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "Country"))
+                    Text(String(localized: "Sets the call forwarding codes Kevin shows you."))
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                }
+            }
+            .disabled(isSavingCountry || isFixtureMode)
+
+            if !countrySaveError.isEmpty {
+                Text(countrySaveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            if RegulatoryAddress.requiresAddress(countryCode: appState.countryCode) {
+                TextField(String(localized: "Business Address"), text: $regulatoryAddressDraft)
+                    .textContentType(.fullStreetAddress)
+                    .font(.subheadline)
+                    .disabled(isFixtureMode)
+                TextField(String(localized: "City"), text: $regulatoryCityDraft)
+                    .textContentType(.addressCity)
+                    .font(.subheadline)
+                    .disabled(isFixtureMode)
+
+                if !regulatoryAddressError.isEmpty {
+                    Text(regulatoryAddressError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Button {
+                    saveRegulatoryAddress()
+                } label: {
+                    if isSavingRegulatoryAddress {
+                        ProgressView()
+                    } else {
+                        Text(String(localized: "Save Address"))
+                    }
+                }
+                .disabled(isSavingRegulatoryAddress || isFixtureMode)
+            }
+
+            Button {
+                presentPaywall(from: .account)
+            } label: {
+                HStack {
+                    Text(viewPlansLabel)
+                        .foregroundStyle(.blue)
+                    Spacer()
+                    Image(systemName: "arrow.right.circle.fill")
+                        .foregroundStyle(.blue)
+                }
+            }
+            .disabled(isFixtureMode)
+            .accessibilityIdentifier("settings.viewPlans")
+
+            if appState.subscriptionStatus == "active" {
+                Button {
+                    #if DEBUG
+                    if isFixtureMode { return }
+                    #endif
+                    if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    HStack {
+                        Text(String(localized: "Manage Subscription"))
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square")
+                            .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                    }
+                }
+                .foregroundStyle(.primary)
+                .disabled(isFixtureMode)
+            }
+        } header: {
+            Text(String(localized: "Account & Plan"))
+        }
+    }
+
+    private var deleteAccountSection: some View {
+        Section {
+            Button(role: .destructive) {
+                #if DEBUG
+                if isFixtureMode { return }
+                #endif
+                let auth = appState.currentAuthContext()
+                guard auth.isValid else { return }
+                deletionLoader.requestConfirmation(
+                    auth: auth,
+                    isAccountPresented: { isAccountPresented },
+                    currentAuth: { appState.currentAuthContext() },
+                    cachedStatus: appState.subscriptionStatus,
+                    cachedTier: appState.subscriptionTier,
+                    fetchProfile: { targetAuth in
+                        await APIClient.shared.getContractorProfile(
+                            contractorId: targetAuth.contractorId,
+                            bearerToken: targetAuth.bearerToken
+                        )
+                    },
+                    onReady: { step in
+                        switch step {
+                        case .warnActiveSubscription:
+                            showSubscriptionWarningAlert = true
+                        case .confirmDelete:
+                            showDeleteAccountAlert = true
+                        }
+                    }
+                )
+            } label: {
+                if accountDeletionFence.isPending {
+                    HStack {
+                        Text(String(localized: "Deleting Account…"))
+                        Spacer()
+                        ProgressView()
+                    }
+                } else {
+                    Text(String(localized: "Delete Account"))
+                }
+            }
+            .disabled(accountDeletionFence.isPending || deletionLoader.isLoading || confirmDeleteTask != nil || isFixtureMode)
+        } footer: {
+            Text(String(localized: "Releases your Kevin number. Your data is permanently deleted within 30 days. You will need to disable call forwarding manually."))
+        }
+        .alert(String(localized: "Delete Account"), isPresented: $showDeleteAccountAlert) {
+            Button(String(localized: "Delete"), role: .destructive) {
+                Task { await deleteAccount() }
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(String(localized: "This will delete your Kevin account and release your Kevin number. All your data is permanently deleted within 30 days. Make sure to deactivate call forwarding first."))
+        }
+        .alert(String(localized: AccountDeletionFlow.warningTitle), isPresented: $showSubscriptionWarningAlert) {
+            Button(String(localized: "Manage Subscription")) {
+                #if DEBUG
+                if isFixtureMode { return }
+                #endif
+                if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+                    UIApplication.shared.open(url)
+                }
+            }
+            Button(String(localized: "Continue Deleting"), role: .destructive) {
+                confirmDeleteTask?.cancel()
+                confirmDeleteTask = Task {
+                    try? await Task.sleep(nanoseconds: alertRedismissalDelay)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        guard !Task.isCancelled else { return }
+                        confirmDeleteTask = nil
+                        showDeleteAccountAlert = true
+                    }
+                }
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(String(localized: AccountDeletionFlow.warningBody))
+        }
+        .alert(String(localized: "Couldn't Delete Account"), isPresented: $showDeleteAccountError) {
+            Button(String(localized: "OK"), role: .cancel) {}
+        } message: {
+            Text(String(localized: "The server couldn't complete the deletion, so your account is unchanged. Please check your connection and try again."))
+        }
+    }
+
+    private var feedbackSection: some View {
+        Section {
+            Button {
+                #if DEBUG
+                if isFixtureMode { return }
+                #endif
+                FeedbackSupport.sendFeedback(contractorId: appState.contractorId)
+            } label: {
+                HStack {
+                    Text(String(localized: "Send Feedback"))
+                    Spacer()
+                    Image(systemName: "envelope")
+                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                }
+            }
+            .foregroundStyle(.primary)
+            .disabled(isFixtureMode)
+        } header: {
+            Text(String(localized: "Feedback & Support"))
+        }
+    }
+
+    private var legalSection: some View {
+        Section {
+            Link(destination: URL(string: "https://heykevin.one/privacy")!) {
+                HStack {
+                    Text(String(localized: "Privacy Policy"))
+                    Spacer()
+                    Image(systemName: "arrow.up.right.square")
+                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                }
+            }
+            .foregroundStyle(.primary)
+            .disabled(isFixtureMode)
+
+            Link(destination: URL(string: "https://heykevin.one/terms")!) {
+                HStack {
+                    Text(String(localized: "Terms of Service"))
+                    Spacer()
+                    Image(systemName: "arrow.up.right.square")
+                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                }
+            }
+            .foregroundStyle(.primary)
+            .disabled(isFixtureMode)
+        } header: {
+            Text(String(localized: "Legal"))
+        }
+    }
+
+    private var aboutSection: some View {
+        Section {
+            HStack {
+                Text(String(localized: "Version"))
+                Spacer()
+                Text(AppVersionService.marketingVersion())
+                    .foregroundStyle(Color.secondary)
+            }
+
+            #if DEBUG
+            DisclosureGroup(String(localized: "Debug"), isExpanded: $showAboutDebug) {
+                if appState.pushToken.isEmpty {
+                    Text(String(localized: "Push: Not registered"))
+                        .foregroundStyle(.red)
+                } else {
+                    Text(String(localized: "Push: \(appState.pushToken.prefix(16))..."))
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                if !appState.contractorId.isEmpty {
+                    Text(String(localized: "ID: \(appState.contractorId)"))
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+            .font(.subheadline)
+            #endif
+        } header: {
+            Text(String(localized: "About"))
+        }
+    }
+
+    // MARK: - Bindings and Actions
+
+    private var screenAllCallsBinding: Binding<Bool> {
+        Binding(
+            get: { !appState.ringThroughContacts },
+            set: { userSelectedScreenAll in
+                guard !isSavingScreenAllCalls else { return }
+                let targetRingThrough = !userSelectedScreenAll
+                saveScreenAllCalls(targetRingThrough)
+            }
+        )
+    }
+
+    private func saveScreenAllCalls(_ newRingThrough: Bool) {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !isSavingScreenAllCalls, let operation = screenAllCallsFence.beginSave() else { return }
+        screenAllCallsSaveError = ""
+        isSavingScreenAllCalls = true
+        let previous = appState.ringThroughContacts
+        Task { @MainActor in
+            #if DEBUG
+            if isFixtureMode {
+                _ = screenAllCallsFence.finish(operation)
+                isSavingScreenAllCalls = false
+                appState.ringThroughContacts = newRingThrough
+                confirmedBaseline.ringThroughContacts = newRingThrough
+                return
+            }
+            #endif
+            let success: Bool
+            do {
+                success = try await APIClient.shared.patchContractor(
+                    auth.contractorId,
+                    body: ["ring_through_contacts": newRingThrough],
+                    bearerToken: auth.bearerToken
+                )
+            } catch {
+                success = false
+            }
+            guard screenAllCallsFence.finish(operation) else { return }
+            isSavingScreenAllCalls = false
+            guard appState.currentAuthContext() == auth else { return }
+            if success {
+                appState.ringThroughContacts = newRingThrough
+                confirmedBaseline.ringThroughContacts = newRingThrough
+            } else {
+                appState.ringThroughContacts = previous
+                screenAllCallsSaveError = String(localized: "Failed to save setting. Please try again.")
+            }
+        }
+    }
+
+    private var sitToneBinding: Binding<Bool> {
+        Binding(
+            get: { appState.sitToneEnabled },
+            set: { newValue in
+                guard !isSavingSitTone else { return }
+                saveSitTone(newValue)
+            }
+        )
+    }
+
+    private func saveSitTone(_ newValue: Bool) {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !isSavingSitTone, let operation = sitToneFence.beginSave() else { return }
+        isSavingSitTone = true
+        sitToneSaveError = ""
+        let previous = appState.sitToneEnabled
+        Task { @MainActor in
+            #if DEBUG
+            if isFixtureMode {
+                _ = sitToneFence.finish(operation)
+                isSavingSitTone = false
+                appState.sitToneEnabled = newValue
+                confirmedBaseline.sitToneEnabled = newValue
+                return
+            }
+            #endif
+            let success: Bool
+            do {
+                success = try await APIClient.shared.patchContractor(
+                    auth.contractorId,
+                    body: ["sit_tone_enabled": newValue],
+                    bearerToken: auth.bearerToken
+                )
+            } catch {
+                success = false
+            }
+            guard sitToneFence.finish(operation) else { return }
+            isSavingSitTone = false
+            guard appState.currentAuthContext() == auth else { return }
+            if success {
+                appState.sitToneEnabled = newValue
+                confirmedBaseline.sitToneEnabled = newValue
+            } else {
+                appState.sitToneEnabled = previous
+                sitToneSaveError = String(localized: "Failed to save setting. Please try again.")
             }
         }
     }
@@ -1179,17 +1414,33 @@ struct SettingsView: View {
         isSavingSmartInterruption = true
         let previous = appState.smartInterruption
         Task { @MainActor in
+            #if DEBUG
+            if isFixtureMode {
+                _ = urgentPreferenceFence.finish(operation)
+                isSavingSmartInterruption = false
+                appState.smartInterruption = newValue
+                smartInterruptionSelection = newValue
+                confirmedBaseline.smartInterruption = newValue
+                return
+            }
+            #endif
             let success: Bool
             do {
-                success = try await APIClient.shared.patchContractor(auth.contractorId,
-                    body: ["smart_interruption": newValue], bearerToken: auth.bearerToken)
-            } catch { success = false }
+                success = try await APIClient.shared.patchContractor(
+                    auth.contractorId,
+                    body: ["smart_interruption": newValue],
+                    bearerToken: auth.bearerToken
+                )
+            } catch {
+                success = false
+            }
             guard urgentPreferenceFence.finish(operation) else { return }
             isSavingSmartInterruption = false
             guard appState.currentAuthContext() == auth else { return }
             if success {
                 appState.smartInterruption = newValue
                 smartInterruptionSelection = newValue
+                confirmedBaseline.smartInterruption = newValue
             } else {
                 smartInterruptionSelection = previous
                 smartInterruptionSaveError = String(localized: "Failed to save setting. Please try again.")
@@ -1197,189 +1448,370 @@ struct SettingsView: View {
         }
     }
 
-    /// Validates and saves the business street address and city that
-    /// regulatory countries require before Twilio number provisioning can
-    /// succeed. On success, normalizes AppState to the trimmed values the
-    /// server now holds.
+    private var countryBinding: Binding<String> {
+        Binding(
+            get: { countrySelection },
+            set: { picked in
+                countrySelection = picked
+                if SettingsCountryFlow.shouldWrite(picked: picked, accountCountry: appState.countryCode) {
+                    saveCountry(picked)
+                }
+            }
+        )
+    }
+
+    private func saveCountry(_ code: String) {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !isSavingCountry else { return }
+        loadCoordinator.recordMutation(field: .country)
+        countrySaveError = ""
+        isSavingCountry = true
+        Task {
+            #if DEBUG
+            if isFixtureMode {
+                isSavingCountry = false
+                appState.countryCode = code
+                confirmedBaseline.countryCode = code
+                return
+            }
+            #endif
+            let returned = await APIClient.shared.updateCountryCode(
+                contractorId: auth.contractorId,
+                countryCode: code
+            )
+            await MainActor.run {
+                isSavingCountry = false
+                guard appState.currentAuthContext() == auth else { return }
+                if SettingsCountryFlow.isConfirmed(requested: code, returned: returned) {
+                    appState.countryCode = code
+                    confirmedBaseline.countryCode = code
+                } else {
+                    countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: appState.countryCode)
+                    countrySaveError = String(localized: "Failed to save setting. Please try again.")
+                }
+            }
+        }
+    }
+
     private func saveRegulatoryAddress() {
-        guard !appState.contractorId.isEmpty, !isSavingRegulatoryAddress else { return }
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !isSavingRegulatoryAddress else { return }
         let result = RegulatoryAddress.validate(address: regulatoryAddressDraft, city: regulatoryCityDraft)
         guard result == .valid else {
             regulatoryAddressError = regulatoryAddressErrorMessage(for: result)
             return
         }
+        loadCoordinator.recordMutation(field: .regulatoryAddress)
         regulatoryAddressError = ""
         isSavingRegulatoryAddress = true
         let address = regulatoryAddressDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let city = regulatoryCityDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
+            #if DEBUG
+            if isFixtureMode {
+                isSavingRegulatoryAddress = false
+                appState.businessAddress = address
+                appState.businessCity = city
+                regulatoryAddressDraft = address
+                regulatoryCityDraft = city
+                confirmedBaseline.regulatoryAddress = address
+                confirmedBaseline.regulatoryCity = city
+                return
+            }
+            #endif
             let success = await APIClient.shared.updateBusinessAddress(
-                contractorId: appState.contractorId,
+                contractorId: auth.contractorId,
                 address: address,
                 city: city
             )
             await MainActor.run {
                 isSavingRegulatoryAddress = false
+                guard appState.currentAuthContext() == auth else { return }
                 if success {
-                    // Only a server-confirmed save reaches appState — the
-                    // draft the user is editing must never leak into the
-                    // value createContractor/updateBusinessAddress read back
-                    // out of appState on a later retry.
                     appState.businessAddress = address
                     appState.businessCity = city
                     regulatoryAddressDraft = address
                     regulatoryCityDraft = city
+                    confirmedBaseline.regulatoryAddress = address
+                    confirmedBaseline.regulatoryCity = city
                 } else {
-                    // Leave appState and the draft untouched on failure: the
-                    // rejected value must not become the account's cached
-                    // "confirmed" address, and the user's typed input stays
-                    // on screen next to the error so they can correct it.
                     regulatoryAddressError = String(localized: "Failed to save setting. Please try again.")
                 }
             }
         }
     }
 
-    private func saveBusinessHours() {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        let start = formatter.string(from: businessHoursStart)
-        let end = formatter.string(from: businessHoursEnd)
-        Task {
-            await updateContractorSetting("business_hours_start", start)
-            await updateContractorSetting("business_hours_end", end)
+    private func saveBusinessHoursExplicitly() {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !isSavingBusinessHours, let operation = businessHoursFence.beginSave() else { return }
+        businessHoursSaveError = ""
+        isSavingBusinessHours = true
+        let startStr = SettingsRefreshPolicy.formatHours(date: businessHoursStart)
+        let endStr = SettingsRefreshPolicy.formatHours(date: businessHoursEnd)
+
+        Task { @MainActor in
+            #if DEBUG
+            if isFixtureMode {
+                _ = businessHoursFence.finish(operation)
+                isSavingBusinessHours = false
+                confirmedBaseline.businessHoursStart = startStr
+                confirmedBaseline.businessHoursEnd = endStr
+                return
+            }
+            #endif
+            let success: Bool
+            do {
+                success = try await APIClient.shared.patchContractor(
+                    auth.contractorId,
+                    body: [
+                        "business_hours_start": startStr,
+                        "business_hours_end": endStr
+                    ],
+                    bearerToken: auth.bearerToken
+                )
+            } catch {
+                success = false
+            }
+            guard businessHoursFence.finish(operation) else { return }
+            isSavingBusinessHours = false
+            guard appState.currentAuthContext() == auth else { return }
+            if success {
+                confirmedBaseline.businessHoursStart = startStr
+                confirmedBaseline.businessHoursEnd = endStr
+                businessHoursSaveError = ""
+            } else {
+                businessHoursSaveError = String(localized: "Failed to save business hours. Please try again.")
+            }
         }
     }
 
-    /// Switches Personal <-> Business mode with a direct PATCH.
-    ///
-    /// This used to hand off to `pendingModeChange` + `isOnboarded = false`,
-    /// re-running the full onboarding wizard (mode select, business info entry,
-    /// a contacts-permission re-prompt, a provisioning spinner) just to flip one
-    /// field on an account that already has a Kevin number. That multi-screen
-    /// detour was the reported bug: Cloud Run logs showed mode-switch attempts
-    /// never produced a single network call, meaning the flow was going nowhere
-    /// before it ever reached the point that would persist anything. The
-    /// backend capability this needs — PATCH mode, entitlement-checked — already
-    /// existed and is exactly what onboarding's own "fast path" falls back to
-    /// for a contractor that already has a number. This calls it directly.
-    /// `@MainActor` is explicit here, matching the other save helpers in this
-    /// file: every line below mutates observable state, and a mutation landing
-    /// off the main thread would leave the row showing the old mode — the exact
-    /// symptom this fix exists to remove.
-    @MainActor
     private func switchMode() async {
-        guard !appState.contractorId.isEmpty else { return }
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
         let targetMode = appState.isPersonalMode ? "business" : "personal"
-
+        loadCoordinator.recordMutation(field: .mode)
         isSwitchingMode = true
         modeChangeError = ""
 
-        // Ask the server rather than trusting the cached subscription tier. A 403
-        // is a real answer ("needs Business"), so it routes to the paywall; the
-        // local tier is only a UI cache and can be stale, which would otherwise
-        // paywall someone who is already entitled.
-        switch await APIClient.shared.updateContractorMode(contractorId: appState.contractorId, mode: targetMode) {
+        #if DEBUG
+        if isFixtureMode {
+            isSwitchingMode = false
+            appState.mode = targetMode
+            confirmedBaseline.mode = targetMode
+            return
+        }
+        #endif
+
+        switch await APIClient.shared.updateContractorMode(contractorId: auth.contractorId, mode: targetMode) {
         case .success:
             appState.mode = targetMode
+            confirmedBaseline.mode = targetMode
         case .entitlementRequired:
-            showPaywall = true
+            presentPaywall(from: .assistant)
         case .failed:
             modeChangeError = String(localized: "Could not switch mode. Please try again.")
         }
-
         isSwitchingMode = false
     }
 
-    private func updateContractorSetting(_ key: String, _ value: Any) async {
-        guard !appState.contractorId.isEmpty else { return }
-        do {
-            _ = try await APIClient.shared.patchContractor(appState.contractorId, body: [key: value])
-        } catch {
-            debugLog("Update \(key) failed: \(error)")
-            await MainActor.run { saveError = String(localized: "Failed to save setting. Please try again.") }
+    private func refreshPushPermission() async {
+        #if DEBUG
+        if isFixtureMode {
+            await MainActor.run { pushPermission = .authorized }
+            return
         }
+        #endif
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        await MainActor.run { pushPermission = settings.authorizationStatus }
     }
 
-    private func connectJobber() async {
-        guard !appState.contractorId.isEmpty else { return }
+    private func provisionNumberFromSettings() async {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
+        #if DEBUG
+        if isFixtureMode { return }
+        #endif
         do {
-            if let authorizeURL = try await APIClient.shared.getIntegrationConnectURL("jobber", contractorId: appState.contractorId) {
-                guard let url = URL(string: authorizeURL),
-                      let scheme = url.scheme, scheme == "https",
-                      let host = url.host,
-                      host == "getjobber.com" || host.hasSuffix(".getjobber.com") else {
-                    debugLog("Invalid OAuth URL rejected")
-                    return
+            let url = URL(string: "\(APIClient.shared.baseURL)/api/contractors/\(auth.contractorId)/provision-number")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+            if !auth.bearerToken.isEmpty {
+                request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
+            } else {
+                APIClient.shared.authorize(&request)
+            }
+            let (data, _) = try await URLSession.shared.data(for: request)
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let number = json["phone_number"] as? String, !number.isEmpty {
+                let country = SettingsCountry.accountCountry(from: json)
+                await MainActor.run {
+                    guard appState.currentAuthContext() == auth else { return }
+                    appState.kevinNumber = number
+                    if let country {
+                        appState.countryCode = country
+                        countrySelection = country
+                        confirmedBaseline.countryCode = country
+                    }
                 }
-                await MainActor.run { UIApplication.shared.open(url) }
             }
         } catch {
-            debugLog("Connect Jobber failed: \(error)")
+            debugLog("Provision from settings failed: \(error)")
         }
     }
 
-    private func disconnectJobber() async {
-        guard !appState.contractorId.isEmpty else { return }
-        do {
-            _ = try await APIClient.shared.disconnectIntegration("jobber", contractorId: appState.contractorId)
-            await MainActor.run {
-                appState.jobberConnected = false
+    private func loadProfileAndHydrate(capturedAuth: CallAuthContext) async -> Bool {
+        let capturedRevisions = SettingsProfileHydrator.CapturedRevisions(
+            urgentRevision: urgentPreferenceFence.revision,
+            screenAllRevision: screenAllCallsFence.revision,
+            sitToneRevision: sitToneFence.revision,
+            hoursRevision: businessHoursFence.revision,
+            fieldMutationRevisions: loadCoordinator.fieldMutationRevisions
+        )
+
+        return await SettingsProfileHydrator.hydrate(
+            capturedAuth: capturedAuth,
+            capturedRevisions: capturedRevisions,
+            fetchProfile: {
+                await APIClient.shared.getContractorProfile(
+                    contractorId: capturedAuth.contractorId,
+                    bearerToken: capturedAuth.bearerToken
+                )
+            },
+            ownsOperation: { [self] in
+                appState.currentAuthContext() == capturedAuth
+            },
+            currentDraftProvider: { [self] in
+                SettingsDraftSnapshot(
+                    knowledgeText: knowledgeText,
+                    regulatoryAddress: regulatoryAddressDraft,
+                    regulatoryCity: regulatoryCityDraft,
+                    businessHoursStart: SettingsRefreshPolicy.formatHours(date: businessHoursStart),
+                    businessHoursEnd: SettingsRefreshPolicy.formatHours(date: businessHoursEnd),
+                    isKnowledgeEditorOpen: showKnowledgeEditor,
+                    isKnowledgeDirty: isKnowledgeDirty
+                )
+            },
+            baselineProvider: { [self] in
+                confirmedBaseline
+            },
+            fenceProvider: { [self] revisions in
+                SettingsProfileHydrator.FencePermits(
+                    urgentFencePermits: urgentPreferenceFence.permitsLoad(revisions.urgentRevision),
+                    screenAllFencePermits: screenAllCallsFence.permitsLoad(revisions.screenAllRevision),
+                    sitToneFencePermits: sitToneFence.permitsLoad(revisions.sitToneRevision),
+                    hoursFencePermits: businessHoursFence.permitsLoad(revisions.hoursRevision),
+                    isSavingRegulatoryAddress: isSavingRegulatoryAddress,
+                    isSavingCountry: isSavingCountry,
+                    isSwitchingMode: isSwitchingMode
+                )
+            },
+            currentFieldRevisions: { [self] in
+                loadCoordinator.fieldMutationRevisions
+            },
+            applyProfile: { [self] contractor, decision in
+                applyHydratedProfile(contractor: contractor, decision: decision)
             }
-        } catch {
-            debugLog("Disconnect Jobber failed: \(error)")
+        )
+    }
+
+    private func applyHydratedProfile(contractor: [String: Any], decision: SettingsHydrationDecision) {
+        let name = contractor["owner_name"] as? String ?? ""
+        let biz = contractor["business_name"] as? String ?? ""
+        let svc = contractor["service_type"] as? String ?? ""
+        if !name.isEmpty { appState.userName = name }
+        if !biz.isEmpty { appState.businessName = biz }
+        if !svc.isEmpty { appState.serviceType = svc }
+
+        let subStatus = contractor["subscription_status"] as? String ?? ""
+        let subTier = contractor["subscription_tier"] as? String ?? ""
+        if !subStatus.isEmpty { appState.subscriptionStatus = subStatus }
+        if !subTier.isEmpty { appState.subscriptionTier = subTier }
+
+        let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
+        appState.autoReplySms = autoReply
+
+        var projection = SettingsGuardedStateProjection(
+            baseline: confirmedBaseline,
+            drafts: SettingsDraftSnapshot(
+                knowledgeText: knowledgeText,
+                regulatoryAddress: regulatoryAddressDraft,
+                regulatoryCity: regulatoryCityDraft,
+                businessHoursStart: SettingsRefreshPolicy.formatHours(date: businessHoursStart),
+                businessHoursEnd: SettingsRefreshPolicy.formatHours(date: businessHoursEnd),
+                isKnowledgeEditorOpen: showKnowledgeEditor,
+                isKnowledgeDirty: isKnowledgeDirty
+            ),
+            appStateBusinessAddress: appState.businessAddress,
+            appStateBusinessCity: appState.businessCity,
+            appStateSmartInterruption: appState.smartInterruption,
+            appStateRingThroughContacts: appState.ringThroughContacts,
+            appStateSitToneEnabled: appState.sitToneEnabled,
+            appStateCountryCode: appState.countryCode,
+            appStateMode: appState.mode,
+            countrySelection: countrySelection,
+            smartInterruptionSelection: smartInterruptionSelection
+        )
+
+        SettingsRefreshPolicy.applyGuardedProfile(
+            contractor: contractor,
+            decision: decision,
+            state: &projection
+        )
+
+        confirmedBaseline = projection.baseline
+        knowledgeText = projection.drafts.knowledgeText
+        isKnowledgeDirty = projection.drafts.isKnowledgeDirty
+        regulatoryAddressDraft = projection.drafts.regulatoryAddress
+        regulatoryCityDraft = projection.drafts.regulatoryCity
+        appState.businessAddress = projection.appStateBusinessAddress
+        appState.businessCity = projection.appStateBusinessCity
+        appState.smartInterruption = projection.appStateSmartInterruption
+        smartInterruptionSelection = projection.smartInterruptionSelection
+        appState.ringThroughContacts = projection.appStateRingThroughContacts
+        appState.sitToneEnabled = projection.appStateSitToneEnabled
+        appState.countryCode = projection.appStateCountryCode
+        countrySelection = projection.countrySelection
+        appState.mode = projection.appStateMode
+
+        if decision.shouldUpdateBusinessHours {
+            if let startDate = SettingsRefreshPolicy.parseHours(string: projection.drafts.businessHoursStart) {
+                businessHoursStart = startDate
+            }
+            if let endDate = SettingsRefreshPolicy.parseHours(string: projection.drafts.businessHoursEnd) {
+                businessHoursEnd = endDate
+            }
         }
     }
 
-    private func checkJobberStatus() async {
-        guard !appState.contractorId.isEmpty else { return }
+    private func checkIntegrationsStatus(capturedAuth: CallAuthContext) async {
+        guard !appState.isPersonalMode else { return }
+        guard capturedAuth.isValid else { return }
+
+        // Jobber
         do {
-            let connected = try await APIClient.shared.checkIntegrationStatus("jobber", contractorId: appState.contractorId)
+            let connected = try await APIClient.shared.checkIntegrationStatus(
+                "jobber",
+                contractorId: capturedAuth.contractorId,
+                bearerToken: capturedAuth.bearerToken
+            )
             await MainActor.run {
+                guard appState.currentAuthContext() == capturedAuth else { return }
                 appState.jobberConnected = connected
             }
         } catch {
             debugLog("Check Jobber status failed: \(error)")
         }
-    }
 
-    // MARK: - Google Calendar
-
-    private func connectGoogleCalendar() async {
-        guard !appState.contractorId.isEmpty else { return }
+        // Google Calendar
         do {
-            if let authorizeURL = try await APIClient.shared.getIntegrationConnectURL("google-calendar", contractorId: appState.contractorId) {
-                guard let url = URL(string: authorizeURL),
-                      let scheme = url.scheme, scheme == "https",
-                      let host = url.host,
-                      host == "google.com" || host.hasSuffix(".google.com") else {
-                    debugLog("Invalid OAuth URL rejected")
-                    return
-                }
-                await MainActor.run { UIApplication.shared.open(url) }
-            }
-        } catch {
-            debugLog("Connect Google Calendar failed: \(error)")
-        }
-    }
-
-    private func disconnectGoogleCalendar() async {
-        guard !appState.contractorId.isEmpty else { return }
-        do {
-            _ = try await APIClient.shared.disconnectIntegration("google-calendar", contractorId: appState.contractorId)
+            let connected = try await APIClient.shared.checkIntegrationStatus(
+                "google-calendar",
+                contractorId: capturedAuth.contractorId,
+                bearerToken: capturedAuth.bearerToken
+            )
             await MainActor.run {
-                appState.googleCalendarConnected = false
-            }
-        } catch {
-            debugLog("Disconnect Google Calendar failed: \(error)")
-        }
-    }
-
-    private func checkGoogleCalendarStatus() async {
-        guard !appState.contractorId.isEmpty else { return }
-        do {
-            let connected = try await APIClient.shared.checkIntegrationStatus("google-calendar", contractorId: appState.contractorId)
-            await MainActor.run {
+                guard appState.currentAuthContext() == capturedAuth else { return }
                 appState.googleCalendarConnected = connected
             }
         } catch {
@@ -1387,19 +1819,121 @@ struct SettingsView: View {
         }
     }
 
+    private func connectJobber() async {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
+        #if DEBUG
+        if isFixtureMode { return }
+        #endif
+        do {
+            if let authorizeURL = try await APIClient.shared.getIntegrationConnectURL("jobber", contractorId: auth.contractorId) {
+                guard let url = URL(string: authorizeURL),
+                      let scheme = url.scheme, scheme == "https",
+                      let host = url.host,
+                      host == "getjobber.com" || host.hasSuffix(".getjobber.com") else {
+                    return
+                }
+                await MainActor.run {
+                    guard appState.currentAuthContext() == auth else { return }
+                    UIApplication.shared.open(url)
+                }
+            }
+        } catch {
+            debugLog("Connect Jobber failed: \(error)")
+        }
+    }
+
+    private func disconnectJobber() async {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
+        #if DEBUG
+        if isFixtureMode {
+            appState.jobberConnected = false
+            return
+        }
+        #endif
+        do {
+            _ = try await APIClient.shared.disconnectIntegration("jobber", contractorId: auth.contractorId)
+            await MainActor.run {
+                guard appState.currentAuthContext() == auth else { return }
+                appState.jobberConnected = false
+            }
+        } catch {
+            debugLog("Disconnect Jobber failed: \(error)")
+        }
+    }
+
+    private func connectGoogleCalendar() async {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
+        #if DEBUG
+        if isFixtureMode { return }
+        #endif
+        do {
+            if let authorizeURL = try await APIClient.shared.getIntegrationConnectURL("google-calendar", contractorId: auth.contractorId) {
+                guard let url = URL(string: authorizeURL),
+                      let scheme = url.scheme, scheme == "https",
+                      let host = url.host,
+                      host == "google.com" || host.hasSuffix(".google.com") else {
+                    return
+                }
+                await MainActor.run {
+                    guard appState.currentAuthContext() == auth else { return }
+                    UIApplication.shared.open(url)
+                }
+            }
+        } catch {
+            debugLog("Connect Google Calendar failed: \(error)")
+        }
+    }
+
+    private func disconnectGoogleCalendar() async {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
+        #if DEBUG
+        if isFixtureMode {
+            appState.googleCalendarConnected = false
+            return
+        }
+        #endif
+        do {
+            _ = try await APIClient.shared.disconnectIntegration("google-calendar", contractorId: auth.contractorId)
+            await MainActor.run {
+                guard appState.currentAuthContext() == auth else { return }
+                appState.googleCalendarConnected = false
+            }
+        } catch {
+            debugLog("Disconnect Google Calendar failed: \(error)")
+        }
+    }
+
     private func importWebsite() async {
-        guard !websiteURL.isEmpty, !appState.contractorId.isEmpty else { return }
+        let auth = appState.currentAuthContext()
+        guard !websiteURL.isEmpty, auth.isValid else { return }
+        loadCoordinator.recordMutation(field: .knowledge)
         isImporting = true
         importMessage = ""
+
+        #if DEBUG
+        if isFixtureMode {
+            isImporting = false
+            importMessage = String(localized: "Imported successfully!")
+            return
+        }
+        #endif
 
         var url = websiteURL
         if !url.hasPrefix("http") {
             url = "https://\(url)"
         }
 
-        if let result = await APIClient.shared.importWebsite(contractorId: appState.contractorId, url: url) {
+        if let result = await APIClient.shared.importWebsite(contractorId: auth.contractorId, url: url) {
+            guard appState.currentAuthContext() == auth else { return }
             if result["status"] as? String == "ok" {
-                knowledgeText = result["knowledge"] as? String ?? ""
+                let importedKnowledge = result["knowledge"] as? String ?? ""
+                knowledgeText = importedKnowledge
+                confirmedBaseline.knowledgeText = importedKnowledge
+                isKnowledgeDirty = false
                 importMessage = String(localized: "Imported successfully!")
             } else {
                 let msg = result["message"] as? String ?? String(localized: "Unknown error")
@@ -1412,50 +1946,127 @@ struct SettingsView: View {
     }
 
     private func cancelPendingDeleteConfirmation() {
+        deletionLoader.cancel()
         confirmDeleteTask?.cancel()
         confirmDeleteTask = nil
+        showDeleteAccountAlert = false
+        showSubscriptionWarningAlert = false
+        showDeleteAccountError = false
     }
 
     private func deleteAccount() async {
-        guard !appState.contractorId.isEmpty, !isDeletingAccount else { return }
-        await MainActor.run { isDeletingAccount = true }
+        let auth = appState.currentAuthContext()
+        guard let token = accountDeletionFence.begin(auth: auth) else { return }
         var outcome = AccountDeletionOutcome.failed
         do {
-            let encodedId = appState.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? appState.contractorId
+            let encodedId = auth.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? auth.contractorId
             let url = URL(string: "\(appState.backendURL)/api/contractors/\(encodedId)")!
             var request = URLRequest(url: url)
             request.httpMethod = "DELETE"
             request.timeoutInterval = 15
-            APIClient.shared.authorize(&request)
+            if !auth.bearerToken.isEmpty {
+                request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
+            } else {
+                APIClient.shared.authorize(&request)
+            }
             let (data, response) = try await URLSession.shared.data(for: request)
             outcome = AccountDeletionResponseParser.parse(response: response, data: data)
         } catch {
             debugLog("Delete account failed: \(error)")
         }
-        // Only clear local state when the server confirmed the deletion (or
-        // reported it already gone). Clearing it on failure strands the user:
-        // logged out locally while the account stays active and billing.
+
         if outcome == .failed {
-            // Let the confirmation alert finish dismissing before presenting
-            // the error alert — flipping a second alert's isPresented during
-            // another's dismissal can silently drop it (fast failures like
-            // airplane mode land inside the ~300ms dismissal window).
             try? await Task.sleep(nanoseconds: alertRedismissalDelay)
         }
         await MainActor.run {
-            isDeletingAccount = false
+            let currentAuth = appState.currentAuthContext()
+            guard accountDeletionFence.finish(token: token, auth: currentAuth) else { return }
             switch outcome {
             case .deleted:
                 appState.contractorId = ""
                 appState.kevinNumber = ""
-                // Otherwise a new account on this device would key its forwarding
-                // codes on the deleted account's country.
                 appState.countryCode = ""
                 appState.isOnboarded = false
                 APIClient.shared.contractorToken = ""
             case .failed:
                 showDeleteAccountError = true
             }
+        }
+    }
+
+    // MARK: - Forwarding Helpers
+
+    private var forwardingCodes: ForwardingCodes {
+        ForwardingDialCodes.codes(
+            countryCode: forwardingCountry,
+            instructions: forwardingInstructions,
+            number: dialNumber,
+            isVerizon: appState.isVerizonCarrier
+        )
+    }
+
+    private var forwardingCountryName: String {
+        Locale.current.localizedString(forRegionCode: forwardingCountry) ?? forwardingCountry
+    }
+
+    private var dialNumber: String {
+        let digits = kevinNumber.filter { $0.isNumber }
+        if digits.count == 10 {
+            return "1\(digits)"
+        }
+        return digits
+    }
+
+    private func dialCode(_ code: String) {
+        #if DEBUG
+        if isFixtureMode { return }
+        #endif
+        if let url = ForwardingDialCodes.telURL(code) {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    // MARK: - Computed Properties
+
+    private var planLabel: String {
+        switch appState.subscriptionStatus {
+        case "trial": return String(localized: "Free Trial")
+        case "active": return tierLabel
+        case "expired": return String(localized: "Expired")
+        case "cancelled": return String(localized: "Cancelled")
+        default: return appState.subscriptionStatus.isEmpty ? String(localized: "Free Trial") : appState.subscriptionStatus.capitalized
+        }
+    }
+
+    private var viewPlansLabel: String {
+        switch appState.subscriptionStatus {
+        case "trial": return String(localized: "View Plans")
+        case "active": return String(localized: "Change Plan")
+        default: return String(localized: "Subscribe to Kevin AI")
+        }
+    }
+
+    private var tierLabel: String {
+        switch appState.subscriptionTier {
+        case "personal": return String(localized: "Personal")
+        case "business": return String(localized: "Business")
+        case "businessPro": return String(localized: "Business Pro")
+        default: return String(localized: "Kevin AI")
+        }
+    }
+}
+
+/// Backward compatibility wrapper for SettingsView.
+struct SettingsView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        SettingsHost(
+            isAccountPresented: .constant(false),
+            assistantIsSelected: true,
+            onOpenCall: { _ in }
+        ) { assistantView in
+            assistantView
         }
     }
 }
@@ -1491,6 +2102,14 @@ struct KnowledgeEditorView: View {
     @State private var showKnowledgeDraft = false
     @State private var showClearKnowledge = false
 
+    private var isFixtureMode: Bool {
+        #if DEBUG
+        return AppStoreScreenshotFixtures.isEnabled
+        #else
+        return false
+        #endif
+    }
+
     private let placeholder = """
 ## Services
 - Faucet repair ($150-350)
@@ -1513,7 +2132,6 @@ San Jose, Santa Clara, Campbell
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Voice record option
                 HStack(spacing: 12) {
                     Button {
                         if isRecording {
@@ -1536,6 +2154,7 @@ San Jose, Santa Clara, Campbell
                         }
                     }
                     .buttonStyle(.plain)
+                    .disabled(isFixtureMode)
 
                     if isTranscribing {
                         ProgressView()
@@ -1556,8 +2175,8 @@ San Jose, Santa Clara, Campbell
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
                 .padding(.top, 8)
+                .disabled(isFixtureMode)
 
-                // Text editor
                 ZStack(alignment: .topLeading) {
                     TextEditor(text: $knowledgeText)
                         .font(.system(.subheadline, design: .monospaced))
@@ -1581,7 +2200,6 @@ San Jose, Santa Clara, Campbell
                 )
                 .padding(.top, 8)
 
-                // Length warning
                 if !knowledgeLengthWarning.isEmpty {
                     Text(knowledgeLengthWarning)
                         .font(.caption)
@@ -1590,7 +2208,6 @@ San Jose, Santa Clara, Campbell
                         .padding(.top, 4)
                 }
 
-                // Tip
                 Text(String(localized: "Type your services, or tap the mic to describe them by voice. Kevin uses this to answer caller questions."))
                     .font(.caption)
                     .foregroundStyle(Color(uiColor: .tertiaryLabel))
@@ -1606,6 +2223,7 @@ San Jose, Santa Clara, Campbell
                     }
                     .font(.subheadline)
                     .padding(.bottom, 12)
+                    .disabled(isFixtureMode)
                 }
             }
             .onChange(of: knowledgeText) { _, newValue in
@@ -1627,7 +2245,7 @@ San Jose, Santa Clara, Campbell
                         Task { await saveKnowledge() }
                     }
                     .fontWeight(.semibold)
-                    .disabled(isSaving || knowledgeText.isEmpty)
+                    .disabled(isSaving || knowledgeText.isEmpty || isFixtureMode)
                 }
             }
             .confirmationDialog(
@@ -1670,6 +2288,9 @@ San Jose, Santa Clara, Campbell
     }
 
     private func startRecording() {
+        #if DEBUG
+        if isFixtureMode { return }
+        #endif
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.record, mode: .default)
@@ -1706,10 +2327,8 @@ San Jose, Santa Clara, Campbell
         isTranscribing = true
 
         Task {
-            // Transcribe locally using Apple Speech Recognition
             let transcript = await transcribeLocally(url: url)
             if let transcript = transcript, !transcript.isEmpty {
-                // Send text to Claude for structuring into knowledge doc
                 if let knowledge = await APIClient.shared.structureKnowledge(
                     contractorId: appState.contractorId,
                     rawText: transcript,
@@ -1730,7 +2349,6 @@ San Jose, Santa Clara, Campbell
                     }
                 }
             }
-            // Clean up temporary audio file
             try? FileManager.default.removeItem(at: url)
             await MainActor.run { isTranscribing = false }
         }
@@ -1740,7 +2358,6 @@ San Jose, Santa Clara, Campbell
         let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         guard let recognizer = recognizer, recognizer.isAvailable else { return nil }
 
-        // Request authorization
         let authStatus = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status)
@@ -1763,16 +2380,21 @@ San Jose, Santa Clara, Campbell
     }
 
     private func saveKnowledge() async {
-        guard !appState.contractorId.isEmpty else { return }
+        let auth = appState.currentAuthContext()
+        guard auth.isValid else { return }
         isSaving = true
-        await APIClient.shared.updateKnowledge(contractorId: appState.contractorId, knowledge: knowledgeText)
+        #if DEBUG
+        if isFixtureMode {
+            isSaving = false
+            dismiss()
+            return
+        }
+        #endif
+        await APIClient.shared.updateKnowledge(contractorId: auth.contractorId, knowledge: knowledgeText)
         isSaving = false
         dismiss()
     }
 }
-
-import AVFoundation
-import Speech
 
 // MARK: - SetupRow
 

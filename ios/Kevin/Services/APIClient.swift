@@ -175,6 +175,95 @@ struct AppointmentConfirmFailure: Error, LocalizedError {
     }
 }
 
+enum CallHistoryError: Error, LocalizedError, Equatable {
+    case unauthorized
+    case forbidden
+    case serverError(statusCode: Int)
+    case httpError(statusCode: Int)
+    case malformedResponse
+    case invalidAuth
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized:
+            return String(localized: "Session expired. Please sign in again.")
+        case .forbidden:
+            return String(localized: "You do not have access to call history.")
+        case .serverError(let code):
+            return String(localized: "Server error (\(code)). Please try again later.")
+        case .httpError(let code):
+            return String(localized: "Request failed with status \(code).")
+        case .malformedResponse:
+            return String(localized: "Received an invalid response from the server.")
+        case .invalidAuth:
+            return String(localized: "Authentication required.")
+        }
+    }
+}
+
+enum CallHistoryResponseParser {
+    static func parse(data: Data, response: HTTPURLResponse) throws -> [CallRecord] {
+        let statusCode = response.statusCode
+        if statusCode == 401 {
+            throw CallHistoryError.unauthorized
+        }
+        if statusCode == 403 {
+            throw CallHistoryError.forbidden
+        }
+        if (500...599).contains(statusCode) {
+            throw CallHistoryError.serverError(statusCode: statusCode)
+        }
+        guard (200...299).contains(statusCode) else {
+            throw CallHistoryError.httpError(statusCode: statusCode)
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let callsArray = json["calls"] as? [[String: Any]] else {
+            throw CallHistoryError.malformedResponse
+        }
+
+        return try callsArray.map { dict -> CallRecord in
+            guard let rawSid = dict["call_sid"] as? String else {
+                throw CallHistoryError.malformedResponse
+            }
+            let callSid = rawSid.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !callSid.isEmpty else {
+                throw CallHistoryError.malformedResponse
+            }
+
+            guard let rawTimestampNum = dict["timestamp"] as? NSNumber,
+                  CFGetTypeID(rawTimestampNum) != CFBooleanGetTypeID() else {
+                throw CallHistoryError.malformedResponse
+            }
+            let rawTimestamp = rawTimestampNum.doubleValue
+            guard rawTimestamp.isFinite, !rawTimestamp.isNaN, rawTimestamp > 0 else {
+                throw CallHistoryError.malformedResponse
+            }
+
+            let timestamp = Date(timeIntervalSince1970: rawTimestamp)
+            let serverRead = dict["read"] as? Bool ?? false
+            let appointment = dict["appointment_request"] as? [String: Any]
+
+            return CallRecord(
+                id: callSid,
+                callerPhone: dict["caller_phone"] as? String ?? "",
+                callerName: dict["caller_name"] as? String ?? "",
+                timestamp: timestamp,
+                trustScore: dict["trust_score"] as? Int ?? 0,
+                outcome: dict["outcome"] as? String ?? "unknown",
+                transcript: dict["transcript"] as? String ?? "",
+                voicemailURL: dict["voicemail_url"] as? String,
+                callbackNumber: dict["callback_number"] as? String,
+                readOnServer: serverRead,
+                appointmentStatus: appointment?["status"] as? String,
+                appointmentStartTime: appointment?["start_time"] as? String,
+                appointmentTitle: appointment?["title"] as? String,
+                appointmentCallerNotified: appointment?["caller_notified_at"] != nil
+            )
+        }
+    }
+}
+
 final class APIClient: @unchecked Sendable {
     static let shared = APIClient()
 
@@ -210,10 +299,15 @@ final class APIClient: @unchecked Sendable {
             return ""
         }
         set {
-            CallSessionEpoch.shared.synchronized {
-                CallSessionEpoch.shared.credentialChanged(from: contractorToken, to: newValue)
+            let changed = CallSessionEpoch.shared.synchronized { () -> Bool in
+                let old = contractorToken
+                guard old != newValue else { return false }
                 if newValue.isEmpty { KeychainManager.shared.delete("contractorApiToken") }
                 else { KeychainManager.shared.save("contractorApiToken", value: newValue) }
+                return true
+            }
+            if changed {
+                CallSessionEpoch.shared.advance()
             }
         }
     }
@@ -846,62 +940,43 @@ final class APIClient: @unchecked Sendable {
         let current = await MainActor.run { AppState.shared.currentAuthContext() }
         let auth = authContext ?? current
         let contractorId = auth.contractorId
-        guard !contractorId.isEmpty else {
-            debugLog("Call history: no contractor ID")
-            return []
+        guard auth.isValid, !contractorId.isEmpty else {
+            debugLog("Call history: invalid auth or no contractor ID")
+            throw CallHistoryError.invalidAuth
         }
         var components = URLComponents(string: "\(baseURL)/api/calls")!
         components.queryItems = [URLQueryItem(name: "contractor_id", value: contractorId)]
-        let url = components.url!
+        guard let url = components.url else {
+            throw CallHistoryError.malformedResponse
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, _) = try await retryRequest(request)
-        if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let callsArray = json["calls"] as? [[String: Any]] {
-            let records = callsArray.compactMap { dict -> CallRecord? in
-                let callSid = dict["call_sid"] as? String ?? "\(dict["timestamp"] as? Double ?? 0)-\(dict["caller_phone"] as? String ?? "")"
-                let serverRead = dict["read"] as? Bool ?? false
-                let appointment = dict["appointment_request"] as? [String: Any]
-                return CallRecord(
-                    id: callSid,
-                    callerPhone: dict["caller_phone"] as? String ?? "",
-                    callerName: dict["caller_name"] as? String ?? "",
-                    timestamp: Date(timeIntervalSince1970: dict["timestamp"] as? Double ?? 0),
-                    trustScore: dict["trust_score"] as? Int ?? 0,
-                    outcome: dict["outcome"] as? String ?? "unknown",
-                    transcript: dict["transcript"] as? String ?? "",
-                    voicemailURL: dict["voicemail_url"] as? String,
-                    callbackNumber: dict["callback_number"] as? String,
-                    readOnServer: serverRead,
-                    appointmentStatus: appointment?["status"] as? String,
-                    appointmentStartTime: appointment?["start_time"] as? String,
-                    appointmentTitle: appointment?["title"] as? String,
-                    appointmentCallerNotified: appointment?["caller_notified_at"] != nil
-                )
-            }
-            // Seed local read state from server so unread badges are correct after reinstall
-            await MainActor.run {
-                for r in records where r.readOnServer {
-                    AppState.shared.readCallIds.insert(r.id)
-                }
-            }
-            return records
+        let (data, response) = try await retryRequest(request, signalReauth: false)
+        guard let http = response as? HTTPURLResponse else {
+            throw CallHistoryError.malformedResponse
         }
-        return []
+        return try CallHistoryResponseParser.parse(data: data, response: http)
     }
 
-    func markCallsRead(_ callSids: [String]) async {
+    func markCallsRead(_ callSids: [String], authContext: CallAuthContext? = nil) async {
         guard !callSids.isEmpty else { return }
-        let url = URL(string: "\(baseURL)/api/calls/mark-read")!
+        let current = await MainActor.run { AppState.shared.currentAuthContext() }
+        let auth = authContext ?? current
+        guard auth.isValid else { return }
+
+        guard let url = URL(string: "\(baseURL)/api/calls/mark-read") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 10
-        authorize(&request)
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["call_sids": callSids])
-        _ = try? await retryRequest(request)
+        request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "call_sids": callSids,
+            "contractor_id": auth.contractorId
+        ])
+        _ = try? await retryRequest(request, signalReauth: false)
     }
 
     /// Returns whether the backend actually texted the caller.
@@ -912,27 +987,32 @@ final class APIClient: @unchecked Sendable {
     /// the server's answer to that, so the confirmation card reads it instead
     /// of assuming.
     @discardableResult
-    func confirmAppointment(callSid: String) async throws -> Bool {
+    func confirmAppointment(callSid: String, authContext: CallAuthContext? = nil) async throws -> Bool {
+        let current = await MainActor.run { AppState.shared.currentAuthContext() }
+        let auth = authContext ?? current
+        guard auth.isValid, !auth.contractorId.isEmpty else {
+            throw URLError(.userAuthenticationRequired)
+        }
         let encoded = callSid.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? callSid
-        let url = URL(string: "\(baseURL)/api/calls/\(encoded)/confirm-appointment")!
+        guard var components = URLComponents(string: "\(baseURL)/api/calls/\(encoded)/confirm-appointment") else {
+            throw URLError(.badURL)
+        }
+        components.queryItems = [URLQueryItem(name: "contractor_id", value: auth.contractorId)]
+        guard let url = components.url else {
+            throw URLError(.badURL)
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 15
-        authorize(&request)
+        request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await retryRequest(request)
+        let (data, response) = try await retryRequest(request, signalReauth: false)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            // The status has to survive. A 422 means the stored time is not
-            // bookable — no amount of retrying fixes it — while a 502 is the
-            // Calendar call failing and is worth another tap. Collapsing both
-            // into URLError told the owner to "try again" forever.
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw AppointmentConfirmFailure(statusCode: status)
         }
 
-        // A missing or unreadable field means "we don't know", which must read
-        // as false — claiming a text that never went is worse than staying quiet.
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         return (json?["caller_notified"] as? Bool) ?? false
     }
@@ -1096,20 +1176,34 @@ final class APIClient: @unchecked Sendable {
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
-    func checkIntegrationStatus(_ service: String, contractorId: String) async throws -> Bool {
+    func checkIntegrationStatus(
+        _ service: String,
+        contractorId: String,
+        bearerToken: String? = nil
+    ) async throws -> Bool {
         let encodedService = service.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? service
         var components = URLComponents(string: "\(baseURL)/api/integrations/\(encodedService)/status")!
         components.queryItems = [URLQueryItem(name: "contractor_id", value: contractorId)]
         var request = URLRequest(url: components.url!)
         request.timeoutInterval = 10
-        authorize(&request)
+        if let token = bearerToken {
+            guard !token.isEmpty else {
+                throw URLError(.userAuthenticationRequired)
+            }
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            authorize(&request)
+        }
 
-        let (data, _) = try await retryRequest(request)
+        let (data, response) = try await retryRequest(request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
         if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            let connected = json["connected"] as? Bool {
             return connected
         }
-        return false
+        throw URLError(.cannotParseResponse)
     }
 
     // MARK: - Subscription

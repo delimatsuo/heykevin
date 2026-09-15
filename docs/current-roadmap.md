@@ -14,7 +14,7 @@ External observations are dated snapshots, not a standing claim about production
 
 ## Observed release baseline
 
-Read-only checks on September 14 found:
+Read-only checks on September 14, with the native candidate updated September 15 UTC:
 
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
@@ -23,7 +23,8 @@ Read-only checks on September 14 found:
 | Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Authenticated read-only App Store Connect inspection on September 14 links the public version to build 36. The public [Apple lookup](https://itunes.apple.com/lookup?id=6761427495&country=us) reports the September 5 release date but does not expose the build number. |
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Authenticated Apple inspection before preparing build 38. This is distinct from the public build 36 and the new notification candidate below. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** in the existing internal QA group, verified at `23:18:44Z` | Source `813e0e3b72e90c709832d72129b82f5e6622775b`. All 127 native unit tests, signed-package review and Apple validation passed. Upload and processing completed; phone acceptance and App Store submission remain open. See the [candidate record and device checklist](releases/2026-09-14-notification-ios-38.md). |
-| Development inventory | No open PRs at the initial status audit; issue #33 remains open | Read-only GitHub inventory, before this reconciliation is published. Old worktrees and retained branches are not evidence of new active feature work. |
+| Native frontend iPhone candidate | **1.3.0 (39)**, **VALID**, **IN_BETA_TESTING** in internal QA, verified September 15 at `03:51:07Z` | New Calls + Kevin design and bounded history. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, independent review, Apple processing and test notes. Owner device acceptance remains open. |
+| Development inventory | Native frontend implementation is complete; N1/N3 owner acceptance remains open | [PR #248](https://github.com/delimatsuo/heykevin/pull/248) records the frontend. Issue #33 and later PRD features remain deferred. Old worktrees and retained branches do not establish active feature work. |
 
 ## Shipped
 
@@ -81,8 +82,9 @@ on reviewed source head `66030cd41318d75b423373aebfcb6c5f3ffc63cb`; the merge ha
 the same tree. The [staging record](releases/2026-09-14-urgent-staging.md) tracks
 the subsequent deployment independently from production and iPhone acceptance.
 The [interactive HTML](frontend-concept/index.html) demonstrates the experience.
-The native frontend redesign is still awaiting owner design approval; callback,
-text reply and the later-feature list are not active implementation.
+The owner subsequently approved the native Calls + Kevin frontend and bounded
+history, tracked below as N3. New callback/text-reply features and the later-feature
+list remain outside active implementation.
 
 - [x] Notification source merged and staged.
 - [x] Independently reproduce the delayed-summary teardown defect with fictional
@@ -131,6 +133,26 @@ App Store submission remains a later release approval. The tested
 forward-recovery patch still requires another build and approval if needed;
 it does not rely on returning live operations to the older backend.
 
+## Native frontend — available for internal TestFlight review
+
+After testing notification build 38, the owner approved translating the
+expert-reviewed HTML into SwiftUI and asked for bounded history. Build 38
+contains the notification changes; it predates this native design.
+
+The [native plan](superpowers/plans/2026-09-14-native-frontend.md) is implemented
+in **1.3.0 (39)**, now available in internal TestFlight QA. Calls + Kevin are the two tabs,
+with labeled account Settings and the live caller reachable throughout.
+History starts at 20 rows, expands by 20 to the existing 100-call/90-day bound,
+and searches/filters the full bounded snapshot before limiting visible rows.
+The retrieval limit does not delete older stored calls or extend retention.
+
+Implementation, independent native review and local verification are complete:
+269 native unit tests, 9 fixture UI tests and targeted mutation probes passed.
+The [candidate record](releases/2026-09-15-native-frontend-ios-39.md) binds the
+source and evidence. Required CI passed, independent package review approved,
+and Apple processing, internal QA membership and What to Test readback are verified.
+Physical notification/call checks and public App Store approval remain separate.
+
 ## Unfinished or unverified, not an automatic implementation queue
 
 | Item | Current fact | Next decision or evidence |
@@ -168,9 +190,9 @@ is not a new release signoff.
 
 ## Deferred
 
-The [current PRD](../kevin-prd.md#deferred-ideas-and-superseded-plans) distinguishes
-the approved HTML design review from a native refactor, and records the former
-v2 work-management program, WhatsApp, voice cloning, multiple numbers and other
+The [current PRD](../kevin-prd.md#deferred-ideas-and-superseded-plans) records the
+approved native refresh separately from the deferred former v2 work-management
+program, WhatsApp, voice cloning, multiple numbers and other
 later ideas. These are not tasks that an agent should automatically start.
 No new provider, SMS, feature flag, pricing, or public-market commitment is created
 by this documentation update.

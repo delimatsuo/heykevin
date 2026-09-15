@@ -1,24 +1,73 @@
 import SwiftUI
 
-/// Deterministic, network-free App Store screenshot scenarios.
+/// Stateful fake fetch provider for scripted screenshot fixtures (such as retry sequences).
+final class FixtureFetchProvider: @unchecked Sendable {
+    private var loadCount = 0
+    private let lock = NSLock()
+
+    func fetchCalls(for scenario: AppStoreScreenshotFixtures.Scenario) async throws -> [CallRecord] {
+        let attempt = lock.withLock {
+            loadCount += 1
+            return loadCount
+        }
+
+        switch scenario {
+        case .historyError:
+            if attempt == 1 {
+                throw NSError(
+                    domain: "KevinPreview",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: String(localized: "Unable to load call history. Please check your connection.")]
+                )
+            }
+            return AppStoreScreenshotFixtures.businessCallsList
+        case .historyRetainedError:
+            if attempt == 2 {
+                throw NSError(
+                    domain: "KevinPreview",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: String(localized: "Failed to refresh calls.")]
+                )
+            }
+            return AppStoreScreenshotFixtures.businessCallsList
+        case .history101:
+            return AppStoreScreenshotFixtures.generate101CallsList()
+        case .historyEmpty:
+            return []
+        case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings:
+            return AppStoreScreenshotFixtures.businessCallsList
+        case .personalLive, .personalRecents, .personalDetail, .personalKevin:
+            return AppStoreScreenshotFixtures.personalCallsList
+        }
+    }
+}
+
+/// Deterministic, network-free App Store screenshot and review scenarios.
 ///
 /// These fixtures are activated only by the Debug-only environment variable
 /// `APP_STORE_SCREENSHOT_SCENARIO`. Production and Staging launches always use
 /// the normal app root and live backend data.
 enum AppStoreScreenshotFixtures {
-    enum Scenario: String {
+    enum Scenario: String, CaseIterable {
         case businessLive = "business-live"
         case businessRecents = "business-recents"
         case businessDetail = "business-detail"
         case personalLive = "personal-live"
         case personalRecents = "personal-recents"
         case personalDetail = "personal-detail"
+        case history101 = "history-101"
+        case historyEmpty = "history-empty"
+        case historyError = "history-error"
+        case historyRetainedError = "history-retained-error"
+        case businessKevin = "business-kevin"
+        case personalKevin = "personal-kevin"
+        case accountSettings = "account-settings"
 
         var isBusiness: Bool {
             switch self {
-            case .businessLive, .businessRecents, .businessDetail:
+            case .businessLive, .businessRecents, .businessDetail, .businessKevin, .history101, .historyEmpty, .historyError, .historyRetainedError, .accountSettings:
                 return true
-            case .personalLive, .personalRecents, .personalDetail:
+            case .personalLive, .personalRecents, .personalDetail, .personalKevin:
                 return false
             }
         }
@@ -27,7 +76,7 @@ enum AppStoreScreenshotFixtures {
             switch self {
             case .businessLive:
                 return "Every missed call can become a job"
-            case .businessRecents:
+            case .businessRecents, .history101:
                 return "See which calls need you first"
             case .businessDetail:
                 return "Call back with the whole story"
@@ -37,6 +86,16 @@ enum AppStoreScreenshotFixtures {
                 return "Keep the people. Lose the robocalls."
             case .personalDetail:
                 return "Know what they need before you call back"
+            case .historyEmpty:
+                return "Screened calls when you need them"
+            case .historyError, .historyRetainedError:
+                return "Reliable call history"
+            case .businessKevin:
+                return "Your 24/7 AI Business Receptionist"
+            case .personalKevin:
+                return "Personal call screening tailored to you"
+            case .accountSettings:
+                return "Complete control of your account"
             }
         }
 
@@ -44,7 +103,7 @@ enum AppStoreScreenshotFixtures {
             switch self {
             case .businessLive:
                 return "Kevin answers, qualifies the caller, and lets you take over live."
-            case .businessRecents:
+            case .businessRecents, .history101:
                 return "Urgent jobs, caller details, and summaries in one place."
             case .businessDetail:
                 return "Review what the customer needs before you return the call."
@@ -54,6 +113,16 @@ enum AppStoreScreenshotFixtures {
                 return "Contacts ring through; unknown callers are screened and summarized."
             case .personalDetail:
                 return "Read the conversation and decide whether the call deserves your time."
+            case .historyEmpty:
+                return "Kevin screens callers and keeps your day distraction-free."
+            case .historyError, .historyRetainedError:
+                return "Clear error feedback with one-tap retry."
+            case .businessKevin:
+                return "Customize your knowledge base, intake questions, and business hours."
+            case .personalKevin:
+                return "Adjust spam sensitivity, smart interruption, and contact sync."
+            case .accountSettings:
+                return "Manage your plan, phone number, and preferences anytime."
             }
         }
     }
@@ -70,6 +139,12 @@ enum AppStoreScreenshotFixtures {
     }
 
     static var isEnabled: Bool { scenario != nil }
+
+    #if DEBUG
+    static var isNativeUIReview: Bool {
+        scenario != nil && ProcessInfo.processInfo.environment["KEVIN_NATIVE_UI_REVIEW"] == "1"
+    }
+    #endif
 
     /// Fixed anchor time for deterministic screenshots.
     /// Using a constant "now" eliminates wall-clock flakiness in labels and details.
@@ -88,11 +163,49 @@ enum AppStoreScreenshotFixtures {
 
     static var seededCalls: [CallRecord] {
         guard let scenario else { return [] }
-        return scenario.isBusiness ? businessCalls : personalCalls
+        switch scenario {
+        case .history101:
+            return generate101CallsList()
+        case .historyEmpty, .historyError:
+            return []
+        case .historyRetainedError:
+            return businessCallsList
+        case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings:
+            return businessCallsList
+        case .personalLive, .personalRecents, .personalDetail, .personalKevin:
+            return personalCallsList
+        }
     }
 
     static var featuredCall: CallRecord {
-        seededCalls.first ?? businessCalls[0]
+        seededCalls.first ?? businessCallsList[0]
+    }
+
+    @MainActor
+    static func makeHistoryModel() -> CallHistoryModel {
+        let currentScenario = scenario ?? .businessRecents
+        let provider = FixtureFetchProvider()
+
+        return CallHistoryModel(
+            authProvider: {
+                AppState.shared.currentAuthContext()
+            },
+            fetchCalls: { _ in
+                try await provider.fetchCalls(for: currentScenario)
+            },
+            markServerRead: { _, _ in },
+            loadReadIds: { _ in [] },
+            commitReadState: { ids, calls, _ in
+                AppState.shared.readCallIds = ids
+                AppState.shared.updateUnreadCount(calls: calls)
+            },
+            resetEffect: { _ in
+                AppState.shared.readCallIds = []
+                AppState.shared.unreadCallCount = 0
+            },
+            reauthEffect: { _ in },
+            clock: { AppStoreScreenshotFixtures.now }
+        )
     }
 
     @MainActor
@@ -117,15 +230,28 @@ enum AppStoreScreenshotFixtures {
 
         switch scenario {
         case .businessLive, .personalLive:
-            appState.selectedTab = .live
+            let fixtureAuth = appState.currentAuthContext()
+            appState.selectedTab = .recents
             appState.setActiveCall(
                 callSid: "CA_APP_STORE_SCREENSHOT",
                 callerPhone: scenario.isBusiness ? "+16505550187" : "+14155550126",
-                callerName: scenario.isBusiness ? "Maria Santos" : ""
+                callerName: scenario.isBusiness ? "Maria Santos" : "",
+                authContext: fixtureAuth
             )
             appState.callStartTime = now.addingTimeInterval(-137)
-            appState.transcriptLines = liveTranscript(forBusiness: scenario.isBusiness)
-        case .businessRecents, .personalRecents, .businessDetail, .personalDetail:
+            appState.updateActiveCallTranscript(
+                lines: liveTranscript(forBusiness: scenario.isBusiness),
+                authContext: fixtureAuth,
+                callSid: "CA_APP_STORE_SCREENSHOT"
+            )
+        case .businessKevin, .personalKevin:
+            appState.clearActiveCall()
+            appState.selectedTab = .settings
+        case .accountSettings:
+            appState.clearActiveCall()
+            appState.selectedTab = .settings
+        case .businessRecents, .personalRecents, .businessDetail, .personalDetail,
+             .history101, .historyEmpty, .historyError, .historyRetainedError:
             appState.clearActiveCall()
             appState.selectedTab = .recents
         }
@@ -152,7 +278,7 @@ enum AppStoreScreenshotFixtures {
         return lines.map(TranscriptLine.init(text:))
     }
 
-    private static var businessCalls: [CallRecord] {
+    static var businessCallsList: [CallRecord] {
         [
             CallRecord(
                 id: "business-urgent",
@@ -237,7 +363,7 @@ enum AppStoreScreenshotFixtures {
         ]
     }
 
-    private static var personalCalls: [CallRecord] {
+    static var personalCallsList: [CallRecord] {
         [
             CallRecord(
                 id: "personal-estimate",
@@ -321,6 +447,39 @@ enum AppStoreScreenshotFixtures {
             ),
         ]
     }
+
+    static func generate101CallsList() -> [CallRecord] {
+        var records: [CallRecord] = []
+        for i in 1...101 {
+            let offsetHours = Double(i) * 6.0
+            let timestamp = now.addingTimeInterval(-offsetHours * 3600)
+            let isSpam = (i % 10 == 0)
+            let isUnread = (i <= 5)
+            let outcome = isSpam ? "spam" : ((i % 4 == 0) ? "picked_up" : "voicemail")
+            let phone = String(format: "+1650555%04d", 1000 + i)
+            let name = (i == 35) ? "Cedar Plumber" : (isSpam ? "" : "Customer \(i)")
+            let transcript = (i == 35)
+                ? "Kevin: Hello\nCaller: Hi, I am calling for the Cedar appointment regarding pipe repair.\nCaller: Please call me back."
+                : (isSpam
+                    ? "Caller: Automated promotion call."
+                    : "Kevin: Hello\nCaller: Hi, I am calling regarding job order \(i).\nCaller: Please let me know when you are available.")
+            records.append(
+                CallRecord(
+                    id: String(format: "CA_RECORD_%03d", i),
+                    callerPhone: phone,
+                    callerName: name,
+                    timestamp: timestamp,
+                    trustScore: isSpam ? 5 : 85,
+                    outcome: outcome,
+                    transcript: transcript,
+                    voicemailURL: nil,
+                    callbackNumber: phone,
+                    readOnServer: !isUnread
+                )
+            )
+        }
+        return records
+    }
 }
 
 struct AppStoreScreenshotRoot: View {
@@ -331,6 +490,19 @@ struct AppStoreScreenshotRoot: View {
     }
 
     var body: some View {
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isNativeUIReview {
+            ContentView()
+                .environmentObject(appState)
+        } else {
+            marketingBody
+        }
+        #else
+        marketingBody
+        #endif
+    }
+
+    private var marketingBody: some View {
         AppStoreMarketingFrame(
             title: scenario.title,
             subtitle: scenario.subtitle,
@@ -354,12 +526,21 @@ struct AppStoreScreenshotRoot: View {
     @ViewBuilder
     private var screenshotContent: some View {
         switch scenario {
-        case .businessLive, .personalLive, .businessRecents, .personalRecents:
+        case .businessLive, .personalLive, .businessRecents, .personalRecents,
+             .history101, .historyEmpty, .historyError, .historyRetainedError,
+             .businessKevin, .personalKevin, .accountSettings:
             ContentView()
                 .environmentObject(appState)
         case .businessDetail, .personalDetail:
             NavigationStack {
-                CallDetailView(call: AppStoreScreenshotFixtures.featuredCall)
+                CallDetailView(
+                    lease: HistoricalCallPresentationLease(
+                        auth: appState.currentAuthContext(),
+                        callId: AppStoreScreenshotFixtures.featuredCall.id,
+                        call: AppStoreScreenshotFixtures.featuredCall
+                    ),
+                    historyModel: AppStoreScreenshotFixtures.makeHistoryModel()
+                )
             }
             .environmentObject(appState)
         }

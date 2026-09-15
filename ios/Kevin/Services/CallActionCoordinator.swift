@@ -1,20 +1,34 @@
 import Foundation
 import Combine
 
+extension Notification.Name {
+    static let callSessionEpochDidChange = Notification.Name("CallSessionEpochDidChangeNotification")
+}
+
 /// Invalidates an authorization lease even when credentials change A -> B -> A.
 final class CallSessionEpoch: @unchecked Sendable {
     static let shared = CallSessionEpoch()
+    static let didChangeNotification = Notification.Name.callSessionEpochDidChange
     private let lock = NSRecursiveLock()
     private var value = 0
     var generation: Int { synchronized { value } }
-    @discardableResult func advance() -> Int { synchronized { value += 1; return value } }
+    @discardableResult func advance() -> Int {
+        let newGen = synchronized {
+            value += 1
+            return value
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        }
+        return newGen
+    }
     func credentialChanged(from old: String, to new: String) { if old != new { advance() } }
     func synchronized<T>(_ body: () -> T) -> T {
         lock.lock(); defer { lock.unlock() }; return body()
     }
 }
 
-struct CallAuthContext: Equatable, Sendable {
+struct CallAuthContext: Hashable, Equatable, Sendable {
     let contractorId: String
     let bearerToken: String
     let generation: Int
@@ -34,6 +48,9 @@ struct CallLifecycleSnapshot: Equatable, Sendable {
 struct CallPresentationLease: Equatable {
     let auth: CallAuthContext
     let scope: CallLifecycleSnapshot
+    func isValid(auth currentAuth: CallAuthContext, scope currentScope: CallLifecycleSnapshot) -> Bool {
+        auth == currentAuth && currentAuth.isValid && scope == currentScope && !scope.callSid.isEmpty
+    }
     func mayClear(auth currentAuth: CallAuthContext, scope currentScope: CallLifecycleSnapshot) -> Bool {
         auth == currentAuth && scope == currentScope && !scope.callSid.isEmpty
     }
@@ -372,9 +389,9 @@ final class CallActionCoordinator: ObservableObject {
         let sameScope = currentCall() == scope && scope.permits(callSid)
         if let status = result, status.validNavigation(callSid: callSid, contractorId: auth.contractorId) {
             if status.isActive && sameScope {
-                AppState.shared.setActiveCall(callSid: callSid, callerPhone: status.callerPhone ?? "", callerName: status.callerName ?? "")
+                AppState.shared.setActiveCall(callSid: callSid, callerPhone: status.callerPhone ?? "", callerName: status.callerName ?? "", authContext: auth)
                 observeStatus(status, auth: auth)
-                if let transcript = status.transcript { AppState.shared.transcriptLines = transcript.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) } }
+                if let transcript = status.transcript { AppState.shared.updateActiveCallTranscript(text: transcript, authContext: auth, callSid: callSid) }
                 AppState.shared.showActiveCall = true; AppState.shared.selectedTab = .live
                 return true
             }

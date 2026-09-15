@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/calls", dependencies=[Depends(verify_api_token)]
 
 @router.get("")
 async def api_list_calls(request: Request, contractor_id: str = Query(..., description="Contractor ID to filter calls")):
-    """List recent calls for a contractor (last 7 days)."""
+    """List up to 100 recent calls for a contractor from the last 90 days."""
     require_contractor_access(request, contractor_id)
     calls = await get_calls_for_contractor(contractor_id)
     return {"calls": calls, "count": len(calls)}

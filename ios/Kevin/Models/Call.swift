@@ -1,7 +1,7 @@
 import Foundation
 
 /// Represents a screened call record.
-struct CallRecord: Identifiable {
+struct CallRecord: Identifiable, Equatable, Hashable, Sendable {
     let id: String
     let callerPhone: String
     let callerName: String
@@ -59,5 +59,60 @@ struct CallRecord: Identifiable {
         let callerLines = transcript.components(separatedBy: "\n")
             .filter { $0.hasPrefix("Caller:") }
         return callerLines.count >= 2
+    }
+
+    var isSpamOrBlocked: Bool {
+        outcome == "spam" || outcome == "blocked"
+    }
+
+    var formattedPhone: String {
+        PhoneFormatter.format(callerPhone)
+    }
+
+    var displayName: String {
+        let trimmedName = callerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty {
+            return trimmedName
+        }
+        let phone = formattedPhone
+        return phone.isEmpty ? String(localized: "Unknown Caller") : phone
+    }
+
+    /// Digits-only normalized representation for search matching
+    var normalizedPhoneDigits: String {
+        callerPhone.filter { $0.isNumber }
+    }
+
+    /// Kevin's truthful one-line caller excerpt or outcome fallback.
+    /// Never claims to be an AI summary.
+    var callerExcerpt: String {
+        if isSpamOrBlocked {
+            return outcomeFallback
+        }
+        let callerLines = transcript
+            .components(separatedBy: "\n")
+            .compactMap { line -> String? in
+                guard line.hasPrefix("Caller:") else { return nil }
+                let body = line.dropFirst("Caller:".count).trimmingCharacters(in: .whitespaces)
+                return body.isEmpty ? nil : body
+            }
+        if let longest = callerLines.max(by: { $0.count < $1.count }), longest.count > 12 {
+            return longest
+        }
+        if let first = callerLines.first {
+            return first
+        }
+        return outcomeFallback
+    }
+
+    var outcomeFallback: String {
+        switch outcome {
+        case "picked_up":           return String(localized: "Answered.")
+        case "voicemail":           return String(localized: "Left a voicemail.")
+        case "ignored", "declined": return String(localized: "Kevin handled the call.")
+        case "spam":                return String(localized: "Marked as spam.")
+        case "blocked":             return String(localized: "Blocked call.")
+        default:                    return String(localized: "Kevin screened the call.")
+        }
     }
 }

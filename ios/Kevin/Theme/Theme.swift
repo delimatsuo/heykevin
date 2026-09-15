@@ -7,8 +7,18 @@ extension Color {
     /// brightens automatically in dark mode for legibility.
     static let hkBlue = Color(uiColor: .systemBlue)
 
+    /// Restrained Cobalt adapted for dark legibility.
+    static let hkCobalt = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.45, green: 0.65, blue: 1.0, alpha: 1.0)
+            : UIColor(red: 0.11, green: 0.35, blue: 0.85, alpha: 1.0)
+    })
+
     /// Clear Line Green. The go signal. Pick Up CTA, Live indicator.
     static let hkGreen = Color(uiColor: .systemGreen)
+
+    /// Forest Green for primary call pickup.
+    static let hkForest = Color(red: 0.12, green: 0.48, blue: 0.30)
 
     /// Warning Orange. Trial expiry, taking-a-message status.
     static let hkOrange = Color(uiColor: .systemOrange)
@@ -19,23 +29,61 @@ extension Color {
     /// Canvas Grey. systemGroupedBackground equivalent.
     static let hkCanvas = Color(.systemGroupedBackground)
 
+    /// Warm Ivory Canvas for journal.
+    static let hkWarmCanvas = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.08, green: 0.09, blue: 0.10, alpha: 1.0)
+            : UIColor(red: 0.98, green: 0.97, blue: 0.95, alpha: 1.0)
+    })
+
+    /// Ink Text.
+    static let hkInk = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1.0)
+            : UIColor(red: 0.12, green: 0.13, blue: 0.14, alpha: 1.0)
+    })
+
+    /// Muted Ink Text.
+    static let hkInkSecondary = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.65, green: 0.68, blue: 0.72, alpha: 1.0)
+            : UIColor(red: 0.42, green: 0.45, blue: 0.48, alpha: 1.0)
+    })
+
+    /// Fine Divider.
+    static let hkDivider = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(white: 0.22, alpha: 1.0)
+            : UIColor(red: 0.91, green: 0.89, blue: 0.86, alpha: 1.0)
+    })
+
     /// Surface Grey. Secondary surfaces, caller chat bubbles.
     static let hkSurface = Color(.systemGray5)
 
     /// Mid Grey. Dividers, disabled borders.
     static let hkBorder = Color(.systemGray4)
+
+    /// Prominent dark active call surface. Always dark in both light and dark mode.
+    static let hkActiveDark = Color(red: 0.09, green: 0.10, blue: 0.11)
 }
 
 /// Bridges the Color tokens above to `ShapeStyle` so they can be used directly
 /// with `.foregroundStyle(.hkBlue)` / `.tint(.hkGreen)` shorthand.
 extension ShapeStyle where Self == Color {
-    static var hkBlue:    Color { .hkBlue }
-    static var hkGreen:   Color { .hkGreen }
-    static var hkOrange:  Color { .hkOrange }
-    static var hkRed:     Color { .hkRed }
-    static var hkCanvas:  Color { .hkCanvas }
-    static var hkSurface: Color { .hkSurface }
-    static var hkBorder:  Color { .hkBorder }
+    static var hkBlue:         Color { .hkBlue }
+    static var hkCobalt:       Color { .hkCobalt }
+    static var hkGreen:        Color { .hkGreen }
+    static var hkForest:       Color { .hkForest }
+    static var hkOrange:       Color { .hkOrange }
+    static var hkRed:          Color { .hkRed }
+    static var hkCanvas:       Color { .hkCanvas }
+    static var hkWarmCanvas:   Color { .hkWarmCanvas }
+    static var hkInk:          Color { .hkInk }
+    static var hkInkSecondary: Color { .hkInkSecondary }
+    static var hkDivider:      Color { .hkDivider }
+    static var hkSurface:      Color { .hkSurface }
+    static var hkBorder:       Color { .hkBorder }
+    static var hkActiveDark:   Color { .hkActiveDark }
 }
 
 // MARK: - Spacing scale (4pt base)

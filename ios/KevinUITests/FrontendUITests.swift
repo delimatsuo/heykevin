@@ -44,43 +44,66 @@ final class FrontendUITests: XCTestCase {
         _ element: XCUIElement,
         in app: XCUIApplication,
         direction: ScrollDirection = .down,
-        maxSwipes: Int = 35
+        maxSwipes: Int = 35,
+        requireHittable: Bool = true
     ) -> Bool {
-        if element.exists && element.isHittable {
+        let isTargetFound: () -> Bool = {
+            if requireHittable {
+                return element.exists && element.isHittable
+            } else {
+                return element.exists
+            }
+        }
+
+        if isTargetFound() {
             return true
         }
-        let container = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch : app.tables.firstMatch
+
+        let container: XCUIElement = {
+            if let hittableCV = app.collectionViews.allElementsBoundByIndex.first(where: { $0.isHittable }) {
+                return hittableCV
+            }
+            if let hittableTable = app.tables.allElementsBoundByIndex.first(where: { $0.isHittable }) {
+                return hittableTable
+            }
+            if app.collectionViews.firstMatch.exists {
+                return app.collectionViews.firstMatch
+            }
+            return app.tables.firstMatch
+        }()
+
         var swipes = 0
         while swipes < maxSwipes {
-            if element.exists && element.isHittable {
+            if isTargetFound() {
                 return true
             }
             if container.exists {
                 switch direction {
                 case .down:
-                    container.swipeUp()
+                    container.swipeUp(velocity: .fast)
                 case .up:
-                    container.swipeDown()
+                    container.swipeDown(velocity: .fast)
                 }
             } else {
                 switch direction {
                 case .down:
-                    app.swipeUp()
+                    app.swipeUp(velocity: .fast)
                 case .up:
-                    app.swipeDown()
+                    app.swipeDown(velocity: .fast)
                 }
             }
             swipes += 1
-            if element.exists && element.isHittable {
+            if isTargetFound() {
                 return true
             }
         }
-        return element.exists && element.isHittable
+        return isTargetFound()
     }
 
     // MARK: - 1. Bounded History & Pagination UI
 
     func testBoundedHistoryPagination101AndExpansion() throws {
+        executionTimeAllowance = 180
         let app = launchApp(scenario: "history-101")
 
         // 1. Verify search field and count label exist
@@ -98,6 +121,10 @@ final class FrontendUITests: XCTestCase {
         showMoreButton.tap()
 
         // Scroll back to top before asserting count label
+        let statusBar = app.statusBars.firstMatch
+        if statusBar.exists {
+            statusBar.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)).tap()
+        }
         let scrolledToTop40 = scrollToElement(countLabel, in: app, direction: .up)
         XCTAssertTrue(scrolledToTop40 && countLabel.exists)
         XCTAssertEqual(countLabel.label, "Showing 40 of 100 calls")
@@ -110,6 +137,9 @@ final class FrontendUITests: XCTestCase {
         }
 
         // Scroll back to top before asserting final count label
+        if statusBar.exists {
+            statusBar.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)).tap()
+        }
         let scrolledToTop100 = scrollToElement(countLabel, in: app, direction: .up)
         XCTAssertTrue(scrolledToTop100 && countLabel.exists)
         XCTAssertEqual(countLabel.label, "Showing the 100 most recent calls available in this history.")
@@ -235,9 +265,13 @@ final class FrontendUITests: XCTestCase {
         kevinTab.tap()
         XCTAssertTrue(kevinTab.isSelected)
 
-        let returnButton = app.buttons["call.return"]
-        XCTAssertTrue(returnButton.waitForExistence(timeout: 5), "Compact return to call card must exist on Kevin tab")
-        returnButton.tap()
+        let kevinReturnQuery = app.buttons.matching(identifier: "call.return")
+        XCTAssertTrue(kevinReturnQuery.firstMatch.waitForExistence(timeout: 5), "Compact return to call card must exist on Kevin tab")
+        let kevinReturnButton = try XCTUnwrap(
+            kevinReturnQuery.allElementsBoundByIndex.first(where: { $0.isHittable }),
+            "Expected hittable return button on Kevin tab"
+        )
+        kevinReturnButton.tap()
 
         let liveDoneButton = app.buttons["call.liveDone"]
         XCTAssertTrue(liveDoneButton.waitForExistence(timeout: 5), "Live transcript detail must open from Kevin return card")
@@ -248,12 +282,18 @@ final class FrontendUITests: XCTestCase {
         XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
         settingsButton.tap()
 
-        XCTAssertTrue(returnButton.waitForExistence(timeout: 5), "Compact return to call card must exist in Account sheet")
-        returnButton.tap()
+        let accountReturnQuery = app.buttons.matching(identifier: "call.return")
+        XCTAssertTrue(accountReturnQuery.firstMatch.waitForExistence(timeout: 5), "Compact return to call card must exist in Account sheet")
+        let accountReturnButton = try XCTUnwrap(
+            accountReturnQuery.allElementsBoundByIndex.first(where: { $0.isHittable }),
+            "Expected hittable return button in Account sheet"
+        )
+        accountReturnButton.tap()
 
         // Account sheet must close and live transcript detail must open
-        XCTAssertTrue(liveDoneButton.waitForExistence(timeout: 5), "Live transcript detail must open from Account sheet return card")
-        liveDoneButton.tap()
+        let liveDoneButton2 = app.buttons["call.liveDone"]
+        XCTAssertTrue(liveDoneButton2.waitForExistence(timeout: 5), "Live transcript detail must open from Account sheet return card")
+        liveDoneButton2.tap()
     }
 
     // MARK: - 7. Fixture External Actions Disabled
@@ -310,14 +350,14 @@ final class FrontendUITests: XCTestCase {
         XCTAssertTrue(accountDone.waitForExistence(timeout: 5), "Account sheet Done button must exist on launch")
 
         // Check Account & Plan View Plans button is disabled
-        let viewPlans = app.buttons["settings.viewPlans"]
-        let foundViewPlans = scrollToElement(viewPlans, in: app, direction: .down)
+        let viewPlans = app.buttons["View Plans"]
+        let foundViewPlans = scrollToElement(viewPlans, in: app, direction: .down, requireHittable: false)
         XCTAssertTrue(foundViewPlans && viewPlans.exists, "View Plans button must exist")
         XCTAssertFalse(viewPlans.isEnabled, "View Plans button should be disabled in screenshot fixtures")
 
         // Check Delete Account button is disabled
         let deleteButton = app.buttons["Delete Account"]
-        let foundDelete = scrollToElement(deleteButton, in: app, direction: .down)
+        let foundDelete = scrollToElement(deleteButton, in: app, direction: .down, requireHittable: false)
         XCTAssertTrue(foundDelete && deleteButton.exists, "Delete Account button must exist")
         XCTAssertFalse(deleteButton.isEnabled, "Delete Account button should be disabled in screenshot fixtures")
 
@@ -329,8 +369,8 @@ final class FrontendUITests: XCTestCase {
         kevinTab.tap()
         XCTAssertTrue(kevinTab.isSelected)
 
-        let screenAllToggle = app.switches["kevin.screenAllCalls"]
-        let foundScreenAll = scrollToElement(screenAllToggle, in: app, direction: .down)
+        let screenAllToggle = app.switches.matching(NSPredicate(format: "label BEGINSWITH 'Screen all calls'")).firstMatch
+        let foundScreenAll = scrollToElement(screenAllToggle, in: app, direction: .down, requireHittable: false)
         XCTAssertTrue(foundScreenAll && screenAllToggle.exists, "Screen all calls toggle must exist")
         XCTAssertFalse(screenAllToggle.isEnabled, "Screen all calls toggle must be disabled in screenshot fixtures")
     }

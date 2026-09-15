@@ -21,9 +21,9 @@ expert panel. Twenty is Kevin's display choice, not a competitor's stated cap.
 
 ## Frozen source and review
 
-- Verified source: `39be39a57246676e32d19124e9d7608596c296df`.
-- iOS tree: `a05ff41581f04b15c0c4ebf90bae9f99a457bce4`.
-- Production application tree (`ios/Kevin`):
+- Unit/UI verification source: `39be39a57246676e32d19124e9d7608596c296df`.
+- Unit/UI iOS tree: `a05ff41581f04b15c0c4ebf90bae9f99a457bce4`.
+- Production application tree at that verification (`ios/Kevin`):
   `4159c6db0d261cf13ccf7f5d01b2fb8cdff239fe`.
 - Base main: `f72fe0a5ef8dc618e51c90767dc8f9e04834ef7d`.
 - Branch/worktree: `codex/frontend-native`, `<clone>/.worktrees/frontend-native`.
@@ -86,7 +86,26 @@ that server-side ambiguity.
 
 ## CI and delivery
 
-Required CI and signed-package delivery are pending. The September 15 preflight
+All nine required CI jobs passed for `f4156db1535db14a531fc842abdc31ab8d61b936`
+in [run 34925143050](https://github.com/delimatsuo/heykevin/actions/runs/34925143050)
+on [PR #248](https://github.com/delimatsuo/heykevin/pull/248), using 412 runner
+seconds. Both deploy jobs were skipped. Automatic Codex review reported exhausted
+review quota; Cursor could not start without usage-based pricing. Neither was
+retried, and independent source review supplies the review evidence.
+
+The first signed package passed Apple validation but was **not uploaded**.
+Independent package inspection found duplicate comment-only catalog entries for
+`Mark All Read` and `Robocall, Kevin hung up.` that caused their Spanish and
+Portuguese translations to be omitted from the compiled tables. The entries were
+merged while preserving comments and all translation values. Duplicate-aware
+parsing verifies 424 unique source keys and unchanged translations. Swift and
+test sources are unchanged by this correction; the replacement package must
+verify the compiled language tables. The initial IPA SHA-256
+`ca483fed23f639bdce096bc9b1de648771df190c839b2e2114fb027f8ef83087`
+is withdrawn. Its exact scratch directory was cleaned.
+
+CI for the catalog correction and signed-package delivery are pending.
+The September 15 preflight
 bound public repository and billing owner to `delimatsuo/heykevin` and
 `delimatsuo`. Required check `Test` remains strict and fail closed, backed by
 seven Python shards and quality (nine standard Ubuntu jobs including Test).
@@ -129,15 +148,16 @@ Routing reason: Master owned architecture, pinned contracts, independent audit,
 source restoration, Git, execution and release evidence. Builders only edited
 allowlisted files through headless agy.
 agy transport=headless: true
-Input tokens: 6451571
-Output tokens: 1035084
-Total tokens: 7486655
-Retries: Two empty/partial builder results required bounded recovery; 21 total
+Input tokens: 6514580
+Output tokens: 1037897
+Total tokens: 7552477
+Retries: Two empty/partial builder results required bounded recovery; 22 total
 builder invocations include planned implementation and audit-fix phases.
-Audit defects found: Six source groups required repair: producing-account
+Audit defects found: Seven source groups required repair: producing-account
 ownership, observer lifecycle, Settings draft/save ownership, retained appointment
-receipts, Account presentation order and deletion-flight ownership. Test/visual
+receipts, Account presentation order, deletion-flight ownership and duplicate
+localization entries. Test/visual
 harness corrections are described above.
 Audit disposition: Source and final test-delta reviews approved; all 269 native
-unit tests, 9 UI tests and targeted mutation checks passed. CI and package
-delivery remain pending.
+unit tests, 9 UI tests and targeted mutation checks passed. Initial CI passed;
+the catalog correction needs current-head CI and package delivery.

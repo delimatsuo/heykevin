@@ -48,6 +48,9 @@ struct CallLifecycleSnapshot: Equatable, Sendable {
 struct CallPresentationLease: Equatable {
     let auth: CallAuthContext
     let scope: CallLifecycleSnapshot
+    func isValid(auth currentAuth: CallAuthContext, scope currentScope: CallLifecycleSnapshot) -> Bool {
+        auth == currentAuth && currentAuth.isValid && scope == currentScope && !scope.callSid.isEmpty
+    }
     func mayClear(auth currentAuth: CallAuthContext, scope currentScope: CallLifecycleSnapshot) -> Bool {
         auth == currentAuth && scope == currentScope && !scope.callSid.isEmpty
     }
@@ -386,9 +389,9 @@ final class CallActionCoordinator: ObservableObject {
         let sameScope = currentCall() == scope && scope.permits(callSid)
         if let status = result, status.validNavigation(callSid: callSid, contractorId: auth.contractorId) {
             if status.isActive && sameScope {
-                AppState.shared.setActiveCall(callSid: callSid, callerPhone: status.callerPhone ?? "", callerName: status.callerName ?? "")
+                AppState.shared.setActiveCall(callSid: callSid, callerPhone: status.callerPhone ?? "", callerName: status.callerName ?? "", authContext: auth)
                 observeStatus(status, auth: auth)
-                if let transcript = status.transcript { AppState.shared.transcriptLines = transcript.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) } }
+                if let transcript = status.transcript { AppState.shared.updateActiveCallTranscript(text: transcript, authContext: auth, callSid: callSid) }
                 AppState.shared.showActiveCall = true; AppState.shared.selectedTab = .live
                 return true
             }

@@ -70,7 +70,7 @@ class CallManager: NSObject, ObservableObject {
                     return
                 }
                 self.callerName = callerName; self.callerPhone = callerPhone
-                AppState.shared.setActiveCall(callSid: callSid, callerPhone: callerPhone, callerName: callerName)
+                AppState.shared.setActiveCall(callSid: callSid, callerPhone: callerPhone, callerName: callerName, authContext: auth)
                 DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) { [weak self] in
                     guard let self, self.activeCallUUID == uuid,
                           self.ownership.contexts[uuid] == context, self.activeCall == nil else { return }

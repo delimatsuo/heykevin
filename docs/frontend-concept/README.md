@@ -3,9 +3,10 @@
 Open `index.html` in a browser. It is a standalone HTML
 file with inline styles, icons and JavaScript; no build step is needed.
 
-This folder is an interactive design proposal for owner review. The wider native
-frontend refactor needs separate design approval. The narrow notification and
-urgent handoff implementation is approved and specified in the current PRD.
+This folder is the interactive design reviewed by the owner. On September 14,
+the owner approved the native Calls + Kevin implementation and bounded history.
+The [native plan](../superpowers/plans/2026-09-14-native-frontend.md) defines that
+work; the current PRD records its acceptance and release status.
 All calls, people, appointments and account details
 are fictional. Changes last only for the current page session.
 
@@ -42,8 +43,9 @@ contract are in `PANEL-REVIEW.md`.
 
 The HTML demonstrates navigation, layout and local interactions. It cannot
 qualify native CallKit, APNs, carrier forwarding, device accessibility, calendar
-providers, App Store billing or production behavior. A native refactor requires
-the owner's separate design approval and a fresh implementation plan.
+providers, App Store billing or production behavior. The approved native work
+requires its own compiled-app, review and release evidence; the HTML is not that
+evidence.
 
 The live local preview, when started by Codex, is bound to `127.0.0.1` and stops
 after six hours. The HTML file remains usable offline afterward.

@@ -82,11 +82,27 @@ final class CallHistoryModel: ObservableObject {
     @Published var selectedFilter: CallHistoryFilter = .all
     @Published var searchQuery: String = ""
     @Published private(set) var isLoading: Bool = false
-    @Published private(set) var errorMessage: String? = nil
-    @Published private(set) var retainedErrorMessage: String? = nil
+    @Published private(set) var rawErrorMessage: String? = nil
+    @Published private(set) var rawRetainedErrorMessage: String? = nil
     @Published private(set) var readCallIds: Set<String> = []
     @Published private(set) var activeAuthContext: CallAuthContext? = nil
     @Published private(set) var lastLoadedRevision: Int = 0
+
+    /// Production getter confirming active auth context matches current auth provider and is valid.
+    var hasOwnedSnapshot: Bool {
+        guard let active = activeAuthContext, active.isValid else { return false }
+        return active == authProvider()
+    }
+
+    var errorMessage: String? {
+        guard hasOwnedSnapshot else { return nil }
+        return rawErrorMessage
+    }
+
+    var retainedErrorMessage: String? {
+        guard hasOwnedSnapshot else { return nil }
+        return rawRetainedErrorMessage
+    }
 
     private var currentRequestRevision: Int = 0
 
@@ -212,6 +228,7 @@ final class CallHistoryModel: ObservableObject {
     // MARK: - Search and Filtering (Applied before visible limit)
 
     var filteredCalls: [CallRecord] {
+        guard hasOwnedSnapshot else { return [] }
         let callsToFilter: [CallRecord]
         switch selectedFilter {
         case .all:
@@ -267,15 +284,16 @@ final class CallHistoryModel: ObservableObject {
     }
 
     var canShowMore: Bool {
-        visibleLimit < filteredCalls.count && visibleLimit < Self.maximumCount
+        hasOwnedSnapshot && visibleLimit < filteredCalls.count && visibleLimit < Self.maximumCount
     }
 
     var hasCalls: Bool {
-        !allCalls.isEmpty
+        hasOwnedSnapshot && !allCalls.isEmpty
     }
 
     var unreadCount: Int {
-        allCalls.filter { isCallUnread($0) }.count
+        guard hasOwnedSnapshot else { return 0 }
+        return allCalls.filter { isCallUnread($0) }.count
     }
 
     // MARK: - Read State Management
@@ -303,6 +321,17 @@ final class CallHistoryModel: ObservableObject {
             await markServerRead([callId], current)
         }
         return task
+    }
+
+    /// Factory creating an action closure that captures expected auth at render time.
+    /// Rejects execution if expected auth is absent, invalid, or mismatched at invocation time.
+    func makeMarkAllReadAction(expectedAuth: CallAuthContext?) -> () -> Void {
+        guard let expected = expectedAuth, expected.isValid else {
+            return {}
+        }
+        return { [weak self] in
+            _ = self?.markAllAsRead(expectedAuth: expected)
+        }
     }
 
     @discardableResult
@@ -343,8 +372,8 @@ final class CallHistoryModel: ObservableObject {
         currentRequestRevision += 1
         let capturedRevision = currentRequestRevision
         isLoading = true
-        errorMessage = nil
-        retainedErrorMessage = nil
+        rawErrorMessage = nil
+        rawRetainedErrorMessage = nil
 
         do {
             let raw = try await fetchCalls(requestAuth)
@@ -385,8 +414,8 @@ final class CallHistoryModel: ObservableObject {
             }
 
             self.isLoading = false
-            self.errorMessage = nil
-            self.retainedErrorMessage = nil
+            self.rawErrorMessage = nil
+            self.rawRetainedErrorMessage = nil
         } catch {
             // GUARD: Must match both captured revision AND current auth context
             guard capturedRevision == self.currentRequestRevision,
@@ -399,10 +428,11 @@ final class CallHistoryModel: ObservableObject {
                 self.reauthEffect(requestAuth)
             }
 
+            self.activeAuthContext = requestAuth
             if !self.allCalls.isEmpty {
-                self.retainedErrorMessage = error.localizedDescription
+                self.rawRetainedErrorMessage = error.localizedDescription
             } else {
-                self.errorMessage = error.localizedDescription
+                self.rawErrorMessage = error.localizedDescription
             }
             self.isLoading = false
         }
@@ -415,8 +445,8 @@ final class CallHistoryModel: ObservableObject {
         selectedFilter = .all
         searchQuery = ""
         isLoading = false
-        errorMessage = nil
-        retainedErrorMessage = nil
+        rawErrorMessage = nil
+        rawRetainedErrorMessage = nil
         readCallIds = []
         let targetAuth = newAuth ?? authProvider()
         activeAuthContext = targetAuth.isValid ? targetAuth : nil
@@ -447,6 +477,7 @@ final class CallHistoryModel: ObservableObject {
     // MARK: - Labels and Copy
 
     var showingCountLabel: String {
+        guard hasOwnedSnapshot else { return "" }
         let total = filteredCalls.count
         guard total > 0 else { return "" }
         if total >= Self.maximumCount && visibleCalls.count >= Self.maximumCount && selectedFilter == .all && searchQuery.isEmpty {
@@ -460,7 +491,7 @@ final class CallHistoryModel: ObservableObject {
     }
 
     var emptyState: CallHistoryEmptyState? {
-        guard !isLoading && filteredCalls.isEmpty else { return nil }
+        guard hasOwnedSnapshot && !isLoading && errorMessage == nil && filteredCalls.isEmpty else { return nil }
         if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return .noMatches
         }
@@ -475,10 +506,12 @@ final class CallHistoryModel: ObservableObject {
     }
 
     func call(for id: String) -> CallRecord? {
-        allCalls.first { $0.id == id }
+        guard hasOwnedSnapshot else { return nil }
+        return allCalls.first { $0.id == id }
     }
 
     var groupedVisibleCalls: [CallDateGroup] {
+        guard hasOwnedSnapshot else { return [] }
         let calendar = Calendar.current
         let now = clock()
         var groups: [String: (title: String, orderDate: Date, calls: [CallRecord])] = [:]

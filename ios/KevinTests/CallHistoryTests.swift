@@ -12,6 +12,7 @@ final class CallHistoryTests: XCTestCase {
         var resetAuths: [CallAuthContext] = []
         var reauthAuths: [CallAuthContext] = []
         var serverMarkedSids: [(sids: [String], auth: CallAuthContext)] = []
+        var onServerMarkRead: (() -> Void)? = nil
 
         func loadReadIds(auth: CallAuthContext) -> Set<String> {
             storedReadIds[auth.contractorId] ?? []
@@ -32,6 +33,7 @@ final class CallHistoryTests: XCTestCase {
 
         func markServerRead(sids: [String], auth: CallAuthContext) async {
             serverMarkedSids.append((sids: sids, auth: auth))
+            onServerMarkRead?()
         }
     }
 
@@ -1064,5 +1066,289 @@ final class CallHistoryTests: XCTestCase {
         // Local mark must NOT be regressed by the refresh
         XCTAssertTrue(model.readCallIds.contains("call-1"))
         XCTAssertEqual(model.unreadCount, 1)
+    }
+
+    // MARK: - 7. Exact 0/19/20/21/99/100/101 Boundary Table Tests
+
+    func testBoundaryTable0_19_20_21_99_100_101() async {
+        let auth = CallAuthContext(contractorId: "contractor-boundary", bearerToken: "token-b", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+
+        func generateRecords(count: Int) -> [CallRecord] {
+            (0..<count).map { i in
+                makeRecord(
+                    id: String(format: "CA_B_%04d", i),
+                    name: "Caller \(i)",
+                    phone: String(format: "+1555%07d", i),
+                    timestamp: now.addingTimeInterval(-Double(i) * 60)
+                )
+            }
+        }
+
+        let testCases: [(count: Int, expectedNormalized: Int, expectedCanShowMoreInitial: Bool, expectedInitialLabel: String)] = [
+            (0, 0, false, ""),
+            (19, 19, false, "Showing 19 of 19 calls"),
+            (20, 20, false, "Showing 20 of 20 calls"),
+            (21, 21, true, "Showing 20 of 21 calls"),
+            (99, 99, true, "Showing 20 of 99 calls"),
+            (100, 100, true, "Showing 20 of 100 calls"),
+            (101, 100, true, "Showing 20 of 100 calls"),
+            (150, 100, true, "Showing 20 of 100 calls")
+        ]
+
+        for testCase in testCases {
+            let rawRecords = generateRecords(count: testCase.count)
+            let normalized = CallHistoryModel.normalize(rawCalls: rawRecords, now: now)
+            XCTAssertEqual(
+                normalized.count,
+                testCase.expectedNormalized,
+                "Normalize failed for count \(testCase.count)"
+            )
+
+            let (model, _) = makeTestModel(
+                authProvider: { auth },
+                fetchCalls: { _ in rawRecords },
+                clock: { now }
+            )
+
+            await model.loadCalls()
+            XCTAssertEqual(model.allCalls.count, testCase.expectedNormalized)
+            XCTAssertEqual(model.canShowMore, testCase.expectedCanShowMoreInitial, "canShowMore mismatch for count \(testCase.count)")
+            XCTAssertEqual(model.showingCountLabel, testCase.expectedInitialLabel, "showingCountLabel mismatch for count \(testCase.count)")
+
+            if testCase.count == 0 {
+                XCTAssertEqual(model.emptyState, .noCalls)
+            } else {
+                XCTAssertNil(model.emptyState)
+            }
+
+            // Expand pagination to max and check capping at 100
+            while model.canShowMore {
+                model.showMore()
+            }
+            XCTAssertLessThanOrEqual(model.visibleCalls.count, 100)
+            XCTAssertFalse(model.canShowMore)
+            if testCase.expectedNormalized == 100 {
+                XCTAssertEqual(model.showingCountLabel, "Showing the 100 most recent calls available in this history.")
+            }
+        }
+    }
+
+    // MARK: - 8. Immediate Auth Rendering Isolation & hasOwnedSnapshot
+
+    func testHasOwnedSnapshotGetter() async {
+        var currentAuth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+
+        let (model, _) = makeTestModel(
+            authProvider: { currentAuth },
+            fetchCalls: { _ in [self.makeRecord(id: "call-1", timestamp: now)] },
+            clock: { now }
+        )
+
+        // After initial load, activeAuthContext matches currentAuth
+        await model.loadCalls()
+        XCTAssertTrue(model.hasOwnedSnapshot)
+
+        // Auth rotates to B without invalidate()
+        currentAuth = CallAuthContext(contractorId: "contractor-B", bearerToken: "token-B", generation: 2)
+        XCTAssertFalse(model.hasOwnedSnapshot, "hasOwnedSnapshot must be false immediately when provider auth diverges")
+
+        // Invalidate for B
+        model.invalidate(for: currentAuth)
+        XCTAssertTrue(model.hasOwnedSnapshot)
+
+        // Invalid auth
+        currentAuth = CallAuthContext(contractorId: "", bearerToken: "", generation: 0)
+        XCTAssertFalse(model.hasOwnedSnapshot)
+    }
+
+    func testLoadAthenProviderBWithoutInvalidateExposesNoRetainedAData() async {
+        var currentAuth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+
+        var callsA: [CallRecord] = []
+        for i in 0..<30 {
+            callsA.append(makeRecord(
+                id: "call-A-\(i)",
+                name: "Customer \(i)",
+                phone: "+15551234567",
+                timestamp: now.addingTimeInterval(-Double(i * 60)),
+                transcript: "Kevin: Hello\nCaller: Need help with order \(i)\nCaller: Call me back",
+                readOnServer: i > 5
+            ))
+        }
+
+        let (model, _) = makeTestModel(
+            authProvider: { currentAuth },
+            fetchCalls: { _ in callsA },
+            clock: { now }
+        )
+
+        await model.loadCalls()
+        XCTAssertTrue(model.hasOwnedSnapshot)
+        XCTAssertEqual(model.filteredCalls.count, 30)
+        XCTAssertEqual(model.visibleCalls.count, 20)
+        XCTAssertFalse(model.groupedVisibleCalls.isEmpty)
+        XCTAssertEqual(model.unreadCount, 6)
+        XCTAssertTrue(model.hasCalls)
+        XCTAssertEqual(model.showingCountLabel, "Showing 20 of 30 calls")
+        XCTAssertNotNil(model.call(for: "call-A-0"))
+
+        // Search query finds a match under Auth A
+        model.setSearchQuery("Customer 1")
+        XCTAssertEqual(model.filteredCalls.count, 12) // matches Customer 1, 10-19
+
+        // Now, switch authProvider to Auth B WITHOUT calling invalidate()
+        currentAuth = CallAuthContext(contractorId: "contractor-B", bearerToken: "token-B", generation: 2)
+
+        // Assert all UI-computed fields immediately hide Auth A payload
+        XCTAssertFalse(model.hasOwnedSnapshot)
+        XCTAssertTrue(model.filteredCalls.isEmpty, "filteredCalls must not expose retained Auth A rows under Auth B")
+        XCTAssertTrue(model.visibleCalls.isEmpty, "visibleCalls must be empty")
+        XCTAssertTrue(model.groupedVisibleCalls.isEmpty, "groupedVisibleCalls must be empty")
+        XCTAssertEqual(model.unreadCount, 0, "unreadCount must be 0")
+        XCTAssertFalse(model.hasCalls, "hasCalls must be false")
+        XCTAssertEqual(model.showingCountLabel, "", "showingCountLabel must be empty")
+        XCTAssertNil(model.emptyState, "emptyState must be nil when unowned")
+        XCTAssertNil(model.errorMessage, "errorMessage must be nil when unowned")
+        XCTAssertNil(model.retainedErrorMessage, "retainedErrorMessage must be nil when unowned")
+        XCTAssertNil(model.call(for: "call-A-0"), "call(for:) must return nil for unowned record")
+
+        // Raw allCalls is preserved for internal load lifecycle guards only
+        XCTAssertEqual(model.allCalls.count, 30)
+    }
+
+    // MARK: - 9. Mark All Read Action Factory & Link Router Policy Tests
+
+    func testMakeMarkAllReadActionRejectsStaleOrMismatchedAuth() async {
+        let authA = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let authB = CallAuthContext(contractorId: "contractor-B", bearerToken: "token-B", generation: 2)
+        var currentAuth = authA
+        let now = Date(timeIntervalSince1970: 1773532800)
+
+        let callsA = [
+            makeRecord(id: "call-A1", timestamp: now),
+            makeRecord(id: "call-A2", timestamp: now.addingTimeInterval(-10))
+        ]
+        let callsB = [
+            makeRecord(id: "call-B1", timestamp: now),
+            makeRecord(id: "call-B2", timestamp: now.addingTimeInterval(-10))
+        ]
+
+        let effects = MockHistoryEffects()
+        let (model, _) = makeTestModel(
+            authProvider: { currentAuth },
+            fetchCalls: { auth in auth == authA ? callsA : callsB },
+            effects: effects,
+            clock: { now }
+        )
+
+        await model.loadCalls()
+        XCTAssertEqual(model.unreadCount, 2)
+
+        // 1. Factory creation with mismatched expectedAuth (authB while active model is authA)
+        // Check A unread BEFORE consuming valid A action
+        let mismatchedAction = model.makeMarkAllReadAction(expectedAuth: authB)
+        mismatchedAction()
+        XCTAssertEqual(model.unreadCount, 2, "Mismatched auth action must not mark calls as read")
+        XCTAssertEqual(effects.serverMarkedSids.count, 0, "No server effect should be dispatched for mismatched auth")
+
+        // 2. Valid action factory invocation matching current auth
+        let serverMarkExp = expectation(description: "Server mark read dispatched for authA")
+        effects.onServerMarkRead = { serverMarkExp.fulfill() }
+
+        let validActionA = model.makeMarkAllReadAction(expectedAuth: authA)
+        validActionA()
+        await fulfillment(of: [serverMarkExp], timeout: 2.0)
+
+        XCTAssertEqual(model.unreadCount, 0)
+        XCTAssertEqual(effects.serverMarkedSids.count, 1)
+        XCTAssertEqual(effects.serverMarkedSids.first?.auth, authA)
+
+        // 3. Stale retained action after auth rotation: load unread B records into model before invoking retained A action; B records must remain unread
+        currentAuth = authB
+        await model.loadCalls()
+        XCTAssertEqual(model.unreadCount, 2, "Model B should have unread calls loaded")
+
+        validActionA()
+        XCTAssertEqual(model.unreadCount, 2, "Old authA action must not mark authB calls as read")
+        XCTAssertEqual(effects.serverMarkedSids.count, 1, "No additional server effect should be dispatched")
+    }
+
+    func testHistoricalCallLinkRouterPolicy() {
+        let authA = CallAuthContext(contractorId: "c-100", bearerToken: "tok-100", generation: 1)
+        let authB = CallAuthContext(contractorId: "c-200", bearerToken: "tok-200", generation: 2)
+        let authA_rot = CallAuthContext(contractorId: "c-100", bearerToken: "tok-100", generation: 3)
+        let invalidAuth = CallAuthContext(contractorId: "", bearerToken: "", generation: 0)
+
+        let testURL = URL(string: "tel:15551234567")!
+        let record = makeRecord(id: "CA_HIST_1", timestamp: Date(timeIntervalSince1970: 1773532800))
+        let leaseA = HistoricalCallPresentationLease(auth: authA, callId: record.id, call: record)
+
+        var openedURLs: [URL] = []
+        let openEffect: (URL) -> Void = { url in
+            openedURLs.append(url)
+        }
+
+        // 1. Valid lease and current auth: forwards and returns true
+        openedURLs.removeAll()
+        let success = HistoricalCallLinkRouter.perform(
+            url: testURL,
+            lease: leaseA,
+            currentAuth: authA,
+            isFixture: false,
+            openEffect: openEffect
+        )
+        XCTAssertTrue(success)
+        XCTAssertEqual(openedURLs, [testURL])
+
+        // 2. Fixture mode enabled: zero effect, returns false
+        openedURLs.removeAll()
+        let fixtureBlocked = HistoricalCallLinkRouter.perform(
+            url: testURL,
+            lease: leaseA,
+            currentAuth: authA,
+            isFixture: true,
+            openEffect: openEffect
+        )
+        XCTAssertFalse(fixtureBlocked)
+        XCTAssertTrue(openedURLs.isEmpty)
+
+        // 3. Stale lease / foreign auth (authB): zero effect, returns false
+        openedURLs.removeAll()
+        let foreignBlocked = HistoricalCallLinkRouter.perform(
+            url: testURL,
+            lease: leaseA,
+            currentAuth: authB,
+            isFixture: false,
+            openEffect: openEffect
+        )
+        XCTAssertFalse(foreignBlocked)
+        XCTAssertTrue(openedURLs.isEmpty)
+
+        // 4. Rotated auth / ABA generation: zero effect, returns false
+        openedURLs.removeAll()
+        let rotatedBlocked = HistoricalCallLinkRouter.perform(
+            url: testURL,
+            lease: leaseA,
+            currentAuth: authA_rot,
+            isFixture: false,
+            openEffect: openEffect
+        )
+        XCTAssertFalse(rotatedBlocked)
+        XCTAssertTrue(openedURLs.isEmpty)
+
+        // 5. Invalid empty auth: zero effect, returns false
+        openedURLs.removeAll()
+        let invalidBlocked = HistoricalCallLinkRouter.perform(
+            url: testURL,
+            lease: leaseA,
+            currentAuth: invalidAuth,
+            isFixture: false,
+            openEffect: openEffect
+        )
+        XCTAssertFalse(invalidBlocked)
+        XCTAssertTrue(openedURLs.isEmpty)
     }
 }

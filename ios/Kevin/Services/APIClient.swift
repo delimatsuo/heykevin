@@ -1176,20 +1176,34 @@ final class APIClient: @unchecked Sendable {
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
-    func checkIntegrationStatus(_ service: String, contractorId: String) async throws -> Bool {
+    func checkIntegrationStatus(
+        _ service: String,
+        contractorId: String,
+        bearerToken: String? = nil
+    ) async throws -> Bool {
         let encodedService = service.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? service
         var components = URLComponents(string: "\(baseURL)/api/integrations/\(encodedService)/status")!
         components.queryItems = [URLQueryItem(name: "contractor_id", value: contractorId)]
         var request = URLRequest(url: components.url!)
         request.timeoutInterval = 10
-        authorize(&request)
+        if let token = bearerToken {
+            guard !token.isEmpty else {
+                throw URLError(.userAuthenticationRequired)
+            }
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            authorize(&request)
+        }
 
-        let (data, _) = try await retryRequest(request)
+        let (data, response) = try await retryRequest(request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
         if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            let connected = json["connected"] as? Bool {
             return connected
         }
-        return false
+        throw URLError(.cannotParseResponse)
     }
 
     // MARK: - Subscription

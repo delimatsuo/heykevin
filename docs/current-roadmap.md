@@ -81,8 +81,9 @@ on reviewed source head `66030cd41318d75b423373aebfcb6c5f3ffc63cb`; the merge ha
 the same tree. The [staging record](releases/2026-09-14-urgent-staging.md) tracks
 the subsequent deployment independently from production and iPhone acceptance.
 The [interactive HTML](frontend-concept/index.html) demonstrates the experience.
-The native frontend redesign is still awaiting owner design approval; callback,
-text reply and the later-feature list are not active implementation.
+The owner subsequently approved the native Calls + Kevin frontend and bounded
+history, tracked below as N3. New callback/text-reply features and the later-feature
+list remain outside active implementation.
 
 - [x] Notification source merged and staged.
 - [x] Independently reproduce the delayed-summary teardown defect with fictional
@@ -131,6 +132,24 @@ App Store submission remains a later release approval. The tested
 forward-recovery patch still requires another build and approval if needed;
 it does not rely on returning live operations to the older backend.
 
+## Approved native frontend — in development
+
+After testing notification build 38, the owner approved translating the
+expert-reviewed HTML into SwiftUI and asked for bounded history. Build 38
+contains the notification changes; it predates this native design.
+
+The [native plan](superpowers/plans/2026-09-14-native-frontend.md) targets
+**1.3.0 (39)** for internal TestFlight review. Calls + Kevin are the two tabs,
+with labeled account Settings and the live caller reachable throughout.
+History starts at 20 rows, expands by 20 to the existing 100-call/90-day bound,
+and searches/filters the full bounded snapshot before limiting visible rows.
+The retrieval limit does not delete older stored calls or extend retention.
+
+Implementation and local verification are in progress. A build number in
+project configuration is not proof of Apple upload or availability. Required
+CI, independent native review and internal TestFlight delivery remain open.
+Physical notification/call checks and public App Store approval remain separate.
+
 ## Unfinished or unverified, not an automatic implementation queue
 
 | Item | Current fact | Next decision or evidence |
@@ -168,9 +187,9 @@ is not a new release signoff.
 
 ## Deferred
 
-The [current PRD](../kevin-prd.md#deferred-ideas-and-superseded-plans) distinguishes
-the approved HTML design review from a native refactor, and records the former
-v2 work-management program, WhatsApp, voice cloning, multiple numbers and other
+The [current PRD](../kevin-prd.md#deferred-ideas-and-superseded-plans) records the
+approved native refresh separately from the deferred former v2 work-management
+program, WhatsApp, voice cloning, multiple numbers and other
 later ideas. These are not tasks that an agent should automatically start.
 No new provider, SMS, feature flag, pricing, or public-market commitment is created
 by this documentation update.

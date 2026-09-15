@@ -22,6 +22,7 @@ final class LiveCallObserver: ObservableObject {
     private let applyActiveCallEffect: ApplyActiveCallEffect
     private let applyStatusEffect: ApplyStatusEffect
     private let clearActiveCallEffect: ClearActiveCallEffect
+    private let autoSchedule: Bool
 
     @Published private(set) var isRunning: Bool = false
     @Published private(set) var isInFlight: Bool = false
@@ -29,6 +30,9 @@ final class LiveCallObserver: ObservableObject {
 
     private var pollTimer: Timer?
     private var currentRequestRevision: Int = 0
+    private var activeFlightToken: Int = 0
+    private var flightCounter: Int = 0
+    private var isPendingRefresh: Bool = false
 
     init(
         authProvider: @escaping AuthProvider = { AppState.shared.currentAuthContext() },
@@ -44,15 +48,15 @@ final class LiveCallObserver: ObservableObject {
         },
         applyActiveCall: @escaping ApplyActiveCallEffect = { info, auth in
             guard AppState.shared.currentAuthContext() == auth else { return }
-            AppState.shared.setActiveCall(callSid: info.callSid, callerPhone: info.callerPhone, callerName: info.callerName)
-            AppState.shared.transcriptLines = info.transcript.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) }
+            AppState.shared.setActiveCall(callSid: info.callSid, callerPhone: info.callerPhone, callerName: info.callerName, authContext: auth)
+            AppState.shared.updateActiveCallTranscript(text: info.transcript, authContext: auth, callSid: info.callSid)
             AppState.shared.showActiveCall = true
         },
         applyStatus: @escaping ApplyStatusEffect = { status, auth in
             guard AppState.shared.currentAuthContext() == auth else { return }
             CallActionCoordinator.shared.observeStatus(status, auth: auth)
             if let text = status.transcript {
-                AppState.shared.transcriptLines = text.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) }
+                AppState.shared.updateActiveCallTranscript(text: text, authContext: auth, callSid: status.callSid)
             }
         },
         clearActiveCall: @escaping ClearActiveCallEffect = { sid, auth in
@@ -60,7 +64,8 @@ final class LiveCallObserver: ObservableObject {
             if AppState.shared.activeCallSid == sid {
                 AppState.shared.clearActiveCall()
             }
-        }
+        },
+        autoSchedule: Bool = true
     ) {
         self.authProvider = authProvider
         self.scopeProvider = scopeProvider
@@ -69,6 +74,7 @@ final class LiveCallObserver: ObservableObject {
         self.applyActiveCallEffect = applyActiveCall
         self.applyStatusEffect = applyStatus
         self.clearActiveCallEffect = clearActiveCall
+        self.autoSchedule = autoSchedule
     }
 
     #if DEBUG
@@ -85,28 +91,47 @@ final class LiveCallObserver: ObservableObject {
         guard !isScreenshotFixture else { return }
         guard !isRunning else { return }
         isRunning = true
+        isPendingRefresh = false
         schedulePollTimer()
-        Task { await checkNow() }
+        requestRefresh()
     }
 
     func stop() {
         isRunning = false
+        isPendingRefresh = false
         currentRequestRevision += 1
         pollTimer?.invalidate()
         pollTimer = nil
-        isInFlight = false
     }
 
     func handleAuthChange() {
         currentRequestRevision += 1
-        isInFlight = false
+        if isRunning {
+            requestRefresh()
+        }
+    }
+
+    func requestRefresh() {
+        guard !isScreenshotFixture else { return }
+        guard isRunning else { return }
+        if isInFlight {
+            isPendingRefresh = true
+        } else {
+            Task { @MainActor [weak self] in
+                await self?.checkNow()
+            }
+        }
     }
 
     private func schedulePollTimer() {
+        guard autoSchedule else { return }
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self, self.isRunning else { return }
+                let scope = self.scopeProvider()
+                // Timer ticks ONLY poll nonempty active scope; never idle-discovery loops
+                guard !scope.callSid.isEmpty else { return }
                 await self.checkNow()
             }
         }
@@ -116,19 +141,30 @@ final class LiveCallObserver: ObservableObject {
 
     @discardableResult
     func checkNow() async -> Bool {
+        guard isRunning else { return false }
         guard !isScreenshotFixture else { return false }
         let requestAuth = authProvider()
         let requestScope = scopeProvider()
         guard requestAuth.isValid else { return false }
         guard !isInFlight else { return false }
 
+        flightCounter += 1
+        let thisFlightToken = flightCounter
+        activeFlightToken = thisFlightToken
+        isInFlight = true
+
         currentRequestRevision += 1
         let capturedRevision = currentRequestRevision
-        isInFlight = true
         defer {
-            if capturedRevision == currentRequestRevision {
+            if activeFlightToken == thisFlightToken {
                 isInFlight = false
                 lastPollDate = Date()
+                if isRunning && isPendingRefresh {
+                    isPendingRefresh = false
+                    Task { @MainActor [weak self] in
+                        await self?.checkNow()
+                    }
+                }
             }
         }
 

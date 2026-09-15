@@ -35,9 +35,12 @@ final class FrontendNavigationTests: XCTestCase {
 
         XCTAssertEqual(nav.selectedTab, .calls)
         XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertNil(nav.presentedSheet)
         XCTAssertNil(nav.presentedDetailLease)
         XCTAssertFalse(nav.shouldScrollToGoogleCalendar)
         XCTAssertNil(nav.pendingCallPresentationLease)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+        XCTAssertFalse(nav.shouldPresentInCall)
     }
 
     // MARK: - Legacy Tab Commands
@@ -50,15 +53,42 @@ final class FrontendNavigationTests: XCTestCase {
         XCTAssertEqual(nav.selectedTab, .calls)
     }
 
-    func testHandleLegacyTabCommandLive() {
-        let nav = FrontendNavigation()
+    func testHandleLegacyTabCommandLiveOpensLiveDetailWhenOwnedLeasePresent() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_LIVE_1", revision: 1)
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(
+            authProvider: { auth },
+            scopeProvider: { scope },
+            ownedLeaseProvider: { lease }
+        )
         nav.selectedTab = .kevin
 
         nav.handleLegacyTabCommand(.live)
         XCTAssertEqual(nav.selectedTab, .calls)
+        if case .liveCallDetail(let presented) = nav.presentedSheet {
+            XCTAssertEqual(presented.scope.callSid, "CA_LIVE_1")
+            XCTAssertEqual(presented.auth, auth)
+        } else {
+            XCTFail("Legacy .live command must present live call detail sheet when owned active call is present")
+        }
     }
 
-    func testHandleLegacyTabCommandSettings() {
+    func testHandleLegacyTabCommandLiveDoesNotOpenLiveDetailWhenOwnedLeaseNil() {
+        let auth = makeAuth()
+        let scope = makeScope(callSid: "")
+        let nav = FrontendNavigation(
+            authProvider: { auth },
+            scopeProvider: { scope },
+            ownedLeaseProvider: { nil }
+        )
+
+        nav.handleLegacyTabCommand(.live)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertNil(nav.presentedSheet)
+    }
+
+    func testHandleLegacyTabCommandSettingsRoutesToKevinAndScrollsToCalendar() {
         let nav = FrontendNavigation()
         nav.selectedTab = .calls
         nav.shouldScrollToGoogleCalendar = false
@@ -84,15 +114,20 @@ final class FrontendNavigationTests: XCTestCase {
     func testRequestReturnToCallFromAccountCapturesLease() {
         let auth = makeAuth(contractorId: "c-100", generation: 2)
         let scope = makeScope(callSid: "CA_LIVE_99", revision: 3)
-        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(
+            authProvider: { auth },
+            scopeProvider: { scope },
+            ownedLeaseProvider: { lease }
+        )
 
         nav.openAccount()
         XCTAssertTrue(nav.isAccountPresented)
 
-        let lease = nav.requestReturnToCallFromAccount()
-        XCTAssertNotNil(lease)
-        XCTAssertEqual(lease?.auth, auth)
-        XCTAssertEqual(lease?.scope, scope)
+        let captured = nav.requestReturnToCallFromAccount()
+        XCTAssertNotNil(captured)
+        XCTAssertEqual(captured?.auth, auth)
+        XCTAssertEqual(captured?.scope, scope)
         XCTAssertEqual(nav.pendingCallPresentationLease, lease)
         XCTAssertFalse(nav.isAccountPresented)
     }
@@ -100,7 +135,11 @@ final class FrontendNavigationTests: XCTestCase {
     func testRequestReturnToCallFromAccountReturnsNilWhenNoActiveCall() {
         let auth = makeAuth()
         let scope = makeScope(callSid: "", revision: 1)
-        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+        let nav = FrontendNavigation(
+            authProvider: { auth },
+            scopeProvider: { scope },
+            ownedLeaseProvider: { nil }
+        )
 
         nav.openAccount()
         let lease = nav.requestReturnToCallFromAccount()
@@ -111,10 +150,36 @@ final class FrontendNavigationTests: XCTestCase {
     func testRequestReturnToCallFromAccountReturnsNilWhenAuthInvalid() {
         let auth = CallAuthContext(contractorId: "", bearerToken: "", generation: 1)
         let scope = makeScope(callSid: "CA_LIVE_99")
-        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+        let nav = FrontendNavigation(
+            authProvider: { auth },
+            scopeProvider: { scope },
+            ownedLeaseProvider: { nil }
+        )
 
         let lease = nav.requestReturnToCallFromAccount()
         XCTAssertNil(lease)
+    }
+
+    // MARK: - Live Call Presentation
+
+    func testOpenLiveDetailWithValidLease() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_LIVE_01", revision: 1)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+
+        nav.openLive(lease: lease)
+        XCTAssertEqual(nav.presentedSheet, .liveCallDetail(lease))
+    }
+
+    func testOpenLiveDetailRejectsInvalidLease() {
+        let auth = makeAuth(contractorId: "c-current", generation: 1)
+        let scope = makeScope(callSid: "CA_CURRENT", revision: 1)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        let staleLease = CallPresentationLease(auth: makeAuth(contractorId: "c-stale", generation: 1), scope: scope)
+        nav.openLive(lease: staleLease)
+        XCTAssertNil(nav.presentedSheet)
     }
 
     // MARK: - Historical Detail Presentation
@@ -131,6 +196,7 @@ final class FrontendNavigationTests: XCTestCase {
 
         nav.dismissHistoricalDetail()
         XCTAssertNil(nav.presentedDetailLease)
+        XCTAssertNil(nav.presentedSheet)
     }
 
     func testOpenHistoricalDetailRejectsMismatchedExpectedAuth() {
@@ -161,14 +227,14 @@ final class FrontendNavigationTests: XCTestCase {
         XCTAssertEqual(nav.selectedTab, .calls)
     }
 
-    func testResolveNotificationTargetReturnsNilWhenCallNotFound() {
+    func testResolveNotificationTargetPresentsUnavailableWhenNotFound() {
         let auth = makeAuth()
         let nav = FrontendNavigation(authProvider: { auth })
         let records = [makeRecord(id: "CA_01")]
 
-        let match = nav.resolveNotificationTarget(callSid: "CA_MISSING", allCalls: records)
+        let match = nav.resolveNotificationTarget(callSid: "CA_MISSING", allCalls: records, fallbackMessage: "Call expired")
         XCTAssertNil(match)
-        XCTAssertNil(nav.presentedDetailLease)
+        XCTAssertEqual(nav.presentedSheet, .unavailableNotification(callSid: "CA_MISSING", message: "Call expired", auth: auth))
     }
 
     func testResolveNotificationTargetReturnsNilWhenAuthInvalid() {
@@ -178,12 +244,118 @@ final class FrontendNavigationTests: XCTestCase {
 
         let match = nav.resolveNotificationTarget(callSid: "CA_01", allCalls: records)
         XCTAssertNil(match)
-        XCTAssertNil(nav.presentedDetailLease)
+        XCTAssertNil(nav.presentedSheet)
+    }
+
+    // MARK: - Connected Call Presentation Sequencing
+
+    func testCallConnectionImmediateWhenNoSheetsOpen() {
+        let auth = makeAuth(contractorId: "c-1")
+        let scope = makeScope(callSid: "CA_CONN_1")
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: false)
+        XCTAssertTrue(nav.shouldPresentInCall)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+    }
+
+    func testCallConnectionSequencingWaitsForAccountSheetDismissal() {
+        let auth = makeAuth(contractorId: "c-1")
+        let scope = makeScope(callSid: "CA_CONN_1")
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        nav.openAccount()
+        XCTAssertTrue(nav.isAccountPresented)
+
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: true)
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertFalse(nav.isAccountPresented)
+
+        // Real onDismiss callback of Account sheet fires with no remaining sheets
+        nav.handleSheetDismissed(hasRemainingSheets: false)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+        XCTAssertTrue(nav.shouldPresentInCall)
+    }
+
+    func testCallConnectionSequencingWaitsForRootSheetDismissal() {
+        let auth = makeAuth(contractorId: "c-1")
+        let scope = makeScope(callSid: "CA_CONN_1")
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+        nav.openHistoricalDetail(call: makeRecord(id: "CA_1"))
+        XCTAssertNotNil(nav.presentedSheet)
+
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: true)
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertNil(nav.presentedSheet)
+
+        // Real onDismiss callback fires
+        nav.handleSheetDismissed(hasRemainingSheets: false)
+        XCTAssertTrue(nav.shouldPresentInCall)
+    }
+
+    func testInCallDismissedCleansUpState() {
+        let auth = makeAuth()
+        let scope = makeScope(callSid: "CA_1")
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: false)
+        XCTAssertTrue(nav.shouldPresentInCall)
+
+        nav.handleInCallDismissed()
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+    }
+
+    func testConnectedPendingOldLeaseRejectedAfterAuthChange() {
+        var currentAuth = makeAuth(contractorId: "c-A", token: "tok-A", generation: 1)
+        let scope = makeScope(callSid: "CA_1")
+        let leaseA = CallPresentationLease(auth: currentAuth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { currentAuth }, scopeProvider: { scope })
+
+        nav.openAccount()
+        nav.handleCallConnectionStarted(lease: leaseA, hasOpenSheets: true)
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+
+        // Switch to Auth B
+        currentAuth = makeAuth(contractorId: "c-B", token: "tok-B", generation: 2)
+        nav.handleAuthChange()
+
+        // Sheet dismissal occurs
+        nav.handleSheetDismissed(hasRemainingSheets: false)
+
+        // Old connected call lease must NOT be presented under new auth
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+        XCTAssertNil(nav.pendingCallPresentationLease)
+    }
+
+    func testPassiveFrontendDismissalNoClearOrHangup() {
+        let auth = makeAuth()
+        let scope = makeScope(callSid: "CA_ACTIVE_1")
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: false)
+        XCTAssertTrue(nav.shouldPresentInCall)
+
+        // Passive UI dismissal only cleans up presentation flags
+        nav.handleInCallDismissed()
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
     }
 
     // MARK: - Auth Lifecycle Invalidation
 
-    func testHandleAuthChangeInvalidatesStalePresentedDetail() {
+    func testHandleAuthChangeInvalidatesStalePresentedHistoricalDetail() {
         var currentAuth = makeAuth(contractorId: "c-1", generation: 1)
         let nav = FrontendNavigation(authProvider: { currentAuth })
         let record = makeRecord(id: "CA_10")
@@ -196,22 +368,249 @@ final class FrontendNavigationTests: XCTestCase {
         nav.handleAuthChange()
 
         XCTAssertNil(nav.presentedDetailLease)
+        XCTAssertNil(nav.presentedSheet)
     }
 
-    func testHandleAuthChangeResetsStateOnInvalidAuth() {
+    func testHandleAuthChangeResetsStateOnAnyAuthRotation() {
         var currentAuth = makeAuth(contractorId: "c-1", generation: 1)
         let nav = FrontendNavigation(authProvider: { currentAuth })
         nav.selectedTab = .kevin
         nav.openAccount()
         nav.shouldScrollToGoogleCalendar = true
 
-        // Logout
-        currentAuth = CallAuthContext(contractorId: "", bearerToken: "", generation: 2)
+        // Rotate A -> B
+        currentAuth = makeAuth(contractorId: "c-2", generation: 1)
         nav.handleAuthChange()
 
-        XCTAssertEqual(nav.selectedTab, .calls)
         XCTAssertFalse(nav.isAccountPresented)
         XCTAssertFalse(nav.shouldScrollToGoogleCalendar)
         XCTAssertNil(nav.pendingCallPresentationLease)
+        XCTAssertNil(nav.presentedSheet)
+        XCTAssertNil(nav.pendingNotificationTarget)
+    }
+
+    // MARK: - Repeated Tab Commands
+
+    func testRepeatedLiveCommandAfterDismissAndKevinSelection() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_LIVE_REP", revision: 1)
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(
+            authProvider: { auth },
+            scopeProvider: { scope },
+            ownedLeaseProvider: { lease }
+        )
+
+        // First .live command
+        nav.handleLegacyTabCommand(.live)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertEqual(nav.presentedSheet, .liveCallDetail(lease))
+
+        // User dismisses sheet and switches to Kevin
+        nav.dismissSheet()
+        XCTAssertNil(nav.presentedSheet)
+        nav.selectedTab = .kevin
+        XCTAssertEqual(nav.selectedTab, .kevin)
+
+        // Repeated .live command must reopen live detail and switch to calls
+        nav.handleLegacyTabCommand(.live)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertEqual(nav.presentedSheet, .liveCallDetail(lease))
+    }
+
+    func testRepeatedSettingsCommandAfterCallsSelection() {
+        let nav = FrontendNavigation()
+
+        // First .settings command
+        nav.handleLegacyTabCommand(.settings)
+        XCTAssertEqual(nav.selectedTab, .kevin)
+        XCTAssertTrue(nav.shouldScrollToGoogleCalendar)
+
+        // User navigates back to Calls tab
+        nav.selectedTab = .calls
+        nav.shouldScrollToGoogleCalendar = false
+
+        // Repeated .settings command must switch back to Kevin and scroll to calendar
+        nav.handleLegacyTabCommand(.settings)
+        XCTAssertEqual(nav.selectedTab, .kevin)
+        XCTAssertTrue(nav.shouldScrollToGoogleCalendar)
+    }
+
+    // MARK: - Cold Root & Settled Notification Target Resolution
+
+    func testColdNotificationTargetQueuedWhileLoadingSettlesToDetail() {
+        let auth = makeAuth(contractorId: "c-10", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+
+        // Target SID for record 35 (beyond initial 20 page)
+        let targetSid = "CA_RECORD_035"
+        nav.queueNotificationTarget(callSid: targetSid, fallbackMessage: "Fallback", auth: auth)
+        XCTAssertNotNil(nav.pendingNotificationTarget)
+        XCTAssertEqual(nav.pendingNotificationTarget?.callSid, targetSid)
+
+        // 1. Attempt resolution while loading: must do NOTHING (no sheet, returns nil)
+        let unresolved = nav.resolvePendingNotification(
+            allCalls: [],
+            loadedAuth: auth,
+            isLoading: true,
+            loadFinishedOrFailed: false
+        )
+        XCTAssertNil(unresolved)
+        XCTAssertNil(nav.presentedSheet)
+        XCTAssertNotNil(nav.pendingNotificationTarget, "Target remains pending while loading")
+
+        // 2. Build 101 records containing target outside page 1
+        var records: [CallRecord] = []
+        for i in 1...101 {
+            records.append(makeRecord(id: String(format: "CA_RECORD_%03d", i), name: "Caller \(i)"))
+        }
+
+        // 3. Snapshot settles: resolution resolves exact ID from full snapshot to detail
+        let consumed = nav.resolvePendingNotification(
+            allCalls: records,
+            loadedAuth: auth,
+            isLoading: false,
+            loadFinishedOrFailed: true
+        )
+        XCTAssertNotNil(consumed)
+        XCTAssertEqual(consumed?.callSid, targetSid)
+        XCTAssertEqual(consumed?.auth, auth)
+        XCTAssertNil(nav.pendingNotificationTarget, "Target consumed and cleared")
+
+        if case .historicalDetail(let lease) = nav.presentedSheet {
+            XCTAssertEqual(lease.callId, targetSid)
+            XCTAssertEqual(lease.auth, auth)
+        } else {
+            XCTFail("Expected historicalDetail sheet for resolved target")
+        }
+
+        // 4. Subsequent resolution attempts do nothing
+        let subsequent = nav.resolvePendingNotification(
+            allCalls: records,
+            loadedAuth: auth,
+            isLoading: false,
+            loadFinishedOrFailed: true
+        )
+        XCTAssertNil(subsequent)
+    }
+
+    func testQueuedTargetAthenBCompletionResolvesBOnly() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+
+        // Queue target A then queue target B
+        nav.queueNotificationTarget(callSid: "CA_A", fallbackMessage: "Msg A", auth: auth)
+        XCTAssertEqual(nav.pendingNotificationTarget?.callSid, "CA_A")
+
+        nav.queueNotificationTarget(callSid: "CA_B", fallbackMessage: "Msg B", auth: auth)
+        XCTAssertEqual(nav.pendingNotificationTarget?.callSid, "CA_B", "New target B supersedes old target A")
+
+        let records = [makeRecord(id: "CA_A"), makeRecord(id: "CA_B")]
+        let consumed = nav.resolvePendingNotification(
+            allCalls: records,
+            loadedAuth: auth,
+            isLoading: false,
+            loadFinishedOrFailed: true
+        )
+
+        XCTAssertEqual(consumed?.callSid, "CA_B")
+        XCTAssertEqual(nav.presentedDetailLease?.callId, "CA_B")
+    }
+
+    func testAuthRotationRejectsAndClearsQueuedPendingTarget() {
+        var currentAuth = makeAuth(contractorId: "c-A", generation: 1)
+        let nav = FrontendNavigation(authProvider: { currentAuth })
+
+        // Queue target with Auth A
+        nav.queueNotificationTarget(callSid: "CA_A", auth: currentAuth)
+        XCTAssertNotNil(nav.pendingNotificationTarget)
+
+        // Rotate auth to B
+        currentAuth = makeAuth(contractorId: "c-B", generation: 2)
+        nav.handleAuthChange()
+
+        XCTAssertNil(nav.pendingNotificationTarget, "Auth rotation must clear pending notification target")
+
+        let records = [makeRecord(id: "CA_A")]
+        let consumed = nav.resolvePendingNotification(
+            allCalls: records,
+            loadedAuth: currentAuth,
+            isLoading: false,
+            loadFinishedOrFailed: true
+        )
+        XCTAssertNil(consumed)
+        XCTAssertNil(nav.presentedSheet)
+    }
+
+    func testPendingTargetDoesNotReportUnavailableUntilOwnedLoadCompletedOrFailed() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+
+        nav.queueNotificationTarget(callSid: "CA_MISSING", fallbackMessage: "Call expired", auth: auth)
+
+        // While loading: no sheet
+        let r1 = nav.resolvePendingNotification(allCalls: [], loadedAuth: auth, isLoading: true, loadFinishedOrFailed: false)
+        XCTAssertNil(r1)
+        XCTAssertNil(nav.presentedSheet)
+
+        // Unsettled (not loading, but loadFinishedOrFailed is false): no sheet
+        let r2 = nav.resolvePendingNotification(allCalls: [], loadedAuth: auth, isLoading: false, loadFinishedOrFailed: false)
+        XCTAssertNil(r2)
+        XCTAssertNil(nav.presentedSheet)
+
+        // Settled completed/failed: now reports honest unavailable
+        let consumed = nav.resolvePendingNotification(allCalls: [], loadedAuth: auth, isLoading: false, loadFinishedOrFailed: true)
+        XCTAssertNotNil(consumed)
+        XCTAssertEqual(consumed?.callSid, "CA_MISSING")
+        XCTAssertEqual(nav.presentedSheet, .unavailableNotification(callSid: "CA_MISSING", message: "Call expired", auth: auth))
+    }
+
+    // MARK: - Historical Selection Action Factory
+
+    func testMakeHistoricalSelectionActionAuthGuards() {
+        var currentAuth = makeAuth(contractorId: "c-100", token: "tok-100", generation: 1)
+        let nav = FrontendNavigation(authProvider: { currentAuth })
+        let record = makeRecord(id: "CA_HIST_SEL_1")
+
+        // 1. Valid action executed while matching current auth
+        let validAction = nav.makeHistoricalSelectionAction(call: record, expectedAuth: currentAuth)
+        validAction()
+
+        XCTAssertNotNil(nav.presentedDetailLease)
+        XCTAssertEqual(nav.presentedDetailLease?.callId, "CA_HIST_SEL_1")
+        if case .historicalDetail(let lease) = nav.presentedSheet {
+            XCTAssertEqual(lease.callId, "CA_HIST_SEL_1")
+            XCTAssertEqual(lease.auth, currentAuth)
+        } else {
+            XCTFail("Expected historicalDetail sheet")
+        }
+
+        // Dismiss sheet
+        nav.dismissHistoricalDetail()
+        XCTAssertNil(nav.presentedSheet)
+        XCTAssertNil(nav.presentedDetailLease)
+
+        // 2. Retained action A executed after auth switches to B
+        currentAuth = makeAuth(contractorId: "c-200", token: "tok-200", generation: 2)
+        nav.handleAuthChange()
+
+        validAction() // execute retained action capturing old c-100/gen-1 auth
+        XCTAssertNil(nav.presentedSheet, "Retained action with old auth must not open sheet after switching to contractor B")
+        XCTAssertNil(nav.presentedDetailLease)
+
+        // 3. Retained action A executed after ABA rotation (c-100 rotated to gen-3)
+        currentAuth = makeAuth(contractorId: "c-100", token: "tok-100", generation: 3)
+        nav.handleAuthChange()
+
+        validAction() // execute retained action capturing gen-1 auth
+        XCTAssertNil(nav.presentedSheet, "Retained action with generation 1 must not open sheet after ABA rotation to generation 3")
+        XCTAssertNil(nav.presentedDetailLease)
+
+        // 4. Action created with invalid auth context
+        let invalidAuth = CallAuthContext(contractorId: "", bearerToken: "", generation: 0)
+        let invalidAction = nav.makeHistoricalSelectionAction(call: record, expectedAuth: invalidAuth)
+        invalidAction()
+        XCTAssertNil(nav.presentedSheet)
+        XCTAssertNil(nav.presentedDetailLease)
     }
 }

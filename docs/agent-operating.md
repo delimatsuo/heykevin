@@ -175,6 +175,11 @@ handoffs are historical; do not rebuild merged intake, memory or appointment
 confirmation from those snapshots. Merged source does not prove runtime
 activation, provider qualification, or physical-device acceptance.
 
+Later on September 14, the owner approved implementing the expert-reviewed
+Calls + Kevin native design with bounded history and another internal TestFlight
+candidate. Follow N3 in the current PRD and the native frontend plan. This does
+not activate the deferred Dispatch workflow or authorize public App Store release.
+
 Do not reintroduce global contact fallback or reopen public-demo work without a
 reported regression. All owner gates and safety rules above remain in force.
 

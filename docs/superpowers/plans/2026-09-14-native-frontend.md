@@ -331,3 +331,21 @@ History review tightened malformed-record handling: an invalid required ID or
 timestamp makes the response an error. It is never silently discarded into an
 empty successful account. Historical urgency badges are omitted because this
 schema has no authoritative urgency field; live urgency uses the coordinator.
+
+The draft audit found that active-call state lacked its producing auth context.
+Store origin auth on adoption and derive display/polling leases only from that
+origin. Require producing auth at each setActiveCall boundary, clear the old
+transcript when identity changes, and immediately reject retained state from
+another auth lifetime even before notification-driven cleanup. The CallManager
+allowlist is expanded only to pass its already captured auth into setActiveCall;
+CallKit, transport and physical-call teardown remain unchanged. New isolated
+AppState ownership tests are allowed. Connected-call UI must validate the
+existing CallManager presentation lease without disconnecting on passive UI
+dismissal.
+
+The Settings audit also requires real load coalescing, dirty-draft preservation,
+screening/spam/urgent preference fences, visible business-hours save failures,
+reachable paywalls from Kevin and Account, and comprehensive fixture guards on
+external sections/tasks and AppState persistence. New production-used Settings
+load/save policy helpers and focused tests are allowed when needed; preserve
+the single SettingsHost state owner.

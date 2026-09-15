@@ -39,8 +39,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen
         SWIFT_EMIT_LOC_STRINGS: true
-        MARKETING_VERSION: "1.2.12"
-        CURRENT_PROJECT_VERSION: "38"
+        MARKETING_VERSION: "1.3.0"
+        CURRENT_PROJECT_VERSION: "39"
         DEVELOPMENT_TEAM: 3FLG8W6B95
         CODE_SIGN_STYLE: Automatic
         ENABLE_DEBUG_DYLIB: false
@@ -104,6 +104,19 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen.tests
         GENERATE_INFOPLIST_FILE: true
 
+  KevinUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - KevinUITests
+    dependencies:
+      - target: Kevin
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kevin.callscreen.uitests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_TARGET_NAME: Kevin
+
 schemes:
   Kevin:
     build:
@@ -149,3 +162,23 @@ schemes:
       config: Staging
     archive:
       config: Staging
+  Kevin UI Review:
+    build:
+      targets:
+        Kevin: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - KevinUITests
+      environmentVariables:
+        - variable: KEVIN_UNIT_TESTS
+          value: "0"
+          isEnabled: true
+    profile:
+      config: Staging
+    analyze:
+      config: Debug
+    archive:
+      config: Release

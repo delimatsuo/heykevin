@@ -552,7 +552,10 @@ final class SettingsRefreshPolicyTests: XCTestCase {
             isKnowledgeDirty: false
         )
 
-        var fieldRevs = SettingsFieldMutationRevisions()
+        // Typing an unsaved draft does not complete a save or increment its revision.
+        // This exercises fresh draft protection independently from the save fence.
+        let fieldRevs = SettingsFieldMutationRevisions()
+        var appliedState: SettingsGuardedStateProjection?
 
         // Profile fetch with simulated mid-flight user edit
         let profileFetch: () async -> [String: Any]? = {
@@ -562,9 +565,6 @@ final class SettingsRefreshPolicyTests: XCTestCase {
             currentDrafts.isKnowledgeDirty = true
             currentDrafts.isKnowledgeEditorOpen = false
             currentDrafts.regulatoryAddress = "999 User Edited St"
-            fieldRevs.knowledge &+= 1
-            fieldRevs.regulatoryAddress &+= 1
-
             return [
                 "knowledge": "Stale Server Knowledge",
                 "business_address": "Stale Server Address",
@@ -583,8 +583,18 @@ final class SettingsRefreshPolicyTests: XCTestCase {
             baselineProvider: { baseline },
             fenceProvider: { _ in SettingsProfileHydrator.FencePermits() },
             currentFieldRevisions: { fieldRevs },
-            applyProfile: { _, decision in
+            applyProfile: { profile, decision in
                 appliedDecision = decision
+                var state = SettingsGuardedStateProjection(
+                    baseline: baseline,
+                    drafts: currentDrafts,
+                    appStateBusinessAddress: "100 Main St",
+                    appStateBusinessCity: "San Jose"
+                )
+                SettingsRefreshPolicy.applyGuardedProfile(
+                    contractor: profile, decision: decision, state: &state
+                )
+                appliedState = state
             }
         )
 
@@ -592,6 +602,12 @@ final class SettingsRefreshPolicyTests: XCTestCase {
         XCTAssertNotNil(appliedDecision)
         XCTAssertFalse(appliedDecision!.shouldUpdateKnowledge, "Knowledge edited during fetch must NOT be overwritten")
         XCTAssertFalse(appliedDecision!.shouldUpdateRegulatoryAddress, "Address edited during fetch must NOT be overwritten")
+        XCTAssertEqual(appliedState?.drafts.knowledgeText, "User Draft Knowledge typed during fetch")
+        XCTAssertTrue(appliedState?.drafts.isKnowledgeDirty ?? false)
+        XCTAssertEqual(appliedState?.drafts.regulatoryAddress, "999 User Edited St")
+        XCTAssertEqual(appliedState?.baseline.knowledgeText, baseline.knowledgeText)
+        XCTAssertEqual(appliedState?.baseline.regulatoryAddress, baseline.regulatoryAddress)
+        XCTAssertEqual(appliedState?.appStateBusinessAddress, "100 Main St")
     }
 
     // MARK: - 16. SETTINGS-02: Deliberately Cleared Address Retained Empty

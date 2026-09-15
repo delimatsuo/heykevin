@@ -463,6 +463,7 @@ final class CallHistoryTests: XCTestCase {
         // Stale error must be discarded: rows remain and error message is not overwritten
         XCTAssertEqual(model.allCalls.map { $0.id }, ["call-success"])
         XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.retainedErrorMessage, "A stale failure must not add an error banner to the newer successful snapshot")
         XCTAssertFalse(model.isLoading)
     }
 

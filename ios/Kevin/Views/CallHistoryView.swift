@@ -1,137 +1,327 @@
 import SwiftUI
 
+/// Main native screened call journal view.
+/// Integrates bounded pagination, date grouping, live active call cards,
+/// search and filtering before pagination, and single-owner account sheet navigation.
 struct CallHistoryView: View {
     @EnvironmentObject var appState: AppState
-    @State private var calls: [CallRecord]
-    @State private var isLoading = false
-    @State private var errorMessage = ""
+    @StateObject private var historyModel: CallHistoryModel
+    var onOpenSettings: (() -> Void)? = nil
 
-    init() {
-        _calls = State(initialValue: AppStoreScreenshotFixtures.seededCalls)
+    init(historyModel: CallHistoryModel? = nil, onOpenSettings: (() -> Void)? = nil) {
+        if let model = historyModel {
+            _historyModel = StateObject(wrappedValue: model)
+        } else {
+            #if DEBUG
+            if AppStoreScreenshotFixtures.isEnabled {
+                let fixtureCalls = AppStoreScreenshotFixtures.seededCalls
+                let model = CallHistoryModel(
+                    authProvider: { AppState.shared.currentAuthContext() },
+                    fetchCalls: { _ in fixtureCalls },
+                    markServerRead: { _, _ in },
+                    loadReadIds: { _ in [] },
+                    commitReadState: { _, _, _ in },
+                    resetEffect: { _ in },
+                    reauthEffect: { _ in },
+                    clock: { AppStoreScreenshotFixtures.now }
+                )
+                _historyModel = StateObject(wrappedValue: model)
+            } else {
+                _historyModel = StateObject(wrappedValue: CallHistoryModel())
+            }
+            #else
+            _historyModel = StateObject(wrappedValue: CallHistoryModel())
+            #endif
+        }
+        self.onOpenSettings = onOpenSettings
     }
 
     var body: some View {
         NavigationStack {
             List {
-                // Screen all calls toggle — inverted from ringThroughContacts backend field
-                Section {
-                    Toggle(isOn: Binding(
-                        get: { !appState.ringThroughContacts },
-                        set: { appState.ringThroughContacts = !$0 }
-                    )) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(String(localized: "Screen all calls"))
-                                .font(.subheadline.weight(.medium))
-                            Text(!appState.ringThroughContacts
-                                 ? String(localized: "Kevin screens everyone, including contacts")
-                                 : String(localized: "Contacts bypass Kevin and ring directly"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .onChange(of: appState.ringThroughContacts) { _, newValue in
-                        guard !AppStoreScreenshotFixtures.isEnabled else { return }
-                        Task {
-                            guard !appState.contractorId.isEmpty else { return }
-                            _ = try? await APIClient.shared.patchContractor(
-                                appState.contractorId,
-                                body: ["ring_through_contacts": newValue]
-                            )
-                        }
-                    }
-                }
-
-                if !errorMessage.isEmpty {
+                // Top prominent active call card if a call is currently live
+                if appState.hasActiveCall {
                     Section {
-                        HStack {
-                            Image(systemName: "exclamationmark.triangle")
-                                .foregroundStyle(.red)
-                            Text(errorMessage)
-                                .foregroundStyle(.red)
-                                .font(.subheadline)
-                        }
-                        .listRowBackground(Color.clear)
-                    }
-                } else if calls.isEmpty && !isLoading {
-                    Section {
-                        Text(String(localized: "No screened calls yet. When someone calls, Kevin will screen and it will show here."))
-                            .foregroundStyle(.secondary)
-                            .font(.subheadline)
+                        ActiveCallCard()
+                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                             .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
                     }
                 }
 
-                if !calls.isEmpty {
+                // Filter tabs (All, Unread, Spam)
+                Section {
+                    filterPicker
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+
+                // Retained error banner on reload failure while existing calls stay visible
+                if let retainedError = historyModel.retainedErrorMessage {
                     Section {
-                        ForEach(calls) { call in
-                            NavigationLink(destination: CallDetailView(call: call)) {
-                                CallRow(call: call, isUnread: appState.isCallUnread(call))
+                        retainedErrorBanner(message: retainedError)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
+                }
+
+                // Initial load error state when no calls are cached
+                if let errorMessage = historyModel.errorMessage, !historyModel.hasCalls {
+                    Section {
+                        initialErrorView(message: errorMessage)
+                            .listRowInsets(EdgeInsets(top: 24, leading: 16, bottom: 24, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
+                }
+
+                // Empty state
+                if let emptyState = historyModel.emptyState {
+                    Section {
+                        emptyStateView(emptyState)
+                            .listRowInsets(EdgeInsets(top: 32, leading: 16, bottom: 32, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
+                }
+
+                // Grouped call rows
+                if !historyModel.groupedVisibleCalls.isEmpty {
+                    ForEach(historyModel.groupedVisibleCalls) { group in
+                        Section(header: Text(group.title).font(.subheadline.weight(.semibold)).foregroundStyle(Color.hkInkSecondary)) {
+                            ForEach(group.calls) { call in
+                                NavigationLink(destination: CallDetailView(call: call, historyModel: historyModel)) {
+                                    CallRow(call: call, isUnread: historyModel.isCallUnread(call))
+                                }
+                                .accessibilityIdentifier("calls.row.\(call.id)")
                             }
                         }
+                    }
+
+                    // Bounded pagination footer
+                    Section {
+                        paginationFooter
+                            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 24, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
                     }
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle(String(localized: "Recents"))
+            .background(Color.hkWarmCanvas)
+            .navigationTitle(String(localized: "Calls"))
+            .searchable(
+                text: $historyModel.searchQuery,
+                placement: .navigationBarDrawer(displayMode: .automatic),
+                prompt: Text(String(localized: "Search by name, number or excerpt"))
+            )
+            .accessibilityIdentifier("calls.search")
+            .onChange(of: historyModel.searchQuery) { _, newQuery in
+                historyModel.setSearchQuery(newQuery)
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if historyModel.unreadCount > 0 {
+                        Button(String(localized: "Mark All Read")) {
+                            historyModel.markAllAsRead()
+                        }
+                        .font(.subheadline.weight(.medium))
+                        .accessibilityIdentifier("calls.markAllRead")
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        onOpenSettings?()
+                    } label: {
+                        Image(systemName: "person.crop.circle")
+                            .font(.system(size: 18))
+                    }
+                    .accessibilityLabel(String(localized: "Account Settings"))
+                    .accessibilityIdentifier("nav.settings")
+                }
+            }
             .sheet(isPresented: Binding(
                 get: { !appState.notificationCallSid.isEmpty },
                 set: { if !$0 { appState.notificationCallSid = ""; appState.notificationCallMessage = "" } }
             )) {
                 NavigationStack {
-                    if let call = calls.first(where: { $0.id == appState.notificationCallSid }) {
-                        CallDetailView(call: call)
+                    if let matchedCall = historyModel.call(for: appState.notificationCallSid) {
+                        CallDetailView(call: matchedCall, historyModel: historyModel)
                     } else {
-                        ContentUnavailableView("Call details unavailable", systemImage: "phone.badge.questionmark", description: Text(appState.notificationCallMessage.isEmpty ? "This call is no longer in your history." : appState.notificationCallMessage))
-                    }
-                }
-            }
-            .toolbar {
-                if calls.contains(where: { appState.isCallUnread($0) }) {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button(String(localized: "Mark All Read")) {
-                            let unread = calls.filter { appState.isCallUnread($0) }.map { $0.id }
-                            unread.forEach { appState.markCallAsRead($0) }
-                            appState.updateUnreadCount(calls: calls)
-                            Task { await APIClient.shared.markCallsRead(unread) }
-                        }
-                        .font(.subheadline)
+                        ContentUnavailableView(
+                            String(localized: "Call details unavailable"),
+                            systemImage: "phone.badge.questionmark",
+                            description: Text(appState.notificationCallMessage.isEmpty
+                                ? String(localized: "This call is no longer in your history.")
+                                : appState.notificationCallMessage)
+                        )
                     }
                 }
             }
             .refreshable {
                 guard !AppStoreScreenshotFixtures.isEnabled else { return }
-                await loadCalls()
+                await historyModel.loadCalls()
             }
             .task {
-                guard !AppStoreScreenshotFixtures.isEnabled else { return }
-                await loadCalls()
+                #if DEBUG
+                if AppStoreScreenshotFixtures.isEnabled {
+                    let fixtureCalls = AppStoreScreenshotFixtures.seededCalls
+                    let normalized = CallHistoryModel.normalize(rawCalls: fixtureCalls, now: AppStoreScreenshotFixtures.now)
+                    if historyModel.allCalls.isEmpty {
+                        historyModel.invalidate()
+                    }
+                    return
+                }
+                #endif
+                await historyModel.loadCalls()
             }
             .onAppear {
-                guard !AppStoreScreenshotFixtures.isEnabled else { return }
+                #if DEBUG
+                if AppStoreScreenshotFixtures.isEnabled { return }
+                #endif
                 StoreReviewManager.shared.requestReviewIfEligible()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: CallSessionEpoch.didChangeNotification)) { _ in
+                historyModel.invalidate()
+                Task { await historyModel.loadCalls() }
             }
         }
     }
 
-    private func loadCalls() async {
-        guard !AppStoreScreenshotFixtures.isEnabled else { return }
-        let auth = appState.currentAuthContext()
-        isLoading = true
-        errorMessage = ""
-        do {
-            let loaded = try await APIClient.shared.getCallHistory(authContext: auth)
-            guard appState.currentAuthContext() == auth else { return }
-            calls = loaded
-            await MainActor.run {
-                appState.updateUnreadCount(calls: calls)
-                StoreReviewManager.shared.recordScreenedCalls(count: calls.count)
-                StoreReviewManager.shared.requestReviewIfEligible()
+    // MARK: - Subviews
+
+    private var filterPicker: some View {
+        Picker("Filter", selection: Binding(
+            get: { historyModel.selectedFilter },
+            set: { historyModel.setFilter($0) }
+        )) {
+            ForEach(CallHistoryFilter.allCases) { filter in
+                Text(filter.localizedTitle).tag(filter)
             }
-        } catch {
-            guard appState.currentAuthContext() == auth else { return }
-            errorMessage = String(localized: "Failed to load calls: \(error.localizedDescription)")
         }
-        isLoading = false
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("calls.filter")
+    }
+
+    private func retainedErrorBanner(message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.hkOrange)
+                .font(.subheadline)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(Color.hkInk)
+                .lineLimit(2)
+            Spacer()
+            Button(String(localized: "Retry")) {
+                Task { await historyModel.loadCalls() }
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(Color.hkCobalt)
+        }
+        .padding(10)
+        .background(Color.hkOrange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func initialErrorView(message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button(String(localized: "Retry")) {
+                Task { await historyModel.loadCalls() }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.hkCobalt)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+    }
+
+    private func emptyStateView(_ state: CallHistoryEmptyState) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: stateIcon(for: state))
+                .font(.system(size: 44))
+                .foregroundStyle(Color.hkInkSecondary.opacity(0.6))
+
+            Text(state.title)
+                .font(.headline)
+                .foregroundStyle(Color.hkInk)
+
+            Text(state.description)
+                .font(.subheadline)
+                .foregroundStyle(Color.hkInkSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+
+            if state == .noMatches {
+                Button(String(localized: "Clear search")) {
+                    historyModel.clearSearch()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.hkCobalt)
+                .padding(.top, 4)
+            } else if state == .noUnread || state == .noSpam {
+                Button(String(localized: "Show all")) {
+                    historyModel.setFilter(.all)
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.hkCobalt)
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func stateIcon(for state: CallHistoryEmptyState) -> String {
+        switch state {
+        case .noCalls:   return "phone.badge.waveform"
+        case .noUnread:  return "tray"
+        case .noSpam:    return "hand.raised.slash"
+        case .noMatches: return "magnifyingglass"
+        }
+    }
+
+    private var paginationFooter: some View {
+        VStack(spacing: 10) {
+            if historyModel.canShowMore {
+                Button {
+                    historyModel.showMore()
+                } label: {
+                    Text(String(localized: "Show 20 more"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.hkCobalt)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.hkCobalt.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("calls.showMore")
+            }
+
+            if !historyModel.showingCountLabel.isEmpty {
+                Text(historyModel.showingCountLabel)
+                    .font(.footnote)
+                    .foregroundStyle(Color.hkInkSecondary)
+                    .accessibilityIdentifier("calls.count")
+            }
+
+            Text(historyModel.historyFootnoteLabel)
+                .font(.caption2)
+                .foregroundStyle(Color.hkInkSecondary.opacity(0.8))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
     }
 }
 
@@ -146,29 +336,18 @@ struct CallRow: View {
             HKAvatar(name: call.callerName, phone: call.callerPhone, size: 40)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(displayName)
+                Text(call.displayName)
                     .font(.system(size: 15, weight: isUnread ? .bold : .medium))
-                    .foregroundStyle(call.outcome == "spam" ? Color.hkRed : Color.primary)
+                    .foregroundStyle(call.isSpamOrBlocked ? Color.hkRed : Color.hkInk)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .monospacedDigit()
 
-                HStack(spacing: 6) {
-                    if seemsUrgent {
-                        Text("URGENT")
-                            .font(.system(size: 10, weight: .bold))
-                            .tracking(0.6)
-                            .foregroundStyle(.hkRed)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color.hkRed.opacity(0.10), in: RoundedRectangle(cornerRadius: 4))
-                    }
-                    Text(summaryLine)
-                        .font(.system(size: 13))
-                        .foregroundStyle(isUnread ? Color.primary : Color.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                Text(call.callerExcerpt)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isUnread ? Color.hkInk : Color.hkInkSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
             Spacer(minLength: 6)
@@ -176,18 +355,20 @@ struct CallRow: View {
             VStack(alignment: .trailing, spacing: 5) {
                 Text(Self.timeLabel(for: call.timestamp))
                     .font(.system(size: 12, weight: isUnread ? .semibold : .regular))
-                    .foregroundStyle(isUnread ? Color.hkBlue : Color.secondary)
+                    .foregroundStyle(isUnread ? Color.hkCobalt : Color.hkInkSecondary)
                     .monospacedDigit()
 
                 if isUnread {
                     Circle()
-                        .fill(Color.hkBlue)
+                        .fill(Color.hkCobalt)
                         .frame(width: 8, height: 8)
                 }
             }
             .frame(minWidth: 44, alignment: .trailing)
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(call.displayName), \(call.callerExcerpt), \(Self.timeLabel(for: call.timestamp))\(isUnread ? ", unread" : "")")
     }
 
     static func timeLabel(for date: Date) -> String {
@@ -221,58 +402,11 @@ struct CallRow: View {
             return String(localized: "Yest.")
         } else {
             let weekday = date.formatted(.dateTime.weekday(.abbreviated))
-            // If within last 6 days show weekday, otherwise the month + day
             if let days = calendar.dateComponents([.day], from: date, to: Date()).day, days < 7 {
                 return weekday
             }
             return date.formatted(.dateTime.month(.abbreviated).day())
         }
-    }
-
-    private var displayName: String {
-        call.callerName.isEmpty ? formattedPhone : call.callerName
-    }
-
-    private var formattedPhone: String {
-        PhoneFormatter.format(call.callerPhone)
-    }
-
-    /// Kevin's one-line summary: pick the most substantive caller utterance, or
-    /// fall back to a status-style label when there's nothing to summarize.
-    private var summaryLine: String {
-        if call.outcome == "spam" || call.outcome == "blocked" {
-            return String(localized: "Robocall, Kevin hung up.")
-        }
-        let callerLines = call.transcript
-            .components(separatedBy: "\n")
-            .compactMap { line -> String? in
-                guard line.hasPrefix("Caller:") else { return nil }
-                let body = line.dropFirst("Caller:".count).trimmingCharacters(in: .whitespaces)
-                return body.isEmpty ? nil : body
-            }
-        if let longest = callerLines.max(by: { $0.count < $1.count }), longest.count > 12 {
-            return longest
-        }
-        if let first = callerLines.first { return first }
-        return outcomeFallback
-    }
-
-    private var outcomeFallback: String {
-        switch call.outcome {
-        case "picked_up":           return String(localized: "Answered.")
-        case "voicemail":           return String(localized: "Left a voicemail.")
-        case "ignored", "declined": return String(localized: "You ignored. Kevin took a message.")
-        default:                    return String(localized: "Kevin screened the call.")
-        }
-    }
-
-    /// Heuristic urgency flag for the badge — until backend supplies one explicitly.
-    private var seemsUrgent: Bool {
-        guard call.outcome != "spam", call.outcome != "blocked" else { return false }
-        let urgentTokens = ["urgent", "emergency", "right away", "asap", "leak", "leaking",
-                            "flood", "flooding", "fire", "burst", "broken", "no heat", "no hot water"]
-        let lowercased = call.transcript.lowercased()
-        return urgentTokens.contains { lowercased.contains($0) }
     }
 }
 
@@ -282,17 +416,18 @@ struct CallDetailView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.openURL) private var openURL
     let call: CallRecord
+    var historyModel: CallHistoryModel? = nil
+    var authContext: CallAuthContext? = nil
+
     @State private var appointmentConfirmed = false
     @State private var callerWasNotified = false
+    @State private var isConfirming = false
+    @State private var confirmError = ""
+    @State private var capturedAuth: CallAuthContext? = nil
 
-    /// True when this session's confirm reported a text, or when the record
-    /// already carries one from a previous confirm. Reading both means a
-    /// historical confirmation still shows the line after a reload.
     private var callerWasTexted: Bool {
         callerWasNotified || call.appointmentCallerNotified
     }
-    @State private var isConfirming = false
-    @State private var confirmError = ""
 
     private var appointmentStatus: String {
         appointmentConfirmed ? "confirmed" : (call.appointmentStatus ?? "")
@@ -314,9 +449,17 @@ struct CallDetailView: View {
         .navigationTitle(String(localized: "Details"))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            appState.markCallAsRead(call.id)
-            if !AppStoreScreenshotFixtures.isEnabled {
-                Task { await APIClient.shared.markCallsRead([call.id]) }
+            let auth = authContext ?? appState.currentAuthContext()
+            capturedAuth = auth
+            if auth.isValid {
+                if let model = historyModel {
+                    model.markAsRead(callId: call.id, expectedAuth: auth)
+                } else {
+                    appState.markCallAsRead(call.id)
+                    if !AppStoreScreenshotFixtures.isEnabled {
+                        Task { await APIClient.shared.markCallsRead([call.id], authContext: auth) }
+                    }
+                }
             }
         }
     }
@@ -345,13 +488,13 @@ struct CallDetailView: View {
             }
 
             VStack(spacing: 5) {
-                Text(displayName)
+                Text(call.displayName)
                     .font(.title2.weight(.semibold))
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .minimumScaleFactor(0.82)
 
-                Link(formattedPhone, destination: phoneURL(for: call.callerPhone))
+                Link(call.formattedPhone, destination: phoneURL(for: call.callerPhone))
                     .font(.body)
                     .foregroundStyle(.tint)
             }
@@ -431,13 +574,6 @@ struct CallDetailView: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// Shown once the appointment is on the calendar.
-    ///
-    /// Before this, confirming made the whole card disappear: the request card
-    /// and button were gated on `pending_owner_confirmation`, so a successful
-    /// confirm left only Call Back and Message. The single piece of feedback
-    /// was a button vanishing, which reads the same as a glitch — and the
-    /// owner lost the time itself, with Google Calendar the only way to check.
     private var appointmentConfirmedCard: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label(String(localized: "Added to Google Calendar"), systemImage: "checkmark.circle.fill")
@@ -503,15 +639,20 @@ struct CallDetailView: View {
 
     private func confirmAppointment() async {
         guard !isConfirming else { return }
+        let currentAuth = appState.currentAuthContext()
+        guard let auth = capturedAuth, auth == currentAuth, auth.isValid else {
+            confirmError = String(localized: "Authentication required.")
+            return
+        }
         isConfirming = true
         confirmError = ""
         do {
-            callerWasNotified = try await APIClient.shared.confirmAppointment(callSid: call.id)
+            callerWasNotified = try await APIClient.shared.confirmAppointment(callSid: call.id, authContext: auth)
+            guard appState.currentAuthContext() == auth else { return }
             appointmentConfirmed = true
             StoreReviewManager.shared.recordAppointmentConfirmed()
             StoreReviewManager.shared.requestReviewIfEligible()
         } catch let failure as AppointmentConfirmFailure {
-            // Distinguishes "this time is unusable" from "Calendar hiccuped".
             confirmError = failure.localizedDescription
         } catch {
             confirmError = String(localized: "Couldn't add this to Google Calendar. Try again.")
@@ -570,6 +711,8 @@ struct CallDetailView: View {
 
     private func actionButton(title: String, systemImage: String, destination: URL, isPrimary: Bool) -> some View {
         Button {
+            let currentAuth = appState.currentAuthContext()
+            guard let auth = capturedAuth, auth == currentAuth, auth.isValid else { return }
             openURL(destination)
         } label: {
             Label(title, systemImage: systemImage)
@@ -600,14 +743,6 @@ struct CallDetailView: View {
             return "\(parts[0].prefix(1))\(parts[1].prefix(1))".uppercased()
         }
         return String(name.prefix(2)).uppercased()
-    }
-
-    private var displayName: String {
-        call.callerName.isEmpty ? formattedPhone : call.callerName
-    }
-
-    private var formattedPhone: String {
-        PhoneFormatter.format(call.callerPhone)
     }
 
     private var callbackPhone: String {
@@ -769,10 +904,8 @@ struct TranscriptRow: View {
         return line
     }
 
-    /// Build an AttributedString with phone numbers as tappable tel: links.
     private var linkedText: AttributedString {
         var result = AttributedString(text)
-        // Match sequences of 7+ digits (possibly with spaces, dashes, parens, dots, or plus)
         let pattern = #"[\+]?[\d][\d\s\-\.\(\)]{5,}[\d]"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
         let nsText = text as NSString

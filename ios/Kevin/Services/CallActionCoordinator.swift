@@ -1,20 +1,34 @@
 import Foundation
 import Combine
 
+extension Notification.Name {
+    static let callSessionEpochDidChange = Notification.Name("CallSessionEpochDidChangeNotification")
+}
+
 /// Invalidates an authorization lease even when credentials change A -> B -> A.
 final class CallSessionEpoch: @unchecked Sendable {
     static let shared = CallSessionEpoch()
+    static let didChangeNotification = Notification.Name.callSessionEpochDidChange
     private let lock = NSRecursiveLock()
     private var value = 0
     var generation: Int { synchronized { value } }
-    @discardableResult func advance() -> Int { synchronized { value += 1; return value } }
+    @discardableResult func advance() -> Int {
+        let newGen = synchronized {
+            value += 1
+            return value
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        }
+        return newGen
+    }
     func credentialChanged(from old: String, to new: String) { if old != new { advance() } }
     func synchronized<T>(_ body: () -> T) -> T {
         lock.lock(); defer { lock.unlock() }; return body()
     }
 }
 
-struct CallAuthContext: Equatable, Sendable {
+struct CallAuthContext: Hashable, Equatable, Sendable {
     let contractorId: String
     let bearerToken: String
     let generation: Int

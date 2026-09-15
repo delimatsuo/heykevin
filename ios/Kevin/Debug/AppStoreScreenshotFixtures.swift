@@ -1,24 +1,31 @@
 import SwiftUI
 
-/// Deterministic, network-free App Store screenshot scenarios.
+/// Deterministic, network-free App Store screenshot and review scenarios.
 ///
 /// These fixtures are activated only by the Debug-only environment variable
 /// `APP_STORE_SCREENSHOT_SCENARIO`. Production and Staging launches always use
 /// the normal app root and live backend data.
 enum AppStoreScreenshotFixtures {
-    enum Scenario: String {
+    enum Scenario: String, CaseIterable {
         case businessLive = "business-live"
         case businessRecents = "business-recents"
         case businessDetail = "business-detail"
         case personalLive = "personal-live"
         case personalRecents = "personal-recents"
         case personalDetail = "personal-detail"
+        case history101 = "history-101"
+        case historyEmpty = "history-empty"
+        case historyError = "history-error"
+        case historyRetainedError = "history-retained-error"
+        case businessKevin = "business-kevin"
+        case personalKevin = "personal-kevin"
+        case accountSettings = "account-settings"
 
         var isBusiness: Bool {
             switch self {
-            case .businessLive, .businessRecents, .businessDetail:
+            case .businessLive, .businessRecents, .businessDetail, .businessKevin, .history101, .historyEmpty, .historyError, .historyRetainedError, .accountSettings:
                 return true
-            case .personalLive, .personalRecents, .personalDetail:
+            case .personalLive, .personalRecents, .personalDetail, .personalKevin:
                 return false
             }
         }
@@ -27,7 +34,7 @@ enum AppStoreScreenshotFixtures {
             switch self {
             case .businessLive:
                 return "Every missed call can become a job"
-            case .businessRecents:
+            case .businessRecents, .history101:
                 return "See which calls need you first"
             case .businessDetail:
                 return "Call back with the whole story"
@@ -37,6 +44,16 @@ enum AppStoreScreenshotFixtures {
                 return "Keep the people. Lose the robocalls."
             case .personalDetail:
                 return "Know what they need before you call back"
+            case .historyEmpty:
+                return "Screened calls when you need them"
+            case .historyError, .historyRetainedError:
+                return "Reliable call history"
+            case .businessKevin:
+                return "Your 24/7 AI Business Receptionist"
+            case .personalKevin:
+                return "Personal call screening tailored to you"
+            case .accountSettings:
+                return "Complete control of your account"
             }
         }
 
@@ -44,7 +61,7 @@ enum AppStoreScreenshotFixtures {
             switch self {
             case .businessLive:
                 return "Kevin answers, qualifies the caller, and lets you take over live."
-            case .businessRecents:
+            case .businessRecents, .history101:
                 return "Urgent jobs, caller details, and summaries in one place."
             case .businessDetail:
                 return "Review what the customer needs before you return the call."
@@ -54,6 +71,16 @@ enum AppStoreScreenshotFixtures {
                 return "Contacts ring through; unknown callers are screened and summarized."
             case .personalDetail:
                 return "Read the conversation and decide whether the call deserves your time."
+            case .historyEmpty:
+                return "Kevin screens callers and keeps your day distraction-free."
+            case .historyError, .historyRetainedError:
+                return "Clear error feedback with one-tap retry."
+            case .businessKevin:
+                return "Customize your knowledge base, intake questions, and business hours."
+            case .personalKevin:
+                return "Adjust spam sensitivity, smart interruption, and contact sync."
+            case .accountSettings:
+                return "Manage your plan, phone number, and preferences anytime."
             }
         }
     }
@@ -88,7 +115,18 @@ enum AppStoreScreenshotFixtures {
 
     static var seededCalls: [CallRecord] {
         guard let scenario else { return [] }
-        return scenario.isBusiness ? businessCalls : personalCalls
+        switch scenario {
+        case .history101:
+            return generate101Calls()
+        case .historyEmpty, .historyError:
+            return []
+        case .historyRetainedError:
+            return businessCalls
+        case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings:
+            return businessCalls
+        case .personalLive, .personalRecents, .personalDetail, .personalKevin:
+            return personalCalls
+        }
     }
 
     static var featuredCall: CallRecord {
@@ -125,7 +163,14 @@ enum AppStoreScreenshotFixtures {
             )
             appState.callStartTime = now.addingTimeInterval(-137)
             appState.transcriptLines = liveTranscript(forBusiness: scenario.isBusiness)
-        case .businessRecents, .personalRecents, .businessDetail, .personalDetail:
+        case .businessKevin, .personalKevin:
+            appState.clearActiveCall()
+            appState.selectedTab = .settings
+        case .accountSettings:
+            appState.clearActiveCall()
+            appState.selectedTab = .settings
+        case .businessRecents, .personalRecents, .businessDetail, .personalDetail,
+             .history101, .historyEmpty, .historyError, .historyRetainedError:
             appState.clearActiveCall()
             appState.selectedTab = .recents
         }
@@ -321,6 +366,37 @@ enum AppStoreScreenshotFixtures {
             ),
         ]
     }
+
+    private static func generate101Calls() -> [CallRecord] {
+        var records: [CallRecord] = []
+        for i in 1...101 {
+            let offsetHours = Double(i) * 6.0
+            let timestamp = now.addingTimeInterval(-offsetHours * 3600)
+            let isSpam = (i % 10 == 0)
+            let isUnread = (i <= 5)
+            let outcome = isSpam ? "spam" : ((i % 4 == 0) ? "picked_up" : "voicemail")
+            let phone = String(format: "+1650555%04d", 1000 + i)
+            let name = isSpam ? "" : "Customer \(i)"
+            let transcript = isSpam
+                ? "Caller: Automated promotion call."
+                : "Kevin: Hello\nCaller: Hi, I am calling regarding job order \(i).\nCaller: Please let me know when you are available."
+            records.append(
+                CallRecord(
+                    id: String(format: "CA_RECORD_%03d", i),
+                    callerPhone: phone,
+                    callerName: name,
+                    timestamp: timestamp,
+                    trustScore: isSpam ? 5 : 85,
+                    outcome: outcome,
+                    transcript: transcript,
+                    voicemailURL: nil,
+                    callbackNumber: phone,
+                    readOnServer: !isUnread
+                )
+            )
+        }
+        return records
+    }
 }
 
 struct AppStoreScreenshotRoot: View {
@@ -354,7 +430,9 @@ struct AppStoreScreenshotRoot: View {
     @ViewBuilder
     private var screenshotContent: some View {
         switch scenario {
-        case .businessLive, .personalLive, .businessRecents, .personalRecents:
+        case .businessLive, .personalLive, .businessRecents, .personalRecents,
+             .history101, .historyEmpty, .historyError, .historyRetainedError,
+             .businessKevin, .personalKevin, .accountSettings:
             ContentView()
                 .environmentObject(appState)
         case .businessDetail, .personalDetail:

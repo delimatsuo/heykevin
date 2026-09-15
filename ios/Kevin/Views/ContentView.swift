@@ -1,10 +1,6 @@
 import SwiftUI
 
 /// Feature flag: hide "Text reply" until A2P 10DLC carrier registration is approved.
-/// Outbound SMS to US numbers from an unregistered Twilio long-code is silently
-/// dropped at the carrier (Twilio error 30034), so the button promises something
-/// the backend can't yet deliver. Flip this to `true` after A2P registration
-/// clears and ship a new TestFlight/App Store build to re-enable.
 private let kTextReplyEnabled = false
 
 struct TranscriptLine: Identifiable {
@@ -12,52 +8,70 @@ struct TranscriptLine: Identifiable {
     let text: String
 }
 
+/// Root content view hosting the native two-tab layout (Calls and Kevin)
+/// wrapped in the single-owner SettingsHost.
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var callManager = CallManager.shared
     @Environment(\.scenePhase) var scenePhase
+    @StateObject private var frontendNav = FrontendNavigation()
+
     @State private var showForcedPaywall = false
     @State private var showWhatsNew = false
     @State private var presentedCallLease: CallPresentationLease?
 
     var body: some View {
-        TabView(selection: $appState.selectedTab) {
-            LiveCallTab()
+        SettingsHost(
+            isAccountPresented: $frontendNav.isAccountPresented,
+            assistantIsSelected: frontendNav.selectedTab == .kevin,
+            onOpenCall: { lease in
+                frontendNav.selectedTab = .calls
+            }
+        ) { assistantScreen in
+            TabView(selection: $frontendNav.selectedTab) {
+                CallHistoryView(onOpenSettings: {
+                    frontendNav.openAccount()
+                })
                 .tabItem {
-                    Label(String(localized: "Live"), systemImage: "waveform")
+                    Label(String(localized: "Calls"), systemImage: "phone.badge.waveform")
                 }
-                .tag(AppTab.live)
-                .badge(appState.hasActiveCall ? "1" : nil)
+                .tag(FrontendTab.calls)
+                .badge(callsTabBadge)
+                .accessibilityIdentifier("calls.tab")
 
-            CallHistoryView()
-                .tabItem {
-                    Label(String(localized: "Recents"), systemImage: "clock")
+                NavigationStack {
+                    assistantScreen
                 }
-                .tag(AppTab.recents)
-                .badge(appState.unreadCallCount > 0 ? "\(appState.unreadCallCount)" : nil)
-
-            SettingsView()
                 .tabItem {
-                    Label(String(localized: "Settings"), systemImage: "gear")
+                    Label(String(localized: "Kevin"), systemImage: "person.crop.circle.badge.checkmark")
                 }
-                .tag(AppTab.settings)
-        }
-        .onChange(of: scenePhase) {
-            if scenePhase == .active, !AppStoreScreenshotFixtures.isEnabled {
-                appState.checkForActiveCall()
+                .tag(FrontendTab.kevin)
+                .accessibilityIdentifier("kevin.tab")
             }
         }
-        .onChange(of: appState.showActiveCall) {
-            // Auto-switch to Live tab when a call comes in
-            if appState.showActiveCall {
-                appState.selectedTab = .live
+        .onChange(of: scenePhase) { _, phase in
+            #if DEBUG
+            if AppStoreScreenshotFixtures.isEnabled { return }
+            #endif
+            if phase == .active {
+                LiveCallObserver.shared.start()
+            } else if phase == .background {
+                LiveCallObserver.shared.stop()
+            }
+        }
+        .onChange(of: appState.selectedTab) { _, legacyTab in
+            frontendNav.handleLegacyTabCommand(legacyTab)
+        }
+        .onChange(of: appState.showActiveCall) { _, show in
+            if show {
+                frontendNav.selectedTab = .calls
             }
         }
         .fullScreenCover(isPresented: $callManager.isOnCall, onDismiss: {
             // A delayed dismissal of A must not clear a newer B or a new session.
             if presentedCallLease?.mayClear(auth: appState.currentAuthContext(), scope: appState.callLifecycleSnapshot) == true {
                 appState.clearActiveCall()
-                appState.selectedTab = .recents
+                frontendNav.selectedTab = .calls
             }
             presentedCallLease = nil
             StoreReviewManager.shared.incrementScreenedCallCount()
@@ -71,638 +85,51 @@ struct ContentView: View {
             PaywallView(canDismiss: false)
                 .environmentObject(appState)
         }
-        // Feature announcement for 1.2.8. Presented only when the paywall is
-        // not — a forced paywall means the account cannot use the feature being
-        // announced, and stacking a sheet behind a non-dismissable cover would
-        // strand it.
+        // Feature announcement for 1.2.8
         .sheet(isPresented: $showWhatsNew) {
             WhatsNewSheet(needsCalendar: !appState.googleCalendarConnected)
                 .environmentObject(appState)
         }
         .onAppear {
+            #if DEBUG
+            if AppStoreScreenshotFixtures.isEnabled { return }
+            #endif
             showForcedPaywall = appState.subscriptionStatus == "expired"
             if !showForcedPaywall {
                 showWhatsNew = WhatsNewSheet.shouldPresent(isOnboarded: appState.isOnboarded)
             }
-        }
-        .onChange(of: appState.subscriptionStatus) {
-            if appState.subscriptionStatus == "expired" {
-                showForcedPaywall = true
-            } else {
-                showForcedPaywall = false
+            if scenePhase == .active {
+                LiveCallObserver.shared.start()
             }
         }
-        // Re-auth alert when token is invalid (e.g. app reinstalled, Keychain cleared)
-        .alert("Session Expired", isPresented: $appState.needsReauth) {
-            Button("Sign In Again") {
+        .onChange(of: appState.subscriptionStatus) { _, status in
+            showForcedPaywall = (status == "expired")
+        }
+        // Re-auth alert when token is invalid
+        .alert(String(localized: "Session Expired"), isPresented: $appState.needsReauth) {
+            Button(String(localized: "Sign In Again")) {
                 appState.needsReauth = false
                 appState.isOnboarded = false
             }
-            Button("Later", role: .cancel) {
+            Button(String(localized: "Later"), role: .cancel) {
                 appState.needsReauth = false
             }
         } message: {
-            Text("Your session has expired. Sign in again to continue.")
+            Text(String(localized: "Your session has expired. Sign in again to continue."))
         }
-    }
-}
-
-// MARK: - Live Call Tab
-
-struct LiveCallTab: View {
-    @EnvironmentObject var appState: AppState
-    @ObservedObject var coordinator = CallActionCoordinator.shared
-    @State private var timer: Timer?
-    @State private var elapsed: TimeInterval = 0
-    @State private var elapsedTimer: Timer?
-    @State private var showTextReplySheet = false
-    @State private var customMessage = ""
-    @State private var sendingReply = false
-
-    var body: some View {
-        NavigationStack {
-            if appState.hasActiveCall {
-                activeCallContent
-            } else {
-                emptyState
-            }
-        }
-        .onAppear {
-            if appState.hasActiveCall {
-                if !AppStoreScreenshotFixtures.isEnabled {
-                    startPolling()
-                }
-                startElapsedTimer()
-            }
-        }
-        .onDisappear {
-            stopPolling()
-            elapsedTimer?.invalidate()
-            elapsedTimer = nil
-        }
-        .onChange(of: appState.hasActiveCall) {
-            if appState.hasActiveCall {
-                if !AppStoreScreenshotFixtures.isEnabled {
-                    startPolling()
-                }
-                startElapsedTimer()
-            } else {
-                stopPolling()
-                elapsedTimer?.invalidate()
-            }
+        .onReceive(NotificationCenter.default.publisher(for: CallSessionEpoch.didChangeNotification)) { _ in
+            frontendNav.handleAuthChange()
+            LiveCallObserver.shared.handleAuthChange()
         }
     }
 
-    // MARK: - Empty State
-
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Spacer()
-
-            Image(systemName: "phone.badge.checkmark")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-
-            Text(String(localized: "No Active Call"))
-                .font(.title3.weight(.medium))
-                .foregroundStyle(.secondary)
-
-            Text(String(localized: "When someone calls, Kevin will screen it\nand the live transcript will appear here."))
-                .font(.subheadline)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-
-            Spacer()
+    private var callsTabBadge: String? {
+        if appState.unreadCallCount > 0 {
+            return "\(appState.unreadCallCount)"
         }
-        .navigationTitle(String(localized: "Live"))
-    }
-
-    // MARK: - Active Call Content
-
-    private var activeCallContent: some View {
-        VStack(spacing: 0) {
-            callerHeader
-
-            transcript
-                .frame(maxHeight: .infinity)
-
-            actionButtons
-                .padding(.horizontal, HKSpace.lg)
-                .padding(.top, HKSpace.md)
-                .padding(.bottom, HKSpace.lg)
-                .background(.ultraThinMaterial)
-                .overlay(alignment: .top) {
-                    Rectangle()
-                        .fill(Color(.systemGray5).opacity(0.7))
-                        .frame(height: 0.5)
-                }
+        if appState.hasActiveCall {
+            return "1"
         }
-        .background(Color(.systemGroupedBackground))
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                HStack(spacing: 6) {
-                    if appState.callIgnored || coordinator.isTakingMessage(for: appState.activeCallSid) {
-                        HKStatusDot(color: .hkOrange)
-                        Text(String(localized: "Taking a message"))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.hkOrange)
-                    } else if coordinator.isDeclinePending(for: appState.activeCallSid) {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                        Text(String(localized: "Requesting a message"))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.hkOrange)
-                    } else if coordinator.isAcceptPending(for: appState.activeCallSid) {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                        Text(String(localized: "Connecting"))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.hkGreen)
-                    } else {
-                        HKPulseDot(color: .hkGreen, size: 7)
-                        Text(String(localized: "Live"))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.hkGreen)
-                    }
-
-                    if coordinator.isUrgent(for: appState.activeCallSid) {
-                        Text(String(localized: "Urgent"))
-                            .font(.system(size: 10, weight: .bold))
-                            .tracking(0.6)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.hkRed, in: RoundedRectangle(cornerRadius: 4))
-                    }
-                }
-            }
-
-            ToolbarItem(placement: .topBarTrailing) {
-                Text(formattedElapsed)
-                    .font(.system(size: 14, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    // MARK: - Caller Strip
-
-    private var callerHeader: some View {
-        HStack(spacing: HKSpace.md) {
-            HKAvatar(
-                name: appState.activeCallerName,
-                phone: appState.activeCallerPhone,
-                size: 40
-            )
-            VStack(alignment: .leading, spacing: 2) {
-                Text(callerPrimaryIdentifier)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .monospacedDigit()
-                Text(callerSecondaryLine)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, HKSpace.xl)
-        .padding(.top, 10)
-        .padding(.bottom, 14)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color(.systemGray5).opacity(0.7))
-                .frame(height: 0.5)
-        }
-    }
-
-    private var callerPrimaryIdentifier: String {
-        let name = appState.activeCallerName.trimmingCharacters(in: .whitespaces)
-        if !name.isEmpty { return name }
-        let phone = appState.activeCallerPhone.trimmingCharacters(in: .whitespaces)
-        return phone.isEmpty ? String(localized: "Unknown") : PhoneFormatter.format(phone)
-    }
-
-    private var callerSecondaryLine: String {
-        let hasName = !appState.activeCallerName.isEmpty
-        if hasName {
-            return formattedPhone
-        }
-        if appState.callIgnored || coordinator.isTakingMessage(for: appState.activeCallSid) {
-            return String(localized: "Kevin is taking a message")
-        }
-        return String(localized: "Unknown caller")
-    }
-
-    // MARK: - Transcript (Chat Bubbles)
-
-    private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    if appState.transcriptLines.isEmpty {
-                        VStack(spacing: 8) {
-                            ProgressView()
-                            Text(String(localized: "Waiting for conversation..."))
-                                .font(.subheadline)
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.top, 40)
-                    }
-
-                    ForEach(appState.transcriptLines) { line in
-                        ChatBubble(line: line.text)
-                            .id(line.id)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-            }
-            .onChange(of: appState.transcriptLines.count) {
-                if let last = appState.transcriptLines.last {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - Action Buttons
-
-    @ViewBuilder
-    private var actionButtons: some View {
-        if appState.callIgnored || coordinator.isTakingMessage(for: appState.activeCallSid) {
-            // Call ignored / taking message — Single Dismiss action.
-            Button {
-                appState.clearActiveCall()
-                StoreReviewManager.shared.incrementScreenedCallCount()
-                StoreReviewManager.shared.requestReviewIfEligible()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                    Text(String(localized: "Dismiss"))
-                }
-            }
-            .buttonStyle(HKSecondaryButtonStyle(tint: .secondary))
-        } else {
-            VStack(spacing: 10) {
-                if let errorMsg = coordinator.errorMessage(for: appState.activeCallSid) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .foregroundStyle(.red)
-                        Text(errorMsg)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-                    .padding(.bottom, 2)
-                }
-
-                if coordinator.canCheckStatus(for: appState.activeCallSid) {
-                    Button("Check status") {
-                        let sid = appState.activeCallSid
-                        Task { _ = await coordinator.checkStatus(callSid: sid) }
-                    }
-                    .buttonStyle(HKSecondaryButtonStyle())
-                }
-
-                Button {
-                    pickUp()
-                } label: {
-                    HStack(spacing: 8) {
-                        if coordinator.isAcceptPending(for: appState.activeCallSid) {
-                            ProgressView()
-                                .tint(.white)
-                        } else {
-                            Image(systemName: "phone.fill")
-                                .font(.system(size: 17, weight: .bold))
-                        }
-                        Text(String(localized: "Pick up"))
-                    }
-                }
-                .buttonStyle(HKPrimaryButtonStyle(tint: .hkGreen))
-                .disabled(coordinator.isActionPending(for: appState.activeCallSid))
-
-                if kTextReplyEnabled {
-                    HStack(spacing: 10) {
-                        Button {
-                            showTextReplySheet = true
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "message.fill")
-                                    .font(.system(size: 14))
-                                Text(String(localized: "Text reply"))
-                            }
-                        }
-                        .buttonStyle(HKSecondaryButtonStyle(tint: .hkBlue))
-                        .disabled(coordinator.isActionPending(for: appState.activeCallSid))
-
-                        Button(role: .destructive) {
-                            takeMessageAction()
-                        } label: {
-                            HStack(spacing: 6) {
-                                if coordinator.isDeclinePending(for: appState.activeCallSid) {
-                                    ProgressView()
-                                        .scaleEffect(0.8)
-                                } else {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                }
-                                Text(String(localized: "Take a message"))
-                            }
-                        }
-                        .buttonStyle(HKDestructiveButtonStyle())
-                        .disabled(coordinator.isActionPending(for: appState.activeCallSid))
-                    }
-                    .sheet(isPresented: $showTextReplySheet) {
-                        TextReplySheet(
-                            callSid: appState.activeCallSid,
-                            callerPhone: formattedPhone,
-                            sendingReply: $sendingReply,
-                            onSend: { message in
-                                sendTextReply(message)
-                            }
-                        )
-                        .presentationDetents([.medium])
-                    }
-                } else {
-                    Button(role: .destructive) {
-                        takeMessageAction()
-                    } label: {
-                        HStack(spacing: 6) {
-                            if coordinator.isDeclinePending(for: appState.activeCallSid) {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                            } else {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 14, weight: .semibold))
-                            }
-                            Text(String(localized: "Take a message"))
-                        }
-                    }
-                    .buttonStyle(HKDestructiveButtonStyle())
-                    .disabled(coordinator.isActionPending(for: appState.activeCallSid))
-                }
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
-    private var callerInitials: String {
-        let name = appState.activeCallerName
-        guard !name.isEmpty else { return "" }
-        let parts = name.split(separator: " ")
-        if parts.count >= 2 {
-            return "\(parts[0].prefix(1))\(parts[1].prefix(1))".uppercased()
-        }
-        return String(name.prefix(2)).uppercased()
-    }
-
-    private var formattedPhone: String {
-        let phone = appState.activeCallerPhone
-        guard !phone.isEmpty else { return String(localized: "Unknown") }
-        return PhoneFormatter.format(phone)
-    }
-
-    private var formattedElapsed: String {
-        let minutes = Int(elapsed) / 60
-        let seconds = Int(elapsed) % 60
-        return String(format: "%d:%02d", minutes, seconds)
-    }
-
-    // MARK: - Actions
-
-    private func pickUp() {
-        let sid = appState.activeCallSid, auth = appState.currentAuthContext()
-        Task { _ = await coordinator.pickUp(callSid: sid, authContext: auth) }
-    }
-
-    private func sendTextReply(_ message: String) {
-        sendingReply = true
-        Task {
-            _ = await APIClient.shared.sendCallAction(
-                callSid: appState.activeCallSid, action: "text_reply", message: message
-            )
-            await MainActor.run {
-                sendingReply = false
-                showTextReplySheet = false
-            }
-        }
-    }
-
-    private func takeMessageAction() {
-        let sid = appState.activeCallSid, auth = appState.currentAuthContext()
-        Task { _ = await coordinator.takeMessage(callSid: sid, authContext: auth) }
-    }
-
-    // MARK: - Polling
-
-    @State private var isPolling = false
-
-    private func startPolling() {
-        stopPolling()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
-            Task { @MainActor in
-                guard !isPolling else { return }
-                isPolling = true
-                await poll()
-                isPolling = false
-            }
-        }
-    }
-
-    private func stopPolling() {
-        timer?.invalidate()
-        timer = nil
-        isPolling = false
-    }
-
-    private func startElapsedTimer() {
-        elapsedTimer?.invalidate()
-        #if DEBUG
-        if AppStoreScreenshotFixtures.isEnabled {
-            elapsed = 137
-            return
-        }
-        #endif
-        if let start = appState.callStartTime {
-            elapsed = Date().timeIntervalSince(start)
-        }
-        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            if let start = appState.callStartTime {
-                elapsed = Date().timeIntervalSince(start)
-            }
-        }
-    }
-
-    private func poll() async {
-        let auth = appState.currentAuthContext(), scope = appState.callLifecycleSnapshot
-        guard auth.isValid, !scope.callSid.isEmpty else { return }
-        do {
-            let status = try await APIClient.shared.getCallAction(callSid: scope.callSid,
-                contractorId: auth.contractorId, bearerToken: auth.bearerToken, sessionGeneration: auth.generation)
-            guard appState.currentAuthContext() == auth, appState.callLifecycleSnapshot == scope,
-                  let status, status.validNavigation(callSid: scope.callSid, contractorId: auth.contractorId) else { return }
-            if status.isEnded {
-                appState.clearActiveCall(); appState.selectedTab = .recents
-                return
-            }
-            coordinator.observeStatus(status, auth: auth)
-            if let text = status.transcript {
-                appState.transcriptLines = text.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) }
-            }
-        } catch { /* Retain the exact live call on unknown status. */ }
-    }
-
-}
-
-// MARK: - Text Reply Sheet
-
-struct TextReplySheet: View {
-    let callSid: String
-    let callerPhone: String
-    @Binding var sendingReply: Bool
-    let onSend: (String) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var customMessage = ""
-    @FocusState private var isCustomFocused: Bool
-
-    private let quickReplies = [
-        String(localized: "Can't talk right now. What's up?"),
-        String(localized: "I'll call you back in a few minutes."),
-        String(localized: "Sorry, I'm busy. I'll get back to you soon."),
-    ]
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Text(String(localized: "to \(callerPhone)"))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
-                    .padding(.bottom, 12)
-
-                VStack(spacing: 8) {
-                    ForEach(quickReplies, id: \.self) { reply in
-                        Button {
-                            onSend(reply)
-                        } label: {
-                            Text(reply)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 12)
-                        }
-                        .buttonStyle(.bordered)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .disabled(sendingReply)
-                    }
-                }
-                .padding(.horizontal, 20)
-
-                Divider()
-                    .padding(.vertical, 12)
-
-                HStack(spacing: 10) {
-                    TextField(String(localized: "Type a message..."), text: $customMessage)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($isCustomFocused)
-
-                    Button {
-                        guard !customMessage.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                        onSend(customMessage)
-                    } label: {
-                        if sendingReply {
-                            ProgressView()
-                                .frame(width: 32, height: 32)
-                        } else {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.title2)
-                        }
-                    }
-                    .disabled(customMessage.trimmingCharacters(in: .whitespaces).isEmpty || sendingReply)
-                }
-                .padding(.horizontal, 20)
-
-                Spacer()
-            }
-            .navigationTitle(String(localized: "Text Reply"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "Cancel")) { dismiss() }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Chat Bubble
-
-struct ChatBubble: View {
-    let line: String
-
-    private var speaker: String {
-        if line.hasPrefix("Caller:") { return "Caller" }
-        if line.hasPrefix("Kevin:") { return "Kevin" }
-        return ""
-    }
-
-    private var speakerLabel: String {
-        speaker.isEmpty ? String(localized: "System") : speaker
-    }
-
-    private var text: String {
-        if let range = line.range(of: ": ") {
-            return String(line[range.upperBound...])
-        }
-        return line
-    }
-
-    private var isKevin: Bool { speaker == "Kevin" }
-
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            if isKevin { Spacer(minLength: 48) }
-
-            VStack(alignment: isKevin ? .trailing : .leading, spacing: 4) {
-                Text(speakerLabel.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(isKevin ? Color.hkBlue : Color.secondary)
-                    .padding(.horizontal, 4)
-
-                Text(text)
-                    .font(.system(size: 15))
-                    .lineSpacing(2)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(
-                        isKevin
-                            ? Color.hkBlue.opacity(0.10)
-                            : Color.hkSurface
-                    )
-                    .foregroundStyle(.primary)
-                    .clipShape(
-                        UnevenRoundedRectangle(
-                            cornerRadii: .init(
-                                topLeading: HKRadius.bubble,
-                                bottomLeading: isKevin ? HKRadius.bubble : 6,
-                                bottomTrailing: isKevin ? 6 : HKRadius.bubble,
-                                topTrailing: HKRadius.bubble
-                            ),
-                            style: .continuous
-                        )
-                    )
-            }
-
-            if !isKevin { Spacer(minLength: 48) }
-        }
+        return nil
     }
 }

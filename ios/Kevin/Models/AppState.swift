@@ -59,25 +59,73 @@ class AppState: ObservableObject {
         return ""
     }
 
+    init() {
+        let initialContractor = Self.migrateToKeychain("contractorId")
+        self.contractorId = initialContractor
+        self.readCallIds = Self.loadReadCallIds(for: initialContractor)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAuthEpochChanged),
+            name: CallSessionEpoch.didChangeNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleAuthEpochChanged() {
+        if Thread.isMainThread {
+            self.applyAuthChange()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyAuthChange()
+            }
+        }
+    }
+
+    private func applyAuthChange() {
+        let current = contractorId
+        readCallIds = Self.loadReadCallIds(for: current)
+        unreadCallCount = 0
+        notificationCallSid = ""
+        notificationCallMessage = ""
+    }
+
     // Session generation incremented on logout, contractor change, and credential change
     var sessionGeneration: Int { CallSessionEpoch.shared.generation }
 
     // Onboarding
     @Published var isOnboarded: Bool = UserDefaults.standard.bool(forKey: "isOnboarded") {
         didSet {
-            if oldValue && !isOnboarded { CallSessionEpoch.shared.advance(); callLifecycleRevision += 1 }
-            if inScreenshotFixture { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.isOnboarded, forKey: "isOnboarded") }
+            let loggedOut = oldValue && !isOnboarded
+            if !inScreenshotFixture {
+                DispatchQueue.main.async { UserDefaults.standard.set(self.isOnboarded, forKey: "isOnboarded") }
+            }
+            if loggedOut {
+                callLifecycleRevision += 1
+                CallSessionEpoch.shared.advance()
+            }
         }
     }
     @Published var contractorId: String = migrateToKeychain("contractorId") {
         didSet {
-            if oldValue != contractorId { CallSessionEpoch.shared.advance(); callLifecycleRevision += 1 }
-            if inScreenshotFixture { return }
-            if contractorId.isEmpty {
-                KeychainManager.shared.delete("contractorId")
-            } else {
-                KeychainManager.shared.save("contractorId", value: contractorId)
+            let changed = oldValue != contractorId
+            if !inScreenshotFixture {
+                if contractorId.isEmpty {
+                    KeychainManager.shared.delete("contractorId")
+                } else {
+                    KeychainManager.shared.save("contractorId", value: contractorId)
+                }
+            }
+            if changed {
+                callLifecycleRevision += 1
+                readCallIds = Self.loadReadCallIds(for: contractorId)
+                unreadCallCount = 0
+                notificationCallSid = ""
+                notificationCallMessage = ""
+                CallSessionEpoch.shared.advance()
             }
         }
     }
@@ -262,16 +310,19 @@ class AppState: ObservableObject {
         didSet { DispatchQueue.main.async { UserDefaults.standard.set(self.countryCode, forKey: "countryCode") } }
     }
 
-    // Unread calls — tracked locally by call ID
-    @Published var readCallIds: Set<String> = {
-        let arr = UserDefaults.standard.stringArray(forKey: "readCallIds") ?? []
+    private static func loadReadCallIds(for contractor: String) -> Set<String> {
+        guard !contractor.isEmpty else { return [] }
+        let arr = UserDefaults.standard.stringArray(forKey: "readCallIds_\(contractor)") ?? []
         return Set(arr)
-    }() {
+    }
+
+    // Unread calls — tracked locally by call ID, scoped per contractor with synchronous persistence
+    @Published var readCallIds: Set<String> = [] {
         didSet {
             if inScreenshotFixture { return }
-            DispatchQueue.main.async {
-                UserDefaults.standard.set(Array(self.readCallIds), forKey: "readCallIds")
-            }
+            let contractor = contractorId
+            guard !contractor.isEmpty else { return }
+            UserDefaults.standard.set(Array(self.readCallIds), forKey: "readCallIds_\(contractor)")
         }
     }
 
@@ -280,13 +331,18 @@ class AppState: ObservableObject {
     }
 
     func isCallUnread(_ call: CallRecord) -> Bool {
-        call.hasMessage && !readCallIds.contains(call.id)
+        if call.readOnServer { return false }
+        return call.hasMessage && !readCallIds.contains(call.id)
     }
 
     @Published var unreadCallCount: Int = 0
 
     func updateUnreadCount(calls: [CallRecord]) {
         unreadCallCount = calls.filter { isCallUnread($0) }.count
+    }
+
+    func pruneReadCallIds(validIds: Set<String>) {
+        readCallIds = readCallIds.intersection(validIds)
     }
 
     // Re-auth flag — set to true when server returns 401 (token expired/invalid)
@@ -343,25 +399,7 @@ class AppState: ObservableObject {
     func checkForActiveCall() {
         Task { @MainActor in
             self.refreshSecureStorageForActiveUse()
-            let auth = currentAuthContext(), scope = callLifecycleSnapshot
-            guard auth.isValid else { return }
-            if !scope.callSid.isEmpty {
-                do {
-                    let status = try await APIClient.shared.getCallAction(callSid: scope.callSid,
-                        contractorId: auth.contractorId, bearerToken: auth.bearerToken, sessionGeneration: auth.generation)
-                    guard currentAuthContext() == auth, callLifecycleSnapshot == scope,
-                          let status, status.validNavigation(callSid: scope.callSid, contractorId: auth.contractorId) else { return }
-                    if status.isEnded { clearActiveCall(); return }
-                    if let text = status.transcript { transcriptLines = text.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) } }
-                    CallActionCoordinator.shared.observeStatus(status, auth: auth)
-                } catch { /* Unknown is not ended. */ }
-                return
-            }
-            guard let call = await APIClient.shared.getActiveCall(authContext: auth), !call.callSid.isEmpty,
-                  currentAuthContext() == auth, callLifecycleSnapshot == scope else { return }
-            setActiveCall(callSid: call.callSid, callerPhone: call.callerPhone, callerName: call.callerName)
-            transcriptLines = call.transcript.components(separatedBy: "\n").filter { !$0.isEmpty }.map { TranscriptLine(text: $0) }
-            showActiveCall = true
+            _ = await LiveCallObserver.shared.checkNow()
         }
     }
 

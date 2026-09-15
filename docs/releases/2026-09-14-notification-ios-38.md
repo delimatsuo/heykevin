@@ -4,7 +4,10 @@ The owner agreed on September 14 to prepare the implemented notification
 enhancement for TestFlight, validate it on the owner's iPhone, and submit an
 App Store release after the device results and release approval. This candidate
 implements the active [N1 scope](../../kevin-prd.md).
-Native frontend refactoring and later PRD features remain deferred.
+This notification candidate predates the native frontend. The owner subsequently
+approved that work under N3; its separate
+[build 39 record](2026-09-15-native-frontend-ios-39.md) tracks delivery.
+The later-feature backlog remains deferred.
 
 ## Candidate and Apple inventory
 

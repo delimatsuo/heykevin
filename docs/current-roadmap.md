@@ -145,9 +145,10 @@ History starts at 20 rows, expands by 20 to the existing 100-call/90-day bound,
 and searches/filters the full bounded snapshot before limiting visible rows.
 The retrieval limit does not delete older stored calls or extend retention.
 
-Implementation and local verification are in progress. A build number in
-project configuration is not proof of Apple upload or availability. Required
-CI, independent native review and internal TestFlight delivery remain open.
+Implementation, independent native review and local verification are complete:
+269 native unit tests, 9 fixture UI tests and targeted mutation probes passed.
+The [candidate record](releases/2026-09-15-native-frontend-ios-39.md) binds the
+source and evidence. Required CI and internal TestFlight delivery remain open.
 Physical notification/call checks and public App Store approval remain separate.
 
 ## Unfinished or unverified, not an automatic implementation queue

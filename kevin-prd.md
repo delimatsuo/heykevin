@@ -150,7 +150,9 @@ records the expert panel, competitor research and verification contract.
 **Delivery acceptance:**
 
 - [x] Owner approved the expert-reviewed design and bounded-history direction.
-- [ ] Native unit, lifecycle/ownership mutation and fixture UI checks pass.
+- [x] Native unit, lifecycle/ownership mutation and fixture UI checks pass.
+      The [candidate record](docs/releases/2026-09-15-native-frontend-ios-39.md)
+      records 269 native unit tests, 9 UI tests and the mutation results.
 - [ ] Independent review and required CI pass for the final source.
 - [ ] The new native candidate is available in the internal TestFlight QA group.
 - [ ] Owner checks the installed frontend and the remaining N1 phone scenarios.

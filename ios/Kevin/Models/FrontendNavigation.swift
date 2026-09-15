@@ -78,6 +78,8 @@ final class FrontendNavigation: ObservableObject {
     @Published var isCallConnectedPendingPresentation: Bool = false
     @Published var shouldPresentInCall: Bool = false
     @Published private(set) var pendingNotificationTarget: PendingNotificationTarget? = nil
+    @Published private(set) var pendingAccountDestination: RootNavigationSheet? = nil
+    @Published private(set) var isAccountDismissalInProgress: Bool = false
 
     /// Backwards compatibility accessor for historical detail lease
     var presentedDetailLease: HistoricalCallPresentationLease? {
@@ -128,21 +130,104 @@ final class FrontendNavigation: ObservableObject {
         }
     }
 
+    // MARK: - Central Destination Presentation Helper
+
+    private func presentDestination(_ destination: RootNavigationSheet) {
+        // Prevent historical/live sheets above connected call
+        guard !shouldPresentInCall && !isCallConnectedPendingPresentation else {
+            return
+        }
+
+        if isAccountPresented || isAccountDismissalInProgress {
+            pendingAccountDestination = destination
+            isAccountDismissalInProgress = true
+            isAccountPresented = false
+            return
+        }
+
+        presentedSheet = destination
+    }
+
     // MARK: - Account Sheet Navigation
 
+    func setAccountPresented(_ presented: Bool) {
+        if presented {
+            openAccount()
+        } else {
+            closeAccount()
+        }
+    }
+
     func openAccount() {
+        guard !isAccountDismissalInProgress, !shouldPresentInCall, !isCallConnectedPendingPresentation else {
+            return
+        }
+        isAccountDismissalInProgress = false
+        pendingAccountDestination = nil
         isAccountPresented = true
     }
 
     func closeAccount() {
-        isAccountPresented = false
+        if isAccountPresented {
+            isAccountDismissalInProgress = true
+            isAccountPresented = false
+        }
     }
 
     func requestReturnToCallFromAccount() -> CallPresentationLease? {
         guard let lease = ownedLeaseProvider() else { return nil }
         pendingCallPresentationLease = lease
-        isAccountPresented = false
+        if isAccountPresented {
+            isAccountDismissalInProgress = true
+            isAccountPresented = false
+        }
         return lease
+    }
+
+    func handleAccountDismissed(hasRemainingSheets: Bool) {
+        isAccountDismissalInProgress = false
+        isAccountPresented = false
+
+        // 1. Highest priority: connected call presentation
+        if isCallConnectedPendingPresentation && !hasRemainingSheets {
+            let currentAuth = authProvider()
+            let currentScope = scopeProvider()
+            if let lease = pendingCallPresentationLease, lease.isValid(auth: currentAuth, scope: currentScope) {
+                isCallConnectedPendingPresentation = false
+                shouldPresentInCall = true
+                pendingAccountDestination = nil
+                return
+            } else {
+                isCallConnectedPendingPresentation = false
+                shouldPresentInCall = false
+                pendingCallPresentationLease = nil
+            }
+        }
+
+        // 2. Drain queued destination ONLY when no connected call is pending/presented and !hasRemainingSheets.
+        guard !shouldPresentInCall, !isCallConnectedPendingPresentation, !hasRemainingSheets else { return }
+        drainPendingAccountDestination()
+    }
+
+    private func drainPendingAccountDestination() {
+        guard let destination = pendingAccountDestination else { return }
+        pendingAccountDestination = nil
+
+        let currentAuth = authProvider()
+        guard currentAuth.isValid else { return }
+
+        switch destination {
+        case .historicalDetail(let lease):
+            guard lease.isValid(currentAuth: currentAuth) else { return }
+            presentedSheet = .historicalDetail(lease)
+        case .liveCallDetail(let lease):
+            let currentScope = scopeProvider()
+            guard lease.isValid(auth: currentAuth, scope: currentScope) else { return }
+            presentedSheet = .liveCallDetail(lease)
+        case .unavailableNotification(let sid, let msg, let auth):
+            guard auth == currentAuth else { return }
+            presentedSheet = .unavailableNotification(callSid: sid, message: msg, auth: auth)
+        }
     }
 
     // MARK: - Live Call Presentation
@@ -155,7 +240,7 @@ final class FrontendNavigation: ObservableObject {
               lease.isValid(auth: currentAuth, scope: currentScope) else {
             return
         }
-        presentedSheet = .liveCallDetail(lease)
+        presentDestination(.liveCallDetail(lease))
     }
 
     // MARK: - Historical Detail Presentation
@@ -181,7 +266,7 @@ final class FrontendNavigation: ObservableObject {
             callId: call.id,
             call: call
         )
-        presentedSheet = .historicalDetail(lease)
+        presentDestination(.historicalDetail(lease))
     }
 
     func dismissHistoricalDetail() {
@@ -283,14 +368,15 @@ final class FrontendNavigation: ObservableObject {
                 callId: match.id,
                 call: match
             )
-            presentedSheet = .historicalDetail(lease)
+            presentDestination(.historicalDetail(lease))
             return match
         } else {
-            presentedSheet = .unavailableNotification(
+            let unavailableSheet = RootNavigationSheet.unavailableNotification(
                 callSid: callSid,
                 message: fallbackMessage,
                 auth: currentAuth
             )
+            presentDestination(unavailableSheet)
             return nil
         }
     }
@@ -300,6 +386,11 @@ final class FrontendNavigation: ObservableObject {
     func handleCallConnectionStarted(lease: CallPresentationLease?, hasOpenSheets: Bool) {
         let currentAuth = authProvider()
         let currentScope = scopeProvider()
+        pendingAccountDestination = nil
+        if isAccountPresented {
+            isAccountDismissalInProgress = true
+            isAccountPresented = false
+        }
         guard let lease = lease, lease.isValid(auth: currentAuth, scope: currentScope) else {
             isCallConnectedPendingPresentation = false
             shouldPresentInCall = false
@@ -309,7 +400,6 @@ final class FrontendNavigation: ObservableObject {
         pendingCallPresentationLease = lease
         if hasOpenSheets {
             isCallConnectedPendingPresentation = true
-            isAccountPresented = false
             presentedSheet = nil
             shouldPresentInCall = false
         } else {
@@ -325,12 +415,16 @@ final class FrontendNavigation: ObservableObject {
             if let lease = pendingCallPresentationLease, lease.isValid(auth: currentAuth, scope: currentScope) {
                 isCallConnectedPendingPresentation = false
                 shouldPresentInCall = true
+                pendingAccountDestination = nil
+                return
             } else {
                 isCallConnectedPendingPresentation = false
                 shouldPresentInCall = false
                 pendingCallPresentationLease = nil
             }
         }
+        guard !shouldPresentInCall, !isCallConnectedPendingPresentation, !hasRemainingSheets else { return }
+        drainPendingAccountDestination()
     }
 
     func handleInCallDismissed() {
@@ -347,6 +441,8 @@ final class FrontendNavigation: ObservableObject {
             // Any context change (A->B, A->B->A, or invalidation) clears all stale sheets and state
             presentedSheet = nil
             isAccountPresented = false
+            pendingAccountDestination = nil
+            isAccountDismissalInProgress = false
             pendingCallPresentationLease = nil
             shouldScrollToGoogleCalendar = false
             isCallConnectedPendingPresentation = false
@@ -359,6 +455,22 @@ final class FrontendNavigation: ObservableObject {
         } else {
             if let pending = pendingNotificationTarget, pending.auth != currentAuth || !currentAuth.isValid {
                 pendingNotificationTarget = nil
+            }
+            if let dest = pendingAccountDestination {
+                switch dest {
+                case .historicalDetail(let lease):
+                    if !lease.isValid(currentAuth: currentAuth) {
+                        pendingAccountDestination = nil
+                    }
+                case .liveCallDetail(let lease):
+                    if !lease.isValid(auth: currentAuth, scope: scopeProvider()) {
+                        pendingAccountDestination = nil
+                    }
+                case .unavailableNotification(_, _, let auth):
+                    if auth != currentAuth || !currentAuth.isValid {
+                        pendingAccountDestination = nil
+                    }
+                }
             }
             if let sheet = presentedSheet {
                 switch sheet {

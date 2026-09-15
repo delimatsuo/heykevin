@@ -59,7 +59,7 @@ struct SettingsHost<Root: View>: View {
 
     @State private var showDeleteAccountAlert = false
     @State private var showDeleteAccountError = false
-    @State private var isDeletingAccount = false
+    @State private var accountDeletionFence = AccountDeletionFence()
     @State private var showSubscriptionWarningAlert = false
     @State private var confirmDeleteTask: Task<Void, Never>?
 
@@ -278,7 +278,7 @@ struct SettingsHost<Root: View>: View {
         importMessage = ""
         syncMessage = ""
         isProvisioningNumber = false
-        isDeletingAccount = false
+        accountDeletionFence.reset(for: newAuth)
         showDeleteAccountAlert = false
         showDeleteAccountError = false
         showSubscriptionWarningAlert = false
@@ -352,10 +352,15 @@ struct SettingsHost<Root: View>: View {
                     Button {
                         isAccountPresented = true
                     } label: {
-                        Label(String(localized: "Settings"), systemImage: "person.crop.circle")
-                            .labelStyle(.titleAndIcon)
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle")
+                            Text(String(localized: "Settings"))
+                        }
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                     }
                     .accessibilityIdentifier("nav.settings")
+                    .accessibilityLabel(String(localized: "Settings"))
                 }
             }
             .onChange(of: shouldScrollToGoogleCalendar?.wrappedValue ?? false) { _, shouldScroll in
@@ -1154,7 +1159,7 @@ struct SettingsHost<Root: View>: View {
                     }
                 )
             } label: {
-                if isDeletingAccount {
+                if accountDeletionFence.isPending {
                     HStack {
                         Text(String(localized: "Deleting Account…"))
                         Spacer()
@@ -1164,7 +1169,7 @@ struct SettingsHost<Root: View>: View {
                     Text(String(localized: "Delete Account"))
                 }
             }
-            .disabled(isDeletingAccount || deletionLoader.isLoading || confirmDeleteTask != nil || isFixtureMode)
+            .disabled(accountDeletionFence.isPending || deletionLoader.isLoading || confirmDeleteTask != nil || isFixtureMode)
         } footer: {
             Text(String(localized: "Releases your Kevin number. Your data is permanently deleted within 30 days. You will need to disable call forwarding manually."))
         }
@@ -1947,13 +1952,11 @@ struct SettingsHost<Root: View>: View {
         showDeleteAccountAlert = false
         showSubscriptionWarningAlert = false
         showDeleteAccountError = false
-        isDeletingAccount = false
     }
 
     private func deleteAccount() async {
         let auth = appState.currentAuthContext()
-        guard auth.isValid, !isDeletingAccount else { return }
-        await MainActor.run { isDeletingAccount = true }
+        guard let token = accountDeletionFence.begin(auth: auth) else { return }
         var outcome = AccountDeletionOutcome.failed
         do {
             let encodedId = auth.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? auth.contractorId
@@ -1976,8 +1979,8 @@ struct SettingsHost<Root: View>: View {
             try? await Task.sleep(nanoseconds: alertRedismissalDelay)
         }
         await MainActor.run {
-            isDeletingAccount = false
-            guard appState.currentAuthContext() == auth else { return }
+            let currentAuth = appState.currentAuthContext()
+            guard accountDeletionFence.finish(token: token, auth: currentAuth) else { return }
             switch outcome {
             case .deleted:
                 appState.contractorId = ""

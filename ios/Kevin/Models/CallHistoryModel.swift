@@ -316,7 +316,7 @@ final class CallHistoryModel: ObservableObject {
 
         let task = Task { [markServerRead, current, weak self] in
             guard let self = self else { return }
-            let revalidated = await self.authProvider()
+            let revalidated = self.authProvider()
             guard revalidated == current, revalidated.isValid else { return }
             await markServerRead([callId], current)
         }
@@ -349,11 +349,52 @@ final class CallHistoryModel: ObservableObject {
 
         let task = Task { [markServerRead, current, weak self] in
             guard let self = self else { return }
-            let revalidated = await self.authProvider()
+            let revalidated = self.authProvider()
             guard revalidated == current, revalidated.isValid else { return }
             await markServerRead(unreadIds, current)
         }
         return task
+    }
+
+    // MARK: - Appointment Confirmation Receipt
+
+    /// Updates local screened call history with a confirmed appointment receipt.
+    /// Replaces the target CallRecord with a confirmed copy preserving all other fields,
+    /// increments request revision to invalidate older in-flight fetches, and settles loading state.
+    @discardableResult
+    func applyAppointmentConfirmation(
+        callId: String,
+        callerNotified: Bool,
+        expectedAuth: CallAuthContext?
+    ) -> Bool {
+        guard let expected = expectedAuth, expected.isValid else { return false }
+        let current = authProvider()
+        guard current.isValid, expected == current else { return false }
+        guard let active = activeAuthContext, active == current else { return false }
+        guard let index = allCalls.firstIndex(where: { $0.id == callId }) else { return false }
+
+        let existing = allCalls[index]
+        let confirmed = CallRecord(
+            id: existing.id,
+            callerPhone: existing.callerPhone,
+            callerName: existing.callerName,
+            timestamp: existing.timestamp,
+            trustScore: existing.trustScore,
+            outcome: existing.outcome,
+            transcript: existing.transcript,
+            voicemailURL: existing.voicemailURL,
+            callbackNumber: existing.callbackNumber,
+            readOnServer: existing.readOnServer,
+            appointmentStatus: "confirmed",
+            appointmentStartTime: existing.appointmentStartTime,
+            appointmentTitle: existing.appointmentTitle,
+            appointmentCallerNotified: callerNotified
+        )
+
+        allCalls[index] = confirmed
+        currentRequestRevision += 1
+        isLoading = false
+        return true
     }
 
     // MARK: - Loading, Guards, and Invalidation

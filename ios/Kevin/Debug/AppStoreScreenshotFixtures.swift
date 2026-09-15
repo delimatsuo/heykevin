@@ -6,13 +6,14 @@ final class FixtureFetchProvider: @unchecked Sendable {
     private let lock = NSLock()
 
     func fetchCalls(for scenario: AppStoreScreenshotFixtures.Scenario) async throws -> [CallRecord] {
-        lock.lock()
-        defer { lock.unlock() }
-        loadCount += 1
+        let attempt = lock.withLock {
+            loadCount += 1
+            return loadCount
+        }
 
         switch scenario {
         case .historyError:
-            if loadCount == 1 {
+            if attempt == 1 {
                 throw NSError(
                     domain: "KevinPreview",
                     code: 1,
@@ -21,7 +22,7 @@ final class FixtureFetchProvider: @unchecked Sendable {
             }
             return AppStoreScreenshotFixtures.businessCallsList
         case .historyRetainedError:
-            if loadCount == 2 {
+            if attempt == 2 {
                 throw NSError(
                     domain: "KevinPreview",
                     code: 1,
@@ -138,6 +139,12 @@ enum AppStoreScreenshotFixtures {
     }
 
     static var isEnabled: Bool { scenario != nil }
+
+    #if DEBUG
+    static var isNativeUIReview: Bool {
+        scenario != nil && ProcessInfo.processInfo.environment["KEVIN_NATIVE_UI_REVIEW"] == "1"
+    }
+    #endif
 
     /// Fixed anchor time for deterministic screenshots.
     /// Using a constant "now" eliminates wall-clock flakiness in labels and details.
@@ -483,6 +490,19 @@ struct AppStoreScreenshotRoot: View {
     }
 
     var body: some View {
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isNativeUIReview {
+            ContentView()
+                .environmentObject(appState)
+        } else {
+            marketingBody
+        }
+        #else
+        marketingBody
+        #endif
+    }
+
+    private var marketingBody: some View {
         AppStoreMarketingFrame(
             title: scenario.title,
             subtitle: scenario.subtitle,

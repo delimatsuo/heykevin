@@ -34,11 +34,14 @@ struct ContentView: View {
 
     var body: some View {
         SettingsHost(
-            isAccountPresented: $frontendNav.isAccountPresented,
+            isAccountPresented: Binding(
+                get: { frontendNav.isAccountPresented },
+                set: { frontendNav.setAccountPresented($0) }
+            ),
             shouldScrollToGoogleCalendar: $frontendNav.shouldScrollToGoogleCalendar,
             onDismissAccount: {
                 let hasOpenSheets = frontendNav.presentedSheet != nil || showWhatsNew
-                frontendNav.handleSheetDismissed(hasRemainingSheets: hasOpenSheets)
+                frontendNav.handleAccountDismissed(hasRemainingSheets: hasOpenSheets)
             },
             assistantIsSelected: frontendNav.selectedTab == .kevin,
             onOpenCall: { lease in
@@ -71,7 +74,7 @@ struct ContentView: View {
             }
         }
         .sheet(item: $frontendNav.presentedSheet, onDismiss: {
-            let hasOpenSheets = frontendNav.isAccountPresented || showWhatsNew
+            let hasOpenSheets = frontendNav.isAccountPresented || frontendNav.isAccountDismissalInProgress || showWhatsNew
             frontendNav.handleSheetDismissed(hasRemainingSheets: hasOpenSheets)
         }) { sheet in
             NavigationStack {
@@ -170,7 +173,7 @@ struct ContentView: View {
             if isOnCall {
                 LiveCallObserver.shared.stop()
                 let lease = callManager.presentationLease
-                let hasOpen = frontendNav.isAccountPresented || frontendNav.presentedSheet != nil || showWhatsNew
+                let hasOpen = frontendNav.isAccountPresented || frontendNav.isAccountDismissalInProgress || frontendNav.presentedSheet != nil || showWhatsNew
                 if showWhatsNew {
                     showWhatsNew = false
                 }
@@ -226,7 +229,7 @@ struct ContentView: View {
         }
         // Feature announcement for 1.2.8
         .sheet(isPresented: $showWhatsNew, onDismiss: {
-            let hasOpenSheets = frontendNav.isAccountPresented || frontendNav.presentedSheet != nil
+            let hasOpenSheets = frontendNav.isAccountPresented || frontendNav.isAccountDismissalInProgress || frontendNav.presentedSheet != nil
             frontendNav.handleSheetDismissed(hasRemainingSheets: hasOpenSheets)
         }) {
             WhatsNewSheet(needsCalendar: !appState.googleCalendarConnected)
@@ -262,7 +265,7 @@ struct ContentView: View {
             if callManager.isOnCall,
                let lease = callManager.presentationLease,
                lease.isValid(auth: appState.currentAuthContext(), scope: appState.callLifecycleSnapshot) {
-                let hasOpen = frontendNav.isAccountPresented || frontendNav.presentedSheet != nil || showWhatsNew
+                let hasOpen = frontendNav.isAccountPresented || frontendNav.isAccountDismissalInProgress || frontendNav.presentedSheet != nil || showWhatsNew
                 if showWhatsNew {
                     showWhatsNew = false
                 }

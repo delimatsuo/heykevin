@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import Kevin
 
 @MainActor
@@ -220,6 +221,49 @@ final class LiveCallObserverTests: XCTestCase {
 
     // MARK: - Fail Safe on Unknown Status
 
+    func testHeldEndedPollCannotClearReplacedCallOrNewerRevision() async {
+        let auth = makeAuth(contractorId: "c-held-poll")
+        for replacementSid in ["CA_REPLACEMENT", "CA_ORIGINAL"] {
+            var scope = makeScope(callSid: "CA_ORIGINAL", revision: 1)
+            var continuation: CheckedContinuation<CallActionResult?, Error>?
+            var cleared: [String] = []
+            let started = expectation(description: "Held poll started: \(replacementSid)")
+            let finished = expectation(description: "Held poll cleaned up: \(replacementSid)")
+            let observer = LiveCallObserver(
+                authProvider: { auth },
+                scopeProvider: { scope },
+                getActiveCall: { _ in nil },
+                getCallAction: { _, _ in
+                    try await withCheckedThrowingContinuation { pending in
+                        continuation = pending
+                        started.fulfill()
+                    }
+                },
+                applyActiveCall: { _, _ in XCTFail("Polling must not adopt a call") },
+                applyStatus: { _, _ in XCTFail("A superseded poll must not apply status") },
+                clearActiveCall: { sid, _ in cleared.append(sid) },
+                autoSchedule: false
+            )
+            observer.start()
+            await fulfillment(of: [started], timeout: 2)
+            let cleanup = observer.$isInFlight.dropFirst().filter { !$0 }.prefix(1)
+                .sink { _ in finished.fulfill() }
+            scope = makeScope(callSid: replacementSid, revision: 2)
+            continuation?.resume(returning: CallActionResult(
+                callSid: "CA_ORIGINAL", contractorId: auth.contractorId,
+                operationId: "", action: "", actionStatus: "ended",
+                accessToken: nil, conferenceName: nil, isActive: false,
+                isUrgent: false, callerName: nil, callerPhone: nil,
+                transcript: nil, statusCode: 200, rawStatus: "ok",
+                errorDetail: nil, hasExplicitActive: true
+            ))
+            await fulfillment(of: [finished], timeout: 2)
+            cleanup.cancel()
+            observer.stop()
+            XCTAssertTrue(cleared.isEmpty, "An old ended response cannot clear the replacement scope")
+        }
+    }
+
     func testPollingRetainsCallOnNetworkError() async {
         let auth = makeAuth()
         let scope = makeScope(callSid: "CA_ACTIVE_1")
@@ -281,6 +325,8 @@ final class LiveCallObserverTests: XCTestCase {
         let scope = makeScope()
         var appliedInfo: ActiveCallInfo? = nil
         var continuation: CheckedContinuation<ActiveCallInfo?, Never>?
+        let flightStarted = expectation(description: "Flight started")
+        let flightCleanedUp = expectation(description: "Flight cleaned up")
 
         let observer = LiveCallObserver(
             authProvider: { auth },
@@ -288,6 +334,7 @@ final class LiveCallObserverTests: XCTestCase {
             getActiveCall: { _ in
                 await withCheckedContinuation { cont in
                     continuation = cont
+                    flightStarted.fulfill()
                 }
             },
             getCallAction: { _, _ in nil },
@@ -300,11 +347,16 @@ final class LiveCallObserverTests: XCTestCase {
         )
 
         observer.start()
-        let task = Task { await observer.checkNow() }
-
-        // Yield to allow task to start and enter in-flight
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        await fulfillment(of: [flightStarted], timeout: 2.0)
         XCTAssertTrue(observer.isInFlight)
+
+        let cancellable = observer.$isInFlight
+            .dropFirst()
+            .filter { !$0 }
+            .prefix(1)
+            .sink { _ in
+                flightCleanedUp.fulfill()
+            }
 
         // Stop observer while request is in flight
         observer.stop()
@@ -312,9 +364,10 @@ final class LiveCallObserverTests: XCTestCase {
 
         // Now resume underlying task
         continuation?.resume(returning: ActiveCallInfo(callSid: "CA_LATE", callerPhone: "+15551234567", callerName: "Late", transcript: ""))
-        let result = await task.value
 
-        XCTAssertFalse(result)
+        await fulfillment(of: [flightCleanedUp], timeout: 2.0)
+        cancellable.cancel()
+
         XCTAssertNil(appliedInfo, "Late response after stop() must not apply side effects")
         XCTAssertFalse(observer.isInFlight)
     }
@@ -531,6 +584,7 @@ final class LiveCallObserverTests: XCTestCase {
         var getActiveCallCallCount = 0
         var continuation: CheckedContinuation<ActiveCallInfo?, Never>?
         let fetchStarted = expectation(description: "Fetch started")
+        let flightCleanedUp = expectation(description: "Flight cleaned up")
 
         let observer = LiveCallObserver(
             authProvider: { auth },
@@ -552,12 +606,23 @@ final class LiveCallObserverTests: XCTestCase {
         observer.start()
         await fulfillment(of: [fetchStarted], timeout: 2.0)
 
+        let cancellable = observer.$isInFlight
+            .dropFirst()
+            .filter { !$0 }
+            .prefix(1)
+            .sink { _ in
+                flightCleanedUp.fulfill()
+            }
+
         // Queue pending refresh, then stop observer
         observer.requestRefresh()
         observer.stop()
 
         // Resume initial task
         continuation?.resume(returning: nil)
+
+        await fulfillment(of: [flightCleanedUp], timeout: 2.0)
+        cancellable.cancel()
 
         // Only the 1 initial call was dispatched, pending refresh was cancelled by stop()
         XCTAssertEqual(getActiveCallCallCount, 1)
@@ -575,6 +640,7 @@ final class LiveCallObserverTests: XCTestCase {
         var continuation2: CheckedContinuation<ActiveCallInfo?, Never>?
         let firstStarted = expectation(description: "First request started")
         let secondStarted = expectation(description: "Second request started")
+        let flightCleanedUp = expectation(description: "Flight cleaned up")
 
         let observer = LiveCallObserver(
             authProvider: { auth },
@@ -618,9 +684,20 @@ final class LiveCallObserverTests: XCTestCase {
         continuation1?.resume(returning: nil)
         await fulfillment(of: [secondStarted], timeout: 2.0)
 
+        let cancellable = observer.$isInFlight
+            .dropFirst()
+            .filter { !$0 }
+            .prefix(1)
+            .sink { _ in
+                flightCleanedUp.fulfill()
+            }
+
         // Resume request 2
         continuation2?.resume(returning: nil)
         observer.stop()
+
+        await fulfillment(of: [flightCleanedUp], timeout: 2.0)
+        cancellable.cancel()
 
         XCTAssertEqual(maxObservedFlights, 1, "At no time should more than 1 network request be in flight simultaneously")
         XCTAssertEqual(totalRequests, 2, "Coalescing should combine multiple rapid triggers into at most 2 requests")

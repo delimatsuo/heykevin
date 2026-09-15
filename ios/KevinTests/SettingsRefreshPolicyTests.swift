@@ -1501,4 +1501,138 @@ final class SettingsRefreshPolicyTests: XCTestCase {
         XCTAssertEqual(fetchCallCount, 1)
         XCTAssertEqual(patchCallCount, 0)
     }
+
+    // MARK: - AccountDeletionFence Tests
+
+    func testAccountDeletionFenceDuplicateBeginAndLoaderCancellation() async {
+        var fence = AccountDeletionFence()
+        let authA = makeAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let loader = SettingsDeletionConfirmationLoader()
+        var requestCount = 0
+
+        // First accepted begin
+        let token1 = fence.begin(auth: authA)
+        if let _ = token1 {
+            requestCount += 1
+        }
+        XCTAssertNotNil(token1)
+        XCTAssertEqual(token1?.auth, authA)
+        XCTAssertTrue(fence.isPending)
+
+        // Duplicate begin for same auth returns nil and keeps pending true
+        let duplicateToken = fence.begin(auth: authA)
+        if let _ = duplicateToken {
+            requestCount += 1
+        }
+        XCTAssertNil(duplicateToken)
+        XCTAssertTrue(fence.isPending)
+
+        // Start a confirmation lookup and then cancel it (lookup/dismiss cancellation)
+        loader.requestConfirmation(
+            auth: authA,
+            isAccountPresented: { true },
+            currentAuth: { authA },
+            cachedStatus: "active",
+            cachedTier: "pro",
+            fetchProfile: { _ in
+                return ["subscription_status": "active"]
+            },
+            onReady: { _ in }
+        )
+        loader.cancel()
+        XCTAssertFalse(loader.isLoading)
+
+        // Canceling confirmation loader does NOT reset the deletion fence
+        XCTAssertTrue(fence.isPending)
+        let duplicateAfterCancel = fence.begin(auth: authA)
+        if let _ = duplicateAfterCancel {
+            requestCount += 1
+        }
+        XCTAssertNil(duplicateAfterCancel)
+        XCTAssertEqual(requestCount, 1, "Only first accepted begin increments simulated request count")
+
+        // Held task pattern: simulate held deletion execution
+        let deletionStartedExp = expectation(description: "Deletion execution started")
+        let heldDeletion = HeldFetch {
+            deletionStartedExp.fulfill()
+        }
+
+        let deletionTask = Task { @MainActor in
+            _ = await heldDeletion.fetch(auth: authA)
+        }
+
+        await fulfillment(of: [deletionStartedExp], timeout: 2.0)
+        heldDeletion.resume(returning: ["status": "deleted"])
+        await deletionTask.value
+
+        // Finish exact token
+        let finishSuccess = fence.finish(token: token1!, auth: authA)
+        XCTAssertTrue(finishSuccess)
+        XCTAssertFalse(fence.isPending)
+    }
+
+    func testAccountDeletionFenceAuthSwitchAndLateFinishRejection() {
+        var fence = AccountDeletionFence()
+        let authA = makeAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let authB = makeAuthContext(contractorId: "contractor-B", bearerToken: "token-B", generation: 2)
+
+        // Begin for Auth A
+        guard let tokenA = fence.begin(auth: authA) else {
+            XCTFail("First begin for auth A must succeed")
+            return
+        }
+        XCTAssertTrue(fence.isPending)
+
+        // Reset for Auth B and begin B
+        fence.reset(for: authB)
+        guard let tokenB = fence.begin(auth: authB) else {
+            XCTFail("Begin for auth B must succeed after reset")
+            return
+        }
+        XCTAssertTrue(fence.isPending)
+        XCTAssertNotEqual(tokenA.id, tokenB.id)
+
+        // Late finish from Auth A (with tokenA, authB) is rejected
+        let lateFinishRejected = fence.finish(token: tokenA, auth: authB)
+        XCTAssertFalse(lateFinishRejected)
+        XCTAssertTrue(fence.isPending, "Pending state for auth B must be preserved after late finish rejection")
+
+        // Proper finish for B succeeds
+        let properBFinish = fence.finish(token: tokenB, auth: authB)
+        XCTAssertTrue(properBFinish)
+        XCTAssertFalse(fence.isPending)
+    }
+
+    func testAccountDeletionFenceSameAuthResetRejectsObsoleteToken() {
+        var fence = AccountDeletionFence()
+        let authA = makeAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+
+        guard let token1 = fence.begin(auth: authA) else {
+            XCTFail("First begin must succeed")
+            return
+        }
+        XCTAssertTrue(fence.isPending)
+
+        // Same auth reset (e.g. error recovery or manual reset)
+        fence.reset(for: authA)
+        XCTAssertFalse(fence.isPending)
+
+        // Begin new token for same auth
+        guard let token2 = fence.begin(auth: authA) else {
+            XCTFail("Second begin after reset must succeed")
+            return
+        }
+        XCTAssertTrue(fence.isPending)
+        XCTAssertNotEqual(token1.id, token2.id)
+
+        // Obsolete first token finish is rejected
+        let obsoleteFinish = fence.finish(token: token1, auth: authA)
+        XCTAssertFalse(obsoleteFinish)
+        XCTAssertTrue(fence.isPending, "Fence must remain pending for active token2")
+
+        // Valid second token finish succeeds
+        let validFinish = fence.finish(token: token2, auth: authA)
+        XCTAssertTrue(validFinish)
+        XCTAssertFalse(fence.isPending)
+    }
 }

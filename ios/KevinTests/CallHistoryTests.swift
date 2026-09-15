@@ -1197,7 +1197,7 @@ final class CallHistoryTests: XCTestCase {
 
         // Search query finds a match under Auth A
         model.setSearchQuery("Customer 1")
-        XCTAssertEqual(model.filteredCalls.count, 12) // matches Customer 1, 10-19
+        XCTAssertEqual(model.filteredCalls.count, 11) // matches Customer 1, 10-19
 
         // Now, switch authProvider to Auth B WITHOUT calling invalidate()
         currentAuth = CallAuthContext(contractorId: "contractor-B", bearerToken: "token-B", generation: 2)
@@ -1350,5 +1350,289 @@ final class CallHistoryTests: XCTestCase {
         )
         XCTAssertFalse(invalidBlocked)
         XCTAssertTrue(openedURLs.isEmpty)
+    }
+
+    // MARK: - CALLS-01: applyAppointmentConfirmation Tests
+
+    func testAppointmentReceiptSurvivesReopenAndPreservesHistory() async {
+        let authA = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let nav = FrontendNavigation(authProvider: { authA })
+
+        // Build 35 pending records with Caller transcript matching "sink"
+        var records: [CallRecord] = []
+        for i in 1...35 {
+            let record = CallRecord(
+                id: String(format: "CA_APT_%03d", i),
+                callerPhone: String(format: "555123%04d", i),
+                callerName: "Caller \(i)",
+                timestamp: now.addingTimeInterval(-Double(i * 60)),
+                trustScore: 80,
+                outcome: "screened",
+                transcript: "Kevin: Hello\nCaller: I need repair for my sink.\nCaller: Please call me back.",
+                voicemailURL: nil,
+                callbackNumber: nil,
+                readOnServer: false,
+                appointmentStatus: "pending",
+                appointmentStartTime: "2026-09-15T10:00:00Z",
+                appointmentTitle: "Sink Repair",
+                appointmentCallerNotified: false
+            )
+            records.append(record)
+        }
+
+        var fetchCount = 0
+        let (model, _) = makeTestModel(
+            authProvider: { authA },
+            fetchCalls: { _ in
+                fetchCount += 1
+                return records
+            },
+            clock: { now }
+        )
+
+        await model.loadCalls()
+        XCTAssertEqual(fetchCount, 1)
+        XCTAssertEqual(model.allCalls.count, 35)
+
+        // Set search query with common matching word, filter unread, showMore (visibleLimit 40)
+        model.setSearchQuery("sink")
+        model.setFilter(.unread)
+        model.showMore()
+        XCTAssertEqual(model.visibleLimit, 40)
+        XCTAssertEqual(model.searchQuery, "sink")
+        XCTAssertEqual(model.selectedFilter, .unread)
+
+        // 1. Open one row through FrontendNavigation with model.allCalls record / expectedauth
+        let firstRecord = model.allCalls[0]
+        nav.openHistoricalDetail(call: firstRecord, expectedAuth: authA)
+        XCTAssertEqual(nav.presentedDetailLease?.callId, firstRecord.id)
+        XCTAssertEqual(nav.presentedDetailLease?.call.appointmentStatus, "pending")
+        XCTAssertEqual(nav.presentedDetailLease?.call.appointmentCallerNotified, false)
+
+        // Dismiss
+        nav.dismissHistoricalDetail()
+        XCTAssertNil(nav.presentedSheet)
+
+        // Apply callerNotified = true receipt
+        let applied1 = model.applyAppointmentConfirmation(
+            callId: firstRecord.id,
+            callerNotified: true,
+            expectedAuth: authA
+        )
+        XCTAssertTrue(applied1)
+
+        // Reopen exact updated model record
+        guard let updatedFirst = model.allCalls.first(where: { $0.id == firstRecord.id }) else {
+            XCTFail("Updated first record must exist in model.allCalls")
+            return
+        }
+        nav.openHistoricalDetail(call: updatedFirst, expectedAuth: authA)
+        XCTAssertEqual(nav.presentedDetailLease?.call.appointmentStatus, "confirmed")
+        XCTAssertEqual(nav.presentedDetailLease?.call.appointmentCallerNotified, true)
+        XCTAssertEqual(nav.presentedDetailLease?.call.appointmentTitle, "Sink Repair")
+
+        // Assert other fields, query, filter, expansion unchanged
+        XCTAssertEqual(model.searchQuery, "sink")
+        XCTAssertEqual(model.selectedFilter, .unread)
+        XCTAssertEqual(model.visibleLimit, 40)
+        XCTAssertEqual(fetchCount, 1, "No extra server call must occur during receipt application or reopen")
+
+        // Dismiss
+        nav.dismissHistoricalDetail()
+        XCTAssertNil(nav.presentedSheet)
+
+        // 2. Apply false receipt to another row and reopen asserts confirmed and bool false
+        let secondRecord = model.allCalls[1]
+        let applied2 = model.applyAppointmentConfirmation(
+            callId: secondRecord.id,
+            callerNotified: false,
+            expectedAuth: authA
+        )
+        XCTAssertTrue(applied2)
+
+        guard let updatedSecond = model.allCalls.first(where: { $0.id == secondRecord.id }) else {
+            XCTFail("Updated second record must exist in model.allCalls")
+            return
+        }
+        nav.openHistoricalDetail(call: updatedSecond, expectedAuth: authA)
+        XCTAssertEqual(nav.presentedDetailLease?.call.appointmentStatus, "confirmed")
+        XCTAssertEqual(nav.presentedDetailLease?.call.appointmentCallerNotified, false)
+        XCTAssertEqual(fetchCount, 1)
+    }
+
+    func testAppointmentReceiptInvalidatesHeldOlderSnapshot() async {
+        let authA = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+
+        let initialRecord = CallRecord(
+            id: "CA_HELD_1",
+            callerPhone: "5551234567",
+            callerName: "Pending Caller",
+            timestamp: now,
+            trustScore: 80,
+            outcome: "screened",
+            transcript: "Kevin: Hello\nCaller: Need booking.\nCaller: Call me.",
+            voicemailURL: nil,
+            callbackNumber: nil,
+            readOnServer: false,
+            appointmentStatus: "pending",
+            appointmentStartTime: "2026-09-15T14:00:00Z",
+            appointmentTitle: "Assessment",
+            appointmentCallerNotified: false
+        )
+
+        final class HeldCallsContinuation: @unchecked Sendable {
+            private let lock = NSLock()
+            private var continuation: CheckedContinuation<[CallRecord], Error>?
+            private var onStarted: (@Sendable () -> Void)?
+
+            init(onStarted: (@Sendable () -> Void)? = nil) {
+                self.onStarted = onStarted
+            }
+
+            func fetch() async throws -> [CallRecord] {
+                try await withCheckedThrowingContinuation { cont in
+                    lock.lock()
+                    self.continuation = cont
+                    let handler = self.onStarted
+                    lock.unlock()
+                    handler?()
+                }
+            }
+
+            func resume(returning value: [CallRecord]) {
+                lock.lock()
+                let cont = self.continuation
+                self.continuation = nil
+                lock.unlock()
+                cont?.resume(returning: value)
+            }
+        }
+
+        let fetchStartedExp = expectation(description: "Second fetch started")
+        let heldCont = HeldCallsContinuation(onStarted: {
+            fetchStartedExp.fulfill()
+        })
+
+        var fetchCount = 0
+        let (model, _) = makeTestModel(
+            authProvider: { authA },
+            fetchCalls: { _ in
+                fetchCount += 1
+                if fetchCount == 1 {
+                    return [initialRecord]
+                } else {
+                    return try await heldCont.fetch()
+                }
+            },
+            clock: { now }
+        )
+
+        // 1. Initial load pending
+        await model.loadCalls()
+        XCTAssertEqual(model.allCalls.count, 1)
+        XCTAssertEqual(model.allCalls.first?.appointmentStatus, "pending")
+        XCTAssertEqual(model.allCalls.first?.appointmentCallerNotified, false)
+
+        // 2. Second fetch holds CheckedContinuation with started expectation
+        let secondLoadTask = Task { @MainActor in
+            await model.loadCalls()
+        }
+
+        await fulfillment(of: [fetchStartedExp], timeout: 2.0)
+        XCTAssertTrue(model.isLoading)
+
+        // 3. Apply true receipt while held
+        let applied = model.applyAppointmentConfirmation(
+            callId: "CA_HELD_1",
+            callerNotified: true,
+            expectedAuth: authA
+        )
+        XCTAssertTrue(applied)
+        XCTAssertFalse(model.isLoading, "Receipt must settle loading state to false")
+
+        // 4. Resume older pending response and await task
+        heldCont.resume(returning: [initialRecord])
+        await secondLoadTask.value
+
+        // 5. Confirmed status and callerNotified=true remain intact
+        XCTAssertEqual(model.allCalls.count, 1)
+        XCTAssertEqual(model.allCalls.first?.appointmentStatus, "confirmed")
+        XCTAssertEqual(model.allCalls.first?.appointmentCallerNotified, true)
+    }
+
+    func testAppointmentReceiptRejectsStaleAuthAndMissingMembership() async {
+        let authA1 = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let authA2 = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 2)
+        let authB = CallAuthContext(contractorId: "contractor-B", bearerToken: "token-B", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        var currentAuth = authA1
+
+        let recordA = CallRecord(
+            id: "CA_STALE_1",
+            callerPhone: "5551234567",
+            callerName: "Alice",
+            timestamp: now,
+            trustScore: 80,
+            outcome: "screened",
+            transcript: "Kevin: Hello\nCaller: Need booking.\nCaller: Call me.",
+            voicemailURL: nil,
+            callbackNumber: nil,
+            readOnServer: false,
+            appointmentStatus: "pending",
+            appointmentStartTime: "2026-09-15T10:00:00Z",
+            appointmentTitle: "Consultation",
+            appointmentCallerNotified: false
+        )
+
+        let (model, _) = makeTestModel(
+            authProvider: { currentAuth },
+            fetchCalls: { _ in [recordA] },
+            clock: { now }
+        )
+
+        await model.loadCalls()
+        XCTAssertEqual(model.allCalls.count, 1)
+        XCTAssertEqual(model.allCalls.first?.appointmentStatus, "pending")
+
+        // 1. Switch authProvider to B WITHOUT calling invalidate() then invoke old Auth A
+        currentAuth = authB
+        let resultOldA = model.applyAppointmentConfirmation(
+            callId: "CA_STALE_1",
+            callerNotified: true,
+            expectedAuth: authA1
+        )
+        XCTAssertFalse(resultOldA)
+        XCTAssertEqual(model.allCalls.first?.appointmentStatus, "pending", "No raw record change on stale auth mismatch")
+
+        // Also invoke with Auth B while activeAuthContext is still Auth A1
+        let resultB = model.applyAppointmentConfirmation(
+            callId: "CA_STALE_1",
+            callerNotified: true,
+            expectedAuth: authB
+        )
+        XCTAssertFalse(resultB)
+        XCTAssertEqual(model.allCalls.first?.appointmentStatus, "pending")
+
+        // 2. Return to A with new generation (Auth A2)
+        currentAuth = authA2
+        let resultGenNew = model.applyAppointmentConfirmation(
+            callId: "CA_STALE_1",
+            callerNotified: true,
+            expectedAuth: authA2
+        )
+        XCTAssertFalse(resultGenNew)
+        XCTAssertEqual(model.allCalls.first?.appointmentStatus, "pending")
+
+        // 3. Return to matching Auth A1, test missing call ID with current owned auth
+        currentAuth = authA1
+        let resultMissingId = model.applyAppointmentConfirmation(
+            callId: "CA_NONEXISTENT",
+            callerNotified: true,
+            expectedAuth: authA1
+        )
+        XCTAssertFalse(resultMissingId)
+        XCTAssertEqual(model.allCalls.first?.appointmentStatus, "pending")
     }
 }

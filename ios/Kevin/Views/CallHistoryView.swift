@@ -4,6 +4,7 @@ import SwiftUI
 /// Integrates bounded pagination, date grouping, live active call cards,
 /// search and filtering before pagination, and single-owner navigation.
 struct CallHistoryView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject var appState: AppState
     @ObservedObject var historyModel: CallHistoryModel
     @ObservedObject var navigation: FrontendNavigation
@@ -138,10 +139,15 @@ struct CallHistoryView: View {
                     Button {
                         onOpenSettings?()
                     } label: {
-                        Label(String(localized: "Settings"), systemImage: "person.crop.circle")
-                            .labelStyle(.titleAndIcon)
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle")
+                            Text(String(localized: "Settings"))
+                        }
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                     }
                     .accessibilityIdentifier("nav.settings")
+                    .accessibilityLabel(String(localized: "Settings"))
                 }
             }
             .refreshable {
@@ -194,7 +200,11 @@ struct CallHistoryView: View {
     }
 
     private var filterPicker: some View {
-        HStack(spacing: 8) {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 8))
+
+        return layout {
             ForEach(CallHistoryFilter.allCases) { filter in
                 let isSelected = historyModel.selectedFilter == filter
                 Button {
@@ -202,6 +212,10 @@ struct CallHistoryView: View {
                 } label: {
                     Text(filter.localizedTitle)
                         .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .background(
                             isSelected ? Color.hkCobalt.opacity(0.15) : Color(.secondarySystemGroupedBackground),
@@ -738,6 +752,11 @@ struct CallDetailView: View {
             let notified = try await APIClient.shared.confirmAppointment(callSid: lease.callId, authContext: lease.auth)
             let postAuth = appState.currentAuthContext()
             guard lease.isValid(currentAuth: postAuth) else { return }
+            _ = historyModel.applyAppointmentConfirmation(
+                callId: lease.callId,
+                callerNotified: notified,
+                expectedAuth: lease.auth
+            )
             callerWasNotified = notified
             appointmentConfirmed = true
             StoreReviewManager.shared.recordAppointmentConfirmed()

@@ -664,3 +664,46 @@ final class SettingsLoadCoordinator {
         fieldMutationRevisions = SettingsFieldMutationRevisions()
     }
 }
+
+/// An immutable token identifying an active account deletion operation owned by a specific authorization context.
+struct AccountDeletionToken: Equatable, Sendable {
+    let id: UInt64
+    let auth: CallAuthContext
+}
+
+/// Operation fence coordinating single-flight account deletion execution, cross-sheet persistence, and auth ownership.
+struct AccountDeletionFence: Equatable, Sendable {
+    private(set) var currentAuth: CallAuthContext? = nil
+    private(set) var activeToken: UInt64? = nil
+    private var nextToken: UInt64 = 1
+
+    var isPending: Bool {
+        activeToken != nil
+    }
+
+    mutating func begin(auth: CallAuthContext) -> AccountDeletionToken? {
+        guard auth.isValid else { return nil }
+        if currentAuth != auth {
+            reset(for: auth)
+        }
+        guard activeToken == nil else { return nil }
+        let token = nextToken
+        nextToken &+= 1
+        activeToken = token
+        currentAuth = auth
+        return AccountDeletionToken(id: token, auth: auth)
+    }
+
+    mutating func finish(token: AccountDeletionToken, auth: CallAuthContext) -> Bool {
+        guard currentAuth == auth, activeToken == token.id, token.auth == auth else {
+            return false
+        }
+        activeToken = nil
+        return true
+    }
+
+    mutating func reset(for newAuth: CallAuthContext? = nil) {
+        currentAuth = newAuth
+        activeToken = nil
+    }
+}

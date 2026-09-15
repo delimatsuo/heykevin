@@ -2,36 +2,80 @@ import XCTest
 
 final class FrontendUITests: XCTestCase {
 
+    private var currentApp: XCUIApplication?
+
     override func setUpWithError() throws {
         continueAfterFailure = false
+    }
+
+    override func tearDownWithError() throws {
+        if let testRun = testRun, testRun.failureCount > 0, let app = currentApp {
+            let screenshotAttachment = XCTAttachment(screenshot: app.screenshot())
+            screenshotAttachment.name = "failure-screenshot"
+            screenshotAttachment.lifetime = .keepAlways
+            add(screenshotAttachment)
+
+            let debugAttachment = XCTAttachment(string: app.debugDescription)
+            debugAttachment.name = "failure-debug-description"
+            debugAttachment.lifetime = .keepAlways
+            add(debugAttachment)
+        }
+        currentApp = nil
     }
 
     private func launchApp(scenario: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["APP_STORE_SCREENSHOT_SCENARIO"] = scenario
+        app.launchEnvironment["KEVIN_NATIVE_UI_REVIEW"] = "1"
         app.launchEnvironment["KEVIN_UNIT_TESTS"] = "0"
         app.launchArguments = ["-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
         app.launch()
+        self.currentApp = app
         return app
     }
 
-    private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication, maxSwipes: Int = 10) -> Bool {
+    enum ScrollDirection {
+        case down
+        case up
+    }
+
+    @discardableResult
+    private func scrollToElement(
+        _ element: XCUIElement,
+        in app: XCUIApplication,
+        direction: ScrollDirection = .down,
+        maxSwipes: Int = 35
+    ) -> Bool {
+        if element.exists && element.isHittable {
+            return true
+        }
+        let container = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch : app.tables.firstMatch
         var swipes = 0
-        while !element.isHittable && swipes < maxSwipes {
-            app.swipeUp()
+        while swipes < maxSwipes {
+            if element.exists && element.isHittable {
+                return true
+            }
+            if container.exists {
+                switch direction {
+                case .down:
+                    container.swipeUp()
+                case .up:
+                    container.swipeDown()
+                }
+            } else {
+                switch direction {
+                case .down:
+                    app.swipeUp()
+                case .up:
+                    app.swipeDown()
+                }
+            }
             swipes += 1
             if element.exists && element.isHittable {
                 return true
             }
         }
-        return element.exists
-    }
-
-    private func attachScreenshot(name: String, app: XCUIApplication) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        return element.exists && element.isHittable
     }
 
     // MARK: - 1. Bounded History & Pagination UI
@@ -49,25 +93,30 @@ final class FrontendUITests: XCTestCase {
 
         // 2. Find and tap 'Show 20 more' button to expand to 40
         let showMoreButton = app.buttons["calls.showMore"]
-        _ = scrollToElement(showMoreButton, in: app)
-        XCTAssertTrue(showMoreButton.exists, "'Show 20 more' button must be present when more than 20 items exist")
+        let foundShowMore = scrollToElement(showMoreButton, in: app, direction: .down)
+        XCTAssertTrue(foundShowMore && showMoreButton.exists, "'Show 20 more' button must be present when more than 20 items exist")
         showMoreButton.tap()
 
-        XCTAssertTrue(countLabel.waitForExistence(timeout: 5))
+        // Scroll back to top before asserting count label
+        let scrolledToTop40 = scrollToElement(countLabel, in: app, direction: .up)
+        XCTAssertTrue(scrolledToTop40 && countLabel.exists)
         XCTAssertEqual(countLabel.label, "Showing 40 of 100 calls")
 
-        // 3. Expand until capped at 100
+        // 3. Expand until capped at 100 (each tap grows by 20: 40 -> 60, 60 -> 80, 80 -> 100)
         for _ in 0..<3 {
-            if showMoreButton.exists && scrollToElement(showMoreButton, in: app) {
-                showMoreButton.tap()
-            }
+            let foundNext = scrollToElement(showMoreButton, in: app, direction: .down)
+            XCTAssertTrue(foundNext && showMoreButton.exists, "'Show 20 more' button must exist for remaining expansion")
+            showMoreButton.tap()
         }
 
-        XCTAssertTrue(countLabel.waitForExistence(timeout: 5))
+        // Scroll back to top before asserting final count label
+        let scrolledToTop100 = scrollToElement(countLabel, in: app, direction: .up)
+        XCTAssertTrue(scrolledToTop100 && countLabel.exists)
         XCTAssertEqual(countLabel.label, "Showing the 100 most recent calls available in this history.")
-        XCTAssertFalse(showMoreButton.exists, "'Show 20 more' button must disappear once all 100 calls are shown")
 
-        attachScreenshot(name: "bounded-history-101-expanded", app: app)
+        // Verify button is absent when fully expanded
+        _ = scrollToElement(showMoreButton, in: app, direction: .down)
+        XCTAssertFalse(showMoreButton.exists, "'Show 20 more' button must disappear once all 100 calls are shown")
     }
 
     // MARK: - 2. Search Matches Beyond Initial Page & Detail Preservation
@@ -81,8 +130,9 @@ final class FrontendUITests: XCTestCase {
         searchField.typeText("Cedar")
 
         // Row 35 ('Cedar Plumber') must appear in search results
-        let cedarRow = app.buttons["calls.row.CA_RECORD_035"]
+        let cedarRow = app.descendants(matching: .any).matching(identifier: "calls.row.CA_RECORD_035").firstMatch
         XCTAssertTrue(cedarRow.waitForExistence(timeout: 5), "Cedar row 35 must match search beyond initial 20 page")
+        XCTAssertTrue(cedarRow.label.contains("Cedar"), "Row label must contain Cedar")
 
         // Tap row to open historical detail
         cedarRow.tap()
@@ -95,9 +145,7 @@ final class FrontendUITests: XCTestCase {
 
         // Verify search query and results are preserved after returning
         XCTAssertTrue(searchField.waitForExistence(timeout: 5))
-        XCTAssertTrue(cedarRow.exists, "Search state must be preserved after returning from detail")
-
-        attachScreenshot(name: "search-cedar-detail-roundtrip", app: app)
+        XCTAssertTrue(cedarRow.waitForExistence(timeout: 5), "Search state must be preserved after returning from detail")
     }
 
     // MARK: - 3. Kevin and Account Done Roundtrip from Both Tabs
@@ -114,14 +162,19 @@ final class FrontendUITests: XCTestCase {
         XCTAssertTrue(accountDone.waitForExistence(timeout: 5), "Account sheet Done button must exist")
         accountDone.tap()
 
-        // Verify Calls tab is still active
+        // Verify Calls tab is still active and selected
+        let callsTab = app.tabBars.buttons["Calls"]
+        XCTAssertTrue(callsTab.waitForExistence(timeout: 5))
+        XCTAssertTrue(callsTab.isSelected, "Calls tab must remain selected after account dismissal")
+
         let searchField = app.textFields["calls.search"]
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), "Calls tab must remain active after account dismissal")
 
         // 2. Switch to Kevin tab
-        let kevinTab = app.buttons["kevin.tab"]
+        let kevinTab = app.tabBars.buttons["Kevin"]
         XCTAssertTrue(kevinTab.waitForExistence(timeout: 5))
         kevinTab.tap()
+        XCTAssertTrue(kevinTab.isSelected, "Kevin tab must be selected after tap")
 
         // Open Account Settings from Kevin tab
         XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
@@ -130,10 +183,9 @@ final class FrontendUITests: XCTestCase {
         XCTAssertTrue(accountDone.waitForExistence(timeout: 5))
         accountDone.tap()
 
-        // Verify Kevin tab is still active
+        // Verify Kevin tab is still active and selected
         XCTAssertTrue(kevinTab.waitForExistence(timeout: 5))
-
-        attachScreenshot(name: "kevin-account-roundtrip", app: app)
+        XCTAssertTrue(kevinTab.isSelected, "Kevin tab must remain selected after account dismissal")
     }
 
     // MARK: - 4. Initial Error & Retry
@@ -149,8 +201,6 @@ final class FrontendUITests: XCTestCase {
         // After Retry, calls should load successfully
         let countLabel = app.staticTexts["calls.count"]
         XCTAssertTrue(countLabel.waitForExistence(timeout: 5), "Calls must load successfully after Retry")
-
-        attachScreenshot(name: "history-error-retry-success", app: app)
     }
 
     // MARK: - 5. Active Call Card & Full Live Transcript Detail
@@ -172,8 +222,6 @@ final class FrontendUITests: XCTestCase {
 
         // Active card must remain visible on Calls tab after live detail dismissal
         XCTAssertTrue(activeCard.waitForExistence(timeout: 5), "Active call card must remain visible after live detail dismissal")
-
-        attachScreenshot(name: "active-card-live-detail-done", app: app)
     }
 
     // MARK: - 6. Return from Kevin and Account Opens Exact Full Transcript
@@ -182,9 +230,10 @@ final class FrontendUITests: XCTestCase {
         let app = launchApp(scenario: "business-live")
 
         // 1. From Kevin tab, tap return to call
-        let kevinTab = app.buttons["kevin.tab"]
+        let kevinTab = app.tabBars.buttons["Kevin"]
         XCTAssertTrue(kevinTab.waitForExistence(timeout: 5))
         kevinTab.tap()
+        XCTAssertTrue(kevinTab.isSelected)
 
         let returnButton = app.buttons["call.return"]
         XCTAssertTrue(returnButton.waitForExistence(timeout: 5), "Compact return to call card must exist on Kevin tab")
@@ -205,8 +254,6 @@ final class FrontendUITests: XCTestCase {
         // Account sheet must close and live transcript detail must open
         XCTAssertTrue(liveDoneButton.waitForExistence(timeout: 5), "Live transcript detail must open from Account sheet return card")
         liveDoneButton.tap()
-
-        attachScreenshot(name: "return-to-call-from-kevin-and-account", app: app)
     }
 
     // MARK: - 7. Fixture External Actions Disabled
@@ -221,8 +268,6 @@ final class FrontendUITests: XCTestCase {
         let messageButton = app.buttons["call.message"]
         XCTAssertTrue(messageButton.waitForExistence(timeout: 5))
         XCTAssertFalse(messageButton.isEnabled, "Take message button must be disabled in screenshot fixtures")
-
-        attachScreenshot(name: "fixture-actions-disabled", app: app)
     }
 
     // MARK: - 8. Retained Error Pull-To-Refresh and Retry
@@ -231,18 +276,14 @@ final class FrontendUITests: XCTestCase {
         let app = launchApp(scenario: "history-retained-error")
 
         // 1. Initial load shows rows
-        let firstRow = app.buttons["calls.row.CA_BIZ_001"]
+        let firstRow = app.descendants(matching: .any).matching(identifier: "calls.row.business-urgent").firstMatch
         XCTAssertTrue(firstRow.waitForExistence(timeout: 5), "Initial call rows must be visible")
 
         // 2. Pull to refresh to trigger retained error
-        let firstCell = app.cells.firstMatch
-        if firstCell.exists {
-            let start = firstCell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
-            let finish = firstCell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9))
-            start.press(forDuration: 0.1, thenDragTo: finish)
-        } else {
-            app.swipeDown()
-        }
+        let scrollContainer = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch : app.tables.firstMatch
+        let start = scrollContainer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let finish = scrollContainer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        start.press(forDuration: 0.1, thenDragTo: finish)
 
         // 3. Verify error banner appears AND same rows remain visible
         let retryButton = app.buttons["Retry"]
@@ -254,10 +295,9 @@ final class FrontendUITests: XCTestCase {
 
         // 5. Verify error is removed and rows remain
         let errorBanner = app.staticTexts["Failed to refresh calls."]
-        XCTAssertFalse(errorBanner.waitForExistence(timeout: 3), "Error banner must be removed after successful retry")
+        let bannerDisappeared = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: errorBanner, handler: nil)
+        wait(for: [bannerDisappeared], timeout: 5.0)
         XCTAssertTrue(firstRow.exists, "Rows must still remain visible after retry")
-
-        attachScreenshot(name: "history-retained-error-recovered", app: app)
     }
 
     // MARK: - 9. Settings Actions Disabled in Screenshot Fixtures
@@ -265,38 +305,33 @@ final class FrontendUITests: XCTestCase {
     func testSettingsSectionsAndActionsDisabledInScreenshotFixture() throws {
         let app = launchApp(scenario: "account-settings")
 
-        // 1. Open Account Settings
-        let settingsButton = app.buttons["nav.settings"]
-        XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
-        settingsButton.tap()
-
+        // 1. Account Settings is already open on launch in this fixture
         let accountDone = app.buttons["settings.done"]
-        XCTAssertTrue(accountDone.waitForExistence(timeout: 5))
+        XCTAssertTrue(accountDone.waitForExistence(timeout: 5), "Account sheet Done button must exist on launch")
 
         // Check Account & Plan View Plans button is disabled
         let viewPlans = app.buttons["settings.viewPlans"]
-        if viewPlans.exists {
-            XCTAssertFalse(viewPlans.isEnabled, "View Plans button should be disabled in screenshot fixtures")
-        }
+        let foundViewPlans = scrollToElement(viewPlans, in: app, direction: .down)
+        XCTAssertTrue(foundViewPlans && viewPlans.exists, "View Plans button must exist")
+        XCTAssertFalse(viewPlans.isEnabled, "View Plans button should be disabled in screenshot fixtures")
 
         // Check Delete Account button is disabled
         let deleteButton = app.buttons["Delete Account"]
-        if deleteButton.exists {
-            XCTAssertFalse(deleteButton.isEnabled, "Delete Account button should be disabled in screenshot fixtures")
-        }
+        let foundDelete = scrollToElement(deleteButton, in: app, direction: .down)
+        XCTAssertTrue(foundDelete && deleteButton.exists, "Delete Account button must exist")
+        XCTAssertFalse(deleteButton.isEnabled, "Delete Account button should be disabled in screenshot fixtures")
 
         accountDone.tap()
 
         // 2. On Kevin tab, check Kevin sections
-        let kevinTab = app.buttons["kevin.tab"]
+        let kevinTab = app.tabBars.buttons["Kevin"]
         XCTAssertTrue(kevinTab.waitForExistence(timeout: 5))
         kevinTab.tap()
+        XCTAssertTrue(kevinTab.isSelected)
 
         let screenAllToggle = app.switches["kevin.screenAllCalls"]
-        if screenAllToggle.exists {
-            XCTAssertFalse(screenAllToggle.isEnabled, "Screen all calls toggle must be disabled in screenshot fixtures")
-        }
-
-        attachScreenshot(name: "settings-fixtures-disabled", app: app)
+        let foundScreenAll = scrollToElement(screenAllToggle, in: app, direction: .down)
+        XCTAssertTrue(foundScreenAll && screenAllToggle.exists, "Screen all calls toggle must exist")
+        XCTAssertFalse(screenAllToggle.isEnabled, "Screen all calls toggle must be disabled in screenshot fixtures")
     }
 }

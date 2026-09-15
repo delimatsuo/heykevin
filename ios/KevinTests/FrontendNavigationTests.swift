@@ -613,4 +613,162 @@ final class FrontendNavigationTests: XCTestCase {
         XCTAssertNil(nav.presentedSheet)
         XCTAssertNil(nav.presentedDetailLease)
     }
+
+    // MARK: - Account Dismissal Integration & Sequencing Tests
+
+    func testAccountTrueOpenLiveQueuesUntilOnDismiss() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_LIVE_1", revision: 1)
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        nav.openAccount()
+        XCTAssertTrue(nav.isAccountPresented)
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+
+        nav.openLive(lease: lease)
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+        XCTAssertNil(nav.presentedSheet)
+        XCTAssertEqual(nav.pendingAccountDestination, .liveCallDetail(lease))
+
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+        XCTAssertNil(nav.pendingAccountDestination)
+        XCTAssertEqual(nav.presentedSheet, .liveCallDetail(lease))
+    }
+
+    func testRepeatedHistoricalRouteWhileDismissingNewestWinsAfterDismissal() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        let record1 = makeRecord(id: "CA_HIST_1")
+        let record2 = makeRecord(id: "CA_HIST_2")
+
+        nav.openAccount()
+        XCTAssertTrue(nav.isAccountPresented)
+
+        // First route while account is open
+        nav.openHistoricalDetail(call: record1)
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+        if case .historicalDetail(let lease1) = nav.pendingAccountDestination {
+            XCTAssertEqual(lease1.callId, "CA_HIST_1")
+        } else {
+            XCTFail("Expected historicalDetail lease1 queued")
+        }
+
+        // Second route while account is still dismissing: newest route supersedes
+        nav.openHistoricalDetail(call: record2)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+        if case .historicalDetail(let lease2) = nav.pendingAccountDestination {
+            XCTAssertEqual(lease2.callId, "CA_HIST_2")
+        } else {
+            XCTFail("Expected historicalDetail lease2 queued")
+        }
+        XCTAssertNil(nav.presentedSheet)
+
+        // Real onDismiss completes
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        XCTAssertFalse(nav.isAccountDismissalInProgress)
+        XCTAssertNil(nav.pendingAccountDestination)
+        if case .historicalDetail(let presented) = nav.presentedSheet {
+            XCTAssertEqual(presented.callId, "CA_HIST_2")
+        } else {
+            XCTFail("Expected newest historicalDetail CA_HIST_2 presented after dismissal")
+        }
+    }
+
+    func testAuthRotationAndScopeReplacementRejectedAtDrain() {
+        var currentAuth = makeAuth(contractorId: "c-A", generation: 1)
+        var currentScope = makeScope(callSid: "CA_LIVE_1", revision: 1)
+        let nav = FrontendNavigation(
+            authProvider: { currentAuth },
+            scopeProvider: { currentScope }
+        )
+
+        // Case A: Historical detail queued under Auth A, auth rotates to Auth B
+        nav.openAccount()
+        nav.openHistoricalDetail(call: makeRecord(id: "CA_HIST_1"))
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+        XCTAssertNotNil(nav.pendingAccountDestination)
+
+        // Auth rotates to B
+        currentAuth = makeAuth(contractorId: "c-B", generation: 2)
+        nav.handleAuthChange()
+        XCTAssertNil(nav.pendingAccountDestination)
+
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        XCTAssertNil(nav.presentedSheet)
+
+        // Case B: Live detail queued with Scope revision 1, scope replaced to revision 2 before drain
+        currentAuth = makeAuth(contractorId: "c-A", generation: 1)
+        currentScope = makeScope(callSid: "CA_LIVE_1", revision: 1)
+        nav.handleAuthChange()
+
+        nav.openAccount()
+        let liveLeaseRev1 = CallPresentationLease(auth: currentAuth, scope: currentScope)
+        nav.openLive(lease: liveLeaseRev1)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+
+        // Scope advances revision before drain callback
+        currentScope = makeScope(callSid: "CA_LIVE_1", revision: 2)
+
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        XCTAssertNil(nav.presentedSheet, "Stale scope revision must be rejected at drain")
+    }
+
+    func testBeginAccountDismissWithSetterDeliverLiveDuringAnimationWaitsCallback() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_LIVE_1", revision: 1)
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        nav.openAccount()
+        XCTAssertTrue(nav.isAccountPresented)
+
+        // User triggers dismissal via binding setter
+        nav.setAccountPresented(false)
+        XCTAssertFalse(nav.isAccountPresented)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+
+        // Live call connects during dismiss animation
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: true)
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+        XCTAssertFalse(nav.shouldPresentInCall)
+        XCTAssertNil(nav.presentedSheet)
+
+        // Dismissal animation finishes
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        XCTAssertFalse(nav.isCallConnectedPendingPresentation)
+        XCTAssertTrue(nav.shouldPresentInCall)
+        XCTAssertNil(nav.presentedSheet)
+    }
+
+    func testStartConnectedWhileQueuePendingClearsQueueAndPresentsInCall() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_LIVE_1", revision: 1)
+        let liveLease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+        let record = makeRecord(id: "CA_HIST_1")
+
+        nav.openAccount()
+        nav.openHistoricalDetail(call: record)
+        XCTAssertNotNil(nav.pendingAccountDestination)
+        XCTAssertTrue(nav.isAccountDismissalInProgress)
+
+        // Live call connects while historical detail was queued behind Account dismissal
+        nav.handleCallConnectionStarted(lease: liveLease, hasOpenSheets: true)
+        XCTAssertNil(nav.pendingAccountDestination, "Connected call priority clears queued pending destination")
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+        XCTAssertFalse(nav.shouldPresentInCall)
+
+        // Account dismissal callback occurs
+        nav.handleAccountDismissed(hasRemainingSheets: false)
+        XCTAssertTrue(nav.shouldPresentInCall)
+        XCTAssertNil(nav.presentedSheet)
+
+        // Subsequent attempt to open historical detail while in-call is rejected
+        nav.openHistoricalDetail(call: record)
+        XCTAssertNil(nav.presentedSheet, "Historical detail presentation rejected while in-call")
+    }
 }

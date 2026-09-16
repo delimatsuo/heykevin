@@ -200,29 +200,42 @@ These observations came from the owner's physical **iPhone 16 Pro Max** through
 iPhone Mirroring, not a simulator. Read-only device metadata reported iOS
 **26.6.2 (23G90)** and installed bundle `com.kevin.callscreen`, version
 **1.3.0 (39)**. TestFlight's app detail independently displayed version 1.3.0,
-build 39, and the app was opened with its **Open** button.
+build 39, and the app was opened with its **Open** button. After the owner
+re-enabled Mirroring, navigation and read-only permission checks continued at
+approximately `01:17–01:30Z` on September 16 (September 15 America/New_York).
 
 | Check | Observed result |
 |---|---|
 | Initial navigation and history | **Pass:** the app opened on Calls and displayed “Showing 20 of 100 calls.” |
-| First history expansion | **Pass:** Show 20 more added rows and the count became 40 of 100. The footer explained the maximum of 100 recent calls within the last 90 days. |
-| Tab and Account navigation | **Pass:** Kevin opened, Account Settings opened from Kevin and dismissed, and returning to Calls retained the 40-call expansion. No saved settings were changed. |
+| History expansion and cap | **Pass:** the initial 20-to-40 expansion was observed. In the continuation, starting at 20, four successive Show 20 more activations reached the header “Showing the 100 most recent calls available in this history.” The final footer retained the 100-recent-calls/90-day scope and no longer offered Show 20 more. |
+| Tab and Account navigation | **Pass:** Kevin opened, Account Settings opened from Kevin and dismissed, and returning to Calls retained the 40-call expansion. In the continuation, Account Settings also opened from Calls; dismissal preserved the 100-call expansion. |
 | Search beyond the first page | **Pass:** searching for an already fetched call outside the initial 20 produced one matching result. The identifying query and caller content are omitted from this record. |
-| Details and search state | **Pass:** an already-read search result opened in Details. Dismissing it preserved the query, the All filter and the one-result view. This did not exercise a non-default filter or expansion retention after Details. |
-| Empty states | **Pass:** Unread displayed its distinct zero-unread state. The fictional query `kevin-acceptance-no-match` displayed “No matching calls” with Clear search. |
+| Details and retained state | **Pass in separate checks:** dismissing an already-read search result preserved the query, All filter and one-result view. Later, opening and closing an already-read call from the unqueried 100-call view preserved that expansion. A non-default filter after Details was not exercised. |
+| Empty states | **Pass:** Unread displayed its distinct zero-unread state; Spam displayed “No spam calls.” The fictional query `kevin-acceptance-no-match` displayed “No matching calls” with Clear search. |
+| Final app state | Calls was restored to All, 20 of 100, with no search query after the checks and again after returning from iOS Settings. |
+
+The continuation inspected the existing iOS Settings values without changing them:
+
+| Setting | Observed state |
+|---|---|
+| Microphone | Enabled for Kevin. |
+| Notifications | Allow Notifications and Time Sensitive Notifications enabled. Lock Screen, Notification Center and Banners selected; banner style Temporary; Sounds and Badges enabled. |
+| Notification previews | When Unlocked (Default). |
+| Notification prioritization and summaries | Prioritize Notifications and Summarize Notifications enabled. These settings do not establish delivered-notification wording or behavior. |
 
 No regression was demonstrated in these checks. No new call or message was
-initiated and no saved account preference was changed. Customer identities,
-phone numbers, transcripts and call-history screenshots are not included in the
-durable record.
+initiated and no saved account preference or OS permission was changed.
+Customer identities, phone numbers, transcripts and call-history screenshots
+are not included in the durable record.
 
-**Still open:** expansion through 60/80/100 and the final no-more-results state;
-expansion and a non-default filter retained after Details; live-call access from
-Calls, Kevin and Account; the N1 phone sequence below; physical VoiceOver;
-and OS notification/microphone permissions, preview and Focus settings.
-The owner reported that a second owner-controlled phone was unavailable.
-Mirroring subsequently relocked, so the remaining navigation checks were not
-completed. These partial observations do not complete N1 or N3 acceptance.
+**Still open:** a non-default filter retained after Details (both Unread and
+Spam were empty, so no matching detail was available); live-call access from
+Calls, Kevin and Account; the N1 phone sequence below; physical VoiceOver; and
+the active Focus state. Focus Settings was viewed, but its sharing configuration
+does not establish which Focus, if any, was active. The owner reported that a
+second owner-controlled phone was unavailable. These partial observations do
+not complete N1 or N3 acceptance.
+
 
 ## Remaining owner acceptance
 

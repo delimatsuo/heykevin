@@ -2,8 +2,9 @@
 
 **Updated:** 2026-09-16
 **Owner:** Deli Matsuo
-**Backend release baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
+**Backend release baseline:** `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, revision `kevin-api-00271-q4j`, verified September 16, 2026
 **Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
+**Current internal iOS candidate:** `1.3.1 (40)`, available in TestFlight QA; [release and phone checklist](docs/releases/2026-09-16-natural-message-ios-40.md)
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
 
@@ -81,20 +82,28 @@ completion on September 14, 2026.
 
 **Release acceptance:**
 
-- [x] The reviewed notification backend is deployed to production and `/health`
-      identifies the approved SHA: `7377c7ba402297625dec5de97a2250f50b1c8013`,
-      revision `kevin-api-00270-l9s`, verified September 14 at `21:45:33Z`.
-      See the [production record](docs/releases/2026-09-14-urgent-production-candidate.md).
+- [x] The reviewed notification backend, including the natural message-taking
+      change, is deployed to production and `/health` identifies the approved
+      SHA: `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, revision
+      `kevin-api-00271-q4j`, verified September 16 at `20:07:42Z`.
+      See the [current release record](docs/releases/2026-09-16-natural-message-ios-40.md).
       iOS publication and device acceptance below remain separate.
 - [x] The iPhone candidate **1.2.12 (38)** passed Apple processing and is
       available in the existing internal TestFlight QA group, verified September
       14 at `23:18:44Z`. See the [candidate record and test sequence](docs/releases/2026-09-14-notification-ios-38.md).
+- [x] The current button-design candidate **1.3.1 (40)** is `VALID` /
+      `IN_BETA_TESTING` and available in internal TestFlight QA. The
+      [build 40 record](docs/releases/2026-09-16-natural-message-ios-40.md)
+      binds its package and backend rollout; installation and phone acceptance
+      remain open. It has not been submitted for public App Store release.
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or
       tapping an old alert does not answer another call.
 - [ ] Take a message shows request/acknowledgement truthfully, preserves the
-      caller connection, and cannot conflict with pickup or timeout.
+      caller connection, and cannot conflict with pickup or timeout. Verify
+      completion of current speech and the conditional three-second pause
+      using the build 40 phone checklist.
 - [ ] An unanswered urgent call leaves the owner wait after 30 seconds. The
       urgent-alert preference survives reload and the backend respects it.
 - [ ] Duplicate actions and late responses after hangup, a new call or an

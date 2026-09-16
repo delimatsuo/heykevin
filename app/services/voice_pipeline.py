@@ -348,35 +348,8 @@ SERVICE INTAKE ORDER:
 """
 
 
-def is_owner_availability_hold(text: str) -> bool:
-    """Return True when Kevin has told the caller he is trying the owner."""
-    normalized = f" {text.lower()} "
-    if "not available" in normalized or "unavailable" in normalized:
-        return False
+from app.services.message_taking import is_owner_availability_hold
 
-    hold_markers = (
-        "let me see if",
-        "let me check if",
-        "i'm going to try",
-        "i will try",
-        "i'll try",
-        "let me try",
-        "one moment",
-        "please hold",
-        "hold on",
-    )
-    owner_markers = (
-        "available",
-        "reach",
-        "get ahold",
-        "get a hold",
-        "connect you",
-        "transfer you",
-        "try",
-    )
-    return any(marker in normalized for marker in hold_markers) and any(
-        marker in normalized for marker in owner_markers
-    )
 
 
 def build_system_prompt(
@@ -702,6 +675,7 @@ class VoicePipeline:
 
         # Serialization: only one Claude→TTS cycle at a time
         self._response_lock = asyncio.Lock()
+        self._transition_lock_held = False
 
         # Owner availability timer, started only when Kevin says he is trying the owner.
         self._unavailable_task = None
@@ -721,6 +695,11 @@ class VoicePipeline:
         self._caller_silence_prompted_at = None
         self._waiting_for_owner_availability = False
         self._owner_availability_wait_started_at = 0.0
+        self._hold_offered = False
+        self._hold_offer_completed_at = 0.0
+        self._last_speaking_finished_at = 0.0
+        self._last_speaking_started_at = 0.0
+        self._message_taking_pending = False
         self._silence_check_task = None
 
         # Persistent HTTP client — reuse TCP/TLS connections across API calls
@@ -809,30 +788,119 @@ class VoicePipeline:
 
     async def trigger_take_message(self):
         """Tell the caller the owner is unavailable after 'Take a message'."""
-        if self._unavailable_said:
+        if getattr(self, '_unavailable_said', False):
             return
-        # Cancel the owner-availability timer if running
-        if self._unavailable_task:
+        from app.services.owner_call_actions import consume_message_intent
+        await consume_message_intent(self, self._deliver_message_instruction)
+
+    async def _prepare_message_delivery(self, intent: dict) -> bool:
+        self._message_taking_pending = True
+        if self._unavailable_task and not self._unavailable_task.done() and self._unavailable_task is not asyncio.current_task():
             self._unavailable_task.cancel()
-        # Fire the unavailability message immediately
-        asyncio.create_task(self._unavailable_now())
+        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
+            self._summary_task.cancel()
 
-    async def _unavailable_now(self):
-        return await self._deliver_message_instruction()
+        if not getattr(self, '_transition_lock_held', False):
+            await self._response_lock.acquire()
+            self._transition_lock_held = True
 
-    async def _deliver_message_instruction(self):
-        async with self._response_lock:
-            if self._unavailable_said:
-                return True
-            owner = self._contractor_config.get("owner_name", settings.user_name)
-            msg = f"I'm sorry, {owner} is not available right now. You can leave me a message and I'll make sure they get it."
-            if await self._speak(msg) is False:
+        if not getattr(self, '_connected', False):
+            return False
+
+        guard = getattr(self, '_message_delivery_guard', None)
+        if guard is not None and callable(guard):
+            if not await guard():
                 return False
-            self._unavailable_said = True
-            self._finish_owner_availability_wait()
-            self._conversation.append({"role": "assistant", "content": msg})
-            await self.on_transcript("Kevin", msg)
+
+        action = str(intent.get('action') or 'decline').strip().lower()
+        hold_offered = bool(getattr(self, '_hold_offered', False))
+        accepted_at = intent.get('accepted_at')
+        finished_at = getattr(self, '_last_speaking_finished_at', 0.0) or getattr(self, '_hold_offer_completed_at', 0.0)
+        from app.services.message_taking import compute_grace_delay
+        delay = compute_grace_delay(
+            action=action,
+            hold_offered=hold_offered,
+            intent_accepted_at=accepted_at,
+            speaking_finished_at=finished_at,
+        )
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        # Allow buffered caller utterance from during grace to settle briefly
+        if self._utterance_buffer and getattr(self, '_connected', False):
+            wait_deadline = asyncio.get_event_loop().time() + 2.0
+            while self._utterance_buffer and asyncio.get_event_loop().time() < wait_deadline:
+                if not getattr(self, '_connected', False):
+                    return False
+                await asyncio.sleep(0.05)
+
+        if not getattr(self, '_connected', False):
+            return False
+        if guard is not None and callable(guard):
+            if not await guard():
+                return False
+        return True
+
+    def _finish_message_delivery_attempt(self) -> None:
+        self._message_taking_pending = False
+        if getattr(self, '_transition_lock_held', False):
+            self._transition_lock_held = False
+            lock = getattr(self, '_response_lock', None)
+            if lock is not None and lock.locked():
+                try:
+                    lock.release()
+                except RuntimeError:
+                    pass
+
+    async def _deliver_message_instruction(self) -> bool:
+        if getattr(self, '_unavailable_said', False):
             return True
+        if not getattr(self, '_connected', False):
+            return False
+
+        if getattr(self, '_transition_lock_held', False):
+            return await self._deliver_message_instruction_body()
+        else:
+            async with self._response_lock:
+                return await self._deliver_message_instruction_body()
+
+    async def _deliver_message_instruction_body(self) -> bool:
+        if getattr(self, '_unavailable_said', False):
+            return True
+        if not getattr(self, '_connected', False):
+            return False
+
+        guard = getattr(self, '_message_delivery_guard', None)
+        if guard is not None and callable(guard):
+            if not await guard():
+                return False
+
+        owner = self._contractor_config.get("owner_name", settings.user_name)
+        hold_offered = bool(getattr(self, "_hold_offered", False))
+        from app.services.message_taking import build_unavailable_speech_text
+        msg = build_unavailable_speech_text(owner, hold_offered=hold_offered)
+
+        speak_fn = getattr(self, '_speak', None)
+        if speak_fn is None or not callable(speak_fn):
+            return False
+
+        try:
+            delivered = await speak_fn(msg, guard=guard)
+        except TypeError:
+            delivered = await speak_fn(msg)
+
+        if delivered is False:
+            return False
+
+        self._unavailable_said = True
+        self._finish_owner_availability_wait()
+        if hasattr(self, '_conversation') and isinstance(self._conversation, list):
+            self._conversation.append({"role": "assistant", "content": msg})
+            if len(self._conversation) > 30:
+                self._conversation = self._conversation[-30:]
+        if self.on_transcript and callable(self.on_transcript):
+            await self.on_transcript("Kevin", msg)
+        return True
 
     async def stop(self):
         self._connected = False
@@ -841,16 +909,16 @@ class VoicePipeline:
         self._audio_input_ready.set()
         self._interrupt_speaking = True
         # Cancel RTDB command polling
-        if self._command_check_task:
+        if self._command_check_task and not self._command_check_task.done() and self._command_check_task is not asyncio.current_task():
             self._command_check_task.cancel()
         # Cancel silence timeout check
-        if self._silence_check_task:
+        if self._silence_check_task and not self._silence_check_task.done() and self._silence_check_task is not asyncio.current_task():
             self._silence_check_task.cancel()
-        if self._unavailable_task:
+        if self._unavailable_task and not self._unavailable_task.done() and self._unavailable_task is not asyncio.current_task():
             self._unavailable_task.cancel()
-        if self._summary_task and not self._summary_task.done():
+        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
             self._summary_task.cancel()
-        if self._deepgram_task:
+        if self._deepgram_task and not self._deepgram_task.done() and self._deepgram_task is not asyncio.current_task():
             self._deepgram_task.cancel()
         if self._deepgram_ws:
             try:
@@ -1707,10 +1775,20 @@ class VoicePipeline:
         try:
             client = self._http_client
             for iteration in range(max_tool_iterations + 1):
+                system_prompt = self._system_prompt
+                if getattr(self, '_unavailable_said', False):
+                    owner = self._contractor_config.get("owner_name", settings.user_name)
+                    directive = (
+                        f"\n\n[System: {owner} is confirmed unavailable. Take a message from the caller. "
+                        f"Do not offer to check availability or put the caller on hold.]"
+                    )
+                    if directive not in system_prompt:
+                        system_prompt = f"{system_prompt}{directive}"
+
                 request_body = {
                     "model": settings.anthropic_model,
                     "max_tokens": 200 if use_tools else 100,
-                    "system": self._system_prompt,
+                    "system": system_prompt,
                     "messages": self._conversation[-20:],
                 }
                 if use_tools:
@@ -1763,7 +1841,7 @@ class VoicePipeline:
                     self._conversation.append({"role": "assistant", "content": content_blocks})
 
                     # Say filler phrase before first tool execution
-                    if not tool_filler_said:
+                    if not tool_filler_said and not getattr(self, '_message_taking_pending', False):
                         tool_filler_said = True
                         filler = "Let me check on that for you."
                         await self.on_transcript("Kevin", filler)
@@ -1856,11 +1934,17 @@ class VoicePipeline:
                     )
                     break
 
-                self._conversation.append({"role": "assistant", "content": kevin_text})
-
-                # A6: Cap conversation history to last 30 entries
-                if len(self._conversation) > 30:
-                    self._conversation = self._conversation[-30:]
+                # Suppress unsounded availability offer BEFORE appending to conversation or transcript
+                if (
+                    getattr(self, '_message_taking_pending', False)
+                    or getattr(self, '_unavailable_said', False)
+                ) and is_owner_availability_hold(kevin_text):
+                    _log_voice_event(
+                        "assistant_availability_offer_suppressed",
+                        self._call_sid,
+                        chars=len(kevin_text.strip()),
+                    )
+                    break
 
                 _log_voice_event(
                     "assistant_response_ready",
@@ -1868,10 +1952,25 @@ class VoicePipeline:
                     chars=len(kevin_text),
                     words=len(kevin_text.split()),
                 )
-                await self.on_transcript("Kevin", kevin_text)
-                await self._speak(kevin_text)
+
                 if is_owner_availability_hold(kevin_text):
-                    self._start_owner_availability_wait()
+                    async def on_hold_speech_started():
+                        self._conversation.append({"role": "assistant", "content": kevin_text})
+                        if len(self._conversation) > 30:
+                            self._conversation = self._conversation[-30:]
+                        if self.on_transcript and callable(self.on_transcript):
+                            await self.on_transcript("Kevin", kevin_text)
+
+                    delivered = await self._speak(kevin_text, on_speech_started=on_hold_speech_started)
+                    if delivered and not getattr(self, '_unavailable_said', False) and not getattr(self, '_message_taking_pending', False):
+                        self._start_owner_availability_wait()
+                else:
+                    self._conversation.append({"role": "assistant", "content": kevin_text})
+                    if len(self._conversation) > 30:
+                        self._conversation = self._conversation[-30:]
+                    if self.on_transcript and callable(self.on_transcript):
+                        await self.on_transcript("Kevin", kevin_text)
+                    await self._speak(kevin_text)
 
                 # Detect goodbye — hang up the call after Kevin's closing line
                 goodbye_phrases = ["have a great day", "have a good day", "have a nice day", "goodbye", "take care"]
@@ -1888,7 +1987,11 @@ class VoicePipeline:
             _log_voice_exception("claude_response_error", error, self._call_sid)
 
     def _start_owner_availability_wait(self):
-        if not self._connected or self._unavailable_said:
+        if (
+            not self._connected
+            or self._unavailable_said
+            or getattr(self, "_message_taking_pending", False)
+        ):
             return
         now = time.time()
         self._waiting_for_owner_availability = True
@@ -1959,7 +2062,7 @@ class VoicePipeline:
         self._waiting_for_owner_availability = False
         self._owner_availability_wait_started_at = 0.0
         self._caller_silence_prompted_at = None
-        if self._summary_task and not self._summary_task.done():
+        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
             self._summary_task.cancel()
 
     def _mark_caller_activity(self):
@@ -1981,8 +2084,13 @@ class VoicePipeline:
         )
         if (
             waiting
-            and self._waiting_for_owner_availability
-            and self._last_caller_speech_time <= self._owner_availability_wait_started_at
+            and (
+                getattr(self, '_message_taking_pending', False)
+                or (
+                    self._waiting_for_owner_availability
+                    and self._last_caller_speech_time <= self._owner_availability_wait_started_at
+                )
+            )
         ):
             return False
         if require_unlocked:
@@ -2078,7 +2186,13 @@ class VoicePipeline:
 
     # --- ElevenLabs TTS (interruptible) ---
 
-    async def _speak(self, text: str):
+    async def _speak(
+        self,
+        text: str,
+        *,
+        on_speech_started: Optional[Callable[[], Awaitable[None]]] = None,
+        guard: Optional[Callable[[], Awaitable[bool]]] = None,
+    ) -> bool:
         """Convert text to speech. Supports barge-in (stops if caller interrupts)."""
         delivered_ok = False
         self._is_speaking = True
@@ -2110,6 +2224,39 @@ class VoicePipeline:
                 if mulaw_data[:4] == b'RIFF':
                     mulaw_data = mulaw_data[44:]
 
+                if not mulaw_data:
+                    self._is_speaking = False
+                    self._interrupt_speaking = False
+                    return False
+
+                # Critical race check before first external audio send:
+                # Hold offer unstarted during ElevenLabs HTTP must be suppressed
+                # if _message_taking_pending or _unavailable_said.
+                if is_owner_availability_hold(text) and (
+                    getattr(self, '_message_taking_pending', False)
+                    or getattr(self, '_unavailable_said', False)
+                ):
+                    _log_voice_event(
+                        "assistant_availability_offer_suppressed",
+                        self._call_sid,
+                        chars=len(text.strip()),
+                    )
+                    self._is_speaking = False
+                    self._interrupt_speaking = False
+                    return False
+
+                # Revalidate guard before emitting any outbound audio chunks
+                if guard is not None and callable(guard):
+                    if not await guard():
+                        self._is_speaking = False
+                        self._interrupt_speaking = False
+                        return False
+
+                if not self._connected or self._interrupt_speaking:
+                    self._is_speaking = False
+                    self._interrupt_speaking = False
+                    return False
+
                 _log_voice_event(
                     "tts_audio_ready",
                     self._call_sid,
@@ -2124,12 +2271,20 @@ class VoicePipeline:
                 chunk_duration = total_duration / num_chunks
 
                 start_time = asyncio.get_event_loop().time()
+                self._last_speaking_started_at = time.monotonic()
                 chunk_index = 0
                 delivery_failed = False
                 for i in range(0, len(mulaw_data), chunk_size):
                     if not self._connected or self._interrupt_speaking:
                         logger.info("TTS interrupted (barge-in)")
                         break
+
+                    # Revalidate guard before next chunk if guard was provided
+                    if chunk_index > 0 and guard is not None and callable(guard):
+                        if not await guard():
+                            self._is_speaking = False
+                            self._interrupt_speaking = False
+                            return False
 
                     chunk = mulaw_data[i:i + chunk_size]
                     delivered = await self.on_audio_out(chunk)
@@ -2146,24 +2301,63 @@ class VoicePipeline:
                         break
                     chunk_index += 1
 
+                    if chunk_index == 1:
+                        # First audio chunk was actually accepted by external consumer
+                        if is_owner_availability_hold(text):
+                            self._hold_offered = True
+                            self._hold_offer_completed_at = time.monotonic()
+                        if on_speech_started is not None and callable(on_speech_started):
+                            await on_speech_started()
+                            # Revalidate authority if callback awaited
+                            if guard is not None and callable(guard):
+                                if not await guard():
+                                    self._is_speaking = False
+                                    self._interrupt_speaking = False
+                                    return False
+
                     # Pace at ~real-time
                     target = start_time + (chunk_index * chunk_duration * 0.9)
                     delay = target - asyncio.get_event_loop().time()
                     if delay > 0:
                         await asyncio.sleep(delay)
 
-                # Brief wait for Twilio to finish playing
+                # Drain locally for the remaining playback duration of the utterance
                 if (
                     not delivery_failed
                     and not self._interrupt_speaking
-                    and chunk_duration > 0
+                    and self._connected
+                    and total_duration > 0
                 ):
-                    await asyncio.sleep(min(chunk_duration, 0.5))
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    remaining = total_duration - elapsed
+                    if remaining > 0:
+                        drain_end = asyncio.get_event_loop().time() + remaining
+                        while asyncio.get_event_loop().time() < drain_end:
+                            if not self._connected or self._interrupt_speaking:
+                                break
+                            step = min(0.05, drain_end - asyncio.get_event_loop().time())
+                            if step > 0:
+                                await asyncio.sleep(step)
 
-                delivered_ok = not delivery_failed and not self._interrupt_speaking and self._connected
+                # Distinguish delivery failure from user cutoff after partial playback
+                if delivery_failed or not self._connected:
+                    delivered_ok = False
+                elif self._interrupt_speaking and chunk_index == 0:
+                    delivered_ok = False
+                elif self._interrupt_speaking and chunk_index > 0:
+                    delivered_ok = True
+                else:
+                    delivered_ok = True
+
                 # Update silence timeout — Kevin spoke
                 if not delivery_failed:
                     self._mark_kevin_activity()
+
+                now = time.monotonic()
+                self._last_speaking_finished_at = now
+                if chunk_index > 0 and is_owner_availability_hold(text):
+                    self._hold_offered = True
+                    self._hold_offer_completed_at = now
             else:
                 _log_voice_event(
                     "tts_provider_error",
@@ -2171,9 +2365,11 @@ class VoicePipeline:
                     level=logging.WARNING,
                     status_code=response.status_code,
                 )
+                delivered_ok = False
 
         except Exception as error:
             _log_voice_exception("tts_request_error", error, self._call_sid)
+            delivered_ok = False
 
         self._is_speaking = False
         self._interrupt_speaking = False

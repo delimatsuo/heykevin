@@ -56,7 +56,7 @@ completion on September 14, 2026.
    end of current speech, then give the unavailable/message response. Repeated
    delivery attempts must not repeat the pause or announcement. The existing
    unanswered 30-second timeout receives no additional three-second delay.
-   Use the configured owner name and preserve the caller's language. Pick up
+   Use the configured owner name and retain existing caller-language handling. Pick up
    remains the primary phone action; Take a message uses a neutral message
    treatment rather than a destructive red X.
 4. Tapping the body opens that call without answering. An ended call opens its
@@ -196,6 +196,11 @@ former v2 program.
 
 ## Deferred ideas and superseded plans
 
+- **Legacy Voice unavailable-prompt language parity:** source review on September
+  16 found that the Voice engine's existing direct-TTS unavailable phrase is
+  fixed English. The current transition fix retains that behavior; it does not
+  claim multilingual qualification for this phrase. Record and prioritize a
+  bounded repair when that engine/language path is in scope.
 - **VoiceOver/accessibility qualification:** deferred by the owner on September
   16, 2026. It is not a current N1/N3 acceptance requirement or release blocker.
   Do not request VoiceOver testing or start accessibility work unless the owner

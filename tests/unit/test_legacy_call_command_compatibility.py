@@ -257,29 +257,44 @@ async def test_actual_407_decline_adopted_by_new_engines_with_honest_ack(rtdb_en
     # 2. Setup active call record
     rtdb_env.active_calls['CA1'] = fresh_record(ws_token='pinned_ws_token')
 
-    cls = {'voice': VoicePipeline, 'gemini': GeminiPipeline, 'relay': RelayPipeline}[engine]
-    pipeline = cls.__new__(cls)
-    pipeline._call_sid = 'CA1'
-    pipeline._contractor_config = {'contractor_id': 'owner', 'owner_name': 'Owner'}
-    pipeline._command_ws_token = 'pinned_ws_token'
-    pipeline._connected = True
-    pipeline._active = True
-    pipeline._ending = False
-    pipeline._unavailable_said = False
-    pipeline._conversation = []
-    pipeline._finish_owner_availability_wait = MagicMock()
-    pipeline.on_transcript = AsyncMock()
-    pipeline._summary_task = None
+    if engine == 'relay':
+        sent_messages = []
 
-    if engine == 'voice':
-        pipeline._response_lock = asyncio.Lock()
-        pipeline._speak = AsyncMock(return_value=True)
-    elif engine == 'gemini':
-        pipeline._ws = object()
-        pipeline._send_client_instruction = AsyncMock(return_value=None)
+        async def fake_stream(_contents):
+            yield {"text": "Owner is not available right now. Can I take a message?"}
+
+        pipeline = RelayPipeline(
+            contractor_config={'contractor_id': 'owner', 'owner_name': 'Owner'},
+            call_sid='CA1',
+            caller_phone='+15550001111',
+            send_to_twilio=AsyncMock(side_effect=sent_messages.append),
+            on_transcript=AsyncMock(),
+            stream_generate=fake_stream,
+        )
+        pipeline._command_ws_token = 'pinned_ws_token'
+        pipeline._prepare_message_delivery = AsyncMock(return_value=True)
     else:
-        pipeline._supersede_in_flight = AsyncMock()
-        pipeline._start_generation = MagicMock()
+        cls = {'voice': VoicePipeline, 'gemini': GeminiPipeline}[engine]
+        pipeline = cls.__new__(cls)
+        pipeline._call_sid = 'CA1'
+        pipeline._contractor_config = {'contractor_id': 'owner', 'owner_name': 'Owner'}
+        pipeline._command_ws_token = 'pinned_ws_token'
+        pipeline._prepare_message_delivery = AsyncMock(return_value=True)
+        pipeline._connected = True
+        pipeline._active = True
+        pipeline._ending = False
+        pipeline._unavailable_said = False
+        pipeline._conversation = []
+        pipeline._finish_owner_availability_wait = MagicMock()
+        pipeline.on_transcript = AsyncMock()
+        pipeline._summary_task = None
+
+        if engine == 'voice':
+            pipeline._response_lock = asyncio.Lock()
+            pipeline._speak = AsyncMock(return_value=True)
+        elif engine == 'gemini':
+            pipeline._ws = object()
+            pipeline._send_client_instruction = AsyncMock(return_value=True)
 
     # Run check commands
     await pipeline._check_commands()
@@ -298,11 +313,18 @@ async def test_actual_407_decline_adopted_by_new_engines_with_honest_ack(rtdb_en
         assert pipeline._speak.await_count == 1
     elif engine == 'gemini':
         assert pipeline._send_client_instruction.await_count == 1
+    elif engine == 'relay':
+        token_messages = [m for m in sent_messages if isinstance(m, dict) and m.get('type') == 'text']
+        assert len(token_messages) > 0
+        initial_sent_count = len(sent_messages)
+
     await pipeline._check_commands()
     if engine == 'voice':
         assert pipeline._speak.await_count == 1
     elif engine == 'gemini':
         assert pipeline._send_client_instruction.await_count == 1
+    elif engine == 'relay':
+        assert len(sent_messages) == initial_sent_count
 
 
 @pytest.mark.asyncio
@@ -357,6 +379,7 @@ async def test_duplicate_intent_projection_reservations_and_delivery(rtdb_env):
     pipeline._call_sid = 'CA1'
     pipeline._contractor_config = {'contractor_id': 'owner', 'owner_name': 'Owner'}
     pipeline._command_ws_token = 'token123'
+    pipeline._prepare_message_delivery = AsyncMock(return_value=True)
     pipeline._connected = True
     pipeline._unavailable_said = False
     pipeline._response_lock = asyncio.Lock()
@@ -428,6 +451,7 @@ async def test_invalid_and_conflicting_contexts_reject_adoption_without_mutation
     pipeline._call_sid = 'CA1'
     pipeline._contractor_config = {'contractor_id': 'owner', 'owner_name': 'Owner'}
     pipeline._command_ws_token = 'token123'
+    pipeline._prepare_message_delivery = AsyncMock(return_value=True)
     pipeline._connected = True
     pipeline._conversation = []
     pipeline._finish_owner_availability_wait = MagicMock()
@@ -449,6 +473,7 @@ async def test_command_replacement_during_consumption_is_preserved(rtdb_env, mon
     pipeline._call_sid = 'CA1'
     pipeline._contractor_config = {'contractor_id': 'owner', 'owner_name': 'Owner'}
     pipeline._command_ws_token = 'token123'
+    pipeline._prepare_message_delivery = AsyncMock(return_value=True)
     pipeline._connected = True
     pipeline._unavailable_said = False
     pipeline._response_lock = asyncio.Lock()
@@ -456,7 +481,7 @@ async def test_command_replacement_during_consumption_is_preserved(rtdb_env, mon
     pipeline._finish_owner_availability_wait = MagicMock()
     pipeline.on_transcript = AsyncMock()
 
-    async def deliver_and_replace(msg):
+    async def deliver_and_replace(msg, **kwargs):
         # Replace command in RTDB before delivery finishes and conditional deletion runs
         rtdb_env.call_commands['CA1'] = {'type': 'take_message', 'replacement_tag': 'new_cmd'}
         return True
@@ -477,6 +502,7 @@ async def test_ack_failure_and_cleanup_failure_resilience(rtdb_env, monkeypatch)
     pipeline._call_sid = 'CA1'
     pipeline._contractor_config = {'contractor_id': 'owner', 'owner_name': 'Owner'}
     pipeline._command_ws_token = 'token123'
+    pipeline._prepare_message_delivery = AsyncMock(return_value=True)
     pipeline._connected = True
     pipeline._unavailable_said = False
     pipeline._response_lock = asyncio.Lock()
@@ -515,6 +541,7 @@ async def test_legacy_accepted_injected_rejects_delivery_and_preparation_release
     pipeline._call_sid = 'CA1'
     pipeline._contractor_config = {'contractor_id': 'owner', 'owner_name': 'Owner'}
     pipeline._command_ws_token = 'token123'
+    pipeline._prepare_message_delivery = AsyncMock(return_value=True)
     pipeline._connected = True
     pipeline._conversation = []
     pipeline._finish_owner_availability_wait = MagicMock()

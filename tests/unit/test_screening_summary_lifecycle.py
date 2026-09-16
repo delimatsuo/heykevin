@@ -29,14 +29,16 @@ def _isolated_owner_decisions(monkeypatch):
     """Keep lifecycle fixtures on an in-memory version of the durable adapter."""
     from copy import deepcopy
     import time
+    from unittest.mock import AsyncMock
     from app.services import owner_call_actions as actions
+    from app.services import legacy_call_commands as legacy_cmds
     owners = {
         'CA_relay_test_100': 'c_relay_test', 'CA_gemini_test_200': 'c_gemini_test',
         'CA_voice_test_300': 'c_voice_test', 'CA_spanish_test_400': 'c_spanish_test',
         'CA_system_quote_test_500': 'c_system_quote_test',
     }
     records = {sid: {'contractor_id': owner, 'state': 'screening',
-                    'state_updated_at': time.time() - 1} for sid, owner in owners.items()}
+                    'state_updated_at': time.time() - 1, 'ws_token': 'ws1'} for sid, owner in owners.items()}
     async def read(sid):
         return deepcopy(records.get(sid))
     async def transaction(sid, callback):
@@ -44,6 +46,7 @@ def _isolated_owner_decisions(monkeypatch):
         return deepcopy(records[sid])
     monkeypatch.setattr(actions, '_run_rtdb_transaction', transaction)
     monkeypatch.setattr(actions, 'read_record', read)
+    monkeypatch.setattr(legacy_cmds, 'read_legacy_command', AsyncMock(return_value=None))
 
 
 # --- Helpers and Fixtures ---
@@ -97,9 +100,8 @@ def _make_relay_pipeline(
 ) -> tuple[RelayPipeline, _Recorder]:
     recorder = _Recorder()
 
-    async def noop_generate(_contents):
-        if False:
-            yield {}
+    async def fake_generate(_contents):
+        yield {"text": "Deli is not available right now. Can I take a message?"}
 
     pipeline = RelayPipeline(
         contractor_config={
@@ -114,8 +116,9 @@ def _make_relay_pipeline(
         on_transcript=recorder.on_transcript,
         on_urgency_detected=recorder.on_urgency,
         on_call_complete=recorder.on_complete,
-        stream_generate=noop_generate,
+        stream_generate=fake_generate,
     )
+    pipeline._command_ws_token = "ws1"
     pipeline._history.append({"role": "user", "parts": [{"text": "Hello, my pipe burst."}]})
     return pipeline, recorder
 
@@ -136,6 +139,7 @@ def _make_gemini_pipeline(
             "effective_mode": "business",
         },
     )
+    pipeline._command_ws_token = "ws1"
     pipeline._ws = FakeWebSocket()
     pipeline._connected = True
     pipeline._transcript_lines.append("Caller: Need help with a broken water heater.")
@@ -158,6 +162,7 @@ def _make_voice_pipeline(
             "effective_mode": "business",
         },
     )
+    pipeline._command_ws_token = "ws1"
     pipeline._connected = True
     pipeline._conversation.append({"role": "user", "content": "<caller_speech>I have an emergency roof leak.</caller_speech>"})
     return pipeline

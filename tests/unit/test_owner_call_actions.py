@@ -15,7 +15,7 @@ _provider_lookup = a._conference_contains_call
 
 
 def fresh(**changes):
-    return dict(contractor_id='owner', state='screening', state_updated_at=time.time(), **changes)
+    return dict(contractor_id='owner', state='screening', state_updated_at=time.time(), **{'ws_token': 'ws1', **changes})
 
 
 class Store:
@@ -172,7 +172,7 @@ async def test_decline_intent_atomic_other_operations_conflict(backend):
 @pytest.mark.asyncio
 async def test_ack_failure_retries_without_instruction_replay(backend,monkeypatch):
     await act('decline')
-    pipeline=SimpleNamespace(_call_sid='CA1',_contractor_config={'contractor_id':'owner'})
+    pipeline=SimpleNamespace(_call_sid='CA1',_contractor_config={'contractor_id':'owner'},_command_ws_token='ws1')
     deliver=AsyncMock(return_value=True)
     real=a.acknowledge_owner_action
     monkeypatch.setattr(a,'acknowledge_owner_action',AsyncMock(side_effect=RuntimeError('storage')))
@@ -186,7 +186,7 @@ async def test_ack_failure_retries_without_instruction_replay(backend,monkeypatc
 @pytest.mark.asyncio
 async def test_failed_delivery_retains_intent_then_retries(backend):
     await act('decline')
-    pipeline=SimpleNamespace(_call_sid='CA1',_contractor_config={'contractor_id':'owner'})
+    pipeline=SimpleNamespace(_call_sid='CA1',_contractor_config={'contractor_id':'owner'},_command_ws_token='ws1')
     deliver=AsyncMock(side_effect=[False,True])
     assert not await a.consume_message_intent(pipeline,deliver)
     assert backend.record['owner_action_status']=='message_requested'
@@ -219,13 +219,14 @@ async def test_engine_failed_instruction_retries_and_ack_failure_never_repeats(b
     cls = VoicePipeline if engine=='voice' else GeminiPipeline
     pipeline=cls.__new__(cls)
     pipeline._call_sid='CA1';pipeline._contractor_config={'contractor_id':'owner','owner_name':'Owner'}
+    pipeline._command_ws_token='ws1';pipeline._prepare_message_delivery=AsyncMock(return_value=True)
     pipeline._connected=True;pipeline._unavailable_said=False;pipeline._ws=object()
     pipeline._response_lock=asyncio.Lock();pipeline._conversation=[]
     pipeline._finish_owner_availability_wait=MagicMock();pipeline.on_transcript=AsyncMock()
     if engine=='voice':
         delivery=pipeline._speak=AsyncMock(side_effect=[False,True])
     else:
-        delivery=pipeline._send_client_instruction=AsyncMock(side_effect=[RuntimeError('socket'),None])
+        delivery=pipeline._send_client_instruction=AsyncMock(side_effect=[RuntimeError('socket'),True])
     await act('decline')
     await pipeline._check_commands()
     assert not pipeline._unavailable_said and backend.record['owner_action_status']=='message_requested'
@@ -243,6 +244,7 @@ async def test_gemini_missing_socket_retains_durable_timeout(backend):
     from app.services.gemini_pipeline import GeminiPipeline
     pipeline=GeminiPipeline.__new__(GeminiPipeline)
     pipeline._call_sid='CA1';pipeline._contractor_config={'contractor_id':'owner'}
+    pipeline._command_ws_token='ws1';pipeline._prepare_message_delivery=AsyncMock(return_value=True)
     pipeline._connected=True;pipeline._unavailable_said=False;pipeline._ws=None
     assert await a.arbitrate_owner_timeout('CA1','owner')
     await pipeline._check_commands()
@@ -259,6 +261,7 @@ async def test_all_engine_timeouts_retry_storage_failure_and_delivery(backend,mo
     cls={'voice':VoicePipeline,'gemini':GeminiPipeline,'relay':RelayPipeline}[engine]
     pipeline=cls.__new__(cls)
     pipeline._call_sid='CA1';pipeline._contractor_config={'contractor_id':'owner'}
+    pipeline._command_ws_token='ws1';pipeline._prepare_message_delivery=AsyncMock(return_value=True)
     pipeline._connected=True;pipeline._active=True;pipeline._ending=False;pipeline._unavailable_said=False
     pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS=0
     pipeline._deliver_message_instruction=AsyncMock(side_effect=[False,True])
@@ -284,14 +287,22 @@ async def test_relay_interrupted_instruction_survives_until_completed(backend):
         yield {'text':'The owner is unavailable; may I take a message?'}
     pipeline=RelayPipeline(contractor_config={'contractor_id':'owner','owner_name':'Owner'},call_sid='CA1',
         caller_phone='',send_to_twilio=AsyncMock(),on_transcript=AsyncMock(),stream_generate=stream)
-    await act('decline');await pipeline._check_commands();await first_started.wait()
-    assert backend.record['owner_action_status']=='taking_message'
-    await pipeline._supersede_in_flight()
-    assert pipeline._message_instruction
-    pipeline._start_generation();await pipeline.wait_idle()
-    assert len(seen)==2 and any('unavailable' in str(part) for part in seen[1])
-    assert pipeline._message_instruction==''
-    await pipeline.stop()
+    pipeline._command_ws_token='ws1'
+    try:
+        await act('decline')
+        command_task=asyncio.create_task(pipeline._check_commands())
+        await asyncio.wait_for(first_started.wait(),timeout=1.0)
+        assert backend.record['owner_action_status']=='message_requested'
+        await pipeline._supersede_in_flight()
+        await asyncio.wait_for(command_task,timeout=1.0)
+        assert backend.record['owner_action_status']=='message_requested'
+        assert not getattr(pipeline,'_unavailable_said',False)
+        await pipeline._check_commands()
+        assert backend.record['owner_action_status']=='taking_message'
+        assert getattr(pipeline,'_unavailable_said',False) is True
+        assert len(seen)==2 and any('unavailable' in str(part) for part in seen[1])
+    finally:
+        await pipeline.stop()
 
 
 @pytest.mark.asyncio
@@ -341,7 +352,7 @@ async def test_direct_decline_ack_waits_for_successful_redirect(backend,monkeypa
     await incoming._ring_contractor(call_sid='CA1',caller_phone='',caller_name='',conference_name='direct',contractor_id='owner')
     assert redirect.await_count==2
     assert backend.record['owner_action_status']=='message_requested'
-    pipeline=SimpleNamespace(_call_sid='CA1', _contractor_config={'contractor_id':'owner'})
+    pipeline=SimpleNamespace(_call_sid='CA1', _contractor_config={'contractor_id':'owner'}, _command_ws_token='ws1')
     assert await a.consume_message_intent(pipeline, AsyncMock(return_value=True))
     assert backend.record['owner_action_status']=='taking_message'
 
@@ -556,7 +567,7 @@ async def test_direct_fallback_rejects_reassigned_owner(backend, monkeypatch):
 @pytest.mark.asyncio
 async def test_elapsed_timeout_survives_pending_pickup_then_preparation_release(backend, monkeypatch):
     pipeline = SimpleNamespace(_call_sid='CA1', _contractor_config={'contractor_id':'owner'},
-                               _connected=True, OWNER_AVAILABILITY_TIMEOUT_SECONDS=0)
+                               _connected=True, _command_ws_token='ws1', OWNER_AVAILABILITY_TIMEOUT_SECONDS=0)
     now = time.time()
     backend.record = a.reduce_active_call_action(backend.record, action='accept', contractor_id='owner',
         operation_id='op1', claim_nonce='pending', conference_name='pickup', now=now)[0]

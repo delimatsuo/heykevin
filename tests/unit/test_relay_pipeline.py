@@ -20,17 +20,21 @@ def _isolated_owner_decisions(monkeypatch):
     """Fake Relay sessions now exercise the durable action adapter without providers."""
     from copy import deepcopy
     import time
+    from unittest.mock import AsyncMock
     from app.services import owner_call_actions as actions
+    from app.services import legacy_call_commands as legacy_cmds
     records = {}
     async def read(sid):
         return deepcopy(records.get(sid))
     async def transaction(sid, callback):
         record = records.setdefault(sid, {'contractor_id': 'test_contractor',
-            'state': 'screening', 'state_updated_at': time.time() - 1})
+            'state': 'screening', 'state_updated_at': time.time() - 1, 'ws_token': 'ws1'})
         records[sid] = callback(deepcopy(record))
         return deepcopy(records[sid])
     monkeypatch.setattr(actions, '_run_rtdb_transaction', transaction)
     monkeypatch.setattr(actions, 'read_record', read)
+    monkeypatch.setattr(legacy_cmds, 'read_legacy_command', AsyncMock(return_value=None))
+    monkeypatch.setattr(RelayPipeline, '_trigger_screening_summary_push', AsyncMock(return_value=None))
 
 
 def _contractor(**overrides) -> dict:
@@ -75,7 +79,7 @@ def _pipeline(recorder: _Recorder, parts_script, **overrides) -> RelayPipeline:
         for part in parts_script[index]:
             yield part
 
-    return RelayPipeline(
+    instance = RelayPipeline(
         contractor_config=_contractor(**overrides),
         call_sid="CA_relay_test",
         caller_phone="+15550001111",
@@ -85,6 +89,8 @@ def _pipeline(recorder: _Recorder, parts_script, **overrides) -> RelayPipeline:
         on_call_complete=recorder.on_complete,
         stream_generate=fake_stream,
     )
+    instance._command_ws_token = "ws1"
+    return instance
 
 
 async def _drive(pipeline: RelayPipeline, message: dict) -> None:

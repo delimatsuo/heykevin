@@ -179,13 +179,15 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     private func setupNotificationCategories() {
         let pickUpAction = UNNotificationAction(
             identifier: "PICK_UP_ACTION",
-            title: String(localized: "Pick Up"),
-            options: [.foreground]
+            title: String(localized: "Pick up"),
+            options: [.foreground],
+            icon: UNNotificationActionIcon(systemImageName: "phone.fill")
         )
         let takeMessageAction = UNNotificationAction(
             identifier: "TAKE_MESSAGE_ACTION",
-            title: String(localized: "Take a Message"),
-            options: [.foreground]
+            title: String(localized: "Take a message"),
+            options: [.foreground],
+            icon: UNNotificationActionIcon(systemImageName: "text.bubble.fill")
         )
         let screeningCategory = UNNotificationCategory(
             identifier: "SCREENING_CALL",

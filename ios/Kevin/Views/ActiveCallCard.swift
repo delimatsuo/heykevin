@@ -222,20 +222,20 @@ struct ActiveCallCard: View {
                         .tint(.white)
                 } else {
                     Image(systemName: "phone.fill")
-                        .font(.headline.weight(.bold))
+                        .font(.system(size: 16, weight: .semibold))
                 }
                 Text(String(localized: "Pick up"))
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: .infinity, minHeight: 46)
         }
-        .buttonStyle(HKPrimaryButtonStyle(tint: .hkForest))
+        .buttonStyle(CallActionPrimaryButtonStyle())
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.pickup")
     }
 
     private func messageButton(sid: String) -> some View {
-        Button(role: .destructive) {
+        Button {
             Task {
                 #if DEBUG
                 if AppStoreScreenshotFixtures.isEnabled { return }
@@ -252,15 +252,15 @@ struct ActiveCallCard: View {
                         .tint(.white)
                         .scaleEffect(0.8)
                 } else {
-                    Image(systemName: "xmark")
-                        .font(.subheadline.weight(.semibold))
+                    Image(systemName: "text.bubble.fill")
+                        .font(.system(size: 16, weight: .semibold))
                 }
                 Text(String(localized: "Take a message"))
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: .infinity, minHeight: 46)
         }
-        .buttonStyle(HKDestructiveButtonStyle())
+        .buttonStyle(CallActionSecondaryButtonStyle(variant: .darkCard))
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.message")
     }
@@ -591,20 +591,20 @@ struct LiveCallDetailView: View {
                         .tint(.white)
                 } else {
                     Image(systemName: "phone.fill")
-                        .font(.headline.weight(.bold))
+                        .font(.system(size: 16, weight: .semibold))
                 }
                 Text(String(localized: "Pick up"))
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: .infinity, minHeight: 46)
         }
-        .buttonStyle(HKPrimaryButtonStyle(tint: .hkForest))
+        .buttonStyle(CallActionPrimaryButtonStyle())
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.livePickup")
     }
 
     private func takeMessageButton(sid: String) -> some View {
-        Button(role: .destructive) {
+        Button {
             Task {
                 #if DEBUG
                 if AppStoreScreenshotFixtures.isEnabled { return }
@@ -618,18 +618,18 @@ struct LiveCallDetailView: View {
             HStack(spacing: 6) {
                 if coordinator.isDeclinePending(for: sid) {
                     ProgressView()
-                        .tint(.white)
+                        .tint(Color.hkInk)
                         .scaleEffect(0.8)
                 } else {
-                    Image(systemName: "xmark")
-                        .font(.subheadline.weight(.semibold))
+                    Image(systemName: "text.bubble.fill")
+                        .font(.system(size: 16, weight: .semibold))
                 }
                 Text(String(localized: "Take a message"))
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: .infinity, minHeight: 46)
         }
-        .buttonStyle(HKDestructiveButtonStyle())
+        .buttonStyle(CallActionSecondaryButtonStyle(variant: .liveDetail))
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.liveMessage")
     }
@@ -714,5 +714,60 @@ private struct TranscriptBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: isKevin ? .trailing : .leading)
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Call Action Button Styles
+
+private struct CallActionPrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(Color.hkForest.opacity(configuration.isPressed ? 0.85 : 1.0))
+            .clipShape(RoundedRectangle(cornerRadius: HKRadius.button, style: .continuous))
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct CallActionSecondaryButtonStyle: ButtonStyle {
+    enum Variant {
+        case darkCard
+        case liveDetail
+    }
+
+    var variant: Variant
+
+    func makeBody(configuration: Configuration) -> some View {
+        let isDark = variant == .darkCard
+        let foregroundColor: Color = isDark ? .white : .hkInk
+        let fillColor: Color = isDark
+            ? Color.white.opacity(configuration.isPressed ? 0.18 : 0.10)
+            : Color.hkInk.opacity(configuration.isPressed ? 0.10 : 0.05)
+        let strokeColor: Color = isDark
+            ? Color.white.opacity(0.25)
+            : Color.hkInk.opacity(0.15)
+
+        configuration.label
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(foregroundColor)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(
+                RoundedRectangle(cornerRadius: HKRadius.button, style: .continuous)
+                    .fill(fillColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: HKRadius.button, style: .continuous)
+                    .stroke(strokeColor, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: HKRadius.button, style: .continuous))
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

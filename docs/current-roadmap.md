@@ -1,7 +1,7 @@
 # Hey Kevin — Current Roadmap and Release Status
 
-**Reconciled:** 2026-09-15
-**Implementation baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
+**Reconciled:** 2026-09-16
+**Backend implementation baseline:** `eee7d42682bf4222ebee59f52e92082f5f9e13cb`
 **Repository:** `delimatsuo/heykevin`
 
 The [current PRD](../kevin-prd.md) defines necessary work and later opportunities.
@@ -14,19 +14,21 @@ External observations are dated snapshots, not a standing claim about production
 
 ## Observed release baseline
 
-Backend snapshots are dated September 14; public iOS was rechecked September 16
-UTC (September 15 in America/New_York):
+Backend and internal TestFlight snapshots are dated September 16. Public iOS
+version `1.3.0` was rechecked through the US lookup at `20:03:00Z`; its build 39
+relationship comes from the earlier authenticated observation recorded below:
 
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
-| Production backend | `kevin-api-00270-l9s`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:45:33Z` | Successful [production run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657), exact live health/runtime identity, 100% serving traffic and anonymous smoke. See the [release record](releases/2026-09-14-urgent-production-candidate.md). |
-| Staging backend | `kevin-api-staging-00169-muy`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:11:16Z` | Successful [staging run 34896587160](https://github.com/delimatsuo/heykevin/actions/runs/34896587160), live health identity, 100% serving traffic, runtime isolation and anonymous static smoke. Includes the rolling-call compatibility repair. |
+| Production backend | `kevin-api-00271-q4j`, SHA `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, verified September 16 at `20:07:42Z` | Successful [production run 35141337468](https://github.com/delimatsuo/heykevin/actions/runs/35141337468), exact live health/runtime identity, 100% serving traffic, preserved bindings, anonymous smoke and canonical pause-WAV retrieval. See the [release record](releases/2026-09-16-natural-message-ios-40.md). |
+| Staging backend | `kevin-api-staging-00171-sir`, SHA `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, verified September 16 | Successful [staging run 35140358345](https://github.com/delimatsuo/heykevin/actions/runs/35140358345), live health identity, 100% serving traffic, runtime isolation, anonymous static smoke and canonical pause-WAV retrieval. Includes the natural message-taking change. |
 | Public iOS | Version `1.3.0`, **build 39**, `READY_FOR_DISTRIBUTION` / `READY_FOR_SALE` | Authenticated read-only inspection at `2026-09-16T00:20:10Z` (Sep 15 America/New_York) links public version 1.3.0 to build 39. Public lookup (`https://itunes.apple.com/lookup?id=6761427495&country=us`) reports release date `2026-09-15T21:35:24Z`. See canonical [release record](releases/2026-09-15-native-frontend-ios-39.md). |
 | Historical Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Historical public baseline as of September 14, now superseded by build 39. |
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
 | Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
-| Development inventory | Native frontend 1.3.0 (39) published; N1/N3 owner phone acceptance remains open | [PR #248](https://github.com/delimatsuo/heykevin/pull/248) merged. Issue #33 and later PRD features remain deferred. |
+| Current internal iPhone candidate | **1.3.1 (40)**, **VALID** / **IN_BETA_TESTING**, available in QA | Clearer call controls. The [build 40 record](releases/2026-09-16-natural-message-ios-40.md) binds the package, successful backend rollout and open phone checklist. Not submitted for public release. |
+| Development inventory | Native frontend 1.3.0 (39) public; reported call-control/transition fixes delivered to production and TestFlight | [PR #253](https://github.com/delimatsuo/heykevin/pull/253) and [PR #254](https://github.com/delimatsuo/heykevin/pull/254) merged. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
 ## Shipped
 
@@ -61,6 +63,12 @@ in 1.3.0 (39) is published to the App Store. Physical-device acceptance on the o
 iPhone remains open. Per the owner's September 16, 2026 scope decision,
 VoiceOver qualification is deferred and is not a current acceptance requirement
 or release blocker. See the [PRD deferral](../kevin-prd.md#deferred-ideas-and-superseded-plans).
+
+The September 16 owner call prompted the clearer action buttons and natural
+message-taking transition. That backend is now deployed; **1.3.1 (40)** is in
+internal TestFlight QA. Use the [current phone checklist](releases/2026-09-16-natural-message-ios-40.md#owner-phone-acceptance--open)
+to record audible timing and pickup results. Provider/package verification does
+not close those physical-call rows.
 
 [PR #239](https://github.com/delimatsuo/heykevin/pull/239) adds caller/reason summary
 updates to an existing notification and the matching Pick Up action. The same
@@ -128,12 +136,13 @@ list remain outside active implementation.
       [candidate record](releases/2026-09-14-notification-ios-38.md) includes
       package identity, verification and the owner test sequence.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION` (verified September 16, 2026 at `00:20:10Z` / Sep 15 America/New_York) following owner's submission instruction ("submit the last build"). See the canonical [build 39 release record](releases/2026-09-15-native-frontend-ios-39.md).
-- [ ] Record the owner's installed iOS build and notification/pickup checks from
-      the PRD on build 39, including stale-alert and ended-call behavior.
+- [ ] Record the owner's installed **1.3.1 (40)** and notification/pickup checks
+      using the [current phone checklist](releases/2026-09-16-natural-message-ios-40.md#owner-phone-acceptance--open),
+      including stale-alert and ended-call behavior. Earlier build 39 observations
+      remain historical evidence.
 
-Only Deli may approve the production environment; [AGENTS.md](../AGENTS.md)
-explicitly forbids an agent or API approval. Deli's approval and the completed
-production deployment above did not authorize an Apple release. The owner
+Deli's approval and the completed September 14 production deployment above did
+not authorize an Apple release. The owner
 subsequently gave explicit instruction to submit the existing build ("submit the last build"),
 and submission was completed. Public release 1.3.0 (39) is live on the App Store;
 the remaining physical-device acceptance stays open.

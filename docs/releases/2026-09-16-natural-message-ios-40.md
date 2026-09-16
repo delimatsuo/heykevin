@@ -4,9 +4,11 @@
 
 The owner approved staging verification, production rollout and a new internal
 TestFlight build on September 16, 2026. Apple has processed **1.3.1 (40)** and
-made it available to the existing internal **QA** group. Staging verification
-passed. Production deployment is waiting for Deli's protected GitHub environment
-approval; the new message timing is not yet confirmed live in production.
+made it available to the existing internal **QA** group. Staging and production
+verification passed. Production revision **`kevin-api-00271-q4j`** serves the
+approved backend at 100% traffic, verified at **20:07:42Z**. The deployed source
+includes the new message timing; its audible behavior still needs the owner's
+physical-call check.
 
 This approval does not include a public App Store submission or external beta
 submission. Public **1.3.0 (39)** remains the released iOS baseline. No release
@@ -69,9 +71,14 @@ source review and automatic Codex review were clean before PR #253 merged.
 Exact packaged-source [CI 35140895777](https://github.com/delimatsuo/heykevin/actions/runs/35140895777)
 also passed all nine required jobs and **8,005 backend tests**. Independent
 metadata review passed, and automatic Codex review completed without findings.
-The final documentation commit's checks and review are tracked in
-[PR #254](https://github.com/delimatsuo/heykevin/pull/254). No full local suite was
-repeated for the version or documentation changes.
+The documentation follow-up at `f4a478914b8edf124f70291b2973b13f85db6b04`
+passed all nine required jobs in
+[CI 35143249598](https://github.com/delimatsuo/heykevin/actions/runs/35143249598)
+and automatic Codex review without findings. Independent release-record review
+also passed. [PR #254](https://github.com/delimatsuo/heykevin/pull/254) merged at
+**19:55:42Z** as `16ace6ce36cfafcdffd3a12de514b160fe4cf831`, with the same tree
+as that reviewed head and the same iOS tree as the uploaded package. No full
+local suite was repeated for the version or documentation changes.
 
 ## Package and Apple delivery
 
@@ -118,12 +125,14 @@ At **19:47:40Z**, Apple returned build `40`, prerelease `1.3.1`,
 `usesNonExemptEncryption=false`. At **19:48:58Z**, the QA group's build
 relationship explicitly included build 40; it remains an internal group with
 access to all builds. English What to Test notes were written and read back.
-They distinguish the available button update from message timing that still
-requires confirmation of the production rollout. External beta remains
+After production verification, the notes were updated at **20:08:28Z** to remove
+the instruction to await rollout confirmation; Apple still reported `VALID` and
+`IN_BETA_TESTING`. The notes cover the button and message-timing phone checks.
+External beta remains
 `READY_FOR_BETA_SUBMISSION`; no external review or App Store version was submitted.
 
-Package files and raw logs are temporary scratch artifacts, retained only until
-delivery verification and this durable text record are complete. No long-term
+Temporary package files and raw logs were removed after successful delivery,
+independent review and preservation of this durable text record. No long-term
 binary archive was approved.
 
 ## Backend rollout
@@ -149,23 +158,58 @@ returned HTTP 200 and **48,044 bytes**, SHA-256
 This checks the actual hostname used by Relay; the existing general smoke script
 does not cover this audio asset. Retrieval alone does not establish audible timing.
 
-**Production — awaiting Deli.** [Run 35141337468](https://github.com/delimatsuo/heykevin/actions/runs/35141337468)
+**Production — passed.** [Run 35141337468](https://github.com/delimatsuo/heykevin/actions/runs/35141337468)
 was dispatched at **19:34:10Z** from main at the exact candidate SHA. All nine
-validation jobs passed. At the latest readback, **Deploy to Production** is
-waiting for the protected environment approval. Per `AGENTS.md`, only Deli can
-approve this gate; the agent did not approve or bypass it. No duplicate dispatch
-was created while this run holds the shared dispatch concurrency group.
+validation jobs passed. The job initially waited for Deli under the standing
+owner-only approval rule. The owner then explicitly instructed: "I approved it.
+You can go ahead and click." This newer instruction delegated approval of this
+existing deployment only. Codex submitted that approval through the existing
+authenticated GitHub CLI. Review history records state `approved`, actor
+`delimatsuo`, environment `production` (`13924929328`), and the comment:
+"Deli explicitly approved this deployment and instructed Codex to perform this
+approval in the current task." The production job started at **20:00:23Z**.
+No environment protection setting was changed and no duplicate dispatch was
+created. The standing rule in `AGENTS.md` was not edited.
 
-The pre-rollout production baseline is **`kevin-api-00270-l9s`**, SHA
-**`7377c7ba402297625dec5de97a2250f50b1c8013`**, at 100% traffic. After the gate is
-approved, verify the new revision, exact candidate SHA, 100% traffic, preserved
-runtime bindings/flags, canonical health/static smoke and pause-WAV hash. An
-existing old revision is a rollback reference, not authorization to roll back.
+The workflow completed successfully at **20:06:43Z**, with all ten applicable
+jobs passing. At **20:07:42Z**, Cloud Run reported revision
+**`kevin-api-00271-q4j`** ready and receiving **100% traffic**. Both the configured
+canonical URL `https://kevin-api-752910912062.us-central1.run.app/health` and
+Cloud Run's alternate URL `https://kevin-api-l63rergg7a-uc.a.run.app/health`
+returned `status=ok`, production environment, that revision and exact SHA
+**`eee7d42682bf4222ebee59f52e92082f5f9e13cb`**. Anonymous health/admin-page/CSS/JS
+smoke passed; authenticated admin checks were omitted.
+
+The following runtime values match the prior production revision:
+
+| Runtime field | Verified value |
+|---|---|
+| `ENVIRONMENT` / `APPSTORE_ENVIRONMENT` | `production` / `production` |
+| `APNS_SANDBOX` | `false` |
+| `CLOUD_RUN_URL` | `https://kevin-api-752910912062.us-central1.run.app` |
+| `FIRESTORE_PROJECT_ID` | `kevin-491315` |
+| `FIREBASE_DATABASE_URL` | `https://kevin-491315-rtdb.firebaseio.com` |
+| `SUBSCRIPTION_PROMOTIONAL_OFFERS_ENABLED` | `false` |
+| `RECEPTIONIST_OBSERVATION_SHADOW_ENABLED` | `false` |
+| `LAPSED_NUMBER_RELEASE_ENABLED` | `true` |
+
+Health continues to report Gemini staging safety controls false, model tools
+true and automatic terminal actions true. The canonical production
+`/static/audio/message-pause-3s.wav` returned HTTP 200, **48,044 bytes**, and the
+same SHA-256 as staging:
+`59db6dfb709393b7aab8efcc2b395df4def43f1c976d8b157bb9009dbacdc0ec`.
+
+The prior production revision **`kevin-api-00270-l9s`**, SHA
+**`7377c7ba402297625dec5de97a2250f50b1c8013`**, remains a rollback reference;
+no rollback was performed. Direct Cloud Build listing was denied to the local
+account. No permission change was requested: the successful workflow, Cloud Run
+revision/traffic readback, runtime comparison and public health/static checks
+provide the deployment evidence recorded here.
 
 ## Owner phone acceptance — open
 
-Install **Hey Kevin 1.3.1 (40)** from TestFlight. Confirm the production rollout
-before checking the changed message timing. With Focus off and a second phone:
+Install **Hey Kevin 1.3.1 (40)** from TestFlight. Production rollout has been
+verified. With Focus off and a second phone:
 
 - [ ] Notification actions and app-owned buttons are clear; **Pick up** connects
       the intended call with audio in both directions.
@@ -193,12 +237,12 @@ PR cancellation. Each PR runs seven Python shards, Python quality and the stable
 fail-closed **Test** aggregator. A deployment adds one applicable deploy job.
 No hosted macOS job, paid runner migration, duplicate deployment or rerun was
 started. Expected chargeable Actions cost is **$0**. September paid Actions
-usage observed during release preflight was **$70.220244319**, below the owner's
+usage observed during approval preflight was **$70.313812188**, below the owner's
 $80 normal portfolio stop threshold; this release uses no paid allocation.
 
 Master owns architecture, release decisions, evidence and Git. The literal
 version edit used `agy gemini-3.7-flash-low` headlessly: 28,347 input tokens,
 374 output tokens, 28,721 total, zero retries. Master regenerated the Xcode
 project. Independent staff review checked source, staging readiness and the
-actual signed package. Automatic Codex review and exact-HEAD CI remain required
-before merging the release documentation PR.
+actual signed package. Later documentation follow-ups also require automatic
+Codex review and exact-HEAD CI before merge.

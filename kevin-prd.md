@@ -4,7 +4,7 @@
 **Owner:** Deli Matsuo
 **Backend release baseline:** `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, revision `kevin-api-00271-q4j`, verified September 16, 2026
 **Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
-**Current internal iOS candidate:** `1.3.1 (40)`, available in TestFlight QA; [release and phone checklist](docs/releases/2026-09-16-natural-message-ios-40.md)
+**Current internal iOS candidate:** `1.3.1 (41)`, available in TestFlight QA; [confirmation repair and retest](docs/releases/2026-09-16-message-confirmation-ios-41.md)
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
 
@@ -91,11 +91,12 @@ completion on September 14, 2026.
 - [x] The iPhone candidate **1.2.12 (38)** passed Apple processing and is
       available in the existing internal TestFlight QA group, verified September
       14 at `23:18:44Z`. See the [candidate record and test sequence](docs/releases/2026-09-14-notification-ios-38.md).
-- [x] The current button-design candidate **1.3.1 (40)** is `VALID` /
-      `IN_BETA_TESTING` and available in internal TestFlight QA. The
-      [build 40 record](docs/releases/2026-09-16-natural-message-ios-40.md)
-      binds its package and backend rollout; installation and phone acceptance
-      remain open. It has not been submitted for public App Store release.
+- [x] The current confirmation-repair candidate **1.3.1 (41)** is `VALID` /
+      `IN_BETA_TESTING` and available in internal TestFlight QA, verified
+      September 16 at `22:07:24Z`. The [build 41 record](docs/releases/2026-09-16-message-confirmation-ios-41.md)
+      binds its package and retest. The owner installed build 40 and reported a
+      false warning after Take a message; build 41 installation and phone
+      acceptance remain open. It has not been submitted for public App Store release.
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or
@@ -103,7 +104,7 @@ completion on September 14, 2026.
 - [ ] Take a message shows request/acknowledgement truthfully, preserves the
       caller connection, and cannot conflict with pickup or timeout. Verify
       completion of current speech and the conditional three-second pause
-      using the build 40 phone checklist.
+      using the build 41 retest and its linked speech/pickup checklist.
 - [ ] An unanswered urgent call leaves the owner wait after 30 seconds. The
       urgent-alert preference survives reload and the backend respects it.
 - [ ] Duplicate actions and late responses after hangup, a new call or an

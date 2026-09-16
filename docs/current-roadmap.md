@@ -27,8 +27,8 @@ relationship comes from the earlier authenticated observation recorded below:
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
 | Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
-| Current internal iPhone candidate | **1.3.1 (40)**, **VALID** / **IN_BETA_TESTING**, available in QA | Clearer call controls. The [build 40 record](releases/2026-09-16-natural-message-ios-40.md) binds the package, successful backend rollout and open phone checklist. Not submitted for public release. |
-| Development inventory | Native frontend 1.3.0 (39) public; reported call-control/transition fixes delivered to production and TestFlight | [PR #253](https://github.com/delimatsuo/heykevin/pull/253) and [PR #254](https://github.com/delimatsuo/heykevin/pull/254) merged. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
+| Current internal iPhone candidate | **1.3.1 (41)**, **VALID** / **IN_BETA_TESTING**, available in QA at `22:07:24Z` | Fixes the reported false confirmation warning after Take a message. The [build 41 record](releases/2026-09-16-message-confirmation-ios-41.md) binds the package and open retest. Not submitted for public release. |
+| Development inventory | Native frontend 1.3.0 (39) public; call-control/transition work and iOS confirmation repair delivered for testing | [PR #253](https://github.com/delimatsuo/heykevin/pull/253) and [PR #254](https://github.com/delimatsuo/heykevin/pull/254) delivered build 40/backend; [PR #256](https://github.com/delimatsuo/heykevin/pull/256) merged the iOS-only confirmation repair packaged in build 41. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
 ## Shipped
 
@@ -65,10 +65,12 @@ VoiceOver qualification is deferred and is not a current acceptance requirement
 or release blocker. See the [PRD deferral](../kevin-prd.md#deferred-ideas-and-superseded-plans).
 
 The September 16 owner call prompted the clearer action buttons and natural
-message-taking transition. That backend is now deployed; **1.3.1 (40)** is in
-internal TestFlight QA. Use the [current phone checklist](releases/2026-09-16-natural-message-ios-40.md#owner-phone-acceptance--open)
-to record audible timing and pickup results. Provider/package verification does
-not close those physical-call rows.
+message-taking transition. That backend is deployed. The owner installed build
+40 and reported a false confirmation warning despite a normal message response.
+**1.3.1 (41)** is now in internal TestFlight QA with the iOS-only repair. Use the
+[current retest](releases/2026-09-16-message-confirmation-ios-41.md#owner-retest--open)
+and its linked speech/pickup checklist. Provider/package verification does not
+close those physical-call rows.
 
 [PR #239](https://github.com/delimatsuo/heykevin/pull/239) adds caller/reason summary
 updates to an existing notification and the matching Pick Up action. The same
@@ -136,11 +138,11 @@ list remain outside active implementation.
       [candidate record](releases/2026-09-14-notification-ios-38.md) includes
       package identity, verification and the owner test sequence.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION` (verified September 16, 2026 at `00:20:10Z` / Sep 15 America/New_York) following owner's submission instruction ("submit the last build"). See the canonical [build 39 release record](releases/2026-09-15-native-frontend-ios-39.md).
-- [ ] Record the owner's installed **1.3.1 (40)** and the remaining notification/
+- [ ] Record the owner's installed **1.3.1 (41)** and the remaining notification/
       pickup acceptance from [N1 in the PRD](../kevin-prd.md#n1--finish-the-screening-notification-enhancement),
       including stale-alert, ended-call, banner, urgent-preference and failure
-      scenarios. The [build 40 phone checklist](releases/2026-09-16-natural-message-ios-40.md#owner-phone-acceptance--open)
-      adds the reported button/timing checks; passing it does not close the other
+      scenarios. The [build 41 retest](releases/2026-09-16-message-confirmation-ios-41.md#owner-retest--open)
+      adds the confirmation regression and links the button/timing checks; passing it does not close the other
       N1 rows. Earlier build 39 observations remain historical evidence.
 
 Deli's approval and the completed September 14 production deployment above did

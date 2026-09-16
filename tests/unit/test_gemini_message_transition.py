@@ -7,7 +7,7 @@ import base64
 import json
 import os
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -892,3 +892,75 @@ async def test_caller_speech_during_grace_preserves_caller_transcript_and_suppre
         await fake_ws.close()
         await pipeline.stop()
         await cancel_and_wait(receive_task)
+
+
+@pytest.mark.asyncio
+async def test_send_client_instruction_send_exception_propagates_and_clears_pending(fake_ws, monkeypatch):
+    pipeline = create_pipeline(fake_ws)
+    monkeypatch.setattr(fake_ws, "send", AsyncMock(side_effect=RuntimeError("ws send failed")))
+
+    with pytest.raises(RuntimeError, match="ws send failed"):
+        await pipeline._send_client_instruction("Test instruction")
+
+    assert pipeline._assistant_instruction_pending is False
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_message_instruction_swallows_send_exception_and_resets_state(fake_ws, monkeypatch):
+    pipeline = create_pipeline(fake_ws)
+    pipeline._message_taking_pending = True
+    monkeypatch.setattr(fake_ws, "send", AsyncMock(side_effect=RuntimeError("ws send failed")))
+
+    delivered = await pipeline._deliver_message_instruction()
+    assert delivered is False
+    assert pipeline._unavailable_said is False
+    assert pipeline._message_response_allowed is False
+    assert len(fake_ws.sent_messages) == 0
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_hangup_for_caller_silence_propagates_send_exception_without_completing(fake_ws, monkeypatch):
+    on_complete = AsyncMock()
+    pipeline = create_pipeline(fake_ws, on_call_complete=on_complete)
+    monkeypatch.setattr(pipeline, "_waiting_on_caller", lambda: True)
+    monkeypatch.setattr(fake_ws, "send", AsyncMock(side_effect=RuntimeError("ws send failed")))
+
+    with pytest.raises(RuntimeError, match="ws send failed"):
+        await pipeline._hangup_for_caller_silence()
+
+    on_complete.assert_not_awaited()
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_live_intake_text_send_exception_logs_error_not_success(fake_ws, monkeypatch):
+    pipeline = create_pipeline(fake_ws)
+    log_mock = Mock()
+    pipeline._log_voice_timing = log_mock
+    monkeypatch.setattr(fake_ws, "send", AsyncMock(side_effect=RuntimeError("ws send failed")))
+
+    await pipeline._send_live_intake_text("Test intake instruction")
+
+    logged_events = [call.args[0] for call in log_mock.call_args_list]
+    assert "intake_instruction_error" in logged_events
+    assert "intake_instruction" not in logged_events
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_prompt_for_caller_silence_send_exception_propagates_without_success_log(fake_ws, monkeypatch):
+    pipeline = create_pipeline(fake_ws)
+    pipeline._caller_silence_prompted_at = None
+    monkeypatch.setattr(pipeline, "_waiting_on_caller", lambda: True)
+    log_mock = Mock()
+    pipeline._log_voice_timing = log_mock
+    monkeypatch.setattr(fake_ws, "send", AsyncMock(side_effect=RuntimeError("ws send failed")))
+
+    with pytest.raises(RuntimeError, match="ws send failed"):
+        await pipeline._prompt_for_caller_silence()
+
+    logged_events = [call.args[0] for call in log_mock.call_args_list]
+    assert "silence_prompt_injected" not in logged_events
+    await pipeline.stop()

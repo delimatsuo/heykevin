@@ -78,7 +78,7 @@ existing conversation-language context.
   first-audio offer suppression and subsequent-chunk authority check each
   failed their corresponding behavioral test. Test transports and background
   provider helpers are isolated.
-- Integrated backend: 478 focused tests passed across the shared action
+- Integrated backend: 483 focused tests passed across the shared action
   consumer, all three transition engines, legacy commands, speech and call
   lifecycle, summary notifications, urgent handoff and media ingress.
 - Additional in-memory mutations proved sensitivity to the three-second
@@ -103,6 +103,11 @@ existing conversation-language context.
   failed their regressions. Reviewed Voice/helper blobs are
   `3a49ddeb52e53d2c5bbc67748d887a16437874e1` and
   `43610d6847879891c737c421c74b7f675518af06`.
+- Gemini send failures retain the pre-existing exception contract for silence,
+  intake and recovery callers; the message transition handles failures as
+  retryable. Five regressions cover this boundary. Swallowing send errors again
+  failed four tests while the transition's retryable-failure control passed.
+  The Gemini source blob is `52f383dfef7cde976183c93e15e063a3d2f8ca8a`.
 
 Exact-HEAD CI and the final commit-bound review are recorded in the associated
 pull request before merge. Backend deployment, a new installed iPhone build,

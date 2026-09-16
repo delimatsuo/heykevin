@@ -1824,7 +1824,7 @@ class GeminiPipeline:
             return True
         except Exception:
             self._assistant_instruction_pending = False
-            return False
+            raise
 
     def _intake_injection_allowed(self) -> bool:
         return (

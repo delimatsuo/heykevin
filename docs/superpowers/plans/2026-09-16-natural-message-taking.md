@@ -119,5 +119,7 @@ existing conversation-language context.
   `3d1219bfcd2b059bd09b3872fb1567c8ea697fbe`.
 
 Exact-HEAD CI and the final commit-bound review are recorded in the associated
-pull request before merge. Backend deployment, a new installed iPhone build,
-and physical-call acceptance of these changes remain outstanding.
+pull request before merge. The subsequent approved rollout and TestFlight
+delivery are recorded in the [build 40 release packet](../../releases/2026-09-16-natural-message-ios-40.md).
+Installation and physical-call acceptance remain separate from source, package
+and provider verification.

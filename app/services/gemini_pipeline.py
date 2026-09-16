@@ -181,6 +181,7 @@ class GeminiPipeline:
         self._owner_availability_wait_started_at = 0.0
         self._hold_offered = False
         self._hold_offer_completed_at = 0.0
+        self._pending_hold_offer_turns: set[tuple[int, int]] = set()
         self._last_playout_drained_at = 0.0
         self._model_turn_generating = False
         self._turn_complete_event = asyncio.Event()
@@ -1200,6 +1201,11 @@ class GeminiPipeline:
                         )
                         if response_turn > self._last_response_first_media_sent_turn:
                             self._last_response_first_media_sent_turn = response_turn
+                            if (audio_epoch, response_turn) in getattr(self, "_pending_hold_offer_turns", set()):
+                                self._pending_hold_offer_turns.discard((audio_epoch, response_turn))
+                                if not getattr(self, "_unavailable_said", False):
+                                    self._hold_offered = True
+                                    self._start_owner_availability_wait()
                             self._log_voice_timing(
                                 "response_first_twilio_media_sent",
                                 turn=response_turn,
@@ -1311,6 +1317,8 @@ class GeminiPipeline:
     async def _clear_audio_queue(self) -> int:
         """Drop queued model audio after barge-in or shutdown."""
         self._response_end_mark_pending = None
+        if hasattr(self, "_pending_hold_offer_turns"):
+            self._pending_hold_offer_turns.clear()
         dropped_chunks = 0
         while True:
             try:
@@ -1399,6 +1407,24 @@ class GeminiPipeline:
             return False
 
         self._transcript_lines.append(f"Kevin: {full_text}")
+        # Synchronously commit spoken hold offer if first media was already sent,
+        # or register in pending hold turns until first media is delivered,
+        # preventing a race where owner decline arrives while callback or audio is pending.
+        if (
+            apply_side_effects
+            and not getattr(self, "_unavailable_said", False)
+            and is_owner_availability_hold(full_text)
+            and getattr(self, "_response_audio_turn_started", False)
+            and getattr(self, "_response_turn_number", 0) > 0
+        ):
+            turn = self._response_turn_number
+            epoch = self._audio_epoch
+            if turn == getattr(self, "_last_response_first_media_sent_turn", -1):
+                self._hold_offered = True
+                self._start_owner_availability_wait()
+            else:
+                self._pending_hold_offer_turns.add((epoch, turn))
+
         await self.on_transcript("Kevin", full_text)
         prompt_started = self._caller_silence_prompted_at
         self._mark_kevin_activity()
@@ -1410,10 +1436,6 @@ class GeminiPipeline:
         ):
             self._caller_silence_prompted_at = time.time()
         self._exchange_count += 1
-        if apply_side_effects and is_owner_availability_hold(full_text):
-            if not getattr(self, "_unavailable_said", False):
-                self._hold_offered = True
-                self._start_owner_availability_wait()
 
         self._credit_live_intake_after_kevin(full_text)
 
@@ -2150,15 +2172,13 @@ class GeminiPipeline:
 
         owner = self._contractor_config.get("owner_name") or settings.user_name
         hold_offered = bool(getattr(self, "_hold_offered", False))
-        language = (
-            getattr(self, "_caller_language", None)
-            or getattr(self, "_language", None)
-            or "en"
-        )
-        instruction = build_gemini_instruction_text(
-            owner,
-            hold_offered=hold_offered,
-            language=language,
+        instruction = (
+            build_gemini_instruction_text(
+                owner,
+                hold_offered=hold_offered,
+                language=None,
+            )
+            + " Continue in the caller's current language."
         )
         self._current_turn_suppressed = False
 

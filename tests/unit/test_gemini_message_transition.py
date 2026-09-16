@@ -767,18 +767,23 @@ async def test_caller_barge_in_clears_old_audio_and_preserves_caller_transcript(
 
 
 @pytest.mark.asyncio
-async def test_caller_language_preserved_in_gemini_instruction(fake_ws):
+@pytest.mark.parametrize("user_language", ["en", "es", "pt"])
+async def test_caller_language_preserved_in_gemini_instruction(fake_ws, user_language):
     pipeline = create_pipeline(
         fake_ws,
-        contractor_config={"owner_name": "Carlos", "user_language": "en"},
+        contractor_config={"owner_name": "Carlos", "user_language": user_language},
     )
-    pipeline._caller_language = "es"
     delivered = await pipeline._deliver_message_instruction()
     assert delivered is True
     assert len(fake_ws.sent_messages) == 1
     sent_text = fake_ws.sent_messages[0]["client_content"]["turns"][0]["parts"][0]["text"]
     assert "Carlos" in sent_text
-    assert "Respond in the caller's language (es)." in sent_text
+    assert "The owner (Carlos) is unavailable." in sent_text
+    assert "Tell the caller Carlos is not available and offer to take a message." in sent_text
+    assert "Continue in the caller's current language." in sent_text
+    assert "(es)" not in sent_text
+    assert "(pt)" not in sent_text
+    assert "(en)" not in sent_text
     await pipeline.stop()
 
 
@@ -963,4 +968,471 @@ async def test_prompt_for_caller_silence_send_exception_propagates_without_succe
 
     logged_events = [call.args[0] for call in log_mock.call_args_list]
     assert "silence_prompt_injected" not in logged_events
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decline_timing", ["before_turn_complete", "after_callback_entered"])
+async def test_event_gated_receive_loop_regression_hold_offer_blocked_on_transcript(
+    fake_ws, monkeypatch, decline_timing
+):
+    recorded_grace_delays: list[float] = []
+    grace_sleep_started = asyncio.Event()
+    grace_sleep_release = asyncio.Event()
+    original_sleep = asyncio.sleep
+
+    async def narrow_grace_sleep(delay: float, *args, **kwargs):
+        if isinstance(delay, (int, float)) and delay >= 2.0:
+            recorded_grace_delays.append(float(delay))
+            grace_sleep_started.set()
+            await grace_sleep_release.wait()
+            return
+        await original_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", narrow_grace_sleep)
+
+    transcript_calls: list[tuple[str, str]] = []
+    kevin_transcript_entered = asyncio.Event()
+    kevin_transcript_release = asyncio.Event()
+
+    async def on_transcript_cb(speaker: str, text: str):
+        transcript_calls.append((speaker, text))
+        if speaker == "Kevin":
+            kevin_transcript_entered.set()
+            await kevin_transcript_release.wait()
+
+    audio_delivered: list[bytes] = []
+    audio_delivered_event = asyncio.Event()
+
+    async def on_audio_out_cb(chunk: bytes):
+        audio_delivered.append(chunk)
+        audio_delivered_event.set()
+
+    pipeline = create_pipeline(
+        fake_ws,
+        contractor_config={"owner_name": "Bob", "user_language": "en"},
+        on_audio_out=on_audio_out_cb,
+        on_transcript=on_transcript_cb,
+        pace_audio_output=False,
+    )
+
+    receive_task = asyncio.create_task(pipeline._receive_loop())
+    prepare_task: asyncio.Task | None = None
+
+    try:
+        audio_bytes = b"\x00" * 480
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        await fake_ws.put_server_message({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [
+                        {"inlineData": {"mimeType": "audio/pcm;rate=24000", "data": audio_b64}},
+                    ]
+                },
+                "outputTranscription": {"text": "Let me see if Bob is available."},
+            }
+        })
+
+        # Await media delivery and join audio queue before turnComplete
+        await asyncio.wait_for(audio_delivered_event.wait(), timeout=1.0)
+        await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1.0)
+        assert len(audio_delivered) > 0
+        assert sum(len(c) for c in audio_delivered) > 0
+        assert pipeline._last_playout_drained_at > 0
+        assert pipeline._is_speaking is False
+
+        accepted_at = time.monotonic()
+        if decline_timing == "before_turn_complete":
+            # Decline starts while turn is generating (waiting for turn complete)
+            prepare_task = asyncio.create_task(
+                pipeline._prepare_message_delivery({
+                    "action": "decline",
+                    "accepted_at": accepted_at,
+                })
+            )
+            await asyncio.sleep(0.01)
+            assert pipeline._message_taking_pending is True
+
+            await fake_ws.put_server_message({
+                "serverContent": {
+                    "turnComplete": True,
+                }
+            })
+            await asyncio.wait_for(kevin_transcript_entered.wait(), timeout=1.0)
+        else:
+            # decline_timing == "after_callback_entered"
+            await fake_ws.put_server_message({
+                "serverContent": {
+                    "turnComplete": True,
+                }
+            })
+            await asyncio.wait_for(kevin_transcript_entered.wait(), timeout=1.0)
+
+            # Initiate message delivery while on_transcript callback is blocked
+            prepare_task = asyncio.create_task(
+                pipeline._prepare_message_delivery({
+                    "action": "decline",
+                    "accepted_at": accepted_at,
+                })
+            )
+
+        # Grace sleep of ~3s anchored to accepted_at / playout drain is requested
+        await asyncio.wait_for(grace_sleep_started.wait(), timeout=1.0)
+        assert len(recorded_grace_delays) == 1
+        assert 2.8 <= recorded_grace_delays[0] <= 3.0
+
+        # Invariants during grace wait and blocked callback:
+        # 1. No instruction sent before grace release
+        assert len(fake_ws.sent_messages) == 0
+        # 2. Blocked callback must not let offer be forgotten
+        assert pipeline._hold_offered is True
+
+        # Release grace delay and wait for preparation to complete
+        grace_sleep_release.set()
+        prepared = await asyncio.wait_for(prepare_task, timeout=1.0)
+        assert prepared is True
+
+        # Release transcript callback and verify transcript recorded
+        kevin_transcript_release.set()
+        await asyncio.sleep(0.01)
+        assert ("Kevin", "Let me see if Bob is available.") in transcript_calls
+
+        # Deliver message instruction and verify complete transition
+        delivered = await pipeline._deliver_message_instruction()
+        assert delivered is True
+        assert pipeline._unavailable_said is True
+
+        assert len(fake_ws.sent_messages) == 1
+        sent_text = fake_ws.sent_messages[0]["client_content"]["turns"][0]["parts"][0]["text"]
+        assert "The owner (Bob) is unavailable." in sent_text
+        assert "unfortunately Bob is not available and ask if you can take a message" in sent_text
+        assert "Continue in the caller's current language." in sent_text
+    finally:
+        kevin_transcript_release.set()
+        grace_sleep_release.set()
+        await fake_ws.close()
+        await pipeline.stop()
+        await cancel_and_wait(receive_task, prepare_task)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previously_heard_hold", [False, True])
+async def test_queued_audio_at_start_buffer_blocked_callback_suppressed_on_decline(
+    fake_ws, monkeypatch, previously_heard_hold
+):
+    recorded_grace_delays: list[float] = []
+    grace_sleep_started = asyncio.Event()
+    grace_sleep_release = asyncio.Event()
+    prebuffer_sleep_started = asyncio.Event()
+    prebuffer_release = asyncio.Event()
+    original_sleep = asyncio.sleep
+
+    async def narrow_sleep(delay: float, *args, **kwargs):
+        if isinstance(delay, (int, float)) and delay >= 2.0:
+            if delay == 10.0:
+                prebuffer_sleep_started.set()
+                await prebuffer_release.wait()
+                return
+            recorded_grace_delays.append(float(delay))
+            grace_sleep_started.set()
+            await grace_sleep_release.wait()
+            return
+        await original_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", narrow_sleep)
+
+    transcript_calls: list[tuple[str, str]] = []
+    kevin_transcript_entered = asyncio.Event()
+    kevin_transcript_release = asyncio.Event()
+
+    async def on_transcript_cb(speaker: str, text: str):
+        transcript_calls.append((speaker, text))
+        if speaker == "Kevin":
+            kevin_transcript_entered.set()
+            await kevin_transcript_release.wait()
+
+    audio_delivered: list[bytes] = []
+
+    async def on_audio_out_cb(chunk: bytes):
+        audio_delivered.append(chunk)
+
+    pipeline = create_pipeline(
+        fake_ws,
+        contractor_config={"owner_name": "Bob", "user_language": "en"},
+        on_audio_out=on_audio_out_cb,
+        on_transcript=on_transcript_cb,
+        pace_audio_output=False,
+    )
+    pipeline.AUDIO_START_BUFFER_SECONDS = 10.0
+    if previously_heard_hold:
+        pipeline._hold_offered = True
+        pipeline._last_playout_drained_at = time.monotonic() - 5.0
+
+    receive_task = asyncio.create_task(pipeline._receive_loop())
+    prepare_task: asyncio.Task | None = None
+
+    try:
+        audio_bytes = b"\x00" * 480
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        await fake_ws.put_server_message({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [
+                        {"inlineData": {"mimeType": "audio/pcm;rate=24000", "data": audio_b64}},
+                    ]
+                },
+                "outputTranscription": {"text": "Let me see if Bob is available."},
+            }
+        })
+
+        # Wait until playout loop reaches AUDIO_START_BUFFER_SECONDS (held before on_audio_out)
+        await asyncio.wait_for(prebuffer_sleep_started.wait(), timeout=1.0)
+        assert len(audio_delivered) == 0
+
+        # turnComplete arrives before first media playout
+        await fake_ws.put_server_message({
+            "serverContent": {
+                "turnComplete": True,
+            }
+        })
+        await asyncio.wait_for(kevin_transcript_entered.wait(), timeout=1.0)
+
+        # Owner decline arrives while transcript callback is blocked and first media is unheard
+        accepted_at = time.monotonic()
+        prepare_task = asyncio.create_task(
+            pipeline._prepare_message_delivery({
+                "action": "decline",
+                "accepted_at": accepted_at,
+            })
+        )
+
+        if not previously_heard_hold:
+            # Unheard turn is suppressed; hold was not heard so no >=2s grace applies
+            prepared = await asyncio.wait_for(prepare_task, timeout=1.0)
+            assert prepared is True
+            assert len(recorded_grace_delays) == 0
+            assert pipeline._hold_offered is False
+
+            # Release prebuffer and transcript callback
+            prebuffer_release.set()
+            kevin_transcript_release.set()
+            await asyncio.sleep(0.01)
+
+            delivered = await pipeline._deliver_message_instruction()
+            assert delivered is True
+            assert pipeline._unavailable_said is True
+            assert len(audio_delivered) == 0
+
+            assert len(fake_ws.sent_messages) == 1
+            sent_text = fake_ws.sent_messages[0]["client_content"]["turns"][0]["parts"][0]["text"]
+            assert "Tell the caller Bob is not available and offer to take a message." in sent_text
+            assert "Continue in the caller's current language." in sent_text
+            assert "unfortunately" not in sent_text.lower()
+        else:
+            # Previously heard hold is preserved; grace of ~3s is applied
+            await asyncio.wait_for(grace_sleep_started.wait(), timeout=1.0)
+            assert len(recorded_grace_delays) == 1
+            assert 2.8 <= recorded_grace_delays[0] <= 3.0
+            assert pipeline._hold_offered is True
+
+            prebuffer_release.set()
+            grace_sleep_release.set()
+            prepared = await asyncio.wait_for(prepare_task, timeout=1.0)
+            assert prepared is True
+
+            kevin_transcript_release.set()
+            await asyncio.sleep(0.01)
+
+            delivered = await pipeline._deliver_message_instruction()
+            assert delivered is True
+            assert pipeline._unavailable_said is True
+
+            assert len(fake_ws.sent_messages) == 1
+            sent_text = fake_ws.sent_messages[0]["client_content"]["turns"][0]["parts"][0]["text"]
+            assert "unfortunately Bob is not available and ask if you can take a message" in sent_text
+            assert "Continue in the caller's current language." in sent_text
+    finally:
+        prebuffer_release.set()
+        kevin_transcript_release.set()
+        grace_sleep_release.set()
+        await fake_ws.close()
+        await pipeline.stop()
+        await cancel_and_wait(receive_task, prepare_task)
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_before_first_media_promotes_hold_on_playout(fake_ws, monkeypatch):
+    prebuffer_started_events = [asyncio.Event(), asyncio.Event()]
+    prebuffer_release_events = [asyncio.Event(), asyncio.Event()]
+    prebuffer_call_count = 0
+
+    recorded_grace_delays: list[float] = []
+    grace_sleep_started = asyncio.Event()
+    grace_sleep_release = asyncio.Event()
+    original_sleep = asyncio.sleep
+
+    async def narrow_sleep(delay: float, *args, **kwargs):
+        nonlocal prebuffer_call_count
+        if isinstance(delay, (int, float)) and delay >= 2.0:
+            if delay == 10.0:
+                idx = prebuffer_call_count
+                prebuffer_call_count += 1
+                if idx < len(prebuffer_started_events):
+                    prebuffer_started_events[idx].set()
+                    await prebuffer_release_events[idx].wait()
+                    return
+            recorded_grace_delays.append(float(delay))
+            grace_sleep_started.set()
+            await grace_sleep_release.wait()
+            return
+        await original_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", narrow_sleep)
+
+    audio_delivered: list[bytes] = []
+    audio_delivered_event = asyncio.Event()
+
+    async def on_audio_out_cb(chunk: bytes):
+        audio_delivered.append(chunk)
+        audio_delivered_event.set()
+
+    pipeline = create_pipeline(
+        fake_ws,
+        contractor_config={"owner_name": "Bob", "user_language": "en"},
+        on_audio_out=on_audio_out_cb,
+        pace_audio_output=False,
+    )
+    pipeline.AUDIO_START_BUFFER_SECONDS = 10.0
+
+    receive_task = asyncio.create_task(pipeline._receive_loop())
+    prepare_task: asyncio.Task | None = None
+
+    try:
+        audio_bytes = b"\x00" * 480
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+        # Turn 1: hold offer generated and buffered at AUDIO_START_BUFFER_SECONDS
+        await fake_ws.put_server_message({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [
+                        {"inlineData": {"mimeType": "audio/pcm;rate=24000", "data": audio_b64}},
+                    ]
+                },
+                "outputTranscription": {"text": "Let me see if Bob is available."},
+            }
+        })
+        await asyncio.wait_for(prebuffer_started_events[0].wait(), timeout=1.0)
+        await fake_ws.put_server_message({
+            "serverContent": {
+                "turnComplete": True,
+            }
+        })
+        await asyncio.sleep(0.01)
+
+        # Candidate turn 1 registered in pending set, not yet promoted because audio not sent
+        epoch = pipeline._audio_epoch
+        assert (epoch, 1) in pipeline._pending_hold_offer_turns
+        assert pipeline._hold_offered is False
+
+        # Turn 2: second hold turn queued before first media released
+        await fake_ws.put_server_message({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [
+                        {"inlineData": {"mimeType": "audio/pcm;rate=24000", "data": audio_b64}},
+                    ]
+                },
+                "outputTranscription": {"text": "Let me check if Bob is available."},
+            }
+        })
+        await fake_ws.put_server_message({
+            "serverContent": {
+                "turnComplete": True,
+            }
+        })
+        await asyncio.sleep(0.01)
+
+        # Both candidates are tracked in the pending set
+        assert (epoch, 1) in pipeline._pending_hold_offer_turns
+        assert (epoch, 2) in pipeline._pending_hold_offer_turns
+        assert pipeline._hold_offered is False
+
+        # Release prebuffer for turn 1 and wait for first frame playout and turn 2 prebuffer pause
+        prebuffer_release_events[0].set()
+        await asyncio.wait_for(audio_delivered_event.wait(), timeout=1.0)
+        await asyncio.wait_for(prebuffer_started_events[1].wait(), timeout=1.0)
+
+        # First media for turn 1 alone accepted, promoted sticky hold and removed (epoch, 1)
+        assert len(audio_delivered) == 1
+        assert pipeline._hold_offered is True
+        assert (epoch, 1) not in pipeline._pending_hold_offer_turns
+        assert (epoch, 2) in pipeline._pending_hold_offer_turns
+
+        # Start decline while turn 2 is still unheard: suppresses turn 2 but preserves sticky hold
+        prepare_task = asyncio.create_task(
+            pipeline._prepare_message_delivery({
+                "action": "decline",
+                "accepted_at": time.monotonic(),
+            })
+        )
+        await asyncio.wait_for(grace_sleep_started.wait(), timeout=1.0)
+        assert len(recorded_grace_delays) == 1
+        assert 2.8 <= recorded_grace_delays[0] <= 3.0
+
+        # Release second prebuffer before grace release and verify second chunk was dropped
+        prebuffer_release_events[1].set()
+        await asyncio.wait_for(pipeline._audio_queue.join(), timeout=1.0)
+        assert len(audio_delivered) == 1
+
+        grace_sleep_release.set()
+        prepared = await asyncio.wait_for(prepare_task, timeout=1.0)
+        assert prepared is True
+
+        delivered = await pipeline._deliver_message_instruction()
+        assert delivered is True
+        assert pipeline._unavailable_said is True
+
+        assert len(fake_ws.sent_messages) == 1
+        sent_text = fake_ws.sent_messages[0]["client_content"]["turns"][0]["parts"][0]["text"]
+        assert "unfortunately Bob is not available and ask if you can take a message" in sent_text
+        assert "Continue in the caller's current language." in sent_text
+    finally:
+        for ev in prebuffer_release_events:
+            ev.set()
+        grace_sleep_release.set()
+        await fake_ws.close()
+        await pipeline.stop()
+        await cancel_and_wait(receive_task, prepare_task)
+
+
+@pytest.mark.asyncio
+async def test_text_only_flush_with_stale_response_turn_number_never_sets_hold(fake_ws):
+    pipeline = create_pipeline(fake_ws)
+    pipeline._response_turn_number = 1
+    pipeline._last_response_first_media_sent_turn = 1
+    pipeline._response_audio_turn_started = False
+
+    pipeline._kevin_transcript_buf.append("Let me check if Bob is available.")
+    flushed = await pipeline._flush_kevin_transcript(apply_side_effects=True)
+    assert flushed is False
+    assert pipeline._hold_offered is False
+    assert len(pipeline._pending_hold_offer_turns) == 0
+    assert pipeline._waiting_for_owner_availability is False
+    await pipeline.stop()
+
+
+@pytest.mark.asyncio
+async def test_flush_kevin_transcript_apply_side_effects_false_never_sets_hold_offered(fake_ws):
+    pipeline = create_pipeline(fake_ws)
+    pipeline._response_turn_number = 2
+    pipeline._last_response_first_media_sent_turn = 2
+    pipeline._response_audio_turn_started = True
+
+    pipeline._kevin_transcript_buf.append("Let me check if Bob is available right now.")
+    flushed = await pipeline._flush_kevin_transcript(apply_side_effects=False)
+    assert flushed is False
+    assert pipeline._hold_offered is False
+    assert len(pipeline._pending_hold_offer_turns) == 0
+    assert pipeline._waiting_for_owner_availability is False
     await pipeline.stop()

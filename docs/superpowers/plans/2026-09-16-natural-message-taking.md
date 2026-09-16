@@ -78,7 +78,7 @@ existing conversation-language context.
   first-audio offer suppression and subsequent-chunk authority check each
   failed their corresponding behavioral test. Test transports and background
   provider helpers are isolated.
-- Integrated backend: 483 focused tests passed across the shared action
+- Integrated backend: 492 focused tests passed across the shared action
   consumer, all three transition engines, legacy commands, speech and call
   lifecycle, summary notifications, urgent handoff and media ingress.
 - Additional in-memory mutations proved sensitivity to the three-second
@@ -107,7 +107,16 @@ existing conversation-language context.
   intake and recovery callers; the message transition handles failures as
   retryable. Five regressions cover this boundary. Swallowing send errors again
   failed four tests while the transition's retryable-failure control passed.
-  The Gemini source blob is `52f383dfef7cde976183c93e15e063a3d2f8ca8a`.
+- Gemini records a heard availability offer before awaiting transcript delivery.
+  Offers generated ahead of their first audio remain pending by audio epoch and
+  turn; accepted first media commits them. Suppression clears pending offers
+  while preserving a previously heard hold. The unavailable instruction uses
+  the caller's conversation language instead of the account language setting.
+  All 35 Gemini transition tests passed. Five additional mutations detected
+  delayed hold recognition, committing unheard offers, missing first-media
+  promotion, treating text-only output as speech, and account-language pinning.
+  The independently reviewed Gemini source blob is
+  `3d1219bfcd2b059bd09b3872fb1567c8ea697fbe`.
 
 Exact-HEAD CI and the final commit-bound review are recorded in the associated
 pull request before merge. Backend deployment, a new installed iPhone build,

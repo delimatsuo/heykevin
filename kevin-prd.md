@@ -96,7 +96,7 @@ completion on September 14, 2026.
       summary after pickup, hangup, or the end of the screening wait.
 - [ ] Record the installed iOS version and build used for this check. Public App
       Store version metadata alone does not identify that build.
-- [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION`, published September 15, 2026 per owner submission instruction; see the canonical [build 39 release record](docs/releases/2026-09-15-native-frontend-ios-39.md). Physical iPhone checks remain unrecorded and open.
+- [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION`, published September 15, 2026 per owner submission instruction; see the canonical [build 39 release record](docs/releases/2026-09-15-native-frontend-ios-39.md). Partial frontend checks on the installed build are recorded there; the remaining N1 phone checks stay open.
 
 PR #239 contains the initial summary notification and feedback/review code;
 PR #241 repairs delayed summary cancellation. The approved urgent handoff extends
@@ -201,7 +201,8 @@ former v2 program.
 N1 is complete only when deployment and the relevant owner-device checks are
 recorded. A green unit suite, merged PR, TestFlight upload, and production release
 are different facts. N3 delivery is published to the App Store in 1.3.0 (39); its
-owner physical phone and VoiceOver acceptance remains explicit and unrecorded.
+owner physical phone and VoiceOver acceptance remains open. Partial frontend
+observations are recorded in the build 39 release record.
 The later-feature list is not a checklist that must be
 exhausted before the current product can be called shipped.
 

@@ -193,19 +193,51 @@ Durable evidence is recorded here. Archives, IPAs, extracts and raw delivery
 logs use the configured ephemeral scratch directory with exact-directory
 cleanup; XcodeStorage manages its own cache/result bundles.
 
+## Partial physical-device frontend checks — September 15, 2026
+
+The session began at `2026-09-16T00:50:46Z` (September 15 America/New_York).
+These observations came from the owner's physical **iPhone 16 Pro Max** through
+iPhone Mirroring, not a simulator. Read-only device metadata reported iOS
+**26.6.2 (23G90)** and installed bundle `com.kevin.callscreen`, version
+**1.3.0 (39)**. TestFlight's app detail independently displayed version 1.3.0,
+build 39, and the app was opened with its **Open** button.
+
+| Check | Observed result |
+|---|---|
+| Initial navigation and history | **Pass:** the app opened on Calls and displayed “Showing 20 of 100 calls.” |
+| First history expansion | **Pass:** Show 20 more added rows and the count became 40 of 100. The footer explained the maximum of 100 recent calls within the last 90 days. |
+| Tab and Account navigation | **Pass:** Kevin opened, Account Settings opened from Kevin and dismissed, and returning to Calls retained the 40-call expansion. No saved settings were changed. |
+| Search beyond the first page | **Pass:** searching for an already fetched call outside the initial 20 produced one matching result. The identifying query and caller content are omitted from this record. |
+| Details and search state | **Pass:** an already-read search result opened in Details. Dismissing it preserved the query, the All filter and the one-result view. This did not exercise a non-default filter or expansion retention after Details. |
+| Empty states | **Pass:** Unread displayed its distinct zero-unread state. The fictional query `kevin-acceptance-no-match` displayed “No matching calls” with Clear search. |
+
+No regression was demonstrated in these checks. No new call or message was
+initiated and no saved account preference was changed. Customer identities,
+phone numbers, transcripts and call-history screenshots are not included in the
+durable record.
+
+**Still open:** expansion through 60/80/100 and the final no-more-results state;
+expansion and a non-default filter retained after Details; live-call access from
+Calls, Kevin and Account; the N1 phone sequence below; physical VoiceOver;
+and OS notification/microphone permissions, preview and Focus settings.
+The owner reported that a second owner-controlled phone was unavailable.
+Mirroring subsequently relocked, so the remaining navigation checks were not
+completed. These partial observations do not complete N1 or N3 acceptance.
+
 ## Remaining owner acceptance
 
-Install the released 1.3.0 (39) build from the App Store or internal TestFlight.
-Check the Calls + Kevin design, history/search/details and Settings on the owner's
-phone. With an owner-controlled fictional test call, check access to the live
+Continue with the installed 1.3.0 (39) build. Finish the open frontend checks
+above. With an owner-controlled fictional test call, check access to the live
 transcript and Pick up / Take a message from both tabs and Account. Complete the
 remaining [N1 device sequence](2026-09-14-notification-ios-38.md#owner-iphone-test-sequence)
 using build 39, including urgent fallback, stale notifications and real two-way audio.
 
-While public App Store release 1.3.0 (39) is completed, physical iPhone and
-VoiceOver acceptance remain unrecorded and open. Offline owner-phone testing of
-unavailable delivery does not prove or equal a forced APNs-provider error.
-This release introduces no backend deployment, runtime flag change, or real customer call.
+Public App Store release 1.3.0 (39) is completed. Partial physical frontend
+observations are recorded above; full physical iPhone and VoiceOver acceptance
+remain open. Offline owner-phone testing of unavailable delivery does not prove
+or equal a forced APNs-provider error. This session introduced no backend
+deployment, runtime flag change, or real customer call.
+
 
 ## Routing evidence
 

@@ -1,6 +1,6 @@
 # Hey Kevin — Current Roadmap and Release Status
 
-**Reconciled:** 2026-09-14
+**Reconciled:** 2026-09-15
 **Implementation baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
 **Repository:** `delimatsuo/heykevin`
 
@@ -14,17 +14,19 @@ External observations are dated snapshots, not a standing claim about production
 
 ## Observed release baseline
 
-Read-only checks on September 14, with the native candidate updated September 15 UTC:
+Backend snapshots are dated September 14; public iOS was rechecked September 16
+UTC (September 15 in America/New_York):
 
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
-| Production backend | `kevin-api-00270-l9s`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:45:33Z` | Successful [production run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657), exact live health/runtime identity, 100% serving traffic and anonymous smoke. See the [release record](releases/2026-09-14-urgent-production-candidate.md). iOS release and real-call/device acceptance remain open. |
-| Staging backend | `kevin-api-staging-00169-muy`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:11:16Z` | Successful [staging run 34896587160](https://github.com/delimatsuo/heykevin/actions/runs/34896587160), live health identity, 100% serving traffic, runtime isolation and anonymous static smoke. Includes the rolling-call compatibility repair. Staging remains distinct from real caller/device acceptance. |
-| Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Authenticated read-only App Store Connect inspection on September 14 links the public version to build 36. The public [Apple lookup](https://itunes.apple.com/lookup?id=6761427495&country=us) reports the September 5 release date but does not expose the build number. |
-| Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Authenticated Apple inspection before preparing build 38. This is distinct from the public build 36 and the new notification candidate below. |
-| Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** in the existing internal QA group, verified at `23:18:44Z` | Source `813e0e3b72e90c709832d72129b82f5e6622775b`. All 127 native unit tests, signed-package review and Apple validation passed. Upload and processing completed; phone acceptance and App Store submission remain open. See the [candidate record and device checklist](releases/2026-09-14-notification-ios-38.md). |
-| Native frontend iPhone candidate | **1.3.0 (39)**, **VALID**, **IN_BETA_TESTING** in internal QA, verified September 15 at `03:51:07Z` | New Calls + Kevin design and bounded history. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, independent review, Apple processing and test notes. Owner device acceptance remains open. |
-| Development inventory | Native frontend implementation is complete; N1/N3 owner acceptance remains open | [PR #248](https://github.com/delimatsuo/heykevin/pull/248) records the frontend. Issue #33 and later PRD features remain deferred. Old worktrees and retained branches do not establish active feature work. |
+| Production backend | `kevin-api-00270-l9s`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:45:33Z` | Successful [production run 34897431657](https://github.com/delimatsuo/heykevin/actions/runs/34897431657), exact live health/runtime identity, 100% serving traffic and anonymous smoke. See the [release record](releases/2026-09-14-urgent-production-candidate.md). |
+| Staging backend | `kevin-api-staging-00169-muy`, SHA `7377c7ba402297625dec5de97a2250f50b1c8013`, verified September 14 at `21:11:16Z` | Successful [staging run 34896587160](https://github.com/delimatsuo/heykevin/actions/runs/34896587160), live health identity, 100% serving traffic, runtime isolation and anonymous static smoke. Includes the rolling-call compatibility repair. |
+| Public iOS | Version `1.3.0`, **build 39**, `READY_FOR_DISTRIBUTION` / `READY_FOR_SALE` | Authenticated read-only inspection at `2026-09-16T00:20:10Z` (Sep 15 America/New_York) links public version 1.3.0 to build 39. Public lookup (`https://itunes.apple.com/lookup?id=6761427495&country=us`) reports release date `2026-09-15T21:35:24Z`. See canonical [release record](releases/2026-09-15-native-frontend-ios-39.md). |
+| Historical Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Historical public baseline as of September 14, now superseded by build 39. |
+| Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
+| Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
+| Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
+| Development inventory | Native frontend 1.3.0 (39) published; N1/N3 owner phone acceptance remains open | [PR #248](https://github.com/delimatsuo/heykevin/pull/248) merged. Issue #33 and later PRD features remain deferred. |
 
 ## Shipped
 
@@ -48,12 +50,15 @@ Read-only checks on September 14, with the native candidate updated September 15
       through PR #235 are included in production. The September 3 notes claiming
       this wave was undeployed are superseded by the observed September 4 deploys.
 
-## Pending notification release
+<a id="pending-notification-release"></a>
 
-**Active priority:** Complete iOS release and device acceptance for N1 in the
-[current PRD](../kevin-prd.md). The notification backend, urgent handoff and
-rolling-call compatibility repair are now deployed to production. This does
-not mark the full PRD or notification experience accepted on a physical iPhone.
+## Notification release and remaining device acceptance
+
+**Active priority:** Complete physical device and VoiceOver acceptance for N1/N3
+in the [current PRD](../kevin-prd.md). The notification backend, urgent handoff and
+rolling-call compatibility repair are deployed to production, and the native frontend
+in 1.3.0 (39) is published to the App Store. Physical-device acceptance on the owner's
+iPhone remains open.
 
 [PR #239](https://github.com/delimatsuo/heykevin/pull/239) adds caller/reason summary
 updates to an existing notification and the matching Pick Up action. The same
@@ -120,27 +125,28 @@ list remain outside active implementation.
       `IN_BETA_TESTING` and present in the internal QA group. The
       [candidate record](releases/2026-09-14-notification-ios-38.md) includes
       package identity, verification and the owner test sequence.
-- [ ] Publish the validated iPhone build to the App Store after the device checks
-      and owner release approval.
+- [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION` (verified September 16, 2026 at `00:20:10Z` / Sep 15 America/New_York) following owner's submission instruction ("submit the last build"). See the canonical [build 39 release record](releases/2026-09-15-native-frontend-ios-39.md).
 - [ ] Record the owner's installed iOS build and notification/pickup checks from
-      the PRD, including stale-alert and ended-call behavior.
+      the PRD on build 39, including stale-alert and ended-call behavior.
 
 Only Deli may approve the production environment; [AGENTS.md](../AGENTS.md)
 explicitly forbids an agent or API approval. Deli's approval and the completed
-production deployment above did not authorize an iPhone release. The owner
-subsequently agreed to the TestFlight candidate and device-validation sequence;
-App Store submission remains a later release approval. The tested
-forward-recovery patch still requires another build and approval if needed;
-it does not rely on returning live operations to the older backend.
+production deployment above did not authorize an Apple release. The owner
+subsequently gave explicit instruction to submit the existing build ("submit the last build"),
+and submission was completed. Public release 1.3.0 (39) is live on the App Store;
+physical-device and VoiceOver acceptance remain open.
+The tested forward-recovery patch still requires another build and approval if
+needed; it does not rely on returning live operations to the older backend.
 
-## Native frontend — available for internal TestFlight review
+## Native frontend — released in 1.3.0 (39)
 
 After testing notification build 38, the owner approved translating the
 expert-reviewed HTML into SwiftUI and asked for bounded history. Build 38
 contains the notification changes; it predates this native design.
 
 The [native plan](superpowers/plans/2026-09-14-native-frontend.md) is implemented
-in **1.3.0 (39)**, now available in internal TestFlight QA. Calls + Kevin are the two tabs,
+and released in **1.3.0 (39)**, now live on the App Store (`READY_FOR_DISTRIBUTION`)
+and available in internal TestFlight QA. Calls + Kevin are the two tabs,
 with labeled account Settings and the live caller reachable throughout.
 History starts at 20 rows, expands by 20 to the existing 100-call/90-day bound,
 and searches/filters the full bounded snapshot before limiting visible rows.
@@ -148,10 +154,11 @@ The retrieval limit does not delete older stored calls or extend retention.
 
 Implementation, independent native review and local verification are complete:
 269 native unit tests, 9 fixture UI tests and targeted mutation probes passed.
-The [candidate record](releases/2026-09-15-native-frontend-ios-39.md) binds the
+The [release record](releases/2026-09-15-native-frontend-ios-39.md) binds the
 source and evidence. Required CI passed, independent package review approved,
-and Apple processing, internal QA membership and What to Test readback are verified.
-Physical notification/call checks and public App Store approval remain separate.
+Apple processing, internal QA availability and What to Test readback are verified,
+and public App Store distribution is live. Physical-device and VoiceOver acceptance
+on the owner's phone remain open.
 
 ## Unfinished or unverified, not an automatic implementation queue
 

@@ -1,5 +1,7 @@
 # Native Calls + Kevin frontend and bounded history
 
+> **Completion Note (2026-09-15):** This plan was implemented, verified, packaged, and published to the App Store as version **1.3.0 (39)** (`READY_FOR_DISTRIBUTION`). See the canonical [build 39 release record](../../releases/2026-09-15-native-frontend-ios-39.md). Physical iPhone and VoiceOver acceptance remain open.
+
 Owner authorization: September 14, 2026, after reviewing the HTML, “ok, proceed
 with the enhancements. Make sure you remember that history needs to have a
 limit or the list will be too long. How similar products manage history?
@@ -292,8 +294,11 @@ Wait for exactHEAD CI and fix/re-review valid findings before reviewed-clean mer
 Next internal TestFlight package requires a fresh release envelope, available
 build number, wrapper-managed archive/export, signed-package identity and
 entitlement inspection, Apple validation/processing and QA availability. Preserve
-all build38 notification capabilities. Public App Store release remains pending
-owner acceptance/approval; no backend deployment is introduced by this slice.
+all build38 notification capabilities. As planned, public App Store release required
+separate owner approval; on September 15, 2026, the owner instructed submission of
+the build, and public App Store release **1.3.0 (39)** is completed (`READY_FOR_DISTRIBUTION`).
+Physical iPhone and VoiceOver qualification remain open. No backend deployment is
+introduced by this slice.
 
 ## Builder output
 

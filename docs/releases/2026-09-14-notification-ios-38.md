@@ -1,12 +1,14 @@
 # Notification iPhone release candidate — 1.2.12 (38)
 
+> **Historical Candidate / Superseded:** On September 15, 2026, following owner instruction, the native frontend build was submitted and published to the App Store as version **1.3.0 (39)** (`READY_FOR_DISTRIBUTION`). See the canonical [build 39 release record](2026-09-15-native-frontend-ios-39.md). This build 38 record is retained as historical candidate evidence. Execute the [Owner iPhone test sequence](#owner-iphone-test-sequence) below against released build 39.
+
 The owner agreed on September 14 to prepare the implemented notification
 enhancement for TestFlight, validate it on the owner's iPhone, and submit an
 App Store release after the device results and release approval. This candidate
 implements the active [N1 scope](../../kevin-prd.md).
 This notification candidate predates the native frontend. The owner subsequently
 approved that work under N3; its separate
-[build 39 record](2026-09-15-native-frontend-ios-39.md) tracks delivery.
+[build 39 record](2026-09-15-native-frontend-ios-39.md) tracks delivery and public release.
 The later-feature backlog remains deferred.
 
 ## Candidate and Apple inventory
@@ -109,8 +111,8 @@ work, hosted macOS jobs or deployments.
 ## Owner iPhone test sequence
 
 Use the owner's existing account and an owner-controlled second phone, with
-fictional caller names and reasons. Install the candidate over the existing app;
-keep existing account data. Open it while unlocked before testing so it can
+fictional caller names and reasons. Install the current build 39 over the existing
+app; keep existing account data. Open it while unlocked before testing so it can
 refresh its notification and urgent-handoff registration. Record the installed
 version/build, iOS version, notification/microphone permissions, preview setting,
 and Focus setting. Keep customer identities and caller content out of the record.
@@ -132,8 +134,8 @@ the exact build, state and reproduction steps and fix the demonstrated defect.
 Injected tests cover delayed responses, network failures and account changes;
 their results must remain distinct from what was actually exercised on a phone.
 Record the PRD's remaining notification-failure and delayed-summary acceptance
-checks explicitly before marking N1 complete. App Store submission remains
-pending device results and owner release approval.
+checks explicitly before marking N1 complete. While public App Store release
+**1.3.0 (39)** is completed, physical iPhone and VoiceOver acceptance remain open.
 
 ## Routing evidence
 
@@ -149,4 +151,5 @@ Retries: 0
 Audit defects found: Existing missing Time Sensitive capability identified by the
 independent staff review and confirmed against Apple's implementation guidance.
 Audit disposition: Configuration correction applied; source and signed-artifact
-reviews passed with no remaining findings. Physical-device acceptance is pending.
+reviews passed with no remaining findings. Candidate superseded by public App Store
+release 1.3.0 (39); physical-device acceptance on build 39 remains open.

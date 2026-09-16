@@ -1,13 +1,11 @@
 # Hey Kevin — Current Product Requirements
 
-**Updated:** 2026-09-14
+**Updated:** 2026-09-15
 **Owner:** Deli Matsuo
 **Backend release baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
-**iPhone test candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
-**Native frontend candidate:** `1.3.0 (39)` in development; release evidence is separate.
-**Scope decision:** Complete the screening notification and urgent-call handoff,
-and implement the approved Calls + Kevin native design with bounded history.
-Keep valuable later features in this PRD rather than starting them automatically.
+**Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
+**Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
+**Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
 
 This is the current product scope. It replaces the original Telegram-first,
 single-user PRD and the broader unapproved Business Dispatch v2 plan as the guide
@@ -98,8 +96,7 @@ completion on September 14, 2026.
       summary after pickup, hangup, or the end of the screening wait.
 - [ ] Record the installed iOS version and build used for this check. Public App
       Store version metadata alone does not identify that build.
-- [ ] Publish the validated iPhone build to the App Store after the device checks
-      and owner release approval.
+- [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION`, published September 15, 2026 per owner submission instruction; see the canonical [build 39 release record](docs/releases/2026-09-15-native-frontend-ios-39.md). Physical iPhone checks remain unrecorded and open.
 
 PR #239 contains the initial summary notification and feedback/review code;
 PR #241 repairs delayed summary cancellation. The approved urgent handoff extends
@@ -151,18 +148,19 @@ records the expert panel, competitor research and verification contract.
 
 - [x] Owner approved the expert-reviewed design and bounded-history direction.
 - [x] Native unit, lifecycle/ownership mutation and fixture UI checks pass.
-      The [candidate record](docs/releases/2026-09-15-native-frontend-ios-39.md)
+      The [release record](docs/releases/2026-09-15-native-frontend-ios-39.md)
       records 269 native unit tests, 9 UI tests and the mutation results.
 - [x] Independent source/package review and required CI pass for the packaged source.
 - [x] **1.3.0 (39)** is VALID / IN_BETA_TESTING in the internal TestFlight QA group;
       exact build and What to Test readback verified September 15 at `03:51:07Z`.
+- [x] **1.3.0 (39)** is `READY_FOR_DISTRIBUTION` on the App Store (verified September 16, 2026 at `00:20:10Z` / Sep 15 America/New_York). See the [release record](docs/releases/2026-09-15-native-frontend-ios-39.md).
 - [ ] Owner checks the installed frontend and the remaining N1 phone scenarios.
 
 Apple Phone uses filters and per-call details; Google Voice offers search and
 separates archiving from deletion; Quo offers searchable, filterable call logs.
 The plan links their official documentation. These examples inform navigation,
-not Kevin's retention policy. Public App Store publication remains a separate
-owner release decision.
+not Kevin's retention policy. Public App Store publication is completed in
+1.3.0 (39); physical iPhone and VoiceOver acceptance remain open.
 
 ## Valuable later features — not active implementation
 
@@ -202,8 +200,8 @@ former v2 program.
 
 N1 is complete only when deployment and the relevant owner-device checks are
 recorded. A green unit suite, merged PR, TestFlight upload, and production release
-are different facts. N3 delivery requires the reviewed native candidate and
-internal TestFlight evidence above; its owner acceptance remains explicit.
+are different facts. N3 delivery is published to the App Store in 1.3.0 (39); its
+owner physical phone and VoiceOver acceptance remains explicit and unrecorded.
 The later-feature list is not a checklist that must be
 exhausted before the current product can be called shipped.
 

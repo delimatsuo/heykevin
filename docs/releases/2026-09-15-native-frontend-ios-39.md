@@ -1,15 +1,32 @@
-# Native frontend candidate — 1.3.0 (39)
+# Native frontend release — 1.3.0 (39)
 
-**Delivered to internal TestFlight QA:** Apple reports VALID / IN_BETA_TESTING,
-verified September 15, 2026 at `03:51:07Z`. Owner iPhone acceptance remains open.
+**Public App Store release:** Apple reports `READY_FOR_DISTRIBUTION` / legacy `READY_FOR_SALE`,
+verified September 16, 2026 at `00:20:10Z` (September 15 America/New_York). Version `1.3.0`,
+build `39` is live on the App Store. Owner physical iPhone acceptance remains open.
 
-The owner approved translating the reviewed HTML into native SwiftUI and
-providing another internal TestFlight build on September 14, 2026. This is the
-[N3 scope](../../kevin-prd.md): Calls + Kevin navigation, preserved call actions
-and Settings, and bounded history. Build 38 contains the earlier notification
-enhancement; the new design starts with this candidate.
+Following internal TestFlight delivery, the owner requested submitting the existing build ("submit the last build"), and submission was completed. Current public 1.3.0 (39) includes the native Calls + Kevin frontend, preserved call actions and Settings, bounded history, and the screening notification enhancements.
+
+## Public App Store release
+
+Authenticated App Store Connect GETs completed September 16, 2026 at
+`00:20:10Z` (September 15 America/New_York). Resources below are under
+`https://api.appstoreconnect.apple.com/v1/`. A direct public US lookup during the
+same session independently confirmed the public version and release date.
+
+- **App Store Version:** `GET appStoreVersions/32977adc-f519-451a-a839-49976ee3bea7?include=build` HTTP 200: version `1.3.0`, `appVersionState=READY_FOR_DISTRIBUTION`, legacy `appStoreState=READY_FOR_SALE`, `releaseType=AFTER_APPROVAL`, linked build ID `7ebb5e58-9016-498b-b43e-75ec3383786e`, version `39`, `VALID`/unexpired. App ID `6761427495`, bundle `com.kevin.callscreen`.
+- **Review Submission:** `GET reviewSubmissions/6697cbd8-48ab-4c63-8539-199683d98d6d?include=items,appStoreVersionForReview`: state `COMPLETE`, item state `APPROVED`, submittedDate `2026-09-15T04:10:43.283Z`, linked to version ID `32977adc-f519-451a-a839-49976ee3bea7`.
+- **Build Status:** `GET builds/7ebb5e58-9016-498b-b43e-75ec3383786e?include=preReleaseVersion,buildBetaDetail`: version `39`, prerelease `1.3.0`, `VALID`/unexpired, internal state `IN_BETA_TESTING`.
+- **Public Lookup:** Direct HTTP GET `https://itunes.apple.com/lookup?id=6761427495&country=us` returned version `1.3.0`, `currentVersionReleaseDate=2026-09-15T21:35:24Z`. Public lookup alone does not expose the build number; authenticated relationship provides build `39`. This does not claim all international storefronts or installed phone versions are confirmed.
+- **Release provenance:** The owner requested submission of the existing build ("submit the last build"), and submission was completed. At submission `releaseType` was `MANUAL`; latest readback shows `AFTER_APPROVAL`. The actor and exact time of the transition are unknown. Read-only inventory refresh did not mutate settings; no further release action is needed and do not resubmit. Future releases retain separate authorization.
 
 ## Product decision
+
+The owner approved translating the reviewed HTML into native SwiftUI and
+providing another internal TestFlight build with bounded history on September 14,
+2026. This is the
+[N3 scope](../../kevin-prd.md): Calls + Kevin navigation, preserved call actions
+and Settings, and bounded history. Build 38 contains the earlier notification
+enhancement; the new design is delivered in this release.
 
 Calls shows 20 records initially, then **Show 20 more**, up to the existing
 100 most recent calls within 90 days. Search and All/Unread/Spam filters examine
@@ -178,16 +195,17 @@ cleanup; XcodeStorage manages its own cache/result bundles.
 
 ## Remaining owner acceptance
 
-Install the available 1.3.0 (39) internal candidate. Check the Calls + Kevin design,
-history/search/details and Settings on the owner's phone. With an owner-controlled
-fictional test call, check access to the live transcript and Pick up / Take a
-message from both tabs and Account. Complete the remaining
-[N1 device sequence](2026-09-14-notification-ios-38.md#owner-iphone-test-sequence),
-including urgent fallback, stale notifications and real two-way audio.
+Install the released 1.3.0 (39) build from the App Store or internal TestFlight.
+Check the Calls + Kevin design, history/search/details and Settings on the owner's
+phone. With an owner-controlled fictional test call, check access to the live
+transcript and Pick up / Take a message from both tabs and Account. Complete the
+remaining [N1 device sequence](2026-09-14-notification-ios-38.md#owner-iphone-test-sequence)
+using build 39, including urgent fallback, stale notifications and real two-way audio.
 
-Physical-device acceptance and public App Store submission remain pending. This
-candidate introduces no backend deployment, runtime flag change, real customer
-call or external TestFlight distribution.
+While public App Store release 1.3.0 (39) is completed, physical iPhone and
+VoiceOver acceptance remain unrecorded and open. Offline owner-phone testing of
+unavailable delivery does not prove or equal a forced APNs-provider error.
+This release introduces no backend deployment, runtime flag change, or real customer call.
 
 ## Routing evidence
 
@@ -211,5 +229,6 @@ harness corrections are described above.
 Audit disposition: Source and final test-delta reviews approved; all 269 native
 unit tests, 9 UI tests and targeted mutation checks passed. Corrected-source CI,
 replacement package review and Apple validation passed; upload succeeded.
-Internal QA availability and What to Test readback are verified. Owner-device
-acceptance and public App Store approval remain open.
+Internal QA availability and What to Test readback are verified. Public App Store
+release 1.3.0 (39) is completed and READY_FOR_DISTRIBUTION. Owner physical-device
+and VoiceOver acceptance remain open.

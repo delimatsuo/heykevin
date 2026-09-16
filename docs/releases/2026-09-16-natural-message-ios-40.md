@@ -17,6 +17,11 @@ The owner subsequently confirmed build 40 was installed and reported the
 confirmation-warning regression below. Full physical-call acceptance remains
 open.
 
+The iOS-only repair is now available as **1.3.1 (41)** in internal TestFlight QA.
+Use the [build 41 retest](2026-09-16-message-confirmation-ios-41.md#owner-retest--open)
+for the warning and the remaining speech/pickup scenarios below. This build 40
+record preserves its original package and backend rollout evidence.
+
 ## Product change and evidence boundary
 
 The owner's build 39 call demonstrated working notification actions and streamed

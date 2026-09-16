@@ -61,7 +61,7 @@ class TestMessageTakingSharedPolicy:
         "text,expected",
         [
             ("Let me see if Deli is available, one moment.", True),
-            ("One moment please, let me check availability.", True),
+            ("One moment please, let me check availability.", False),
             ("Let me check if he's available.", True),
             ("I'm going to try to reach Deli for you.", True),
             ("Hold on, let me try to connect you.", True),
@@ -71,6 +71,11 @@ class TestMessageTakingSharedPolicy:
             ("Unfortunately, Deli is not available. Can I take a message?", False),
             ("I'm sorry, Deli is not available right now. You can leave me a message.", False),
             ("He is unavailable today.", False),
+            # Generic availability without established owner offer
+            ("Let me check what appointment times are available", False),
+            ("Let me check which parts are available", False),
+            ("Let me see which appointment times are available", False),
+            ("Let me check availability.", False),
             # General conversation
             ("How can I help you today?", False),
             ("Could you please spell your last name?", False),

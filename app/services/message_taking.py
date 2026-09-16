@@ -19,9 +19,7 @@ def is_owner_availability_hold(text: str) -> bool:
 
     hold_markers = (
         "let me see if",
-        "let me see",
         "let me check if",
-        "let me check",
         "i'm going to try",
         "i will try",
         "i'll try",
@@ -32,7 +30,6 @@ def is_owner_availability_hold(text: str) -> bool:
     )
     owner_markers = (
         "available",
-        "availability",
         "reach",
         "get ahold",
         "get a hold",

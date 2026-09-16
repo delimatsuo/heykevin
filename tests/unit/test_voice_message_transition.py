@@ -17,17 +17,20 @@ Verifies:
    - Held across _prepare_message_delivery, delivery guard, and delivery.
    - Released by _finish_message_delivery_attempt on success, prepare False, and cancellation.
 7. Guard dynamic revocation:
-   - Guard failing after first chunk aborts delivery and returns False without setting _unavailable_said.
+   - Guard failing after first chunk stops remaining audio, commits delivery locally (_unavailable_said=True), and avoids duplicate speech.
 8. Caller transcripts during grace:
    - Interim and final transcripts during grace are preserved and queued in _process_utterance.
    - No overlap or race with Kevin's unavailable announcement; processes cleanly after transition.
 9. TTS delivery failure and barge-in semantics:
    - TTS provider failure returns False, retains _unavailable_said=False, allowing retry.
+   - First outbound audio failure leaves _unavailable_said=False, allowing retry to speak.
    - Barge-in after partial audio playback marks _unavailable_said=True, preventing duplicate prompt.
 10. Post-transition conversation and silence resumption:
    - Subsequent caller turns are handled in message-taking context without offering new owner check.
    - Claude system prompt persists message-taking directive after _unavailable_said.
    - Silence check / _waiting_on_caller resumes normally once transition completes.
+11. consume_message_intent regression:
+   - Guard failure/error after first chunk aborts subsequent audio, prevents stale ACK, commits local delivery key, and allows retry without duplicate speech.
 """
 
 from __future__ import annotations
@@ -507,20 +510,22 @@ async def test_lock_released_on_prepare_cancellation(make_pipeline):
     assert pipeline._message_taking_pending is False
 
 
-# --- 7. Guard changes after first chunk aborts delivery -----------------------
+# --- 7. Guard changes after first chunk stops remaining audio and commits delivery ---
 
 @pytest.mark.asyncio
-async def test_guard_changes_after_first_chunk_aborts_delivery(make_pipeline):
-    """If guard returns False between audio chunks, delivery aborts and does not set unavailable_said."""
+async def test_guard_changes_after_first_chunk_stops_remaining_audio_and_commits_local_delivery(make_pipeline):
+    """If guard returns False between audio chunks, remaining chunks stop, delivery is locally committed,
+    _unavailable_said becomes True, and another delivery is a no-op.
+    """
     pipeline, fake_http, transcripts, audio_chunks = make_pipeline()
-    fake_http.tts_audio = b"\x00" * 8000  # 2 chunks
+    fake_http.tts_audio = b"\x00" * 8000  # 2 chunks (500ms each)
 
     call_count = 0
 
     async def dynamic_guard():
         nonlocal call_count
         call_count += 1
-        # Succeed for initial checks, then fail when rechecked
+        # Succeed for initial checks, then fail when rechecked after first chunk
         if call_count > 2:
             return False
         return True
@@ -528,8 +533,17 @@ async def test_guard_changes_after_first_chunk_aborts_delivery(make_pipeline):
     pipeline._message_delivery_guard = dynamic_guard
 
     delivered = await asyncio.wait_for(pipeline._deliver_message_instruction(), timeout=3.0)
-    assert delivered is False
-    assert pipeline._unavailable_said is False
+    assert delivered is True
+    assert pipeline._unavailable_said is True
+    assert len(audio_chunks) == 1
+
+    # Full unsaid transcript must NOT be published to conversation or transcript callback
+    assert not any("Unfortunately" in t or "not available" in t for _, t in transcripts)
+
+    # Calling deliver again is a no-op (already said)
+    delivered_again = await asyncio.wait_for(pipeline._deliver_message_instruction(), timeout=3.0)
+    assert delivered_again is True
+    assert len(audio_chunks) == 1
 
 
 # --- 8. Caller interim/final during grace not lost / no overlap ---------------
@@ -594,6 +608,45 @@ async def test_failed_tts_allows_retry_and_retains_unavailable_said_false(make_p
 
 
 @pytest.mark.asyncio
+async def test_first_output_failed_retains_unavailable_false_and_allows_retry(make_pipeline):
+    """When the first outbound audio chunk fails (on_audio_out returns False),
+    _unavailable_said remains False and subsequent valid delivery speaks audio.
+    """
+    pipeline, fake_http, transcripts, audio_chunks = make_pipeline()
+    fake_http.tts_audio = b"\x00" * 8000  # 2 chunks
+
+    first_attempt = True
+
+    async def fail_first_chunk_audio_out(chunk: bytes):
+        nonlocal first_attempt
+        if first_attempt:
+            first_attempt = False
+            return False
+        audio_chunks.append(chunk)
+        return True
+
+    pipeline.on_audio_out = fail_first_chunk_audio_out
+
+    # Attempt 1: on_audio_out returns False on the first chunk
+    delivered1 = await asyncio.wait_for(pipeline._deliver_message_instruction(), timeout=3.0)
+    assert delivered1 is False
+    assert pipeline._unavailable_said is False
+    assert len(audio_chunks) == 0
+
+    # Restore connected state for retry
+    pipeline._connected = True
+
+    # Attempt 2: Valid retry succeeds, speaks full audio, sets _unavailable_said=True
+    delivered2 = await asyncio.wait_for(pipeline._deliver_message_instruction(), timeout=3.0)
+    assert delivered2 is True
+    assert pipeline._unavailable_said is True
+    assert len(audio_chunks) == 2
+
+    kevin_transcripts = [t for s, t in transcripts if s == "Kevin"]
+    assert any("Unfortunately" in t or "not available" in t for t in kevin_transcripts)
+
+
+@pytest.mark.asyncio
 async def test_barge_in_partial_playback_sets_unavailable_said_and_no_repeat(make_pipeline):
     """Barge-in after partial audio playout marks _unavailable_said=True and does not repeat prompt."""
     pipeline, fake_http, transcripts, _ = make_pipeline()
@@ -650,3 +703,119 @@ async def test_next_caller_response_works_in_message_taking_context(make_pipelin
 
     # Silence check is active and waiting on caller
     assert pipeline._waiting_on_caller() is True
+
+
+# --- 11. consume_message_intent regression: partial speech recovery ------------
+
+@pytest.mark.parametrize("failure_mode", ["invalid_record", "transient_error"])
+@pytest.mark.asyncio
+async def test_consume_message_intent_partial_speech_guard_failure_recovers_without_duplicate_speech(
+    make_pipeline, monkeypatch, failure_mode
+):
+    """If guard fails/raises after first accepted audio chunk, subsequent chunks stop, no ACK while
+    ownership unavailable, but local delivery commits so retry ACKs without duplicate TTS/speech.
+    """
+    cid = "contractor_123"
+    sid = "CA_test_transition_123"
+    ws_token = "ws_test_token_456"
+    op_id = "op_decline_789"
+    claim_nonce = "nonce_xyz_999"
+
+    pipeline, fake_http, transcripts, audio_chunks = make_pipeline()
+    pipeline._call_sid = sid
+    pipeline._command_ws_token = ws_token
+    pipeline._contractor_config["contractor_id"] = cid
+
+    # 8000 bytes = 2 chunks (500ms each)
+    fake_http.tts_audio = b"\x00" * 8000
+
+    record = {
+        "contractor_id": cid,
+        "call_sid": sid,
+        "state": "screening",
+        "state_updated_at": time.time(),
+        "owner_action": "decline",
+        "owner_operation_id": op_id,
+        "claim_nonce": claim_nonce,
+        "owner_action_status": "message_requested",
+        "ws_token": ws_token,
+        "message_intent": {
+            "type": "take_message",
+            "contractor_id": cid,
+            "operation_id": op_id,
+            "action": "decline",
+        },
+    }
+
+    first_chunk_accepted = asyncio.Event()
+    fail_guard_reads = False
+
+    async def tracking_audio_out(chunk: bytes):
+        audio_chunks.append(chunk)
+        first_chunk_accepted.set()
+        return True
+
+    pipeline.on_audio_out = tracking_audio_out
+
+    async def mock_read_record(call_sid: str):
+        assert call_sid == sid
+        if fail_guard_reads:
+            if failure_mode == "invalid_record":
+                return {"contractor_id": cid, "state": "ended", "state_updated_at": time.time()}
+            elif failure_mode == "transient_error":
+                raise RuntimeError("Transient RTDB connection error")
+        return dict(record, state_updated_at=time.time())
+
+    ack_calls = []
+
+    async def mock_acknowledge(call_sid, new_status="taking_message", **kwargs):
+        ack_calls.append((call_sid, new_status, kwargs))
+        return True
+
+    monkeypatch.setattr("app.services.owner_call_actions.read_record", mock_read_record)
+    monkeypatch.setattr("app.services.owner_call_actions.acknowledge_owner_action", mock_acknowledge)
+    monkeypatch.setattr(
+        "app.services.legacy_call_commands.adopt_legacy_message_intent",
+        AsyncMock(return_value=None),
+    )
+
+    from app.services.owner_call_actions import consume_message_intent
+
+    # Hook first_chunk_accepted to immediately trigger the failure mode for subsequent reads
+    async def trigger_failure_after_first_chunk():
+        await first_chunk_accepted.wait()
+        nonlocal fail_guard_reads
+        fail_guard_reads = True
+
+    trigger_task = asyncio.create_task(trigger_failure_after_first_chunk())
+
+    # Attempt 1: Consumer runs, first audio chunk accepted, but subsequent guard read fails/raises
+    try:
+        result1 = await consume_message_intent(pipeline, pipeline._deliver_message_instruction)
+    except Exception:
+        result1 = False
+    await trigger_task
+
+    # First attempt must fail (return False), emitting only one chunk, no ACK while ownership unavailable
+    assert result1 is False
+    assert len(audio_chunks) == 1
+    assert len(ack_calls) == 0
+    assert pipeline._unavailable_said is True
+    assert getattr(pipeline, "_message_delivery_key", None) is not None
+
+    # TTS was requested exactly once during attempt 1
+    tts_post_count_1 = len([c for c in fake_http.post_calls if "elevenlabs.io" in c["url"]])
+    assert tts_post_count_1 == 1
+
+    # Restore exact original record
+    fail_guard_reads = False
+
+    # Attempt 2 (Retry): Consumer runs again
+    result2 = await consume_message_intent(pipeline, pipeline._deliver_message_instruction)
+
+    # ACK succeeds without a second TTS request or additional audio chunk
+    assert result2 is True
+    assert len(ack_calls) == 1
+    assert len(audio_chunks) == 1
+    tts_post_count_2 = len([c for c in fake_http.post_calls if "elevenlabs.io" in c["url"]])
+    assert tts_post_count_2 == 1  # No second TTS request!

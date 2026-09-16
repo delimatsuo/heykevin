@@ -884,12 +884,28 @@ class VoicePipeline:
         if speak_fn is None or not callable(speak_fn):
             return False
 
+        speech_started = False
+
+        async def on_speech_started():
+            nonlocal speech_started
+            speech_started = True
+            self._unavailable_said = True
+            self._finish_owner_availability_wait()
+
         try:
-            delivered = await speak_fn(msg, guard=guard)
+            delivered = await speak_fn(msg, on_speech_started=on_speech_started, guard=guard)
         except TypeError:
-            delivered = await speak_fn(msg)
+            try:
+                delivered = await speak_fn(msg, guard=guard)
+            except TypeError:
+                try:
+                    delivered = await speak_fn(msg, on_speech_started=on_speech_started)
+                except TypeError:
+                    delivered = await speak_fn(msg)
 
         if delivered is False:
+            if speech_started:
+                return True
             return False
 
         self._unavailable_said = True

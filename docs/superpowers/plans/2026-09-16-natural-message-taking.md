@@ -74,11 +74,11 @@ existing conversation-language context.
   checks covered English Business in light mode and Portuguese Personal in dark
   mode. These are simulator results; the new controls are not installed on the
   owner's phone.
-- Voice transition: 13 focused tests passed. In-memory mutations removing the
+- Voice transition: 16 focused tests passed. In-memory mutations removing the
   first-audio offer suppression and subsequent-chunk authority check each
   failed their corresponding behavioral test. Test transports and background
   provider helpers are isolated.
-- Integrated backend: 471 focused tests passed across the shared action
+- Integrated backend: 478 focused tests passed across the shared action
   consumer, all three transition engines, legacy commands, speech and call
   lifecycle, summary notifications, urgent handoff and media ingress.
 - Additional in-memory mutations proved sensitivity to the three-second
@@ -94,6 +94,15 @@ existing conversation-language context.
   outbound continuation text. The reviewed consumer and Relay blobs are
   `ec74a26917a91da91d999cc7be98a437611b4662` and
   `5cb38a7197decd150511eee02cc7a77defc7897b`.
+- PR review follow-up restored the released hold-detection markers so generic
+  scheduling or inventory phrases do not newly trigger an owner hold. The
+  first accepted Voice audio chunk now commits the local announcement before
+  any later guard failure; the common final guard still blocks stale ACKs.
+  Retry tests cover rejected and raised reads without a second TTS request or
+  audio chunk. Mutations removing this commit point or restoring broad markers
+  failed their regressions. Reviewed Voice/helper blobs are
+  `3a49ddeb52e53d2c5bbc67748d887a16437874e1` and
+  `43610d6847879891c737c421c74b7f675518af06`.
 
 Exact-HEAD CI and the final commit-bound review are recorded in the associated
 pull request before merge. Backend deployment, a new installed iPhone build,

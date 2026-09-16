@@ -252,8 +252,11 @@ final class CallActionCoordinator: ObservableObject {
         if status.actionStatus == "taking_message" {
             serverTakingMessage.insert(status.callSid)
             onMessage(status.callSid)
+            if let op = operations[status.callSid], op.action == "decline", !op.complete, owns(op), op.task == nil {
+                startReconciliation(for: op)
+            }
         }
-        // This projection is not reconciliation of our retained operation.
+        // Call-level projection is not reconciliation of our retained operation.
     }
     func reportConnectionFailure(callSid sid: String, auth: CallAuthContext) {
         guard let op = operations[sid], op.auth == auth, owns(op), op.action == "accept" else { return }
@@ -315,15 +318,20 @@ final class CallActionCoordinator: ObservableObject {
         op.task = task
         return await task.value
     }
-    func checkStatus(callSid sid: String) async -> Bool {
-        synchronizeSession()
-        guard let op = operations[sid], owns(op), !op.complete else { return false }
-        if let task = op.task { return await task.value }
+    @discardableResult
+    private func startReconciliation(for op: Operation) -> Task<Bool, Never>? {
+        guard owns(op), !op.complete else { return nil }
+        if let task = op.task { return task }
         let task = Task { @MainActor in
-            defer { if self.operations[sid] === op { op.task = nil } }
+            defer { if self.operations[op.sid] === op { op.task = nil } }
             return await self.reconcile(op)
         }
         op.task = task
+        return task
+    }
+    func checkStatus(callSid sid: String) async -> Bool {
+        synchronizeSession()
+        guard let op = operations[sid], let task = startReconciliation(for: op) else { return false }
         return await task.value
     }
     /// nil means unknown: retain the operation and reconcile by GET, never another POST.
@@ -347,6 +355,12 @@ final class CallActionCoordinator: ObservableObject {
             guard owns(op) else { return false }
             currentStates[op.sid] = .takingMessage; errors.removeValue(forKey: op.sid); op.complete = true
             onMessage(op.sid); return true
+        }
+        if op.action == "decline" && result.isPending && result.actionStatus == "message_requested" {
+            guard owns(op) else { return false }
+            currentStates[op.sid] = .messageRequested(operationId: op.id)
+            errors.removeValue(forKey: op.sid)
+            return false
         }
         if result.isEnded {
             serverBlocked.insert(op.sid); errors[op.sid] = "This call has ended."

@@ -13,7 +13,9 @@ physical-call check.
 This approval does not include a public App Store submission or external beta
 submission. Public **1.3.0 (39)** remains the released iOS baseline. No release
 setting, feature flag, account, credential or telephony configuration was changed.
-Build 40 installation and physical-call acceptance remain unrecorded.
+The owner subsequently confirmed build 40 was installed and reported the
+confirmation-warning regression below. Full physical-call acceptance remains
+open.
 
 ## Product change and evidence boundary
 
@@ -208,8 +210,17 @@ provide the deployment evidence recorded here.
 
 ## Owner phone acceptance — open
 
-Install **Hey Kevin 1.3.1 (40)** from TestFlight. Production rollout has been
-verified.
+The owner confirmed **Hey Kevin 1.3.1 (40)** was installed from TestFlight.
+Production rollout has been verified.
+
+During the September 16 call, the owner tapped **Take a message**, heard Kevin's
+normal message response, and saw **"Outcome not confirmed. Check status before
+choosing another action."** The supplied screen showed **Taking message** and
+Dismiss, with no usable Check status control. This is a reported confirmation
+regression, tracked by the [bounded repair plan](../superpowers/plans/2026-09-16-message-confirmation-state.md).
+The report does not establish the exact three-second pause, absence of speech
+interruption, or completion of the other scenarios below. Caller details and
+the screenshot are intentionally excluded from repository evidence.
 
 These focused button/message-transition checks supplement the remaining N1/N3
 acceptance in the [PRD](../../kevin-prd.md#n1--finish-the-screening-notification-enhancement).

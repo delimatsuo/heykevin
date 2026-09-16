@@ -133,6 +133,23 @@ struct ActiveCallCard: View {
                 }
 
                 // Actions
+                if coordinator.canCheckStatus(for: sid) {
+                    Button(String(localized: "Check status")) {
+                        Task {
+                            #if DEBUG
+                            if AppStoreScreenshotFixtures.isEnabled { return }
+                            #endif
+                            let auth = appState.currentAuthContext()
+                            let scope = appState.callLifecycleSnapshot
+                            guard lease.isValid(auth: auth, scope: scope) else { return }
+                            _ = await coordinator.checkStatus(callSid: sid)
+                        }
+                    }
+                    .buttonStyle(HKSecondaryButtonStyle(tint: .white))
+                    .disabled(AppStoreScreenshotFixtures.isEnabled)
+                    .accessibilityIdentifier("call.checkStatus")
+                }
+
                 if appState.callIgnored || coordinator.isTakingMessage(for: sid) {
                     Button {
                         let auth = appState.currentAuthContext()
@@ -155,34 +172,15 @@ struct ActiveCallCard: View {
                     .tint(.white)
                     .accessibilityIdentifier("call.dismiss")
                 } else {
-                    VStack(spacing: 8) {
-                        if coordinator.canCheckStatus(for: sid) {
-                            Button(String(localized: "Check status")) {
-                                Task {
-                                    #if DEBUG
-                                    if AppStoreScreenshotFixtures.isEnabled { return }
-                                    #endif
-                                    let auth = appState.currentAuthContext()
-                                    let scope = appState.callLifecycleSnapshot
-                                    guard lease.isValid(auth: auth, scope: scope) else { return }
-                                    _ = await coordinator.checkStatus(callSid: sid)
-                                }
-                            }
-                            .buttonStyle(HKSecondaryButtonStyle(tint: .white))
-                            .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
-                            .accessibilityIdentifier("call.checkStatus")
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) {
+                            pickupButton(sid: sid)
+                            messageButton(sid: sid)
                         }
 
-                        ViewThatFits(in: .horizontal) {
-                            HStack(spacing: 10) {
-                                pickupButton(sid: sid)
-                                messageButton(sid: sid)
-                            }
-
-                            VStack(spacing: 10) {
-                                pickupButton(sid: sid)
-                                messageButton(sid: sid)
-                            }
+                        VStack(spacing: 10) {
+                            pickupButton(sid: sid)
+                            messageButton(sid: sid)
                         }
                     }
                 }
@@ -515,6 +513,23 @@ struct LiveCallDetailView: View {
 
     private func liveActionBar(sid: String) -> some View {
         VStack(spacing: 10) {
+            if coordinator.canCheckStatus(for: sid) {
+                Button(String(localized: "Check status")) {
+                    Task {
+                        #if DEBUG
+                        if AppStoreScreenshotFixtures.isEnabled { return }
+                        #endif
+                        let auth = appState.currentAuthContext()
+                        let scope = appState.callLifecycleSnapshot
+                        guard lease.isValid(auth: auth, scope: scope) else { return }
+                        _ = await coordinator.checkStatus(callSid: sid)
+                    }
+                }
+                .buttonStyle(HKSecondaryButtonStyle())
+                .disabled(AppStoreScreenshotFixtures.isEnabled)
+                .accessibilityIdentifier("call.liveCheckStatus")
+            }
+
             if appState.callIgnored || coordinator.isTakingMessage(for: sid) {
                 Button {
                     let auth = appState.currentAuthContext()
@@ -534,23 +549,6 @@ struct LiveCallDetailView: View {
                 .tint(.primary)
                 .accessibilityIdentifier("call.liveDismiss")
             } else {
-                if coordinator.canCheckStatus(for: sid) {
-                    Button(String(localized: "Check status")) {
-                        Task {
-                            #if DEBUG
-                            if AppStoreScreenshotFixtures.isEnabled { return }
-                            #endif
-                            let auth = appState.currentAuthContext()
-                            let scope = appState.callLifecycleSnapshot
-                            guard lease.isValid(auth: auth, scope: scope) else { return }
-                            _ = await coordinator.checkStatus(callSid: sid)
-                        }
-                    }
-                    .buttonStyle(HKSecondaryButtonStyle())
-                    .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
-                    .accessibilityIdentifier("call.liveCheckStatus")
-                }
-
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 12) {
                         pickupButton(sid: sid)

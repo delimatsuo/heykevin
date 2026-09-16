@@ -12,6 +12,9 @@ private final class ActionHarness {
     var sid = ""
     var action = ""
     var op = ""
+    var lastGetAuth: CallAuthContext?
+    var lastGetSid = ""
+    var lastGetOp = ""
     var postWaiter: CheckedContinuation<CallActionResult, Error>?
     var getWaiter: CheckedContinuation<CallActionResult?, Error>?
     var suspendGet = false
@@ -21,8 +24,13 @@ private final class ActionHarness {
             self.posts += 1; self.sid = sid; self.action = action; self.op = op
             return try await withCheckedThrowingContinuation { self.postWaiter = $0 }
         },
-        getStatus: { [unowned self] _, _, op in
+        getStatus: { [unowned self] auth, sid, op in
             self.gets += 1
+            self.lastGetAuth = auth
+            self.lastGetSid = sid
+            self.lastGetOp = op
+            XCTAssertEqual(auth, self.auth)
+            XCTAssertEqual(sid, self.sid)
             XCTAssertEqual(op, self.op)
             if self.suspendGet { return try await withCheckedThrowingContinuation { self.getWaiter = $0 } }
             return self.getResult
@@ -41,11 +49,25 @@ private final class ActionHarness {
             accessToken: status == "accepted" ? "token" : nil,
             conferenceName: status == "accepted" ? "conference" : nil,
             isActive: active, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
-            statusCode: http, rawStatus: http == 202 ? "pending" : "ok", errorDetail: nil)
+            statusCode: http, rawStatus: http == 202 ? "pending" : (http == 409 || http == 500 || http == 503 ? "error" : "ok"), errorDetail: nil)
+    }
+    func observation(sid: String = "call-A", action: String = "decline", status: String = "taking_message",
+                     active: Bool = true, urgent: Bool = false) -> CallActionResult {
+        CallActionResult(callSid: sid, contractorId: "owner", operationId: "", action: action,
+            actionStatus: status, accessToken: nil, conferenceName: nil, isActive: active,
+            isUrgent: urgent, callerName: nil, callerPhone: nil, transcript: nil,
+            statusCode: 200, rawStatus: "ok", errorDetail: nil)
     }
     func reply(_ result: CallActionResult) { let c = postWaiter; postWaiter = nil; c?.resume(returning: result) }
+    func replyGet(_ result: CallActionResult?) { let c = getWaiter; getWaiter = nil; c?.resume(returning: result) }
     func waitForPost() async { for _ in 0..<200 where postWaiter == nil { await Task.yield() }; XCTAssertNotNil(postWaiter) }
     func waitForGet() async { for _ in 0..<200 where getWaiter == nil { await Task.yield() }; XCTAssertNotNil(getWaiter) }
+    func waitForReconciliationToFinish(sid: String = "call-A") async {
+        for _ in 0..<200 where coordinator.isReconciling[sid] == true {
+            await Task.yield()
+        }
+        XCTAssertFalse(coordinator.isReconciling[sid] ?? false)
+    }
 }
 
 final class CallActionTests: XCTestCase {
@@ -85,28 +107,351 @@ final class CallActionTests: XCTestCase {
         let result = await pending.value
         XCTAssertFalse(result); XCTAssertEqual(h.connections, 0)
     }
-    @MainActor func testUnknownDeclineRetainsOperationAndCheckUsesOnlyGet() async {
+    @MainActor func testKnownPendingDeclineRetainsOperationWithZeroImmediateGetsAndResolvesOnExplicitGet() async {
         let h = ActionHarness()
         let pending = Task { await h.coordinator.takeMessage(callSid: "call-A") }
         await h.waitForPost()
-        h.getResult = h.result(status: "message_requested", http: 202)
-        h.reply(h.result(status: "message_requested", http: 202))
+        h.reply(h.result(status: "message_requested", action: "decline", http: 202))
         let initial = await pending.value
-        XCTAssertFalse(initial); XCTAssertEqual(h.messages, 0)
+        XCTAssertFalse(initial)
+        XCTAssertEqual(h.messages, 0)
+        XCTAssertNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .messageRequested(operationId: h.op))
         XCTAssertTrue(h.coordinator.canCheckStatus(for: "call-A"))
         XCTAssertTrue(h.coordinator.isActionPending(for: "call-A"))
+        XCTAssertTrue(h.coordinator.isDeclinePending(for: "call-A"))
         let opposite = await h.coordinator.pickUp(callSid: "call-A")
         XCTAssertFalse(opposite)
-        h.getResult = h.result(status: "taking_message")
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 0)
+        h.getResult = h.result(status: "taking_message", action: "decline")
         let resolved = await h.coordinator.checkStatus(callSid: "call-A")
-        XCTAssertTrue(resolved); XCTAssertEqual(h.posts, 1); XCTAssertEqual(h.gets, 2); XCTAssertEqual(h.messages, 1)
+        XCTAssertTrue(resolved)
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 1)
+        XCTAssertEqual(h.messages, 1)
+        XCTAssertNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertFalse(h.coordinator.canCheckStatus(for: "call-A"))
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .takingMessage)
+    }
+    @MainActor func testGenuinelyUnknownDeclineReconcilesViaObserverTriggeredExactGet() async {
+        let h = ActionHarness()
+        let pending = Task { await h.coordinator.takeMessage(callSid: "call-A") }
+        await h.waitForPost()
+        let malformed = CallActionResult(callSid: "call-A", contractorId: "owner", operationId: h.op,
+            action: "decline", actionStatus: "unknown_status", accessToken: nil, conferenceName: nil,
+            isActive: true, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
+            statusCode: 200, rawStatus: "ok", errorDetail: nil)
+        h.getResult = malformed
+        h.reply(malformed)
+        let initial = await pending.value
+        XCTAssertFalse(initial)
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 1)
+        XCTAssertNotNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertTrue(h.coordinator.canCheckStatus(for: "call-A"))
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .unresolved(action: "decline", operationId: h.op))
+
+        h.suspendGet = true
+        let observation = h.observation()
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        await h.waitForGet()
+
+        XCTAssertNotNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertTrue(h.coordinator.isDeclinePending(for: "call-A"))
+        XCTAssertFalse(h.coordinator.canCheckStatus(for: "call-A"))
+        XCTAssertEqual(h.gets, 2)
+
+        // Repeated observes coalesce one GET and no extra POST
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 2)
+
+        // Resume exact taking_message
+        h.replyGet(h.result(status: "taking_message", action: "decline"))
+        await h.waitForReconciliationToFinish()
+
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .takingMessage)
+        XCTAssertNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertFalse(h.coordinator.canCheckStatus(for: "call-A"))
+
+        let getsBefore = h.gets
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        XCTAssertEqual(h.gets, getsBefore)
+    }
+    @MainActor func testPendingDeclineWithLaterObserverResolvesThroughExactGet() async {
+        let h = ActionHarness()
+        let pending = Task { await h.coordinator.takeMessage(callSid: "call-A") }
+        await h.waitForPost()
+        h.reply(h.result(status: "message_requested", action: "decline", http: 202))
+        let initial = await pending.value
+        XCTAssertFalse(initial)
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 0)
+        XCTAssertNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .messageRequested(operationId: h.op))
+
+        h.suspendGet = true
+        let observation = h.observation()
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        await h.waitForGet()
+
+        XCTAssertEqual(h.gets, 1)
+        XCTAssertTrue(h.coordinator.isDeclinePending(for: "call-A"))
+        XCTAssertFalse(h.coordinator.canCheckStatus(for: "call-A"))
+
+        h.replyGet(h.result(status: "taking_message", action: "decline"))
+        await h.waitForReconciliationToFinish()
+
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .takingMessage)
+        XCTAssertNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertFalse(h.coordinator.canCheckStatus(for: "call-A"))
+        XCTAssertTrue(h.coordinator.isTakingMessage(for: "call-A"))
+    }
+    @MainActor func testWrongOperationAndConflictDuringObserverReconciliationDoNotClearWarning() async {
+        for wrongOp in ["", "other-op"] {
+            let h = ActionHarness()
+            let pending = Task { await h.coordinator.takeMessage(callSid: "call-A") }
+            await h.waitForPost()
+            let unknownResult = CallActionResult(callSid: "call-A", contractorId: "owner", operationId: h.op,
+                action: "decline", actionStatus: "unknown_status", accessToken: nil, conferenceName: nil,
+                isActive: true, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
+                statusCode: 200, rawStatus: "ok", errorDetail: nil)
+            h.getResult = unknownResult
+            h.reply(unknownResult)
+            _ = await pending.value
+            XCTAssertNotNil(h.coordinator.errorMessage(for: "call-A"))
+
+            h.suspendGet = true
+            let observation = h.observation()
+            h.coordinator.observeStatus(observation, auth: h.auth)
+            await h.waitForGet()
+
+            // Exact GET returns wrong operation ID (blank or other) -> fails matchesAction
+            let wrongResult = CallActionResult(callSid: "call-A", contractorId: "owner", operationId: wrongOp,
+                action: "decline", actionStatus: "taking_message", accessToken: nil, conferenceName: nil,
+                isActive: true, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
+                statusCode: 200, rawStatus: "ok", errorDetail: nil)
+            h.replyGet(wrongResult)
+            await h.waitForReconciliationToFinish()
+
+            XCTAssertEqual(h.coordinator.errorMessage(for: "call-A"), "Outcome not confirmed. Check status before choosing another action.")
+            XCTAssertTrue(h.coordinator.isTakingMessage(for: "call-A"))
+            XCTAssertTrue(h.coordinator.canCheckStatus(for: "call-A"))
+            XCTAssertEqual(h.coordinator.state(for: "call-A"), .unresolved(action: "decline", operationId: h.op))
+        }
+
+        // Exact conflict 409 must result terminal conflict error, not .takingMessage or a new POST
+        let h2 = ActionHarness()
+        let pending2 = Task { await h2.coordinator.takeMessage(callSid: "call-A") }
+        await h2.waitForPost()
+        let unknownResult2 = CallActionResult(callSid: "call-A", contractorId: "owner", operationId: h2.op,
+            action: "decline", actionStatus: "unknown_status", accessToken: nil, conferenceName: nil,
+            isActive: true, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
+            statusCode: 200, rawStatus: "ok", errorDetail: nil)
+        h2.getResult = unknownResult2
+        h2.reply(unknownResult2)
+        _ = await pending2.value
+        XCTAssertNotNil(h2.coordinator.errorMessage(for: "call-A"))
+
+        h2.suspendGet = true
+        let timeoutObservation = h2.observation(action: "timeout", urgent: true)
+        h2.coordinator.observeStatus(timeoutObservation, auth: h2.auth)
+        await h2.waitForGet()
+
+        let conflictResult = CallActionResult(callSid: "call-A", contractorId: "owner", operationId: h2.op,
+            action: "timeout", actionStatus: "action_conflict", accessToken: nil, conferenceName: nil,
+            isActive: true, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
+            statusCode: 409, rawStatus: "error", errorDetail: nil)
+        h2.replyGet(conflictResult)
+        await h2.waitForReconciliationToFinish()
+
+        XCTAssertEqual(h2.coordinator.errorMessage(for: "call-A"), "Another action owns this call. Open the call to review its status.")
+        XCTAssertEqual(h2.coordinator.state(for: "call-A"), .error("Another action owns this call. Open the call to review its status."))
+        XCTAssertFalse(h2.coordinator.canCheckStatus(for: "call-A"))
+        let retry = await h2.coordinator.takeMessage(callSid: "call-A")
+        XCTAssertFalse(retry)
+        let opposite = await h2.coordinator.pickUp(callSid: "call-A")
+        XCTAssertFalse(opposite)
+        XCTAssertEqual(h2.posts, 1)
+    }
+    @MainActor func testChangedSessionOrRevisionWhileAutomaticGetSuspendedDoesNotSettleRetainedOp() async {
+        enum StaleVariant: CaseIterable {
+            case differentAccount
+            case generationRoundTrip
+            case differentCallSid
+            case sameCallSidNewRevision
+        }
+
+        for variant in StaleVariant.allCases {
+            let h = ActionHarness()
+            let pending = Task { await h.coordinator.takeMessage(callSid: "call-A") }
+            await h.waitForPost()
+            h.reply(h.result(status: "message_requested", action: "decline", http: 202))
+            _ = await pending.value
+
+            h.suspendGet = true
+            let observation = h.observation()
+            h.coordinator.observeStatus(observation, auth: h.auth)
+            await h.waitForGet()
+
+            let messagesAtProjection = h.messages
+            switch variant {
+            case .differentAccount:
+                h.auth = CallAuthContext(contractorId: "other-owner", bearerToken: "other-token", generation: 1)
+            case .generationRoundTrip:
+                h.auth = CallAuthContext(contractorId: "owner", bearerToken: "credential", generation: 3)
+            case .differentCallSid:
+                h.scope = CallLifecycleSnapshot(callSid: "call-B", revision: 1)
+            case .sameCallSidNewRevision:
+                h.scope = CallLifecycleSnapshot(callSid: "call-A", revision: 2)
+            }
+
+            h.replyGet(h.result(status: "taking_message", action: "decline"))
+            await h.waitForReconciliationToFinish()
+
+            XCTAssertEqual(h.messages, messagesAtProjection)
+            XCTAssertNotEqual(h.coordinator.currentStates["call-A"], .takingMessage)
+
+            switch variant {
+            case .differentAccount, .generationRoundTrip:
+                XCTAssertEqual(h.coordinator.state(for: "call-A"), .idle)
+            case .differentCallSid, .sameCallSidNewRevision:
+                XCTAssertNotEqual(h.coordinator.state(for: "call-A"), .takingMessage)
+            }
+        }
+    }
+    @MainActor func testRepeatedObservationsWhileInFlightDoNotLaunchParallelWork() async {
+        let h = ActionHarness()
+        let pending = Task { await h.coordinator.takeMessage(callSid: "call-A") }
+        await h.waitForPost()
+
+        let observation = h.observation()
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        h.coordinator.observeStatus(observation, auth: h.auth)
+
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 0)
+
+        h.reply(h.result(status: "message_requested", action: "decline", http: 202))
+        _ = await pending.value
+
+        h.suspendGet = true
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        await h.waitForGet()
+
+        XCTAssertEqual(h.gets, 1)
+
+        h.replyGet(h.result(status: "taking_message", action: "decline"))
+        await h.waitForReconciliationToFinish()
+
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .takingMessage)
+    }
+    @MainActor func testUnfinishedAcceptDoesNotAutoReconcileOnTakingMessageObservation() async {
+        let h = ActionHarness()
+        let pending = Task { await h.coordinator.pickUp(callSid: "call-A") }
+        await h.waitForPost()
+        let unknownResult = CallActionResult(callSid: "call-A", contractorId: "owner", operationId: h.op,
+            action: "accept", actionStatus: "uncertain", accessToken: nil, conferenceName: nil,
+            isActive: true, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
+            statusCode: 202, rawStatus: "pending", errorDetail: nil)
+        h.getResult = unknownResult
+        h.reply(unknownResult)
+        _ = await pending.value
+
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 1)
+        XCTAssertEqual(h.connections, 0)
+
+        let observation = h.observation()
+        h.coordinator.observeStatus(observation, auth: h.auth)
+        await Task.yield()
+        await h.waitForReconciliationToFinish()
+
+        XCTAssertEqual(h.gets, 1)
+        XCTAssertEqual(h.connections, 0)
+        XCTAssertTrue(h.coordinator.canCheckStatus(for: "call-A"))
+    }
+    @MainActor func testUnknownToKnownPendingGetClearsWarningAndResolvesOnExplicitGet() async {
+        let h = ActionHarness()
+        let pending = Task { await h.coordinator.takeMessage(callSid: "call-A") }
+        await h.waitForPost()
+        let unknownPost = CallActionResult(callSid: "call-A", contractorId: "owner", operationId: h.op,
+            action: "decline", actionStatus: "unknown_status", accessToken: nil, conferenceName: nil,
+            isActive: true, isUrgent: false, callerName: nil, callerPhone: nil, transcript: nil,
+            statusCode: 200, rawStatus: "ok", errorDetail: nil)
+        h.getResult = nil
+        h.reply(unknownPost)
+        let initial = await pending.value
+        XCTAssertFalse(initial)
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 1)
+        XCTAssertNotNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .unresolved(action: "decline", operationId: h.op))
+        XCTAssertTrue(h.coordinator.canCheckStatus(for: "call-A"))
+        XCTAssertTrue(h.coordinator.isActionPending(for: "call-A"))
+        XCTAssertTrue(h.coordinator.isDeclinePending(for: "call-A"))
+
+        // Explicit exact 202 decline/message_requested GET clears warning but keeps incomplete pending
+        h.getResult = h.result(status: "message_requested", action: "decline", http: 202)
+        let checked = await h.coordinator.checkStatus(callSid: "call-A")
+        XCTAssertFalse(checked)
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 2)
+        XCTAssertNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .messageRequested(operationId: h.op))
+        XCTAssertTrue(h.coordinator.canCheckStatus(for: "call-A"))
+        XCTAssertTrue(h.coordinator.isActionPending(for: "call-A"))
+        XCTAssertTrue(h.coordinator.isDeclinePending(for: "call-A"))
+        XCTAssertFalse(h.coordinator.isAcceptPending(for: "call-A"))
+
+        // Opposite action is blocked
+        let opposite = await h.coordinator.pickUp(callSid: "call-A")
+        XCTAssertFalse(opposite)
+        XCTAssertEqual(h.posts, 1)
+
+        // Exact acknowledgment resolves
+        h.getResult = h.result(status: "taking_message", action: "decline", http: 200)
+        let resolved = await h.coordinator.checkStatus(callSid: "call-A")
+        XCTAssertTrue(resolved)
+        XCTAssertEqual(h.posts, 1)
+        XCTAssertEqual(h.gets, 3)
+        XCTAssertEqual(h.messages, 1)
+        XCTAssertNil(h.coordinator.errorMessage(for: "call-A"))
+        XCTAssertFalse(h.coordinator.canCheckStatus(for: "call-A"))
+        XCTAssertEqual(h.coordinator.state(for: "call-A"), .takingMessage)
+    }
+    @MainActor func testExactPendingDeclineWithMalformedResponseRemainsUnknown() async {
+        for invalid in 0..<7 {
+            let h = ActionHarness()
+            let task = Task { await h.coordinator.takeMessage(callSid: "call-A") }
+            await h.waitForPost()
+            let result: CallActionResult
+            switch invalid {
+            case 0: result = h.result(status: "message_requested", owner: "wrong", http: 202)
+            case 1: result = h.result(status: "message_requested", sid: "call-B", http: 202)
+            case 2: result = h.result(status: "message_requested", operation: "wrong", http: 202)
+            case 3: result = h.result(status: "message_requested", action: "accept", http: 202)
+            case 4: result = h.result(status: "uncertain", http: 202)
+            case 5: result = h.result(status: "message_requested", http: 500)
+            default: result = h.result(status: "message_requested", http: 202, active: false)
+            }
+            h.getResult = result
+            h.reply(result)
+            let settled = await task.value
+            XCTAssertFalse(settled)
+            XCTAssertNotNil(h.coordinator.errorMessage(for: "call-A"))
+            XCTAssertEqual(h.coordinator.state(for: "call-A"), .unresolved(action: "decline", operationId: h.op))
+            XCTAssertTrue(h.coordinator.canCheckStatus(for: "call-A"))
+        }
     }
     @MainActor func testReconciliationChecksSessionAfterSuspendedGet() async {
         let h = ActionHarness(); h.suspendGet = true
         let pending = Task { await h.coordinator.pickUp(callSid: "call-A") }
         await h.waitForPost(); h.reply(h.result(status: "accepting", http: 202)); await h.waitForGet()
         h.auth = CallAuthContext(contractorId: "owner", bearerToken: "changed", generation: 2)
-        h.getWaiter?.resume(returning: h.result()); h.getWaiter = nil
+        h.replyGet(h.result())
         let result = await pending.value
         XCTAssertFalse(result); XCTAssertEqual(h.connections, 0); XCTAssertEqual(h.posts, 1)
     }
@@ -241,7 +586,7 @@ final class CallActionTests: XCTestCase {
     @MainActor func testReadAccessorsHideChangedSessionWithoutMutation() async {
         let h = ActionHarness()
         let task = Task { await h.coordinator.takeMessage(callSid: "call-A") }
-        await h.waitForPost(); h.reply(h.result(status: "taking_message")); _ = await task.value
+        await h.waitForPost(); h.reply(h.result(status: "taking_message", action: "decline")); _ = await task.value
         let oldStates = h.coordinator.currentStates
         h.auth = CallAuthContext(contractorId: "new-owner", bearerToken: "new-token", generation: 2)
         XCTAssertEqual(h.coordinator.state(for: "call-A"), .idle)

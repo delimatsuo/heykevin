@@ -1,6 +1,6 @@
 # Hey Kevin — Current Product Requirements
 
-**Updated:** 2026-09-15
+**Updated:** 2026-09-16
 **Owner:** Deli Matsuo
 **Backend release baseline:** `7377c7ba402297625dec5de97a2250f50b1c8013`
 **Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
@@ -160,7 +160,10 @@ Apple Phone uses filters and per-call details; Google Voice offers search and
 separates archiving from deletion; Quo offers searchable, filterable call logs.
 The plan links their official documentation. These examples inform navigation,
 not Kevin's retention policy. Public App Store publication is completed in
-1.3.0 (39); physical iPhone and VoiceOver acceptance remain open.
+1.3.0 (39); the remaining physical iPhone call and frontend checks stay open.
+VoiceOver is excluded from current N1/N3 acceptance by the owner's September 16,
+2026 scope decision below, which supersedes earlier plans, release records and
+handoffs that listed it as required.
 
 ## Valuable later features — not active implementation
 
@@ -182,6 +185,11 @@ former v2 program.
 
 ## Deferred ideas and superseded plans
 
+- **VoiceOver/accessibility qualification:** deferred by the owner on September
+  16, 2026. It is not a current N1/N3 acceptance requirement or release blocker.
+  Do not request VoiceOver testing or start accessibility work unless the owner
+  explicitly reopens that scope. Existing app accessibility support remains;
+  no physical VoiceOver pass is claimed.
 - **Dispatch work-management program:** persistent lead/action states and the
   former three-tab workflow remain deferred. The approved N3 visual refresh
   implements the existing call-screening product, without adding that program.
@@ -201,7 +209,8 @@ former v2 program.
 N1 is complete only when deployment and the relevant owner-device checks are
 recorded. A green unit suite, merged PR, TestFlight upload, and production release
 are different facts. N3 delivery is published to the App Store in 1.3.0 (39); its
-owner physical phone and VoiceOver acceptance remains open. Partial frontend
+remaining owner physical phone acceptance stays open. VoiceOver qualification is
+deferred and is not part of current completion criteria. Partial frontend
 observations are recorded in the build 39 release record.
 The later-feature list is not a checklist that must be
 exhausted before the current product can be called shipped.

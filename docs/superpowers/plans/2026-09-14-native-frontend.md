@@ -1,6 +1,8 @@
 # Native Calls + Kevin frontend and bounded history
 
-> **Completion Note (2026-09-15):** This plan was implemented, verified, packaged, and published to the App Store as version **1.3.0 (39)** (`READY_FOR_DISTRIBUTION`). See the canonical [build 39 release record](../../releases/2026-09-15-native-frontend-ios-39.md). Physical iPhone and VoiceOver acceptance remain open.
+> **Completion Note (2026-09-15):** This plan was implemented, verified, packaged, and published to the App Store as version **1.3.0 (39)** (`READY_FOR_DISTRIBUTION`). See the canonical [build 39 release record](../../releases/2026-09-15-native-frontend-ios-39.md). The remaining physical iPhone acceptance stays open.
+
+> **Owner scope update (2026-09-16):** VoiceOver qualification is deferred and is not a current N1/N3 acceptance requirement or release blocker. Resume accessibility work only if the owner explicitly requests it. This overrides earlier VoiceOver acceptance wording; existing accessibility support and recorded source/fixture evidence remain unchanged. See the [PRD deferral](../../../kevin-prd.md#deferred-ideas-and-superseded-plans).
 
 Owner authorization: September 14, 2026, after reviewing the HTML, “ok, proceed
 with the enhancements. Make sure you remember that history needs to have a
@@ -297,7 +299,7 @@ entitlement inspection, Apple validation/processing and QA availability. Preserv
 all build38 notification capabilities. As planned, public App Store release required
 separate owner approval; on September 15, 2026, the owner instructed submission of
 the build, and public App Store release **1.3.0 (39)** is completed (`READY_FOR_DISTRIBUTION`).
-Physical iPhone and VoiceOver qualification remain open. No backend deployment is
+The remaining physical iPhone qualification stays open. No backend deployment is
 introduced by this slice.
 
 ## Builder output

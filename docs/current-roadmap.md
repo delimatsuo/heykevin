@@ -54,11 +54,13 @@ UTC (September 15 in America/New_York):
 
 ## Notification release and remaining device acceptance
 
-**Active priority:** Complete physical device and VoiceOver acceptance for N1/N3
+**Active priority:** Complete the remaining physical call and frontend checks for N1/N3
 in the [current PRD](../kevin-prd.md). The notification backend, urgent handoff and
 rolling-call compatibility repair are deployed to production, and the native frontend
 in 1.3.0 (39) is published to the App Store. Physical-device acceptance on the owner's
-iPhone remains open.
+iPhone remains open. Per the owner's September 16, 2026 scope decision,
+VoiceOver qualification is deferred and is not a current acceptance requirement
+or release blocker. See the [PRD deferral](../kevin-prd.md#deferred-ideas-and-superseded-plans).
 
 [PR #239](https://github.com/delimatsuo/heykevin/pull/239) adds caller/reason summary
 updates to an existing notification and the matching Pick Up action. The same
@@ -134,7 +136,7 @@ explicitly forbids an agent or API approval. Deli's approval and the completed
 production deployment above did not authorize an Apple release. The owner
 subsequently gave explicit instruction to submit the existing build ("submit the last build"),
 and submission was completed. Public release 1.3.0 (39) is live on the App Store;
-physical-device and VoiceOver acceptance remain open.
+the remaining physical-device acceptance stays open.
 The tested forward-recovery patch still requires another build and approval if
 needed; it does not rely on returning live operations to the older backend.
 
@@ -157,8 +159,8 @@ Implementation, independent native review and local verification are complete:
 The [release record](releases/2026-09-15-native-frontend-ios-39.md) binds the
 source and evidence. Required CI passed, independent package review approved,
 Apple processing, internal QA availability and What to Test readback are verified,
-and public App Store distribution is live. Physical-device and VoiceOver acceptance
-on the owner's phone remain open.
+and public App Store distribution is live. The remaining physical call and
+frontend acceptance on the owner's phone stays open.
 
 ## Unfinished or unverified, not an automatic implementation queue
 

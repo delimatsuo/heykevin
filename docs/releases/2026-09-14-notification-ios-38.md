@@ -135,7 +135,9 @@ Injected tests cover delayed responses, network failures and account changes;
 their results must remain distinct from what was actually exercised on a phone.
 Record the PRD's remaining notification-failure and delayed-summary acceptance
 checks explicitly before marking N1 complete. While public App Store release
-**1.3.0 (39)** is completed, physical iPhone and VoiceOver acceptance remain open.
+**1.3.0 (39)** is completed, the remaining physical iPhone call checks stay open.
+VoiceOver qualification was deferred by the owner on September 16, 2026 and is
+not part of current N1/N3 acceptance; see the [PRD deferral](../../kevin-prd.md#deferred-ideas-and-superseded-plans).
 
 ## Routing evidence
 

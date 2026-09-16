@@ -230,7 +230,7 @@ are not included in the durable record.
 
 **Still open:** a non-default filter retained after Details (both Unread and
 Spam were empty, so no matching detail was available); live-call access from
-Calls, Kevin and Account; the N1 phone sequence below; physical VoiceOver; and
+Calls, Kevin and Account; the N1 phone sequence below; and
 the active Focus state. Focus Settings was viewed, but its sharing configuration
 does not establish which Focus, if any, was active. The owner reported that a
 second owner-controlled phone was unavailable. These partial observations do
@@ -239,6 +239,11 @@ not complete N1 or N3 acceptance.
 
 ## Remaining owner acceptance
 
+**Owner scope update — September 16, 2026:** VoiceOver qualification is deferred,
+outside current N1/N3 acceptance, and is not a release blocker. No physical
+VoiceOver pass is claimed. Resume accessibility work only if the owner explicitly
+requests it; see the [PRD deferral](../../kevin-prd.md#deferred-ideas-and-superseded-plans).
+
 Continue with the installed 1.3.0 (39) build. Finish the open frontend checks
 above. With an owner-controlled fictional test call, check access to the live
 transcript and Pick up / Take a message from both tabs and Account. Complete the
@@ -246,8 +251,8 @@ remaining [N1 device sequence](2026-09-14-notification-ios-38.md#owner-iphone-te
 using build 39, including urgent fallback, stale notifications and real two-way audio.
 
 Public App Store release 1.3.0 (39) is completed. Partial physical frontend
-observations are recorded above; full physical iPhone and VoiceOver acceptance
-remain open. Offline owner-phone testing of unavailable delivery does not prove
+observations are recorded above; the remaining physical iPhone call and frontend
+checks stay open. Offline owner-phone testing of unavailable delivery does not prove
 or equal a forced APNs-provider error. This session introduced no backend
 deployment, runtime flag change, or real customer call.
 
@@ -275,5 +280,5 @@ Audit disposition: Source and final test-delta reviews approved; all 269 native
 unit tests, 9 UI tests and targeted mutation checks passed. Corrected-source CI,
 replacement package review and Apple validation passed; upload succeeded.
 Internal QA availability and What to Test readback are verified. Public App Store
-release 1.3.0 (39) is completed and READY_FOR_DISTRIBUTION. Owner physical-device
-and VoiceOver acceptance remain open.
+release 1.3.0 (39) is completed and READY_FOR_DISTRIBUTION. Remaining owner
+physical-device acceptance stays open; VoiceOver qualification is deferred.

@@ -136,10 +136,12 @@ list remain outside active implementation.
       [candidate record](releases/2026-09-14-notification-ios-38.md) includes
       package identity, verification and the owner test sequence.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION` (verified September 16, 2026 at `00:20:10Z` / Sep 15 America/New_York) following owner's submission instruction ("submit the last build"). See the canonical [build 39 release record](releases/2026-09-15-native-frontend-ios-39.md).
-- [ ] Record the owner's installed **1.3.1 (40)** and notification/pickup checks
-      using the [current phone checklist](releases/2026-09-16-natural-message-ios-40.md#owner-phone-acceptance--open),
-      including stale-alert and ended-call behavior. Earlier build 39 observations
-      remain historical evidence.
+- [ ] Record the owner's installed **1.3.1 (40)** and the remaining notification/
+      pickup acceptance from [N1 in the PRD](../kevin-prd.md#n1--finish-the-screening-notification-enhancement),
+      including stale-alert, ended-call, banner, urgent-preference and failure
+      scenarios. The [build 40 phone checklist](releases/2026-09-16-natural-message-ios-40.md#owner-phone-acceptance--open)
+      adds the reported button/timing checks; passing it does not close the other
+      N1 rows. Earlier build 39 observations remain historical evidence.
 
 Deli's approval and the completed September 14 production deployment above did
 not authorize an Apple release. The owner

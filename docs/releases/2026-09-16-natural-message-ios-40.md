@@ -209,7 +209,15 @@ provide the deployment evidence recorded here.
 ## Owner phone acceptance — open
 
 Install **Hey Kevin 1.3.1 (40)** from TestFlight. Production rollout has been
-verified. With Focus off and a second phone:
+verified.
+
+These focused button/message-transition checks supplement the remaining N1/N3
+acceptance in the [PRD](../../kevin-prd.md#n1--finish-the-screening-notification-enhancement).
+They do not replace its notification preview, banner navigation, old/ended-call
+alert, urgent-preference persistence, notification-failure or other open rows.
+Passing the five checks below does not close those separate requirements.
+
+With Focus off and a second phone:
 
 - [ ] Notification actions and app-owned buttons are clear; **Pick up** connects
       the intended call with audio in both directions.

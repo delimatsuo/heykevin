@@ -33,6 +33,10 @@ from app.services.voice_pipeline import (
     build_system_prompt,
     is_owner_availability_hold,
 )
+from app.services.message_taking import (
+    build_relay_instruction_text,
+    is_owner_availability_hold_text,
+)
 from app.services.receptionist_context import build_greeting_text as _shared_greeting_text
 from app.utils.logging import get_logger
 
@@ -158,12 +162,19 @@ class RelayPipeline:
         self._playback_receipts = 0
         self._played_chars_sum = 0
         self._played_chars_max = 0
+        self._hold_offered = False
+        self._message_taking_pending = False
+        self._message_caller_response_pending = False
+        self._message_instruction = ""
+        self._pending_pause = False
+        self._played_pause_keys: set = set()
         self._hold_task: Optional[asyncio.Task] = None
         self._silence_task: Optional[asyncio.Task] = None
         self._last_activity = time.monotonic()
         self._silence_nudged = False
         self._nudged_monotonic = 0.0
         self._command_task: Optional[asyncio.Task] = None
+        self._command_ws_token = ""
         self._screening_summary_push_sent = False
         self._summary_task: Optional[asyncio.Task] = None
         self._tools = self._build_tools()
@@ -184,6 +195,8 @@ class RelayPipeline:
 
     async def stop(self) -> None:
         self._active = False
+        self._message_taking_pending = False
+        self._message_caller_response_pending = False
         if getattr(self, '_urgency_task', None):
             self._urgency_task.cancel()
         self._turn_epoch += 1
@@ -296,6 +309,17 @@ class RelayPipeline:
         self._history.append({"role": "user", "parts": [{"text": text}]})
         self._last_activity = time.monotonic()
 
+        if getattr(self, "_message_taking_pending", False):
+            self._message_caller_response_pending = True
+            logger.info(
+                "relay_event event=caller_speech_during_message_pending call=%s chars=%d",
+                _call_label(self._call_sid),
+                len(text),
+            )
+            # A message taking transition is in-flight: retain caller speech in history
+            # and transcript, but let the pending message instruction own the next reply.
+            return
+
         if self._hold_task and not self._hold_task.done():
             logger.info(
                 "relay_event event=caller_speech_during_hold call=%s chars=%d",
@@ -308,6 +332,7 @@ class RelayPipeline:
             # unavailability if the owner does not answer.
             return
 
+        self._message_caller_response_pending = False
         self._start_generation()
 
     async def _handle_interrupt(self, message: dict) -> None:
@@ -358,44 +383,103 @@ class RelayPipeline:
             if self._on_transcript:
                 await self._on_transcript("Kevin", partial)
 
-    def _start_generation(self, extra_instruction: str = "") -> None:
+    def _start_generation(
+        self,
+        extra_instruction: str = "",
+        *,
+        guard: Optional[Callable[[], Awaitable[bool]]] = None,
+    ) -> None:
         if self._ending:
             return
         self._turn_epoch += 1
         epoch = self._turn_epoch
         self._streamed_text = ""
         self._generate_task = asyncio.create_task(
-            self._generate_reply(epoch, extra_instruction)
+            self._generate_reply(epoch, extra_instruction, guard=guard)
         )
 
     # --- generation ------------------------------------------------------
 
-    async def _send_current(self, epoch: int, message: dict) -> None:
-        """Send to Twilio only while this generation's epoch is still live."""
-        if epoch != self._turn_epoch:
+    async def _send_current(
+        self,
+        epoch: int,
+        message: dict,
+        guard: Optional[Callable[[], Awaitable[bool]]] = None,
+    ) -> None:
+        """Send to Twilio only while this generation's epoch is still live and explicit guard is valid."""
+        if epoch != self._turn_epoch or not self._active or self._ending:
             raise asyncio.CancelledError()
-        if message.get("type") == "text" and message.get("token"):
-            self._streamed_text += message["token"]
-        await self._send(message)
 
-    async def _generate_reply(self, epoch: int, extra_instruction: str = "") -> None:
-        if self._ending:
-            return
+        # Only check explicit captured guard for owned message generator, NOT dynamic fallback
+        if guard is not None and callable(guard):
+            valid = await guard()
+            if not valid:
+                raise asyncio.CancelledError()
+            if epoch != self._turn_epoch or not self._active or self._ending:
+                raise asyncio.CancelledError()
+
+        msg = dict(message)
+        if msg.get("type") == "text":
+            msg.setdefault("preemptible", False)
+            msg.setdefault("interruptible", True)
+        elif msg.get("type") == "play":
+            msg.setdefault("preemptible", False)
+            msg.setdefault("interruptible", True)
+
+        await self._send(msg)
+
+        # Update _streamed_text ONLY after await self._send succeeds!
+        if msg.get("type") == "text" and msg.get("token"):
+            self._streamed_text += msg["token"]
+
+    async def _generate_reply(
+        self,
+        epoch: int,
+        extra_instruction: str = "",
+        guard: Optional[Callable[[], Awaitable[bool]]] = None,
+        pause_key: Optional[tuple] = None,
+        should_pause: bool = False,
+        on_actual_token: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        if self._ending or not self._active:
+            return False
         try:
             contents = list(self._history)
-            message_instruction = getattr(self, '_message_instruction', '')
-            if message_instruction:
-                contents.append({'role': 'user', 'parts': [{'text': message_instruction}]})
             if extra_instruction:
                 contents.append(
                     {"role": "user", "parts": [{"text": extra_instruction}]}
                 )
+            elif getattr(self, "_unavailable_said", False):
+                owner = self._contractor_config.get("owner_name", settings.user_name)
+                lang = self._language or "en"
+                lang_note = f" Respond in the caller's language ({lang})." if lang and lang != "en" else ""
+                contents.append({
+                    "role": "user",
+                    "parts": [{
+                        "text": (
+                            f"SYSTEM INSTRUCTION: {owner} is unavailable. Take and acknowledge the caller's message.{lang_note} "
+                            f"Do not offer to check availability or put the caller on hold."
+                        )
+                    }]
+                })
 
             reply_text = ""
             for _round in range(MAX_TOOL_ROUNDS):
+                if guard is not None and callable(guard):
+                    valid = await guard()
+                    if not valid:
+                        raise asyncio.CancelledError()
+                if epoch != self._turn_epoch or not self._active or self._ending:
+                    raise asyncio.CancelledError()
+
                 started_at = time.monotonic()
                 text_out, function_calls, raw_parts = await self._run_stream(
-                    epoch, contents
+                    epoch,
+                    contents,
+                    guard=guard,
+                    pause_key=pause_key,
+                    should_pause=should_pause,
+                    on_actual_token=on_actual_token,
                 )
                 reply_text += text_out
                 logger.info(
@@ -406,15 +490,18 @@ class RelayPipeline:
                 )
                 if not function_calls:
                     break
-                # The model turn must be echoed back with its parts VERBATIM:
-                # Gemini 3.x functionCall parts carry a thoughtSignature the
-                # API requires on replay — rebuilding the part from just the
-                # functionCall drops it and every tool round 400s ("Function
-                # call is missing a thought_signature"), observed live on
-                # call CAcae04f. raw_parts preserves signatures and ids.
                 function_response_parts = []
                 for fc in function_calls:
+                    if guard is not None and callable(guard):
+                        valid = await guard()
+                        if not valid:
+                            raise asyncio.CancelledError()
+                    if epoch != self._turn_epoch or not self._active or self._ending:
+                        raise asyncio.CancelledError()
+
                     response_payload = await self._execute_tool(fc)
+                    if epoch != self._turn_epoch or not self._active or self._ending:
+                        raise asyncio.CancelledError()
                     function_response = {
                         "name": fc.get("name", ""),
                         "response": response_payload,
@@ -430,11 +517,11 @@ class RelayPipeline:
                 ]
 
             # Close the TTS turn even if the model produced no text.
-            await self._send_current(epoch, {"type": "text", "token": "", "last": True})
+            await self._send_current(
+                epoch, {"type": "text", "token": "", "last": True}, guard=guard
+            )
 
-            if reply_text:
-                if getattr(self, '_message_instruction', '') == message_instruction:
-                    self._message_instruction = ''
+            if reply_text and reply_text.strip():
                 self._history.append(
                     {"role": "model", "parts": [{"text": reply_text}]}
                 )
@@ -444,9 +531,9 @@ class RelayPipeline:
                     await self._on_transcript("Kevin", reply_text)
                 self._maybe_start_owner_hold(reply_text)
                 await self._maybe_end_on_goodbye(epoch, reply_text)
+                return True
+            return False
         except asyncio.CancelledError:
-            # Superseded by newer caller speech or a barge-in. The successor
-            # turn owns the channel now — no apology, no closing token.
             raise
         except Exception as error:
             logger.error(
@@ -454,19 +541,58 @@ class RelayPipeline:
                 _call_label(self._call_sid),
                 type(error).__name__,
             )
-            if epoch != self._turn_epoch:
-                return
+            if epoch != self._turn_epoch or not self._active or self._ending:
+                return False
+
+            if self._streamed_text and self._streamed_text.strip():
+                try:
+                    await self._send_current(
+                        epoch, {"type": "text", "token": "", "last": True}, guard=guard
+                    )
+                except Exception:
+                    # No partial success if closing last send fails
+                    return False
+                partial = self._streamed_text
+                self._history.append({"role": "model", "parts": [{"text": partial}]})
+                self._streamed_text = ""
+                self._last_activity = time.monotonic()
+                if self._on_transcript:
+                    await self._on_transcript("Kevin", partial)
+                return True
+
+            # No text sent: check guard before fallback
+            if guard is not None and callable(guard):
+                try:
+                    if not await guard():
+                        return False
+                except Exception:
+                    return False
+            if epoch != self._turn_epoch or not self._active or self._ending:
+                return False
+
             # Never leave the caller in silence: degrade with a short apology.
-            await self._send(
-                {
-                    "type": "text",
-                    "token": "I'm sorry, I'm having a little trouble. Could you say that again?",
-                    "last": True,
-                }
-            )
+            try:
+                await self._send_current(
+                    epoch,
+                    {
+                        "type": "text",
+                        "token": "I'm sorry, I'm having a little trouble. Could you say that again?",
+                        "last": True,
+                    },
+                    guard=guard,
+                )
+            except Exception:
+                pass
+            return False
 
     async def _run_stream(
-        self, epoch: int, contents: list[dict]
+        self,
+        epoch: int,
+        contents: list[dict],
+        guard: Optional[Callable[[], Awaitable[bool]]] = None,
+        pause_key: Optional[tuple] = None,
+        should_pause: bool = False,
+        on_actual_token: Optional[Callable[[str], None]] = None,
     ) -> tuple[str, list[dict], list[dict]]:
         """Run one streaming generate; forward text tokens as they arrive.
 
@@ -478,12 +604,48 @@ class RelayPipeline:
         text_out = ""
         function_calls: list[dict] = []
         raw_parts: list[dict] = []
+
         async for part in self._stream_generate(contents):
+            if epoch != self._turn_epoch or not self._active or self._ending:
+                raise asyncio.CancelledError()
             if "text" in part and part["text"]:
-                text_out += part["text"]
-                await self._send_current(
-                    epoch, {"type": "text", "token": part["text"], "last": False}
+                token_text = part["text"]
+                pause_already_played = bool(
+                    pause_key and pause_key in getattr(self, "_played_pause_keys", set())
                 )
+                if should_pause and not pause_already_played:
+                    # Queue play media message ONCE before sending the first text token
+                    pause_source = f"{settings.cloud_run_url.rstrip('/')}/static/audio/message-pause-3s.wav"
+                    play_msg = {
+                        "type": "play",
+                        "source": pause_source,
+                        "loop": 1,
+                        "preemptible": False,
+                        "interruptible": True,
+                    }
+                    await self._send_current(epoch, play_msg, guard=guard)
+                    if not hasattr(self, "_played_pause_keys"):
+                        self._played_pause_keys = set()
+                    if pause_key:
+                        self._played_pause_keys.add(pause_key)
+                    logger.info(
+                        "relay_event event=message_pause_queued call=%s source=%s",
+                        _call_label(self._call_sid),
+                        pause_source,
+                    )
+
+                await self._send_current(
+                    epoch,
+                    {"type": "text", "token": token_text, "last": False},
+                    guard=guard,
+                )
+                if on_actual_token is not None:
+                    try:
+                        on_actual_token(token_text)
+                    except Exception:
+                        pass
+
+                text_out += token_text
                 if "thoughtSignature" in part:
                     raw_parts.append(dict(part))
                 elif (
@@ -491,9 +653,9 @@ class RelayPipeline:
                     and "text" in raw_parts[-1]
                     and "thoughtSignature" not in raw_parts[-1]
                 ):
-                    raw_parts[-1]["text"] += part["text"]
+                    raw_parts[-1]["text"] += token_text
                 else:
-                    raw_parts.append({"text": part["text"]})
+                    raw_parts.append({"text": token_text})
             elif "functionCall" in part:
                 function_calls.append(part["functionCall"])
                 raw_parts.append(dict(part))
@@ -630,6 +792,19 @@ class RelayPipeline:
 
     # --- owner-availability hold -----------------------------------------
 
+    def _has_committed_hold_offer(self) -> bool:
+        if getattr(self, "_hold_offered", False):
+            return True
+        if is_owner_availability_hold(getattr(self, "_streamed_text", "")) or is_owner_availability_hold_text(getattr(self, "_streamed_text", "")):
+            return True
+        for entry in self._history:
+            if entry.get("role") == "model":
+                for part in entry.get("parts", []):
+                    txt = part.get("text", "")
+                    if txt and (is_owner_availability_hold(txt) or is_owner_availability_hold_text(txt)):
+                        return True
+        return False
+
     def _maybe_start_owner_hold(self, reply_text: str) -> None:
         """Arm the 30s unavailability return when Kevin puts the caller on hold.
 
@@ -640,7 +815,10 @@ class RelayPipeline:
         """
         if not self._active or self._ending or self._unavailable_said:
             return
-        if not is_owner_availability_hold(reply_text):
+        if not (is_owner_availability_hold(reply_text) or is_owner_availability_hold_text(reply_text)):
+            return
+        self._hold_offered = True
+        if getattr(self, "_message_taking_pending", False):
             return
         if not self._hold_task or self._hold_task.done():
             self._hold_task = asyncio.create_task(self._owner_hold_timer())
@@ -699,7 +877,6 @@ class RelayPipeline:
         except asyncio.CancelledError:
             pass
 
-
     # --- caller-silence watchdog ------------------------------------------
 
     async def _silence_watchdog_loop(self) -> None:
@@ -718,6 +895,8 @@ class RelayPipeline:
                 await asyncio.sleep(self.SILENCE_CHECK_INTERVAL_SECONDS)
                 if not self._active or self._ending:
                     return
+                if getattr(self, "_message_taking_pending", False):
+                    continue
                 if self._hold_task and not self._hold_task.done():
                     continue
                 if self._generate_task and not self._generate_task.done():
@@ -887,28 +1066,168 @@ class RelayPipeline:
             return
         try:
             await consume_message_intent(self, self._deliver_message_instruction)
-            if (getattr(self, '_message_instruction', '') and self._active and not self._ending
-                    and (self._generate_task is None or self._generate_task.done())):
-                self._start_generation()
         except asyncio.CancelledError:
             raise
         except Exception:
             pass  # Durable intent remains available for the next poll.
 
+    async def trigger_take_message(self):
+        from app.services.owner_call_actions import consume_message_intent
+        await consume_message_intent(self, self._deliver_message_instruction)
 
-    async def _deliver_message_instruction(self):
-        if self._unavailable_said:
-            return True
+    async def _prepare_message_delivery(self, intent: dict) -> bool:
+        """Prepare for message delivery: wait for in-flight generation or cancel zero-token turn."""
+        self._message_taking_pending = True
+        if self._hold_task and not self._hold_task.done() and self._hold_task is not asyncio.current_task():
+            self._hold_task.cancel()
+        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
+            self._summary_task.cancel()
+
+        task = self._generate_task
+        if task and not task.done():
+            # If zero tokens have been streamed to Twilio, cancel generation before first send
+            if not self._streamed_text:
+                self._cancel_generation()
+            else:
+                # Tokens already sent: await regular speech shielded for 15s
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Return False WITHOUT cancelling current generation!
+                    # Preserving utterance and last=True so caller hears full speech; next poll retries.
+                    return False
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and getattr(current, "cancelling", lambda: False)():
+                        raise
+                    return False
+                except Exception:
+                    return False
+
         if not self._active or self._ending:
             return False
-        owner = self._contractor_config.get("owner_name", settings.user_name)
-        # Owned instruction survives cancellation/replacement of any generated turn.
-        self._message_instruction = (
-            f"SYSTEM INSTRUCTION: {owner} is unavailable. Tell the caller and offer to take a message."
-        )
-        await self._supersede_in_flight()
-        self._start_generation()
-        self._unavailable_said = True
-        if self._summary_task and not self._summary_task.done():
-            self._summary_task.cancel()
+
+        action = str(intent.get("action") or "decline").strip().lower()
+        hold_committed = self._has_committed_hold_offer()
+        if action == "decline" and hold_committed:
+            self._pending_pause = True
+        else:
+            self._pending_pause = False
+
         return True
+
+    async def _deliver_message_instruction(self) -> bool:
+        if getattr(self, "_unavailable_said", False):
+            return True
+        if not self._active or getattr(self, "_ending", False):
+            return False
+
+        guard = getattr(self, "_message_delivery_guard", None)
+        if guard is not None and callable(guard):
+            if not await guard():
+                self._message_instruction = ""
+                return False
+
+        owner = self._contractor_config.get("owner_name", settings.user_name)
+        hold_offered = self._has_committed_hold_offer()
+
+        instruction = build_relay_instruction_text(
+            owner,
+            hold_offered=hold_offered,
+        )
+        self._message_instruction = instruction
+
+        if self._hold_task and not self._hold_task.done() and self._hold_task is not asyncio.current_task():
+            self._hold_task.cancel()
+        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
+            self._summary_task.cancel()
+
+        await self._supersede_in_flight()
+        if not self._active or self._ending:
+            self._message_instruction = ""
+            return False
+
+        self._turn_epoch += 1
+        epoch = self._turn_epoch
+        self._streamed_text = ""
+
+        pause_key = getattr(self, "_intent_accepted_key", None)
+        if pause_key is None:
+            cid = self._contractor_config.get("contractor_id", "")
+            pause_key = (cid, self._call_sid, "decline", epoch)
+
+        should_pause = getattr(self, "_pending_pause", False)
+        owned_actual_sent = [False]
+
+        def on_actual_token(t: str) -> None:
+            if t and t.strip():
+                owned_actual_sent[0] = True
+
+        task = asyncio.create_task(
+            self._generate_reply(
+                epoch,
+                instruction,
+                guard=guard,
+                pause_key=pause_key,
+                should_pause=should_pause,
+                on_actual_token=on_actual_token,
+            )
+        )
+        self._generate_task = task
+        try:
+            # Await WITHOUT shield so external cancellation propagates/cancels child
+            success = await asyncio.wait_for(task, timeout=GENERATE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            success = False
+        except asyncio.CancelledError:
+            # If interrupted after actual tokens sent and guard still valid, consider instruction accepted
+            if owned_actual_sent[0] and guard is not None:
+                try:
+                    valid = await guard()
+                    success = bool(valid)
+                except Exception:
+                    success = False
+            else:
+                success = False
+            current = asyncio.current_task()
+            if current is not None and getattr(current, "cancelling", lambda: False)():
+                raise
+        except Exception:
+            success = False
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if self._generate_task is task:
+                self._generate_task = None
+            if not success:
+                self._message_instruction = ""
+
+        if success:
+            self._unavailable_said = True
+            self._message_instruction = ""
+            if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
+                self._summary_task.cancel()
+            return True
+        return False
+
+    def _finish_message_delivery_attempt(self) -> None:
+        """Synchronous cleanup hook called by common consume_message_intent in finally."""
+        self._message_taking_pending = False
+        guard = getattr(self, "_message_continuation_guard", None)
+        if not self._active or self._ending:
+            self._message_caller_response_pending = False
+            return
+
+        if (
+            getattr(self, "_message_caller_response_pending", False)
+            and getattr(self, "_unavailable_said", False)
+            and (self._generate_task is None or self._generate_task.done())
+            and guard is not None
+            and callable(guard)
+        ):
+            self._message_caller_response_pending = False
+            self._start_generation(guard=guard)

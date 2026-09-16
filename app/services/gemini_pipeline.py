@@ -30,6 +30,10 @@ from app.services.voice_pipeline import (
     build_system_prompt,
     is_owner_availability_hold,
 )
+from app.services.message_taking import (
+    build_gemini_instruction_text,
+    compute_grace_delay,
+)
 from app.services.receptionist_context import (
     build_greeting_text,
     returning_caller_first_name,
@@ -175,6 +179,16 @@ class GeminiPipeline:
         self._caller_silence_prompted_at = None
         self._waiting_for_owner_availability = False
         self._owner_availability_wait_started_at = 0.0
+        self._hold_offered = False
+        self._hold_offer_completed_at = 0.0
+        self._pending_hold_offer_turns: set[tuple[int, int]] = set()
+        self._last_playout_drained_at = 0.0
+        self._model_turn_generating = False
+        self._turn_complete_event = asyncio.Event()
+        self._turn_complete_event.set()
+        self._current_turn_suppressed = False
+        self._message_taking_pending = False
+        self._message_response_allowed = False
         self._assistant_instruction_pending = False
         self._silence_check_task = None
         self._unavailable_task = None
@@ -650,6 +664,14 @@ class GeminiPipeline:
         self._audio_input_ready.set()
         self._reconnecting = False
         self._interrupt_speaking = True
+        self._current_turn_suppressed = False
+        self._model_turn_generating = False
+        self._assistant_instruction_pending = False
+        self._message_taking_pending = False
+        self._message_response_allowed = False
+        if getattr(self, '_turn_complete_event', None) is not None:
+            self._turn_complete_event.set()
+        self._reset_response_metrics()
         if self._silence_check_task:
             self._silence_check_task.cancel()
         if self._unavailable_task:
@@ -728,6 +750,12 @@ class GeminiPipeline:
             self._interrupt_speaking = True
             self._audio_epoch += 1
             self._assistant_instruction_pending = False
+            self._current_turn_suppressed = False
+            self._model_turn_generating = False
+            self._message_response_allowed = False
+            if getattr(self, '_turn_complete_event', None) is not None:
+                self._turn_complete_event.set()
+            self._reset_response_metrics()
             self._kevin_transcript_buf.clear()
             clear_started_at = time.monotonic()
             async with self._audio_output_lock:
@@ -828,6 +856,10 @@ class GeminiPipeline:
                     self._audio_epoch += 1
                     self._response_end_mark_pending = None
                     self._assistant_instruction_pending = False
+                    self._model_turn_generating = False
+                    self._current_turn_suppressed = False
+                    if getattr(self, '_turn_complete_event', None) is not None:
+                        self._turn_complete_event.set()
                     self._mark_caller_activity()
                     self._kevin_transcript_buf.clear()
                     async with self._audio_output_lock:
@@ -859,6 +891,17 @@ class GeminiPipeline:
                     if inline_data.get("mimeType", "").startswith("audio/"):
                         audio_b64 = inline_data.get("data", "")
                         if audio_b64:
+                            self._model_turn_generating = True
+                            if getattr(self, '_turn_complete_event', None) is not None:
+                                self._turn_complete_event.clear()
+                            if getattr(self, "_current_turn_suppressed", False) or (
+                                getattr(self, "_message_taking_pending", False)
+                                and not getattr(self, "_unavailable_said", False)
+                                and not getattr(self, "_message_response_allowed", False)
+                                and not self._response_audio_turn_started
+                            ):
+                                self._current_turn_suppressed = True
+                                continue
                             self._begin_response_audio_turn()
                             self._log_response_start_latency()
                             pcm_24k = base64.b64decode(audio_b64)
@@ -866,7 +909,17 @@ class GeminiPipeline:
 
                 # Buffer Kevin's transcript fragments (sent word-by-word)
                 output_text = self._extract_transcript(server_content, "output")
-                if output_text and not self._interrupt_speaking:
+                if (
+                    output_text
+                    and not self._interrupt_speaking
+                    and not getattr(self, "_current_turn_suppressed", False)
+                    and not (
+                        getattr(self, "_message_taking_pending", False)
+                        and not getattr(self, "_unavailable_said", False)
+                        and not getattr(self, "_message_response_allowed", False)
+                        and not self._response_audio_turn_started
+                    )
+                ):
                     self._kevin_transcript_buf.append(output_text)
 
                 # Flush caller transcript when Kevin starts speaking (turn boundary)
@@ -876,8 +929,20 @@ class GeminiPipeline:
                 # Handle turn completion — Gemini finished generating. Audio
                 # playout may still be draining through the paced queue.
                 if server_content.get("turnComplete"):
+                    self._model_turn_generating = False
+                    if getattr(self, '_turn_complete_event', None) is not None:
+                        self._turn_complete_event.set()
                     overflowed_turn = self._audio_backlog_overflowed
                     interrupted_turn = self._interrupt_speaking
+                    suppressed_turn = getattr(self, "_current_turn_suppressed", False)
+                    if suppressed_turn:
+                        self._current_turn_suppressed = False
+                        self._kevin_transcript_buf.clear()
+                        async with self._audio_output_lock:
+                            await self._clear_audio_queue()
+                        self._assistant_instruction_pending = False
+                        self._reset_response_metrics()
+                        continue
                     if interrupted_turn:
                         # Gemini sends interrupted -> turnComplete for a cut-off turn.
                         # Invalidate output received between those two events before
@@ -1136,6 +1201,11 @@ class GeminiPipeline:
                         )
                         if response_turn > self._last_response_first_media_sent_turn:
                             self._last_response_first_media_sent_turn = response_turn
+                            if (audio_epoch, response_turn) in getattr(self, "_pending_hold_offer_turns", set()):
+                                self._pending_hold_offer_turns.discard((audio_epoch, response_turn))
+                                if not getattr(self, "_unavailable_said", False):
+                                    self._hold_offered = True
+                                    self._start_owner_availability_wait()
                             self._log_voice_timing(
                                 "response_first_twilio_media_sent",
                                 turn=response_turn,
@@ -1166,6 +1236,10 @@ class GeminiPipeline:
                             and not self._interrupt_speaking
                             and audio_epoch == self._audio_epoch
                         ):
+                            now = time.monotonic()
+                            self._last_playout_drained_at = now
+                            if getattr(self, '_hold_offered', False) and getattr(self, '_hold_offer_completed_at', 0.0) == 0.0:
+                                self._hold_offer_completed_at = now
                             self._mark_kevin_activity()
                             if response_turn and response_first_audio_at > 0:
                                 self._log_voice_timing(
@@ -1243,6 +1317,8 @@ class GeminiPipeline:
     async def _clear_audio_queue(self) -> int:
         """Drop queued model audio after barge-in or shutdown."""
         self._response_end_mark_pending = None
+        if hasattr(self, "_pending_hold_offer_turns"):
+            self._pending_hold_offer_turns.clear()
         dropped_chunks = 0
         while True:
             try:
@@ -1331,6 +1407,24 @@ class GeminiPipeline:
             return False
 
         self._transcript_lines.append(f"Kevin: {full_text}")
+        # Synchronously commit spoken hold offer if first media was already sent,
+        # or register in pending hold turns until first media is delivered,
+        # preventing a race where owner decline arrives while callback or audio is pending.
+        if (
+            apply_side_effects
+            and not getattr(self, "_unavailable_said", False)
+            and is_owner_availability_hold(full_text)
+            and getattr(self, "_response_audio_turn_started", False)
+            and getattr(self, "_response_turn_number", 0) > 0
+        ):
+            turn = self._response_turn_number
+            epoch = self._audio_epoch
+            if turn == getattr(self, "_last_response_first_media_sent_turn", -1):
+                self._hold_offered = True
+                self._start_owner_availability_wait()
+            else:
+                self._pending_hold_offer_turns.add((epoch, turn))
+
         await self.on_transcript("Kevin", full_text)
         prompt_started = self._caller_silence_prompted_at
         self._mark_kevin_activity()
@@ -1342,8 +1436,6 @@ class GeminiPipeline:
         ):
             self._caller_silence_prompted_at = time.time()
         self._exchange_count += 1
-        if apply_side_effects and is_owner_availability_hold(full_text):
-            self._start_owner_availability_wait()
 
         self._credit_live_intake_after_kevin(full_text)
 
@@ -1682,7 +1774,7 @@ class GeminiPipeline:
         self._last_kevin_speech_time = now
 
     def _start_owner_availability_wait(self):
-        if not self._connected or self._unavailable_said:
+        if not self._connected or self._unavailable_said or getattr(self, "_message_taking_pending", False):
             return
         now = time.time()
         self._waiting_for_owner_availability = True
@@ -1724,7 +1816,7 @@ class GeminiPipeline:
         self._waiting_for_owner_availability = False
         self._owner_availability_wait_started_at = 0.0
         self._caller_silence_prompted_at = None
-        if self._summary_task and not self._summary_task.done():
+        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
             self._summary_task.cancel()
 
     def _waiting_on_caller(self) -> bool:
@@ -1733,6 +1825,7 @@ class GeminiPipeline:
             and self._last_kevin_speech_time >= self._last_caller_speech_time
             and not self._is_speaking
             and not self._assistant_instruction_pending
+            and not getattr(self, '_message_taking_pending', False)
         )
         if (
             waiting
@@ -1742,14 +1835,15 @@ class GeminiPipeline:
             return False
         return waiting
 
-    async def _send_client_instruction(self, text: str):
-        if not self._ws or not self._connected:
-            return
+    async def _send_client_instruction(self, text: str) -> bool:
+        if not self._ws or not getattr(self, "_connected", False):
+            return False
         self._assistant_instruction_pending = True
         try:
             await self._ws.send(
                 json.dumps(self._build_text_instruction_payload(text))
             )
+            return True
         except Exception:
             self._assistant_instruction_pending = False
             raise
@@ -1758,6 +1852,8 @@ class GeminiPipeline:
         return (
             self._live_intake is not None
             and not self._waiting_for_owner_availability
+            and not getattr(self, "_message_taking_pending", False)
+            and not getattr(self, "_unavailable_said", False)
         )
 
     async def _send_opening_intake_instructions(self) -> None:
@@ -1915,16 +2011,204 @@ class GeminiPipeline:
         except Exception:
             pass  # Durable intent remains available for the next poll.
 
+    async def trigger_take_message(self):
+        from app.services.owner_call_actions import consume_message_intent
+        await consume_message_intent(self, self._deliver_message_instruction)
 
-    async def _deliver_message_instruction(self):
-        if self._unavailable_said:
-            return True
-        if not self._ws or not self._connected:
-            return False
-        owner = self._contractor_config.get("owner_name", settings.user_name)
-        await self._send_client_instruction(
-            f"The owner ({owner}) is unavailable. Offer to take a message. Be warm and apologetic."
+    def _is_turn_in_progress(self) -> bool:
+        """Return True if Gemini is generating or audio playout is busy."""
+        generating = (
+            getattr(self, "_model_turn_generating", False)
+            or getattr(self, "_assistant_instruction_pending", False)
         )
+        queue_busy = (
+            getattr(self, "_audio_queue", None) is not None
+            and (
+                not self._audio_queue.empty()
+                or getattr(self._audio_queue, "_unfinished_tasks", 0) > 0
+            )
+        )
+        is_speaking = getattr(self, "_is_speaking", False)
+        return generating or queue_busy or is_speaking
+
+    def _has_speech_started_for_current_turn(self) -> bool:
+        """Return True if first media was already sent to caller for the current active turn."""
+        if not self._is_turn_in_progress():
+            return False
+        turn = getattr(self, "_response_turn_number", 0)
+        last_sent_turn = getattr(self, "_last_response_first_media_sent_turn", -1)
+        return turn > 0 and last_sent_turn == turn
+
+    async def _wait_for_current_turn_and_playout(self, timeout: float = 15.0) -> bool:
+        """Wait for in-flight model response generation and audio queue playout to finish."""
+        deadline = time.monotonic() + timeout
+        while (getattr(self, "_connected", False) and getattr(self, "_ws", None) is not None) and time.monotonic() < deadline:
+            if not self._is_turn_in_progress():
+                return True
+            remaining = max(0.005, min(0.05, deadline - time.monotonic()))
+            await asyncio.sleep(remaining)
+        if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
+            return False
+        return not self._is_turn_in_progress()
+
+    async def _wait_for_old_turn_complete(self, timeout: float = 15.0) -> bool:
+        """Wait for an in-flight suppressed turn generation to receive turnComplete."""
+        deadline = time.monotonic() + timeout
+        while (getattr(self, "_connected", False) and getattr(self, "_ws", None) is not None) and time.monotonic() < deadline:
+            generating = (
+                getattr(self, "_model_turn_generating", False)
+                or getattr(self, "_assistant_instruction_pending", False)
+            )
+            if not generating:
+                return True
+            if getattr(self, "_turn_complete_event", None) is not None:
+                try:
+                    wait_time = max(0.005, min(0.05, deadline - time.monotonic()))
+                    await asyncio.wait_for(self._turn_complete_event.wait(), timeout=wait_time)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(0.01)
+        if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
+            return False
+        generating = (
+            getattr(self, "_model_turn_generating", False)
+            or getattr(self, "_assistant_instruction_pending", False)
+        )
+        return not generating
+
+    async def _prepare_message_delivery(self, intent: dict) -> bool:
+        """Await current speaking completion and apply bounded grace before message taking."""
+        self._message_taking_pending = True
+        action = str(intent.get("action") or "decline").strip().lower()
+
+        if action == "decline":
+            if (
+                self._unavailable_task
+                and not self._unavailable_task.done()
+                and self._unavailable_task is not asyncio.current_task()
+            ):
+                self._unavailable_task.cancel()
+            if (
+                self._summary_task
+                and not self._summary_task.done()
+                and self._summary_task is not asyncio.current_task()
+            ):
+                self._summary_task.cancel()
+
+        if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
+            return False
+
+        if self._has_speech_started_for_current_turn():
+            completed = await self._wait_for_current_turn_and_playout()
+            if not completed:
+                return False
+        elif self._is_turn_in_progress():
+            self._current_turn_suppressed = True
+            self._audio_epoch += 1
+            self._kevin_transcript_buf.clear()
+            async with self._audio_output_lock:
+                await self._clear_audio_queue()
+            self._response_audio_turn_started = False
+            self._response_end_mark_pending = None
+            self._response_first_audio_at = 0.0
+            completed = await self._wait_for_old_turn_complete()
+            if not completed:
+                return False
+
+        if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
+            return False
+
+        hold_offered = bool(getattr(self, "_hold_offered", False))
+        accepted_at = intent.get("accepted_at")
+        last_finished_at = (
+            getattr(self, "_last_playout_drained_at", 0.0)
+            or getattr(self, "_hold_offer_completed_at", 0.0)
+        )
+
+        delay = compute_grace_delay(
+            action=action,
+            hold_offered=hold_offered,
+            intent_accepted_at=accepted_at,
+            speaking_finished_at=last_finished_at,
+        )
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
+            return False
+
+        # After delay recheck boundary loop
+        if self._has_speech_started_for_current_turn():
+            completed = await self._wait_for_current_turn_and_playout()
+            if not completed:
+                return False
+        elif self._is_turn_in_progress():
+            self._current_turn_suppressed = True
+            self._audio_epoch += 1
+            self._kevin_transcript_buf.clear()
+            async with self._audio_output_lock:
+                await self._clear_audio_queue()
+            completed = await self._wait_for_old_turn_complete()
+            if not completed:
+                return False
+
+        if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
+            return False
+        return True
+
+    async def _deliver_message_instruction(self) -> bool:
+        if getattr(self, "_unavailable_said", False):
+            return True
+        guard = getattr(self, "_message_delivery_guard", None)
+        if guard is not None and callable(guard):
+            try:
+                if not await guard():
+                    return False
+            except Exception:
+                return False
+        if not getattr(self, "_ws", None) or not getattr(self, "_connected", False):
+            return False
+
+        owner = self._contractor_config.get("owner_name") or settings.user_name
+        hold_offered = bool(getattr(self, "_hold_offered", False))
+        instruction = (
+            build_gemini_instruction_text(
+                owner,
+                hold_offered=hold_offered,
+                language=None,
+            )
+            + " Continue in the caller's current language."
+        )
+        self._current_turn_suppressed = False
+
+        # Guard immediately before external send after boundary awaits
+        if guard is not None and callable(guard):
+            try:
+                if not await guard():
+                    return False
+            except Exception:
+                return False
+        if not getattr(self, "_ws", None) or not getattr(self, "_connected", False):
+            return False
+
+        self._message_response_allowed = True
+        try:
+            sent = await self._send_client_instruction(instruction)
+        except Exception:
+            self._message_response_allowed = False
+            return False
+
+        if not sent:
+            self._message_response_allowed = False
+            return False
+
         self._unavailable_said = True
+        self._message_response_allowed = False
         self._finish_owner_availability_wait()
         return True
+
+    def _finish_message_delivery_attempt(self) -> None:
+        """Cleanup hook invoked after each message delivery attempt."""
+        self._message_taking_pending = False
+        self._message_response_allowed = False

@@ -48,6 +48,17 @@ completion on September 14, 2026.
    Pickup targets the exact live call. Take a message keeps the caller connected
    and remains pending until Kevin accepts the instruction; acceptance does not
    mean a caller has finished leaving a message.
+   Owner feedback on September 16 requires a natural transition: finish Kevin's
+   current speech before responding to Take a message. If an availability offer
+   has not begun, say the owner is unavailable and offer to take a message
+   without first offering to check. If Kevin has already offered to check,
+   pause three seconds after the later of the accepted owner request and the
+   end of current speech, then give the unavailable/message response. Repeated
+   delivery attempts must not repeat the pause or announcement. The existing
+   unanswered 30-second timeout receives no additional three-second delay.
+   Use the configured owner name and retain existing caller-language handling. Pick up
+   remains the primary phone action; Take a message uses a neutral message
+   treatment rather than a destructive red X.
 4. Tapping the body opens that call without answering. An ended call opens its
    matching summary or an honest unavailable state. Dismissing the notification
    changes presentation only.
@@ -185,6 +196,11 @@ former v2 program.
 
 ## Deferred ideas and superseded plans
 
+- **Legacy Voice unavailable-prompt language parity:** source review on September
+  16 found that the Voice engine's existing direct-TTS unavailable phrase is
+  fixed English. The current transition fix retains that behavior; it does not
+  claim multilingual qualification for this phrase. Record and prioritize a
+  bounded repair when that engine/language path is in scope.
 - **VoiceOver/accessibility qualification:** deferred by the owner on September
   16, 2026. It is not a current N1/N3 acceptance requirement or release blocker.
   Do not request VoiceOver testing or start accessibility work unless the owner

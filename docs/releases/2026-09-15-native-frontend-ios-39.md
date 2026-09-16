@@ -237,6 +237,27 @@ second owner-controlled phone was unavailable. These partial observations do
 not complete N1 or N3 acceptance.
 
 
+## Owner-reported call feedback — September 16, 2026
+
+In the continuation of this device session, the owner reported that Focus was
+off and then placed a test call. The owner saw both **Pick up** and **Take a
+message** in the notification and could read the conversation as phrases
+streamed into it. Choosing Take a message during the conversation caused Kevin
+to announce unavailability too abruptly. The owner requested clearer button
+design and a natural transition that lets current speech finish, avoids an
+unsounded availability offer, and pauses three seconds if Kevin already offered
+to check. The [bounded follow-up contract](../superpowers/plans/2026-09-16-natural-message-taking.md)
+records the requested correction.
+
+These are owner reports, not agent-observed audio or fresh installed-build
+metadata. No caller identity, phone number, recording or transcript is retained
+here. This supersedes the earlier second-phone/Focus blocker for this reported
+call, but does not establish both lock-screen and unlocked behavior, two-way
+pickup audio, exact-call navigation, the urgent timeout/preference checks, or
+stale-action safety. Those acceptance rows remain open. The correction is not
+part of the already published build 39; any backend deployment or new iOS
+delivery needs separate owner authorization.
+
 ## Remaining owner acceptance
 
 **Owner scope update — September 16, 2026:** VoiceOver qualification is deferred,

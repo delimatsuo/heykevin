@@ -388,6 +388,31 @@ async def acknowledge_owner_action(call_sid, new_status=STATUS_TAKING_MESSAGE, *
     return bool(matches(result) and result.get('owner_action_status') == new_status)
 
 
+def _pipeline_cid(pipeline) -> str:
+    cfg = getattr(pipeline, '_contractor_config', None)
+    if isinstance(cfg, dict):
+        return cfg.get('contractor_id', '') or ''
+    return ''
+
+
+def _pipeline_sid(pipeline) -> str:
+    return getattr(pipeline, '_call_sid', '') or ''
+
+
+def _pipeline_ws(pipeline) -> str:
+    return getattr(pipeline, '_command_ws_token', '') or ''
+
+
+def _pipeline_alive(pipeline) -> bool:
+    if hasattr(pipeline, '_connected') and not pipeline._connected:
+        return False
+    if hasattr(pipeline, '_active') and not pipeline._active:
+        return False
+    if getattr(pipeline, '_ending', False):
+        return False
+    return True
+
+
 async def consume_message_intent(pipeline, deliver):
     lock = getattr(pipeline, '_message_delivery_lock', None)
     if lock is None:
@@ -398,9 +423,14 @@ async def consume_message_intent(pipeline, deliver):
 
 async def _consume_message_intent(pipeline, deliver):
     """Fence delivery and acknowledgment to the same claim and authenticated stream."""
-    cid = getattr(pipeline, '_contractor_config', {}).get('contractor_id', '')
-    sid = getattr(pipeline, '_call_sid', '')
-    ws_token = getattr(pipeline, '_command_ws_token', '') or ''
+    cid = _pipeline_cid(pipeline)
+    sid = _pipeline_sid(pipeline)
+    ws_token = _pipeline_ws(pipeline)
+    if not cid or not sid or not ws_token or not _pipeline_alive(pipeline):
+        return False
+
+    continuation_guard = None
+
     legacy_snapshot = None
     if sid and cid and ws_token:
         try:
@@ -410,13 +440,23 @@ async def _consume_message_intent(pipeline, deliver):
             raise
         except Exception:
             pass
+        if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
+                or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+            return False
 
     intent = await pending_message_intent(sid, cid)
+    if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
+            or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+        return False
+
     if not intent:
         # An acknowledged instruction may still need exact-command cleanup after
         # a lost cleanup response or a projection that arrived after acknowledgment.
         if legacy_snapshot:
             current = await read_record(sid)
+            if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
+                    or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+                return False
             expected = legacy_snapshot.intent
             completed = message_intent_from_record(current, cid, statuses=(STATUS_TAKING_MESSAGE,),
                 operation_id=expected['operation_id'], action=expected['action'],
@@ -426,23 +466,102 @@ async def _consume_message_intent(pipeline, deliver):
         return False
 
     current = await read_record(sid)
+    if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
+            or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+        return False
+
     if not message_intent_from_record(current, cid, operation_id=intent['operation_id'],
             action=intent['action'], claim_nonce=intent['claim_nonce'], ws_token=ws_token):
         return False
     if legacy_snapshot and legacy_snapshot.intent != intent:
         return False
 
-    key = (cid, intent['operation_id'], intent['action'], intent['claim_nonce'])
-    if getattr(pipeline, '_message_delivery_key', None) != key:
-        if await deliver() is False:
+    key = (cid, sid, ws_token, intent['operation_id'], intent['action'], intent['claim_nonce'])
+    if getattr(pipeline, '_intent_accepted_key', None) == key:
+        accepted_at = getattr(pipeline, '_intent_accepted_at', None)
+        if accepted_at is None:
+            accepted_at = time.monotonic()
+            pipeline._intent_accepted_at = accepted_at
+    else:
+        accepted_at = time.monotonic()
+        pipeline._intent_accepted_key = key
+        pipeline._intent_accepted_at = accepted_at
+
+    intent_copy = dict(intent)
+    intent_copy['accepted_at'] = accepted_at
+
+    async def _guard(*, allow_acknowledged: bool = False) -> bool:
+        if not _pipeline_alive(pipeline):
             return False
-        pipeline._message_delivery_key = key
-    acked = await acknowledge_owner_action(sid, contractor_id=cid,
-        operation_id=intent['operation_id'], action=intent['action'], ws_token=ws_token,
-        claim_nonce=intent['claim_nonce'])
-    if acked and legacy_snapshot:
-        await _cleanup_legacy_snapshot(sid, legacy_snapshot)
-    return acked
+        if _pipeline_cid(pipeline) != cid or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token:
+            return False
+        rec = await read_record(sid)
+        if not _pipeline_alive(pipeline):
+            return False
+        if _pipeline_cid(pipeline) != cid or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token:
+            return False
+        statuses = (STATUS_MESSAGE_REQUESTED, STATUS_TAKING_MESSAGE) if allow_acknowledged else (STATUS_MESSAGE_REQUESTED,)
+        if not message_intent_from_record(rec, cid, statuses=statuses, operation_id=intent['operation_id'],
+                action=intent['action'], claim_nonce=intent['claim_nonce'], ws_token=ws_token):
+            return False
+        return True
+
+    pipeline._message_delivery_guard = _guard
+    try:
+        if getattr(pipeline, '_message_delivery_key', None) != key:
+            pipeline._message_taking_pending = True
+            prepare_fn = getattr(pipeline, '_prepare_message_delivery', None)
+            if prepare_fn is not None and callable(prepare_fn):
+                prepared = await prepare_fn(intent_copy)
+                if prepared is False:
+                    return False
+            if not await _guard():
+                return False
+            delivered = await deliver()
+            if delivered is False:
+                return False
+            pipeline._message_delivery_key = key
+
+        if not await _guard():
+            return False
+
+        async def _continuation() -> bool:
+            return await _guard(allow_acknowledged=True)
+
+        continuation_guard = _continuation
+
+        acked = await acknowledge_owner_action(sid, contractor_id=cid,
+            operation_id=intent['operation_id'], action=intent['action'], ws_token=ws_token,
+            claim_nonce=intent['claim_nonce'])
+        if acked and legacy_snapshot:
+            await _cleanup_legacy_snapshot(sid, legacy_snapshot)
+        return acked
+    finally:
+        pipeline._message_taking_pending = False
+        if hasattr(pipeline, '_message_delivery_guard'):
+            try:
+                del pipeline._message_delivery_guard
+            except AttributeError:
+                pass
+        pipeline._message_continuation_guard = continuation_guard
+        try:
+            finish_fn = getattr(pipeline, '_finish_message_delivery_attempt', None)
+            if finish_fn is not None and callable(finish_fn):
+                try:
+                    finish_fn()
+                except Exception:
+                    pass
+        finally:
+            if hasattr(pipeline, '_message_continuation_guard'):
+                try:
+                    del pipeline._message_continuation_guard
+                except AttributeError:
+                    pass
+            if hasattr(pipeline, '_message_delivery_guard'):
+                try:
+                    del pipeline._message_delivery_guard
+                except AttributeError:
+                    pass
 
 
 async def _cleanup_legacy_snapshot(call_sid, snapshot):

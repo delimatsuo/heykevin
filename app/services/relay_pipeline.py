@@ -662,8 +662,47 @@ class RelayPipeline:
         return text_out, function_calls, raw_parts
 
     def _build_generate_body(self, contents: list[dict]) -> dict:
+        system_parts = [{"text": self._system_prompt}]
+
+        message_instruction = getattr(self, "_message_instruction", "")
+        unavailable_said = bool(getattr(self, "_unavailable_said", False))
+
+        if message_instruction:
+            lang = self._language or "en"
+            lang_note = (
+                f" Respond in the caller's language ({lang})."
+                if lang and lang != "en"
+                else ""
+            )
+            transition_text = (
+                f"APPLICATION CALL STATE: MESSAGE TAKING.\n"
+                f"{message_instruction}\n"
+                f"This call state supersedes normal owner-availability checking and screening-intake sequence. "
+                f"If the caller has not begun a message, say the owner is unavailable and offer to take one. "
+                f"If the caller has already provided a message, briefly acknowledge it instead of asking permission to receive it. "
+                f"Never repeat questions already answered or paraphrase caller details. Make no new promises. "
+                f"Follow the caller's language and context; do not force English when the caller speaks or has spoken another language.{lang_note}"
+            )
+            system_parts.append({"text": transition_text})
+        elif unavailable_said:
+            owner = self._contractor_config.get("owner_name", settings.user_name)
+            lang = self._language or "en"
+            lang_note = (
+                f" Respond in the caller's language ({lang})."
+                if lang and lang != "en"
+                else ""
+            )
+            continuation_text = (
+                f"APPLICATION CALL STATE: MESSAGE TAKING (CONTINUATION).\n"
+                f"{owner} remains unavailable. Continue message taking instead of checking availability or restarting intake. "
+                f"When responding to caller speech, use the latest caller words without re-asking answered questions or re-announcing unavailability unnecessarily. "
+                f"Explicitly honor separate silence-check and goodbye instructions, and do not repeat prior caller content just to fill silence. "
+                f"Follow the caller's language and context; do not force English when the caller speaks or has spoken another language.{lang_note}"
+            )
+            system_parts.append({"text": continuation_text})
+
         body: dict = {
-            "system_instruction": {"parts": [{"text": self._system_prompt}]},
+            "system_instruction": {"parts": system_parts},
             "contents": contents,
             "generationConfig": {
                 "temperature": settings.gemini_live_temperature,
@@ -1135,7 +1174,6 @@ class RelayPipeline:
             owner,
             hold_offered=hold_offered,
         )
-        self._message_instruction = instruction
 
         if self._hold_task and not self._hold_task.done() and self._hold_task is not asyncio.current_task():
             self._hold_task.cancel()
@@ -1146,6 +1184,8 @@ class RelayPipeline:
         if not self._active or self._ending:
             self._message_instruction = ""
             return False
+
+        self._message_instruction = instruction
 
         self._turn_epoch += 1
         epoch = self._turn_epoch
@@ -1195,6 +1235,7 @@ class RelayPipeline:
         except Exception:
             success = False
         finally:
+            self._message_instruction = ""
             if not task.done():
                 task.cancel()
                 try:
@@ -1203,12 +1244,9 @@ class RelayPipeline:
                     pass
             if self._generate_task is task:
                 self._generate_task = None
-            if not success:
-                self._message_instruction = ""
 
         if success:
             self._unavailable_said = True
-            self._message_instruction = ""
             if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
                 self._summary_task.cancel()
             return True

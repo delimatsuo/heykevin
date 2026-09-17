@@ -201,7 +201,7 @@ def _job_data(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_contractor_sms_leads_with_the_appointment_request():
+async def test_contractor_sms_prioritizes_appointment_after_identity_and_call_type():
     job_data = _job_data(appointment_request={
         "start_time": "2026-08-11T10:00:00-04:00",
         "status": "pending_owner_confirmation",
@@ -212,7 +212,8 @@ async def test_contractor_sms_leads_with_the_appointment_request():
     )
 
     lines = sms.splitlines()
-    assert "APPOINTMENT REQUEST" in lines[1]
+    assert lines[0] == "Hey Kevin: Call summary"
+    assert "APPOINTMENT REQUEST" in lines[2]
     assert "Tue, Aug 11 at 10:00 AM" in sms
     assert "not confirmed" in sms.lower()
 
@@ -325,10 +326,12 @@ def test_business_prompt_forbids_claiming_an_unconfirmed_appointment():
 
 
 @pytest.mark.asyncio
-async def test_contractor_sms_without_a_request_is_unchanged():
+async def test_contractor_sms_without_a_request_preserves_details_after_identity():
     sms = await post_call._format_contractor_sms(
         _job_data(), "job-1", contractor={"timezone": "America/New_York"}
     )
 
     assert "APPOINTMENT REQUEST" not in sms
-    assert sms.splitlines()[1] == "From: John Smith"
+    lines = sms.splitlines()
+    assert lines[0] == "Hey Kevin: Call summary"
+    assert lines[2] == "From: John Smith"

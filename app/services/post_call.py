@@ -1,7 +1,7 @@
 """Post-call processing: extract job card, save to Firestore, send SMS.
 
 Supports two modes:
-- "personal": simple missed-call notification, no job card
+- "personal": simple call summary notification, no job card
 - "business" (default): full job card extraction + estimate link + vCard
 """
 
@@ -76,6 +76,8 @@ def _log_post_call_exception(
 
 # Auto-reply rate limit moved to Firestore (auto_reply_timestamps collection)
 
+OWNER_SMS_HEADER = "Hey Kevin: Call summary"
+
 # Urgency emoji mapping
 URGENCY_ICONS = {
     "emergency": "\U0001f6a8",
@@ -92,7 +94,7 @@ CALL_TYPE_HEADERS = {
     "personal": "PERSONAL CALL",
     "business": "BUSINESS CALL",
     "spam": "SPAM",
-    "unknown": "MISSED CALL",
+    "unknown": "CALL",
 }
 
 SAFE_SUMMARY_URGENCY_LABELS = {
@@ -352,7 +354,7 @@ async def _process_personal(
     owner_phone = contractor_phone
     if owner_phone and twilio_number:
         sms = (
-            f"Missed call from {name}\n"
+            f"Call from {name}\n"
             f"Re: {reason}\n"
             f"\U0001f4de {callback}"
         )
@@ -364,14 +366,17 @@ async def _process_personal(
                     model=settings.anthropic_model,
                     max_tokens=200,
                     messages=[{"role": "user", "content": (
-                        f"Translate this missed call notification to language code '{user_language}'. "
+                        f"Translate this call summary notification to language code '{user_language}'. "
                         f"Keep phone numbers and names exactly as-is. Keep emojis. "
                         f"Return ONLY the translated message:\n\n{sms}"
                     )}],
                 )
-                sms = resp.content[0].text.strip()
+                translated = resp.content[0].text.strip()
+                if translated:
+                    sms = translated
             except Exception as error:
                 _log_post_call_exception("personal_sms_translation_error", error, call_sid)
+        sms = f"{OWNER_SMS_HEADER}\n{sms}"
         try:
             sent = await send_sms(owner_phone, sms, from_number=twilio_number)
             _record_effect(tracker, "owner_sms", sent)
@@ -854,7 +859,7 @@ async def _format_contractor_sms(
     call_type = job_data.get("call_type", "unknown")
     urgency = job_data.get("urgency", "none")
     icon = URGENCY_ICONS.get(urgency, "\U0001f4de")
-    header = CALL_TYPE_HEADERS.get(call_type, "MISSED CALL")
+    header = CALL_TYPE_HEADERS.get(call_type, "CALL")
 
     name = job_data.get("caller_name", "") or "Unknown"
     business = job_data.get("business_name", "")
@@ -867,7 +872,7 @@ async def _format_contractor_sms(
     lines = [f"{icon} {header}"]
 
     # A request is only recorded when Kevin could not book the slot himself,
-    # so it leads the message as the one thing the owner has to act on.
+    # so it leads the call details as the one thing the owner has to act on.
     appointment_request = job_data.get("appointment_request") or {}
     if appointment_request:
         when = _format_requested_time(
@@ -920,11 +925,13 @@ async def _format_contractor_sms(
                     f"Return ONLY the translated message:\n\n{sms}"
                 )}],
             )
-            sms = resp.content[0].text.strip()
+            translated = resp.content[0].text.strip()
+            if translated:
+                sms = translated
         except Exception as error:
             _log_post_call_exception("contractor_sms_translation_error", error)
 
-    return sms
+    return f"{OWNER_SMS_HEADER}\n{sms}"
 
 
 async def _format_caller_sms_with_estimate(

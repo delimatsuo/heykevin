@@ -116,3 +116,14 @@ with $0 expected chargeable cost. Feature pushes and main merges do not deploy;
 no macOS job or workflow dispatch is included. September paid account Actions
 usage observed during preflight was $71.470765035, with Hey Kevin net usage $0.
 No paid-CI allocation or deployment approval is implied by this record.
+
+## Approved rollout, September 16–17
+
+After source review and merge, the owner approved sequential staging and
+production deployment and later delegated the existing production approval.
+Both environments now serve merge commit
+`976202dfd418e0c4ca551a96e8075e5d5065b45b`, with healthy exact-revision readback
+and 100% traffic. The [dated rollout record](../../releases/2026-09-16-relay-message-state-backend.md)
+contains workflow, revision, image, approval and configuration evidence.
+Physical conversation acceptance remains open and requires the existing iOS
+1.3.1 (41), which addresses the separate build 40 confirmation warning.

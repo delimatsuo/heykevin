@@ -57,6 +57,13 @@ completion reaction. The optional Cursor security review could not start because
 its integration required an additional billing allowance; it is unavailable
 evidence, not a security pass. No billing setting was changed.
 
+The first delivery-documentation head `646bcbc` passed all nine CI jobs in run
+`35241373903`. Codex found a valid documentation P2: active N1/roadmap acceptance
+rows still directed installation of build 41 and retained its old review status.
+The follow-up makes build 42 the explicit current phone-test target in those
+rows, keeps build 41 as historical package evidence, and preserves every open
+physical acceptance checkbox. It changes no application or package bytes.
+
 ## Signed package
 
 Archive and export used the required `xcodebuild-external` wrapper with one
@@ -168,5 +175,5 @@ Input tokens: 28799
 Output tokens: 398
 Total tokens: 29197
 Retries: 0 builder retries
-Audit defects found: 0
-Audit disposition: metadata source and actual signed package independently approved; Apple validation, processing and QA delivery verified; physical acceptance remains open
+Audit defects found: 1 documentation issue — stale build 41 acceptance references; no source/package defects
+Audit disposition: documentation references corrected; metadata source and actual signed package independently approved; Apple validation, processing and QA delivery verified; physical acceptance remains open

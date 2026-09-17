@@ -93,15 +93,18 @@ completion on September 14, 2026.
 - [x] The iPhone candidate **1.2.12 (38)** passed Apple processing and is
       available in the existing internal TestFlight QA group, verified September
       14 at `23:18:44Z`. See the [candidate record and test sequence](docs/releases/2026-09-14-notification-ios-38.md).
-- [x] The current confirmation-repair candidate **1.3.1 (41)** is `VALID` /
-      `IN_BETA_TESTING` and available in internal TestFlight QA, verified
-      September 16 at `22:07:24Z`. The [build 41 record](docs/releases/2026-09-16-message-confirmation-ios-41.md)
-      binds its package and retest. The owner installed build 40 and reported a
-      false warning after Take a message; build 41 installation and phone
-      acceptance remain open. The owner subsequently requested public submission
-      with updated screenshots: Apple reports `WAITING_FOR_REVIEW` at
-      `2026-09-17T03:16:05Z`, with six processed screenshots and automatic release
-      after approval. See the [submission record](docs/releases/2026-09-16-app-store-ios-41.md).
+- [x] The earlier confirmation-repair candidate **1.3.1 (41)** passed internal
+      QA processing on September 16; its [package record](docs/releases/2026-09-16-message-confirmation-ios-41.md)
+      preserves that evidence. Apple now reports `READY_FOR_SALE` and review
+      `COMPLETE`, observed September 17 at 15:16 UTC. The
+      [submission record](docs/releases/2026-09-16-app-store-ios-41.md) preserves
+      the earlier submission and six updated screenshots. Build 41 is historical
+      evidence for this repair, not the current phone-test target.
+- [x] Current internal candidate **1.3.2 (42)** is `VALID / IN_BETA_TESTING` in
+      QA, verified September 17 at `15:33:58Z`. It retains the confirmation repair
+      and adds the transcript-first flow and appearance correction. Use the
+      [build 42 phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
+      for the remaining acceptance rows; installation and physical checks remain open.
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or
@@ -122,8 +125,8 @@ completion on September 14, 2026.
       the hold or transcript.
 - [ ] Delayed extraction or a stale task cannot send a new actionable screening
       summary after pickup, hangup, or the end of the screening wait.
-- [ ] Record the installed iOS version and build used for this check. Public App
-      Store version metadata alone does not identify that build.
+- [ ] Record the installed **1.3.2 (42)** used for these phone checks. Public App
+      Store version metadata alone does not identify the installed build.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION`, published September 15, 2026 per owner submission instruction; see the canonical [build 39 release record](docs/releases/2026-09-15-native-frontend-ios-39.md). Partial frontend checks on the installed build are recorded there; the remaining N1 phone checks stay open.
 
 PR #239 contains the initial summary notification and feedback/review code;

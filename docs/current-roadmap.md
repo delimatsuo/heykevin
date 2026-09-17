@@ -32,7 +32,7 @@ from that existing release and from physical-phone acceptance:
 | Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
 | Latest Apple version | **1.3.1 (41)**, **READY_FOR_SALE**, review **COMPLETE**, observed September 17 at 15:16 UTC; also **VALID** / **IN_BETA_TESTING** in QA | The [submission record](releases/2026-09-16-app-store-ios-41.md) binds six updated screenshots; the [new dated observation](releases/2026-09-17-transcript-first-ios-42.md) supersedes its waiting-for-review snapshot. Public US lookup still showed 1.3.0. Physical phone acceptance remains open. |
 | Current internal iPhone candidate | **1.3.2 (42)**, **VALID / IN_BETA_TESTING** in the existing QA group, verified `2026-09-17T15:33:58Z` | [Delivery record and phone checks](releases/2026-09-17-transcript-first-ios-42.md). Includes direct full-transcript notification entry, retained screening text after pickup and consistent system appearance. The new backend reason field is not deployed. |
-| Development inventory | Native frontend 1.3.0 (39) public; call-control/transition work, iOS confirmation repair and Relay message-state correction delivered for testing | [PR #253](https://github.com/delimatsuo/heykevin/pull/253) and [PR #254](https://github.com/delimatsuo/heykevin/pull/254) delivered build 40/backend; [PR #256](https://github.com/delimatsuo/heykevin/pull/256) merged the iOS-only confirmation repair packaged in build 41. [PR #258](https://github.com/delimatsuo/heykevin/pull/258) added the deployed Relay message-state correction. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
+| Development inventory | Transcript-first flow and appearance correction delivered in internal build 42; notification and Relay corrections remain included | [PR #261](https://github.com/delimatsuo/heykevin/pull/261) adds the current frontend behavior. Earlier [PR #256](https://github.com/delimatsuo/heykevin/pull/256) supplied the iOS confirmation repair, and [PR #258](https://github.com/delimatsuo/heykevin/pull/258) supplied the deployed Relay correction. The new structured reason field is not deployed. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
 ## Shipped
 
@@ -153,12 +153,13 @@ list remain outside active implementation.
       [candidate record](releases/2026-09-14-notification-ios-38.md) includes
       package identity, verification and the owner test sequence.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION` (verified September 16, 2026 at `00:20:10Z` / Sep 15 America/New_York) following owner's submission instruction ("submit the last build"). See the canonical [build 39 release record](releases/2026-09-15-native-frontend-ios-39.md).
-- [ ] Record the owner's installed **1.3.1 (41)** and the remaining notification/
+- [ ] Record the owner's installed **1.3.2 (42)** and the remaining notification/
       pickup acceptance from [N1 in the PRD](../kevin-prd.md#n1--finish-the-screening-notification-enhancement),
       including stale-alert, ended-call, banner, urgent-preference and failure
-      scenarios. The [build 41 retest](releases/2026-09-16-message-confirmation-ios-41.md#owner-retest--open)
-      adds the confirmation regression and links the button/timing checks; passing it does not close the other
-      N1 rows. Earlier build 39 observations remain historical evidence.
+      scenarios. The [build 42 phone checks](releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
+      cover the transcript-first flow alongside the confirmation and button/timing
+      checks; passing them does not close other unperformed N1 rows. Earlier
+      build 39/41 records remain historical evidence.
 
 Deli's approval and the completed September 14 production deployment above did
 not authorize an Apple release. The owner

@@ -4,7 +4,7 @@
 **Owner:** Deli Matsuo
 **Backend release baseline:** `976202dfd418e0c4ca551a96e8075e5d5065b45b`, revision `kevin-api-00272-8z4`, verified `2026-09-17T02:25:37Z` (September 16 America/New_York)
 **Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
-**Current internal iOS candidate:** `1.3.1 (41)`, available in TestFlight QA; [confirmation repair and retest](docs/releases/2026-09-16-message-confirmation-ios-41.md)
+**Current iOS submission:** `1.3.1 (41)`, `WAITING_FOR_REVIEW` with six updated screenshots, submitted `2026-09-17T03:16:04.335Z`; [submission record](docs/releases/2026-09-16-app-store-ios-41.md). Also available in TestFlight QA; [confirmation repair and retest](docs/releases/2026-09-16-message-confirmation-ios-41.md).
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
 
@@ -97,7 +97,10 @@ completion on September 14, 2026.
       September 16 at `22:07:24Z`. The [build 41 record](docs/releases/2026-09-16-message-confirmation-ios-41.md)
       binds its package and retest. The owner installed build 40 and reported a
       false warning after Take a message; build 41 installation and phone
-      acceptance remain open. It has not been submitted for public App Store release.
+      acceptance remain open. The owner subsequently requested public submission
+      with updated screenshots: Apple reports `WAITING_FOR_REVIEW` at
+      `2026-09-17T03:16:05Z`, with six processed screenshots and automatic release
+      after approval. See the [submission record](docs/releases/2026-09-16-app-store-ios-41.md).
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or

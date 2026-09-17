@@ -16,8 +16,9 @@ External observations are dated snapshots, not a standing claim about production
 
 Backend verification times are stated in UTC below; both deployments occurred
 on September 16 in America/New_York. Internal TestFlight snapshots are dated
-September 16. Public iOS version `1.3.0` was rechecked through the US lookup on
-September 16 at `20:03:00Z`; its build 39 relationship comes from the earlier
+September 16. Version 1.3.1 (41) was submitted at `2026-09-17T03:16:04.335Z`
+(September 16 America/New_York). The US lookup still reported public version
+`1.3.0` after submission; its build 39 relationship comes from the earlier
 authenticated observation recorded below:
 
 | Surface | Observed state | Evidence and limit |
@@ -29,7 +30,7 @@ authenticated observation recorded below:
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
 | Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
-| Current internal iPhone candidate | **1.3.1 (41)**, **VALID** / **IN_BETA_TESTING**, available in QA at `22:07:24Z` | Fixes the reported false confirmation warning after Take a message. The [build 41 record](releases/2026-09-16-message-confirmation-ios-41.md) binds the package and open retest. Not submitted for public release. |
+| Current iPhone submission | **1.3.1 (41)**, **WAITING_FOR_REVIEW**, submitted `2026-09-17T03:16:04.335Z`; also **VALID** / **IN_BETA_TESTING** in QA | Fixes the reported false confirmation warning after Take a message. The [submission record](releases/2026-09-16-app-store-ios-41.md) binds six processed, updated screenshots and automatic release after Apple approval. The [build 41 record](releases/2026-09-16-message-confirmation-ios-41.md) binds the package and open phone retest. Submission is not public release or device acceptance. |
 | Development inventory | Native frontend 1.3.0 (39) public; call-control/transition work, iOS confirmation repair and Relay message-state correction delivered for testing | [PR #253](https://github.com/delimatsuo/heykevin/pull/253) and [PR #254](https://github.com/delimatsuo/heykevin/pull/254) delivered build 40/backend; [PR #256](https://github.com/delimatsuo/heykevin/pull/256) merged the iOS-only confirmation repair packaged in build 41. [PR #258](https://github.com/delimatsuo/heykevin/pull/258) added the deployed Relay message-state correction. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
 ## Shipped
@@ -69,7 +70,9 @@ or release blocker. See the [PRD deferral](../kevin-prd.md#deferred-ideas-and-su
 The September 16 owner call prompted the clearer action buttons and natural
 message-taking transition. That backend is deployed. The owner installed build
 40 and reported a false confirmation warning despite a normal message response.
-**1.3.1 (41)** is now in internal TestFlight QA with the iOS-only repair. Use the
+**1.3.1 (41)** is in internal TestFlight QA with the iOS-only repair and was
+[submitted for App Review](releases/2026-09-16-app-store-ios-41.md) with six updated
+screenshots at the owner's request. Apple reports `WAITING_FOR_REVIEW`. Use the
 [current retest](releases/2026-09-16-message-confirmation-ios-41.md#owner-retest--open)
 and its linked speech/pickup checklist. Provider/package verification does not
 close those physical-call rows.

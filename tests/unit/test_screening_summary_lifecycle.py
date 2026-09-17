@@ -653,3 +653,76 @@ async def test_voice_caller_speech_quoting_system_is_preserved_not_filtered(monk
     assert "<caller_speech>" not in call_kwargs["reason"]
 
     await pipeline.stop()
+
+
+@pytest.mark.parametrize("engine", ["relay", "gemini", "voice"])
+@pytest.mark.asyncio
+async def test_all_engines_pass_captured_command_ws_token_and_publish_reason(monkeypatch, engine):
+    from app.services import owner_call_actions
+
+    push_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    async def fake_extract(*args, **kwargs):
+        return {"caller_name": "Test Caller", "reason": "Water leak repair"}
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", fake_extract)
+
+    if engine == "relay":
+        pipeline, _ = _make_relay_pipeline()
+    elif engine == "gemini":
+        pipeline = _make_gemini_pipeline()
+    else:
+        pipeline = _make_voice_pipeline()
+
+    assert pipeline._command_ws_token == "ws1"
+
+    if engine == "relay":
+        pipeline._maybe_start_owner_hold("Let me see if Deli is available")
+    else:
+        pipeline._start_owner_availability_wait()
+
+    assert pipeline._summary_task is not None
+    await pipeline._summary_task
+
+    assert push_mock.call_count == 1
+    assert push_mock.call_args.kwargs["reason"] == "Water leak repair"
+
+    record = await owner_call_actions.read_record(pipeline._call_sid)
+    assert record is not None
+    assert record["screening_reason"] == "Water leak repair"
+
+    await pipeline.stop()
+
+
+@pytest.mark.parametrize("engine", ["relay", "gemini", "voice"])
+@pytest.mark.asyncio
+async def test_engine_mismatched_ws_token_rejects_publish_and_suppresses_push(monkeypatch, engine):
+    push_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    async def fake_extract(*args, **kwargs):
+        return {"caller_name": "Test Caller", "reason": "Water leak repair"}
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", fake_extract)
+
+    if engine == "relay":
+        pipeline, _ = _make_relay_pipeline()
+    elif engine == "gemini":
+        pipeline = _make_gemini_pipeline()
+    else:
+        pipeline = _make_voice_pipeline()
+
+    pipeline._command_ws_token = "invalid_rotated_token"
+
+    if engine == "relay":
+        pipeline._maybe_start_owner_hold("Let me see if Deli is available")
+    else:
+        pipeline._start_owner_availability_wait()
+
+    assert pipeline._summary_task is not None
+    await pipeline._summary_task
+
+    assert push_mock.call_count == 0
+
+    await pipeline.stop()

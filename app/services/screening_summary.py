@@ -7,6 +7,7 @@ shows e.g. "Jonathan from Geico: Wants to talk about insurance renewal — Tap t
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Callable, Optional
@@ -16,6 +17,7 @@ from app.config import settings
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+REASON_PUBLISH_TIMEOUT_SECONDS = 1.0
 
 
 def _sanitize_transcript(transcript: str, max_chars: int = 1500) -> str:
@@ -145,6 +147,7 @@ async def extract_and_send_screening_summary(
     transcript: str = "",
     collapse_id: Optional[str] = None,
     is_active: Optional[Callable[[], bool]] = None,
+    ws_token: str = "",
 ) -> bool:
     """Extract screening details and dispatch the in-place APNs notification update."""
     if not contractor_id or not call_sid:
@@ -162,12 +165,33 @@ async def extract_and_send_screening_summary(
     if is_active is not None and not is_active():
         return False
 
+    reason = summary.get("reason", "") if isinstance(summary, dict) else ""
+
+    if ws_token:
+        try:
+            from app.services.owner_call_actions import publish_screening_reason
+            # Optional metadata must not indefinitely delay the existing alert.
+            async with asyncio.timeout(REASON_PUBLISH_TIMEOUT_SECONDS):
+                published = await publish_screening_reason(
+                    call_sid=call_sid,
+                    contractor_id=contractor_id,
+                    ws_token=ws_token,
+                    reason=reason,
+                )
+            if not published:
+                return False
+        except Exception as e:
+            logger.warning("Screening reason publish failed: %s", type(e).__name__)
+
+    if is_active is not None and not is_active():
+        return False
+
     from app.services.push_notification import send_screening_summary_push
     return await send_screening_summary_push(
         contractor_id=contractor_id,
         call_sid=call_sid,
         caller_phone=caller_phone,
-        caller_name=summary.get("caller_name", ""),
-        reason=summary.get("reason", ""),
+        caller_name=summary.get("caller_name", "") if isinstance(summary, dict) else "",
+        reason=reason,
         collapse_id=collapse_id,
     )

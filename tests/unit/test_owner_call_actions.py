@@ -671,3 +671,177 @@ async def test_stream_token_guard_mutation_is_detected(backend):
     exec(source.replace(guard, ''), namespace)
     assert await namespace['confirm_fallback_stream']('CA1', **args)
     assert backend.record['kevin_redirect_status'] == 'succeeded'
+
+
+def test_normalize_screening_reason():
+    assert a.normalize_screening_reason(None) == ''
+    assert a.normalize_screening_reason(123) == ''
+    assert a.normalize_screening_reason([]) == ''
+    assert a.normalize_screening_reason({}) == ''
+    assert a.normalize_screening_reason('') == ''
+    assert a.normalize_screening_reason('   ') == ''
+    assert a.normalize_screening_reason('Speaking with Kevin') == ''
+    assert a.normalize_screening_reason('  Speaking with Kevin  ') == ''
+    assert a.normalize_screening_reason('Speaking with Kevin ') == ''
+    assert a.normalize_screening_reason('Wants a quote') == 'Wants a quote'
+    assert a.normalize_screening_reason('  Wants a quote  ') == 'Wants a quote'
+    long_reason = 'A' * 200
+    assert a.normalize_screening_reason(long_reason) == 'A' * 160
+    assert len(a.normalize_screening_reason(long_reason)) == 160
+
+
+@pytest.mark.asyncio
+async def test_publish_screening_reason_exact_persistence_and_timestamp_retained(backend):
+    stamp = backend.record['state_updated_at']
+    result = await a.publish_screening_reason('CA1', 'owner', 'ws1', 'Wants a quote for plumbing')
+    assert result is True
+    assert backend.record['screening_reason'] == 'Wants a quote for plumbing'
+    assert backend.record['state_updated_at'] == stamp
+    assert backend.record['contractor_id'] == 'owner'
+    assert backend.record['state'] == 'screening'
+    assert backend.record['ws_token'] == 'ws1'
+
+
+@pytest.mark.parametrize('generic_or_empty', ['', '   ', 'Speaking with Kevin', '  Speaking with Kevin  '])
+@pytest.mark.asyncio
+async def test_publish_screening_reason_normalizes_empty_and_generic(backend, generic_or_empty):
+    result = await a.publish_screening_reason('CA1', 'owner', 'ws1', generic_or_empty)
+    assert result is True
+    assert backend.record['screening_reason'] == ''
+
+
+@pytest.mark.parametrize('change', [
+    {'state': 'ended'},
+    {'state': 'connected'},
+    {'state': 'unknown'},
+    {'contractor_id': ''},
+    {'contractor_id': 'other'},
+    {'state_updated_at': None},
+    {'state_updated_at': 0},
+    {'state_updated_at': float('nan')},
+    {'state_updated_at': float('inf')},
+    {'state_updated_at': True},
+    {'state_updated_at': time.time() + 3600},
+    {'state_updated_at': time.time() - 1000},
+    {'accepted': True},
+    {'owner_action': 'accept'},
+    {'owner_action': 'decline'},
+    {'kevin_redirect_status': 'pending'},
+    {'kevin_redirect_status': 'uncertain'},
+    {'ws_token': 'rotated-token'},
+    {'ws_token': None},
+    {'call_sid': None},
+    {'call_sid': 'CA2'},
+])
+@pytest.mark.asyncio
+async def test_publish_screening_reason_rejects_and_preserves_on_invalid_conditions(backend, change):
+    backend.record.update(change)
+    before = deepcopy(backend.record)
+    result = await a.publish_screening_reason('CA1', 'owner', 'ws1', 'Wants a quote')
+    assert result is False
+    assert backend.record == before
+
+
+@pytest.mark.asyncio
+async def test_publish_screening_reason_missing_record_no_resurrection(backend):
+    backend.record = None
+    result = await a.publish_screening_reason('CA1', 'owner', 'ws1', 'Wants a quote')
+    assert result is False
+    assert backend.record is None
+
+
+@pytest.mark.parametrize('sid', ['../other', 'CA.foo', 'CA/other', 'CA#x', 'CA[x]', ''])
+@pytest.mark.asyncio
+async def test_publish_screening_reason_invalid_sid_raises(backend, sid):
+    with pytest.raises(HTTPException) as error:
+        await a.publish_screening_reason(sid, 'owner', 'ws1', 'Wants a quote')
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize('bad_token', ['', '   ', None, 123])
+@pytest.mark.asyncio
+async def test_publish_screening_reason_invalid_token_returns_false(backend, bad_token):
+    before = deepcopy(backend.record)
+    result = await a.publish_screening_reason('CA1', 'owner', bad_token, 'Wants a quote')
+    assert result is False
+    assert backend.record == before
+
+
+@pytest.mark.parametrize('change', [
+    {'state': 'ended'}, {'contractor_id': 'other'}, {'ws_token': 'replacement'},
+    {'owner_action': 'accept'}, {'owner_action': 'decline'},
+])
+@pytest.mark.asyncio
+async def test_publish_screening_reason_retried_callback_rejected_byte_for_byte(backend, change):
+    replacement = {**fresh(), **change}
+    backend.retry_with = deepcopy(replacement)
+    result = await a.publish_screening_reason('CA1', 'owner', 'ws1', 'Wants a quote')
+    assert result is False
+    assert backend.record == replacement
+
+
+@pytest.mark.asyncio
+async def test_status_readback_normalized_screening_reason_provider_free(backend):
+    backend.record['screening_reason'] = 'Emergency leak'
+    result = await a.get_owner_call_action_status(call_sid='CA1', contractor_id='owner', operation_id='')
+    assert result['screening_reason'] == 'Emergency leak'
+    assert result['active'] is True
+    assert result['status'] == 'ok'
+    assert 'access_token' not in result
+    a._conference_contains_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_status_readback_inactive_and_older_data_returns_empty(backend):
+    # Missing screening_reason in older data
+    result = await a.get_owner_call_action_status(call_sid='CA1', contractor_id='owner', operation_id='')
+    assert result['screening_reason'] == ''
+
+    # Generic reason in older record normalizes to empty
+    backend.record['screening_reason'] = 'Speaking with Kevin'
+    result = await a.get_owner_call_action_status(call_sid='CA1', contractor_id='owner', operation_id='')
+    assert result['screening_reason'] == ''
+
+    # Inactive call
+    backend.record['state'] = 'ended'
+    result = await a.get_owner_call_action_status(call_sid='CA1', contractor_id='owner', operation_id='')
+    assert result['screening_reason'] == ''
+    assert result['active'] is False
+
+    # Deleted / None record
+    backend.record = None
+    result = await a.get_owner_call_action_status(call_sid='CA1', contractor_id='owner', operation_id='')
+    assert result['screening_reason'] == ''
+    assert result['active'] is False
+
+
+@pytest.mark.asyncio
+async def test_accepted_call_preserves_historical_screening_reason(backend):
+    backend.record['screening_reason'] = 'Broken water heater'
+    accepted, code = await act('accept', 'op1')
+    assert code == 200
+    assert accepted['action_status'] == 'accepted'
+    assert accepted['screening_reason'] == 'Broken water heater'
+    assert backend.record['screening_reason'] == 'Broken water heater'
+
+    readback = await a.get_owner_call_action_status(call_sid='CA1', contractor_id='owner', operation_id='op1')
+    assert readback['screening_reason'] == 'Broken water heater'
+    assert readback['action_status'] == 'accepted'
+    assert not await a.publish_screening_reason('CA1', 'owner', 'ws1', 'Late replacement')
+    assert backend.record['screening_reason'] == 'Broken water heater'
+
+
+@pytest.mark.parametrize('guard,change', [
+    ("and current.get('ws_token') == ws_token", {'ws_token': 'replacement'}),
+    ("and not current.get('owner_action')", {'owner_action': 'decline'}),
+])
+@pytest.mark.asyncio
+async def test_screening_reason_guard_mutations_are_detected(backend, guard, change):
+    import inspect
+    backend.record.update(change)
+    assert not await a.publish_screening_reason('CA1', 'owner', 'ws1', 'Late summary')
+    source = inspect.getsource(a.publish_screening_reason)
+    assert source.count(guard) == 1
+    namespace = vars(a).copy()
+    exec(source.replace(guard, ''), namespace)
+    assert await namespace['publish_screening_reason']('CA1', 'owner', 'ws1', 'Late summary')

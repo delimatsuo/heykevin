@@ -201,4 +201,107 @@ final class AppStateOwnershipTests: XCTestCase {
         XCTAssertEqual(appState.contractorId, "test-contractor")
         XCTAssertEqual(appState.readCallIds.count, 2)
     }
+
+    // MARK: - 9. activeCallReason Lifecycle, Trimming, and Resets
+
+    func testActiveCallReasonLifecycleAndGuards() {
+        let authA = makeAuth(contractorId: "c-A", token: "tok-A", generation: 1)
+        let authB = makeAuth(contractorId: "c-B", token: "tok-B", generation: 2)
+        var currentAuth = authA
+        let appState = AppState(authProvider: { currentAuth }, inMemory: true)
+
+        appState.setActiveCall(callSid: "CA_REASON_1", callerPhone: "+15551111", callerName: "Alice", authContext: authA)
+        XCTAssertEqual(appState.activeCallReason, "")
+
+        // 1. Valid update with whitespace trimming
+        appState.updateActiveCallReason(reason: "  Water heater leaking  \n", authContext: authA, callSid: "CA_REASON_1")
+        XCTAssertEqual(appState.activeCallReason, "Water heater leaking")
+
+        // 2. 160-character capping
+        let longReason = String(repeating: "A", count: 200)
+        appState.updateActiveCallReason(reason: longReason, authContext: authA, callSid: "CA_REASON_1")
+        XCTAssertEqual(appState.activeCallReason.count, 160)
+        XCTAssertEqual(appState.activeCallReason, String(repeating: "A", count: 160))
+
+        // 3. Mismatched auth context rejected
+        appState.updateActiveCallReason(reason: "New reason from auth B", authContext: authB, callSid: "CA_REASON_1")
+        XCTAssertEqual(appState.activeCallReason, String(repeating: "A", count: 160))
+
+        // 4. Mismatched callSid rejected
+        appState.updateActiveCallReason(reason: "Wrong SID reason", authContext: authA, callSid: "CA_OTHER")
+        XCTAssertEqual(appState.activeCallReason, String(repeating: "A", count: 160))
+
+        // 5. Update via lease
+        let lease = appState.ownedActiveCallLease!
+        appState.updateActiveCallReason(reason: "Lease updated reason", lease: lease)
+        XCTAssertEqual(appState.activeCallReason, "Lease updated reason")
+
+        // 6. Reset on new call adoption
+        appState.setActiveCall(callSid: "CA_REASON_2", callerPhone: "+15552222", callerName: "Bob", authContext: authA)
+        XCTAssertEqual(appState.activeCallReason, "", "Adopting a new call must reset activeCallReason")
+
+        // 7. Reset on clearActiveCall
+        appState.updateActiveCallReason(reason: "Some reason", authContext: authA, callSid: "CA_REASON_2")
+        XCTAssertEqual(appState.activeCallReason, "Some reason")
+        appState.clearActiveCall()
+        XCTAssertEqual(appState.activeCallReason, "", "Clearing active call must reset activeCallReason")
+
+        // 8. Reset on applyAuthChange
+        appState.setActiveCall(callSid: "CA_REASON_3", callerPhone: "+15553333", callerName: "Charlie", authContext: authA)
+        appState.updateActiveCallReason(reason: "Charlie's reason", authContext: authA, callSid: "CA_REASON_3")
+        currentAuth = authB
+        appState.applyAuthChange()
+        XCTAssertEqual(appState.activeCallReason, "", "Auth change must reset activeCallReason")
+    }
+
+    // MARK: - 10. CapturedScreeningTranscript Snapshot Immutability and Lease Isolation
+
+    func testCapturedScreeningTranscriptSnapshotAndIsolation() {
+        let authA = makeAuth(contractorId: "c-A", token: "tok-A", generation: 1)
+        let authB = makeAuth(contractorId: "c-B", token: "tok-B", generation: 2)
+        let appState = AppState(authProvider: { authA }, inMemory: true)
+
+        appState.setActiveCall(callSid: "CA_SNAP_1", callerPhone: "+15551111", callerName: "Alice", authContext: authA)
+        appState.updateActiveCallTranscript(text: "Kevin: Hi\nCaller: Need help", authContext: authA, callSid: "CA_SNAP_1")
+        appState.updateActiveCallReason(reason: "Pipe bursting", authContext: authA, callSid: "CA_SNAP_1")
+
+        guard let lease1 = appState.ownedActiveCallLease else {
+            XCTFail("Expected valid active call lease")
+            return
+        }
+
+        // 1. Capture screening transcript
+        appState.captureScreeningTranscript(for: lease1)
+
+        let snapshot = appState.screeningTranscript(for: lease1)
+        XCTAssertNotNil(snapshot)
+        XCTAssertEqual(snapshot?.lines, ["Kevin: Hi", "Caller: Need help"])
+        XCTAssertEqual(snapshot?.reason, "Pipe bursting")
+        XCTAssertEqual(snapshot?.lease, lease1)
+
+        // 2. Immutability: subsequent mutations to activeCall transcript do not affect the captured snapshot
+        appState.updateActiveCallTranscript(text: "Kevin: Hi\nCaller: Need help\nKevin: On the way", authContext: authA, callSid: "CA_SNAP_1")
+        appState.updateActiveCallReason(reason: "Resolved", authContext: authA, callSid: "CA_SNAP_1")
+
+        let snapshotAfterMutation = appState.screeningTranscript(for: lease1)
+        XCTAssertEqual(snapshotAfterMutation?.lines, ["Kevin: Hi", "Caller: Need help"], "Captured transcript must be an immutable snapshot")
+        XCTAssertEqual(snapshotAfterMutation?.reason, "Pipe bursting")
+
+        // 3. Stale / mismatched lease returns nil
+        let staleLease = CallPresentationLease(auth: authB, scope: lease1.scope)
+        XCTAssertNil(appState.screeningTranscript(for: staleLease))
+
+        let wrongSidLease = CallPresentationLease(auth: authA, scope: CallLifecycleSnapshot(callSid: "CA_WRONG", revision: 1))
+        XCTAssertNil(appState.screeningTranscript(for: wrongSidLease))
+
+        // 4. clearScreeningTranscript for matching lease removes snapshot
+        appState.clearScreeningTranscript(for: lease1)
+        XCTAssertNil(appState.screeningTranscript(for: lease1))
+
+        // 5. clearActiveCall cleans up captured transcript
+        appState.captureScreeningTranscript(for: lease1)
+        XCTAssertNotNil(appState.screeningTranscript(for: lease1))
+        appState.clearActiveCall()
+        XCTAssertNil(appState.screeningTranscript(for: lease1))
+    }
 }

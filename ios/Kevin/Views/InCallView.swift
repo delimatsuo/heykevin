@@ -1,109 +1,195 @@
 import SwiftUI
 
 struct InCallView: View {
+    let lease: CallPresentationLease
+    @EnvironmentObject var appState: AppState
     @ObservedObject var callManager = CallManager.shared
     @State private var elapsed: TimeInterval = 0
     @State private var timer: Timer?
 
     var body: some View {
+        let auth = appState.currentAuthContext()
+        let scope = appState.callLifecycleSnapshot
+
         ZStack {
-            // Dark background
-            Color(red: 0.07, green: 0.07, blue: 0.07)
+            // Background
+            Color.hkCanvas
                 .ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                Spacer()
-                    .frame(height: 60)
+            if lease.isValid(auth: auth, scope: scope) {
+                let snapshot = appState.screeningTranscript(for: lease)
+                let lines = snapshot?.lines ?? []
 
-                // Caller avatar
-                ZStack {
-                    Circle()
-                        .fill(Color(.systemGray3))
-                        .frame(width: 96, height: 96)
+                VStack(spacing: 0) {
+                    // Compact Caller Header
+                    compactHeader
+                        .padding(.top, 16)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 12)
 
-                    if !callerInitials.isEmpty {
-                        Text(callerInitials)
-                            .font(.system(size: 36, weight: .medium))
-                            .foregroundStyle(.white)
-                    } else {
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 36))
-                            .foregroundStyle(.white)
+                    Divider()
+                        .background(Color.hkDivider)
+
+                    // Frozen Screening Transcript Area (occupies available space)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text(String(localized: "Before you joined"))
+                                .font(.caption.weight(.semibold))
+                                .textCase(.uppercase)
+                                .tracking(0.6)
+                                .foregroundStyle(Color.hkInkSecondary)
+                                .accessibilityIdentifier("incall.section.beforeJoined")
+                            Spacer()
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+
+                        if lines.isEmpty {
+                            VStack(spacing: 8) {
+                                Spacer()
+                                Text(String(localized: "No screening transcript was captured before you joined."))
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color.hkInkSecondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 24)
+                                    .accessibilityIdentifier("incall.emptyTranscript")
+                                Spacer()
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            ScrollView {
+                                VStack(spacing: 10) {
+                                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                                        InCallFrozenTranscriptBubble(text: line)
+                                    }
+                                }
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 8)
+                            }
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    Divider()
+                        .background(Color.hkDivider)
+
+                    // Persistent Call Controls (Outside scroll)
+                    callControls
+                        .padding(.top, 16)
+                        .padding(.bottom, 32)
                 }
-
-                // Caller name
-                Text(displayName)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.top, 16)
-
-                // Phone number (if name is available, show number below)
-                if !callManager.callerName.isEmpty && !callManager.callerPhone.isEmpty {
-                    Text(PhoneFormatter.format(callManager.callerPhone))
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.6))
-                        .padding(.top, 2)
+            } else {
+                VStack {
+                    Spacer()
+                    Text(String(localized: "Call is no longer active."))
+                        .font(.headline)
+                        .foregroundStyle(Color.hkInkSecondary)
+                    Spacer()
                 }
-
-                // Call duration
-                Text(formattedElapsed)
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.6))
-                    .padding(.top, 8)
-
-                Spacer()
-
-                // Control buttons
-                HStack(spacing: 48) {
-                    // Mute
-                    CallControlButton(
-                        icon: callManager.isMuted ? "mic.slash.fill" : "mic.fill",
-                        label: String(localized: "Mute"),
-                        isActive: callManager.isMuted
-                    ) {
-                        callManager.toggleMute()
-                    }
-
-                    // Speaker
-                    CallControlButton(
-                        icon: callManager.isSpeaker ? "speaker.wave.3.fill" : "speaker.fill",
-                        label: String(localized: "Speaker"),
-                        isActive: callManager.isSpeaker
-                    ) {
-                        callManager.toggleSpeaker()
-                    }
-                }
-                .padding(.bottom, 48)
-
-                // End call button
-                Button {
-                    callManager.endCall()
-                } label: {
-                    ZStack {
-                        Circle()
-                            .fill(.red)
-                            .frame(width: 72, height: 72)
-
-                        Image(systemName: "phone.down.fill")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.white)
-                    }
-                }
-                .padding(.bottom, 12)
-
-                Text(String(localized: "End"))
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.6))
-
-                Spacer()
-                    .frame(height: 48)
             }
         }
         .onAppear { startTimer() }
         .onDisappear { stopTimer() }
         .onChange(of: callManager.callStartTime) {
             startTimer()
+        }
+    }
+
+    // MARK: - Compact Header
+
+    private var compactHeader: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(Color.hkSurface)
+                    .frame(width: 48, height: 48)
+
+                if !callerInitials.isEmpty {
+                    Text(callerInitials)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.hkInk)
+                } else {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.hkInk)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayName)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(Color.hkInk)
+                    .lineLimit(1)
+
+                if !callManager.callerName.isEmpty && !callManager.callerPhone.isEmpty {
+                    Text(PhoneFormatter.format(callManager.callerPhone))
+                        .font(.caption)
+                        .foregroundStyle(Color.hkInkSecondary)
+                }
+                if let reason = appState.screeningTranscript(for: lease)?.reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(Color.hkInkSecondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer()
+
+            Text(formattedElapsed)
+                .font(.subheadline.monospacedDigit().weight(.medium))
+                .foregroundStyle(Color.hkInkSecondary)
+                .accessibilityIdentifier("incall.duration")
+        }
+    }
+
+    // MARK: - Call Controls
+
+    private var callControls: some View {
+        VStack(spacing: 20) {
+            HStack(spacing: 48) {
+                // Mute
+                CallControlButton(
+                    icon: callManager.isMuted ? "mic.slash.fill" : "mic.fill",
+                    label: String(localized: "Mute"),
+                    isActive: callManager.isMuted
+                ) {
+                    callManager.toggleMute()
+                }
+                .accessibilityIdentifier("incall.mute")
+
+                // Speaker
+                CallControlButton(
+                    icon: callManager.isSpeaker ? "speaker.wave.3.fill" : "speaker.fill",
+                    label: String(localized: "Speaker"),
+                    isActive: callManager.isSpeaker
+                ) {
+                    callManager.toggleSpeaker()
+                }
+                .accessibilityIdentifier("incall.speaker")
+            }
+
+            // End call button
+            VStack(spacing: 6) {
+                Button {
+                    callManager.endCall()
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(.red)
+                            .frame(width: 68, height: 68)
+
+                        Image(systemName: "phone.down.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .accessibilityIdentifier("incall.end")
+
+                Text(String(localized: "End"))
+                    .font(.caption)
+                    .foregroundStyle(Color.hkInkSecondary)
+            }
         }
     }
 
@@ -142,6 +228,12 @@ struct InCallView: View {
 
     private func startTimer() {
         stopTimer()
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isNativeUIReview {
+            elapsed = 137
+            return
+        }
+        #endif
         if let start = callManager.callStartTime {
             elapsed = Date().timeIntervalSince(start)
         }
@@ -171,18 +263,71 @@ struct CallControlButton: View {
             VStack(spacing: 8) {
                 ZStack {
                     Circle()
-                        .fill(isActive ? .white : .white.opacity(0.12))
+                        .fill(isActive ? Color.hkCobalt : Color.hkSurface)
                         .frame(width: 60, height: 60)
 
                     Image(systemName: icon)
                         .font(.system(size: 24))
-                        .foregroundStyle(isActive ? .black : .white)
+                        .foregroundStyle(isActive ? Color.white : Color.hkInk)
                 }
 
                 Text(label)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(Color.hkInkSecondary)
             }
         }
+    }
+}
+
+private struct InCallFrozenTranscriptBubble: View {
+    let text: String
+
+    private var isKevin: Bool {
+        text.hasPrefix("Kevin:")
+    }
+
+    private var speakerName: String {
+        if text.hasPrefix("Kevin:") { return "Kevin" }
+        if text.hasPrefix("Caller:") { return "Caller" }
+        return ""
+    }
+
+    private var bodyText: String {
+        if let range = text.range(of: ": ") {
+            return String(text[range.upperBound...])
+        }
+        return text
+    }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            if isKevin {
+                Spacer(minLength: 28)
+            }
+
+            VStack(alignment: isKevin ? .trailing : .leading, spacing: 3) {
+                if !speakerName.isEmpty {
+                    Text(speakerName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(bodyText)
+                    .font(.subheadline)
+                    .foregroundStyle(isKevin ? .white : Color.hkInk)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        isKevin ? Color.accentColor : Color(.secondarySystemGroupedBackground),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+            }
+            .frame(maxWidth: 280, alignment: isKevin ? .trailing : .leading)
+
+            if !isKevin {
+                Spacer(minLength: 28)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: isKevin ? .trailing : .leading)
     }
 }

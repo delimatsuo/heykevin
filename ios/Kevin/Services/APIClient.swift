@@ -32,6 +32,7 @@ struct CallActionResult: Equatable, Sendable {
     let errorDetail: String?
     var retryable: Bool = false
     var hasExplicitActive: Bool = true
+    var screeningReason: String = ""
 
     var isPreparationFailure: Bool {
         statusCode == 503 && rawStatus == "error" && action == "accept" && actionStatus == "preparation_failed"
@@ -100,6 +101,11 @@ enum CallActionResponseParser {
         let callerPhone = json["caller_phone"] as? String
         let transcript = json["transcript"] as? String
         let errorDetail = json["error"] as? String ?? json["detail"] as? String ?? json["message"] as? String
+        var screeningReason = ""
+        if let rawReason = json["screening_reason"] as? String {
+            let trimmed = rawReason.trimmingCharacters(in: .whitespacesAndNewlines)
+            screeningReason = trimmed == "Speaking with Kevin" ? "" : String(trimmed.prefix(160))
+        }
 
         // Only the genuine legacy POST accept shape is synthesized. A partial v2
         // response or any decline acknowledgement must never become success.
@@ -130,7 +136,8 @@ enum CallActionResponseParser {
             rawStatus: rawStatus,
             errorDetail: errorDetail,
             retryable: boolean(json["retryable"]) ?? false,
-            hasExplicitActive: boolean(json["active"]) != nil
+            hasExplicitActive: boolean(json["active"]) != nil,
+            screeningReason: screeningReason
         )
     }
 }

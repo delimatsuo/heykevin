@@ -144,7 +144,13 @@ class CallManager: NSObject, ObservableObject {
 
     private func prepareConnection(auth: CallAuthContext, sid: String, token: String, conference: String) {
         connectionAuth = auth; connectionSid = sid; connectionScope = AppState.shared.callLifecycleSnapshot
-        presentationLease = CallPresentationLease(auth: auth, scope: AppState.shared.callLifecycleSnapshot)
+        let lease = CallPresentationLease(auth: auth, scope: AppState.shared.callLifecycleSnapshot)
+        presentationLease = lease
+        AppState.shared.captureScreeningTranscript(for: lease)
+        if lease.isValid(auth: AppState.shared.currentAuthContext(), scope: AppState.shared.callLifecycleSnapshot) {
+            callerName = AppState.shared.activeCallerName
+            callerPhone = AppState.shared.activeCallerPhone
+        }
         pendingAccessToken = token; pendingConferenceName = conference
     }
     private func connectionIsCurrent(_ uuid: UUID) -> Bool {
@@ -190,10 +196,35 @@ class CallManager: NSObject, ObservableObject {
     }
     private func cleanup(uuid: UUID) {
         guard activeCallUUID == uuid else { return }
+        if let lease = presentationLease {
+            AppState.shared.clearScreeningTranscript(for: lease)
+        }
+        presentationLease = nil
         activeCall = nil; activeCallUUID = nil; answeringUUID = nil
         pendingAccessToken = nil; pendingConferenceName = nil; connectionAuth = nil; connectionScope = nil; connectionSid = ""
         isOnCall = false; isMuted = false; isSpeaker = false; callerName = ""; callerPhone = ""; callStartTime = nil
     }
+
+    #if DEBUG
+    @MainActor
+    func adoptFakeConnectionForTesting(
+        auth: CallAuthContext,
+        callSid: String,
+        callerName: String,
+        callerPhone: String,
+        startTime: Date = Date()
+    ) {
+        guard AppStoreScreenshotFixtures.isNativeUIReview else { return }
+        // Exercise the production snapshot hook without requesting CallKit or Twilio.
+        prepareConnection(auth: auth, sid: callSid, token: "", conference: "")
+        self.callerName = callerName
+        self.callerPhone = callerPhone
+        self.callStartTime = startTime
+        self.isOnCall = true
+        self.isMuted = false
+        self.isSpeaker = false
+    }
+    #endif
 }
 
 extension CallManager: CXProviderDelegate {

@@ -63,8 +63,8 @@ extension Color {
     /// Mid Grey. Dividers, disabled borders.
     static let hkBorder = Color(.systemGray4)
 
-    /// Prominent dark active call surface. Always dark in both light and dark mode.
-    static let hkActiveDark = Color(red: 0.09, green: 0.10, blue: 0.11)
+    /// Call surface. Adapts to light/dark mode.
+    static let hkCallSurface = Color(.secondarySystemGroupedBackground)
 }
 
 /// Bridges the Color tokens above to `ShapeStyle` so they can be used directly
@@ -83,7 +83,7 @@ extension ShapeStyle where Self == Color {
     static var hkDivider:      Color { .hkDivider }
     static var hkSurface:      Color { .hkSurface }
     static var hkBorder:       Color { .hkBorder }
-    static var hkActiveDark:   Color { .hkActiveDark }
+    static var hkCallSurface:  Color { .hkCallSurface }
 }
 
 // MARK: - Spacing scale (4pt base)

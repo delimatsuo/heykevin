@@ -109,6 +109,10 @@ extension WhatsNewSheet {
     /// feature is noise. Screenshot fixtures suppress it so App Store captures
     /// are not covered by a sheet.
     static func shouldPresent(isOnboarded: Bool) -> Bool {
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isNativeUIReview,
+           ProcessInfo.processInfo.environment["KEVIN_REVIEW_ANNOUNCEMENT"] == "1" { return true }
+        #endif
         guard !AppStoreScreenshotFixtures.isEnabled else { return false }
         guard isOnboarded else { return false }
         return !UserDefaults.standard.bool(forKey: seenKey)

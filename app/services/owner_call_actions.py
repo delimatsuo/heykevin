@@ -34,6 +34,45 @@ def validate_call_sid(call_sid):
         raise HTTPException(400, 'Invalid call ID')
 
 
+def normalize_screening_reason(value: object) -> str:
+    """Bound existing screening text without inventing a reason when unknown."""
+    if not isinstance(value, str):
+        return ''
+    trimmed = value.strip()
+    if not trimmed or trimmed == 'Speaking with Kevin':
+        return ''
+    return trimmed[:160]
+
+
+async def publish_screening_reason(call_sid: str, contractor_id: str, ws_token: str, reason: object) -> bool:
+    """Publish metadata only on the same live stream; never extend its lifetime."""
+    validate_call_sid(call_sid)
+    if not isinstance(contractor_id, str) or not contractor_id.strip():
+        return False
+    if not isinstance(ws_token, str) or not ws_token.strip():
+        return False
+    normalized = normalize_screening_reason(reason)
+
+    def matches(current, at_time):
+        return (
+            live_record(current, contractor_id, at_time)
+            and current.get('state') in DECISION_STATES
+            and not current.get('accepted')
+            and not current.get('owner_action')
+            and current.get('kevin_redirect_status') not in {'pending', 'uncertain'}
+            and current.get('ws_token') == ws_token
+            and ('call_sid' not in current or current.get('call_sid') == call_sid)
+        )
+
+    def txn(current):
+        if not matches(current, time.time()):
+            return current
+        return {**current, 'screening_reason': normalized}
+
+    result = await _run_rtdb_transaction(call_sid, txn)
+    return bool(result is not None and matches(result, time.time()) and result.get('screening_reason') == normalized)
+
+
 def live_record(record, contractor_id, now=None):
     now = time.time() if now is None else now
     if not isinstance(record, dict) or not isinstance(contractor_id, str) or not contractor_id.strip():
@@ -198,7 +237,8 @@ def _response(record, call_sid, contractor_id, operation_id, action=None, creden
                     action=record.get('owner_action', '') if action is None else action,
                     action_status=status, status='pending' if status in {STATUS_ACCEPTING, STATUS_UNCERTAIN, STATUS_MESSAGE_REQUESTED} else 'ok',
                     active=True, urgent=record.get('urgent') is True, caller_name=record.get('caller_name', ''),
-                    caller_phone=record.get('caller_phone', ''), transcript=record.get('transcript_buffer', ''))
+                    caller_phone=record.get('caller_phone', ''), transcript=record.get('transcript_buffer', ''),
+                    screening_reason=normalize_screening_reason(record.get('screening_reason', '')))
     if credentials and status == STATUS_ACCEPTED:
         response.update(conference_name=record['conference_name'], access_token=_generate_access_token(contractor_id))
     return response
@@ -293,7 +333,7 @@ async def get_owner_call_action_status(*, call_sid, contractor_id, operation_id=
     if not live_record(record, contractor_id):
         return dict(call_sid=call_sid, contractor_id=contractor_id, operation_id=op, action='',
                     action_status=STATUS_ENDED, status='ok', active=False, urgent=False,
-                    caller_name='', caller_phone='', transcript='')
+                    caller_name='', caller_phone='', transcript='', screening_reason='')
     if (op and op == record.get('owner_operation_id') and record.get('owner_action') == ACTION_ACCEPT
             and record.get('owner_action_status') in {STATUS_ACCEPTING, STATUS_UNCERTAIN}
             and record.get('conference_name')):
@@ -309,7 +349,7 @@ async def get_owner_call_action_status(*, call_sid, contractor_id, operation_id=
         if not live_record(record, contractor_id):
             return dict(call_sid=call_sid, contractor_id=contractor_id, operation_id=op, action='',
                         action_status=STATUS_ENDED, status='ok', active=False, urgent=False,
-                        caller_name='', caller_phone='', transcript='')
+                        caller_name='', caller_phone='', transcript='', screening_reason='')
     result = _response(record, call_sid, contractor_id, op)
     if op and op != record.get('owner_operation_id'):
         result.update(status='error', action_status=STATUS_ACTION_CONFLICT)

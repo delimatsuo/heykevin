@@ -122,6 +122,52 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         completionHandler([.banner, .sound])
     }
 
+    // MARK: - Notification Handling Seam
+
+    @MainActor
+    static func handleNotificationResponse(
+        categoryIdentifier: String,
+        actionIdentifier: String,
+        userInfo: [AnyHashable: Any],
+        authContext auth: CallAuthContext,
+        currentAuth: @escaping @MainActor () -> CallAuthContext = { AppState.shared.currentAuthContext() },
+        coordinator suppliedCoordinator: CallActionCoordinator? = nil
+    ) async {
+        if actionIdentifier == UNNotificationDismissActionIdentifier {
+            return
+        }
+        guard categoryIdentifier == "SCREENING_CALL" else {
+            return
+        }
+        let callSid = userInfo["call_sid"] as? String ?? ""
+        guard !callSid.isEmpty else {
+            return
+        }
+        guard auth.isValid, currentAuth() == auth else {
+            return
+        }
+        let payloadOwner = userInfo["contractor_id"] as? String ?? ""
+        guard payloadOwner.isEmpty || payloadOwner == auth.contractorId else {
+            return
+        }
+        let coordinator = suppliedCoordinator ?? .shared
+
+        switch actionIdentifier {
+        case UNNotificationDefaultActionIdentifier, "READ_TRANSCRIPT_ACTION":
+            await coordinator.validateAndNavigate(callSid: callSid, authContext: auth)
+        case "PICK_UP_ACTION":
+            guard await coordinator.validateAndNavigate(callSid: callSid, authContext: auth),
+                  currentAuth() == auth else { return }
+            _ = await coordinator.pickUp(callSid: callSid, authContext: auth)
+        case "TAKE_MESSAGE_ACTION":
+            guard await coordinator.validateAndNavigate(callSid: callSid, authContext: auth),
+                  currentAuth() == auth else { return }
+            _ = await coordinator.takeMessage(callSid: callSid, authContext: auth)
+        default:
+            return
+        }
+    }
+
     // Handle push notification tap
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
@@ -130,53 +176,25 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     ) {
         let userInfo = response.notification.request.content.userInfo
         let actionIdentifier = response.actionIdentifier
-
-        if actionIdentifier == UNNotificationDismissActionIdentifier {
-            completionHandler()
-            return
-        }
-
-        let callSid = userInfo["call_sid"] as? String ?? ""
-        let callerPhone = userInfo["caller_phone"] as? String ?? ""
-        var callerName = userInfo["caller_name"] as? String ?? ""
-        if callerName.isEmpty {
-            callerName = lookupContactName(phone: callerPhone)
-        }
-
-        guard !callSid.isEmpty else {
-            completionHandler()
-            return
-        }
-
-        guard response.notification.request.content.categoryIdentifier == "SCREENING_CALL" else {
-            completionHandler(); return
-        }
+        let categoryIdentifier = response.notification.request.content.categoryIdentifier
         let auth = AppState.shared.currentAuthContext()
-        let payloadOwner = userInfo["contractor_id"] as? String ?? ""
-        guard auth.isValid, payloadOwner.isEmpty || payloadOwner == auth.contractorId else {
-            completionHandler(); return
-        }
-        Task { @MainActor in
-            guard AppState.shared.currentAuthContext() == auth else { return }
-            if actionIdentifier == "PICK_UP_ACTION" || actionIdentifier == "TAKE_MESSAGE_ACTION" {
-                guard await CallActionCoordinator.shared.validateAndNavigate(callSid: callSid, authContext: auth),
-                      AppState.shared.currentAuthContext() == auth else { return }
-                if actionIdentifier == "PICK_UP_ACTION" {
-                    _ = await CallActionCoordinator.shared.pickUp(callSid: callSid, authContext: auth)
-                } else {
-                    _ = await CallActionCoordinator.shared.takeMessage(callSid: callSid, authContext: auth)
-                }
-            } else if actionIdentifier == UNNotificationDefaultActionIdentifier {
-                await CallActionCoordinator.shared.validateAndNavigate(callSid: callSid, authContext: auth)
-            }
-        }
 
+        Task { @MainActor in
+            await Self.handleNotificationResponse(
+                categoryIdentifier: categoryIdentifier,
+                actionIdentifier: actionIdentifier,
+                userInfo: userInfo,
+                authContext: auth
+            )
+        }
+        // Foreground navigation/actions continue in the task; never hold the
+        // notification callback through status, action or reconciliation waits.
         completionHandler()
     }
 
     // MARK: - Notification Categories
 
-    private func setupNotificationCategories() {
+    static func makeScreeningNotificationCategory() -> UNNotificationCategory {
         let pickUpAction = UNNotificationAction(
             identifier: "PICK_UP_ACTION",
             title: String(localized: "Pick up"),
@@ -189,13 +207,22 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             options: [.foreground],
             icon: UNNotificationActionIcon(systemImageName: "text.bubble.fill")
         )
-        let screeningCategory = UNNotificationCategory(
+        let readTranscriptAction = UNNotificationAction(
+            identifier: "READ_TRANSCRIPT_ACTION",
+            title: String(localized: "Read transcript"),
+            options: [.foreground],
+            icon: UNNotificationActionIcon(systemImageName: "text.alignleft")
+        )
+        return UNNotificationCategory(
             identifier: "SCREENING_CALL",
-            actions: [pickUpAction, takeMessageAction],
+            actions: [pickUpAction, takeMessageAction, readTranscriptAction],
             intentIdentifiers: [],
             options: []
         )
-        UNUserNotificationCenter.current().setNotificationCategories([screeningCategory])
+    }
+
+    private func setupNotificationCategories() {
+        UNUserNotificationCenter.current().setNotificationCategories([Self.makeScreeningNotificationCategory()])
     }
 
     // MARK: - PushKit (VoIP Push)

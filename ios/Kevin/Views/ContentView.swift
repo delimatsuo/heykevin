@@ -218,7 +218,7 @@ struct ContentView: View {
         }) {
             if let lease = callManager.presentationLease,
                lease.isValid(auth: appState.currentAuthContext(), scope: appState.callLifecycleSnapshot) {
-                InCallView()
+                InCallView(lease: lease)
                     .onAppear { presentedCallLease = lease }
             }
         }
@@ -236,6 +236,15 @@ struct ContentView: View {
                 .environmentObject(appState)
         }
         .task {
+            #if DEBUG
+            if AppStoreScreenshotFixtures.isNativeUIReview,
+               ProcessInfo.processInfo.environment["KEVIN_REVIEW_NOTIFICATION"] == "warm" {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    await AppStoreScreenshotFixtures.openReviewNotification(appState)
+                }
+            }
+            #endif
             if !appState.notificationCallSid.isEmpty {
                 let currentAuth = appState.currentAuthContext()
                 frontendNav.queueNotificationTarget(

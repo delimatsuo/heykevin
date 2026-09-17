@@ -3,8 +3,8 @@
 **Updated:** 2026-09-17
 **Owner:** Deli Matsuo
 **Backend release baseline:** `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, revision `kevin-api-00273-f7g`, verified `2026-09-17T17:36:33Z`. See the [SMS identity and screening-reason rollout](docs/releases/2026-09-17-owner-sms-identity-backend.md).
-**Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
-**Latest Apple version:** `1.3.1 (41)`, `READY_FOR_SALE` with review `COMPLETE`, observed September 17 at 15:16 UTC. The public US lookup still reported 1.3.0 at `15:32:01Z`; storefront propagation is not established. The [submission record](docs/releases/2026-09-16-app-store-ios-41.md) records its six updated screenshots.
+**Public iOS release baseline:** `1.3.1 (41)`, `READY_FOR_SALE` with review `COMPLETE`. Public US lookup at `2026-09-17T18:33:08Z` reports version 1.3.1, released `2026-09-17T08:44:22Z`; see the [dated release observation](docs/releases/2026-09-17-app-store-ios-42.md).
+**Latest Apple submission:** `1.3.2 (42)`, `WAITING_FOR_REVIEW`, verified September 17 at `18:32:28Z`, with six updated screenshots and `AFTER_APPROVAL` release policy. See the [submission record](docs/releases/2026-09-17-app-store-ios-42.md). Submission is separate from approval, public availability and phone acceptance.
 **Current internal candidate:** `1.3.2 (42)`, `VALID / IN_BETA_TESTING` in the existing QA group, verified September 17 at `15:33:58Z`. See [delivery and phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md). The backend screening-reason field is now deployed; phone acceptance remains open.
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
@@ -106,6 +106,9 @@ completion on September 14, 2026.
       and adds the transcript-first flow and appearance correction. Use the
       [build 42 phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
       for the remaining acceptance rows; installation and physical checks remain open.
+- [x] **1.3.2 (42)** was [submitted for App Review](docs/releases/2026-09-17-app-store-ios-42.md)
+      with six updated screenshots at the owner's request. Apple reports
+      `WAITING_FOR_REVIEW` at `2026-09-17T18:32:28Z`; release remains `AFTER_APPROVAL`.
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or

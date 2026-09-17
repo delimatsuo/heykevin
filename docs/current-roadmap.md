@@ -15,22 +15,22 @@ External observations are dated snapshots, not a standing claim about production
 ## Observed release baseline
 
 Backend verification times are stated in UTC below; both current deployments
-occurred on September 17. Apple reported version 1.3.1 (41)
-`READY_FOR_SALE` and review `COMPLETE` on September 17 at 15:16 UTC. The public
-US lookup still returned 1.3.0 at 15:32:01 UTC, so storefront propagation is not
-established. The new transcript-first internal candidate is tracked separately
-from that existing release and from physical-phone acceptance:
+occurred on September 17. The public US lookup at 18:33:08 UTC now confirms
+version 1.3.1, released at `2026-09-17T08:44:22Z`, superseding the earlier 1.3.0
+lookup. Apple reports the new transcript-first **1.3.2 (42)** submission
+`WAITING_FOR_REVIEW` at 18:32:28 UTC. Submission, public availability and
+physical-phone acceptance remain separate:
 
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
 | Production backend | `kevin-api-00273-f7g`, SHA `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, verified `2026-09-17T17:36:33Z` | Successful [production run 35249645557](https://github.com/delimatsuo/heykevin/actions/runs/35249645557), exact live health/runtime identity, 100% serving traffic, unchanged runtime settings, anonymous smoke and canonical pause-WAV retrieval. Adds owner SMS identity and the screening-reason field; retains the Relay correction. The owner confirmed the SMS fix working on September 17; separate call/frontend phone acceptance remains open. See the [rollout record](releases/2026-09-17-owner-sms-identity-backend.md). |
 | Staging backend | `kevin-api-staging-00175-sag`, SHA `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, verified `2026-09-17T16:55:30Z` | Successful [staging run 35248672440](https://github.com/delimatsuo/heykevin/actions/runs/35248672440), canonical/tagged health identity, 100% serving traffic, preserved runtime isolation, anonymous static smoke and canonical pause-WAV retrieval. See the [rollout record](releases/2026-09-17-owner-sms-identity-backend.md). |
-| Public iOS | Version `1.3.0`, **build 39**, `READY_FOR_DISTRIBUTION` / `READY_FOR_SALE` | Authenticated read-only inspection at `2026-09-16T00:20:10Z` (Sep 15 America/New_York) links public version 1.3.0 to build 39. Public lookup (`https://itunes.apple.com/lookup?id=6761427495&country=us`) reports release date `2026-09-15T21:35:24Z`. See canonical [release record](releases/2026-09-15-native-frontend-ios-39.md). |
+| Public iOS | Version **1.3.1 (41)**, `READY_FOR_SALE`, review `COMPLETE` | Public US lookup at `2026-09-17T18:33:08Z` confirms 1.3.1, released `2026-09-17T08:44:22Z`. Apple binds that version to build 41. See the [submission record](releases/2026-09-16-app-store-ios-41.md) and [dated public observation](releases/2026-09-17-app-store-ios-42.md). |
 | Historical Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Historical public baseline as of September 14, now superseded by build 39. |
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
-| Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
-| Latest Apple version | **1.3.1 (41)**, **READY_FOR_SALE**, review **COMPLETE**, observed September 17 at 15:16 UTC; also **VALID** / **IN_BETA_TESTING** in QA | The [submission record](releases/2026-09-16-app-store-ios-41.md) binds six updated screenshots; the [new dated observation](releases/2026-09-17-transcript-first-ios-42.md) supersedes its waiting-for-review snapshot. Public US lookup still showed 1.3.0. Physical phone acceptance remains open. |
+| Original native frontend release | **1.3.0 (39)**, first published September 15 with internal QA availability | Delivered Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and the dated Apple release state. Current public version is 1.3.1 (41), as recorded above. Physical phone acceptance remains open. |
+| Latest Apple submission | **1.3.2 (42)**, **WAITING_FOR_REVIEW**, verified `2026-09-17T18:32:28Z`; release **AFTER_APPROVAL** | [Submission record](releases/2026-09-17-app-store-ios-42.md) binds the existing build and six updated screenshots, including full live and retained screening transcripts. Approval, public availability and physical phone acceptance remain unconfirmed for this version. |
 | Current internal iPhone candidate | **1.3.2 (42)**, **VALID / IN_BETA_TESTING** in the existing QA group, verified `2026-09-17T15:33:58Z` | [Delivery record and phone checks](releases/2026-09-17-transcript-first-ios-42.md). Includes direct full-transcript notification entry, retained screening text after pickup and consistent system appearance. The backend screening-reason field is deployed; phone acceptance remains open. |
 | Development inventory | Transcript-first flow and appearance correction delivered in internal build 42; owner SMS identity and screening reason deployed in the backend | [PR #261](https://github.com/delimatsuo/heykevin/pull/261) adds the current frontend behavior and screening-reason field. [PR #263](https://github.com/delimatsuo/heykevin/pull/263) brands owner summaries. Earlier [PR #256](https://github.com/delimatsuo/heykevin/pull/256) supplied the iOS confirmation repair, and [PR #258](https://github.com/delimatsuo/heykevin/pull/258) supplied the retained Relay correction. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
@@ -78,6 +78,8 @@ screenshots at the owner's request. Apple reported `READY_FOR_SALE` with review
 build of the transcript-first flow and consistent appearance. Use the
 [build 42 phone checks](releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
 alongside the earlier speech/pickup checklist. QA availability is verified.
+At the owner's later request, build 42 was [submitted for App Review](releases/2026-09-17-app-store-ios-42.md)
+with six updated screenshots; Apple reports `WAITING_FOR_REVIEW` at 18:32:28 UTC.
 Provider/package verification does not close those physical-call rows.
 
 A later build 40 call also reported repeated questions after Take a message.
@@ -164,8 +166,9 @@ list remain outside active implementation.
 Deli's approval and the completed September 14 production deployment above did
 not authorize an Apple release. The owner
 subsequently gave explicit instruction to submit the existing build ("submit the last build"),
-and submission was completed. Public release 1.3.0 (39) is live on the App Store;
-the remaining physical-device acceptance stays open.
+and submission was completed. The native frontend was first released in
+1.3.0 (39); the current public baseline is 1.3.1 (41), as recorded above.
+The remaining physical-device acceptance stays open.
 The tested forward-recovery patch still requires another build and approval if
 needed; it does not rely on returning live operations to the older backend.
 
@@ -176,8 +179,9 @@ expert-reviewed HTML into SwiftUI and asked for bounded history. Build 38
 contains the notification changes; it predates this native design.
 
 The [native plan](superpowers/plans/2026-09-14-native-frontend.md) is implemented
-and released in **1.3.0 (39)**, now live on the App Store (`READY_FOR_DISTRIBUTION`)
-and available in internal TestFlight QA. Calls + Kevin are the two tabs,
+and was first released in **1.3.0 (39)**, with App Store publication and internal
+TestFlight QA availability. The current public baseline is **1.3.1 (41)**, as
+recorded above. Calls + Kevin are the two tabs,
 with labeled account Settings and the live caller reachable throughout.
 History starts at 20 rows, expands by 20 to the existing 100-call/90-day bound,
 and searches/filters the full bounded snapshot before limiting visible rows.
@@ -187,8 +191,8 @@ Implementation, independent native review and local verification are complete:
 269 native unit tests, 9 fixture UI tests and targeted mutation probes passed.
 The [release record](releases/2026-09-15-native-frontend-ios-39.md) binds the
 source and evidence. Required CI passed, independent package review approved,
-Apple processing, internal QA availability and What to Test readback are verified,
-and public App Store distribution is live. The remaining physical call and
+Apple processing, internal QA availability and What to Test readback were verified,
+and App Store publication completed September 15. The remaining physical call and
 frontend acceptance on the owner's phone stays open.
 
 ## Unfinished or unverified, not an automatic implementation queue

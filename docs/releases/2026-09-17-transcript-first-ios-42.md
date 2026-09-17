@@ -5,6 +5,13 @@ with explicit availability in the existing internal QA group and exact English
 What to Test readback, verified **2026-09-17T15:33:58Z**. Owner installation and
 phone acceptance remain open. No public App Store submission was made.
 
+**Later App Store submission, September 17 at 18:32:28 UTC:** at the owner's
+“go ahead and upload” instruction, this existing build was submitted with six
+updated screenshots. Apple reports **WAITING_FOR_REVIEW** and release remains
+**AFTER_APPROVAL**. See the [App Store submission record](2026-09-17-app-store-ios-42.md).
+This supersedes the internal-only authorization and no-submission status above
+for this release. No binary was uploaded again; unperformed phone checks stay open.
+
 ## Authorization and compatibility
 
 The owner said “ok, continue” after the source merge report named a new test

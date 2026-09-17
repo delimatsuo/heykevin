@@ -1,10 +1,11 @@
 # Hey Kevin — Current Product Requirements
 
-**Updated:** 2026-09-16
+**Updated:** 2026-09-17
 **Owner:** Deli Matsuo
 **Backend release baseline:** `976202dfd418e0c4ca551a96e8075e5d5065b45b`, revision `kevin-api-00272-8z4`, verified `2026-09-17T02:25:37Z` (September 16 America/New_York)
 **Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
-**Current iOS submission:** `1.3.1 (41)`, `WAITING_FOR_REVIEW` with six updated screenshots, submitted `2026-09-17T03:16:04.335Z`; [submission record](docs/releases/2026-09-16-app-store-ios-41.md). Also available in TestFlight QA; [confirmation repair and retest](docs/releases/2026-09-16-message-confirmation-ios-41.md).
+**Latest Apple version:** `1.3.1 (41)`, `READY_FOR_SALE` with review `COMPLETE`, observed September 17 at 15:16 UTC. The public US lookup still reported 1.3.0 at `15:32:01Z`; storefront propagation is not established. The [submission record](docs/releases/2026-09-16-app-store-ios-41.md) records its six updated screenshots.
+**Current internal candidate:** `1.3.2 (42)`, `VALID / IN_BETA_TESTING` in the existing QA group, verified September 17 at `15:33:58Z`. See [delivery and phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md). The new backend reason field is not deployed.
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
 
@@ -92,15 +93,18 @@ completion on September 14, 2026.
 - [x] The iPhone candidate **1.2.12 (38)** passed Apple processing and is
       available in the existing internal TestFlight QA group, verified September
       14 at `23:18:44Z`. See the [candidate record and test sequence](docs/releases/2026-09-14-notification-ios-38.md).
-- [x] The current confirmation-repair candidate **1.3.1 (41)** is `VALID` /
-      `IN_BETA_TESTING` and available in internal TestFlight QA, verified
-      September 16 at `22:07:24Z`. The [build 41 record](docs/releases/2026-09-16-message-confirmation-ios-41.md)
-      binds its package and retest. The owner installed build 40 and reported a
-      false warning after Take a message; build 41 installation and phone
-      acceptance remain open. The owner subsequently requested public submission
-      with updated screenshots: Apple reports `WAITING_FOR_REVIEW` at
-      `2026-09-17T03:16:05Z`, with six processed screenshots and automatic release
-      after approval. See the [submission record](docs/releases/2026-09-16-app-store-ios-41.md).
+- [x] The earlier confirmation-repair candidate **1.3.1 (41)** passed internal
+      QA processing on September 16; its [package record](docs/releases/2026-09-16-message-confirmation-ios-41.md)
+      preserves that evidence. Apple now reports `READY_FOR_SALE` and review
+      `COMPLETE`, observed September 17 at 15:16 UTC. The
+      [submission record](docs/releases/2026-09-16-app-store-ios-41.md) preserves
+      the earlier submission and six updated screenshots. Build 41 is historical
+      evidence for this repair, not the current phone-test target.
+- [x] Current internal candidate **1.3.2 (42)** is `VALID / IN_BETA_TESTING` in
+      QA, verified September 17 at `15:33:58Z`. It retains the confirmation repair
+      and adds the transcript-first flow and appearance correction. Use the
+      [build 42 phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
+      for the remaining acceptance rows; installation and physical checks remain open.
 - [ ] On the owner's iPhone, the incoming alert updates with caller and reason
       during screening; lock-screen and unlocked behavior are checked.
 - [ ] Banner navigation and Pick Up target the same call; ending the call or
@@ -108,7 +112,7 @@ completion on September 14, 2026.
 - [ ] Take a message shows request/acknowledgement truthfully, preserves the
       caller connection, and cannot conflict with pickup or timeout. Verify
       completion of current speech and the conditional three-second pause
-      using the build 41 retest and its linked speech/pickup checklist. Also
+      using the build 42 phone checks and the earlier linked speech/pickup checklist. Also
       verify continued caller replies without repeated answered questions using
       the [Relay phone acceptance](docs/releases/2026-09-16-relay-message-state-backend.md#phone-acceptance).
 - [ ] An unanswered urgent call leaves the owner wait after 30 seconds. The
@@ -121,8 +125,8 @@ completion on September 14, 2026.
       the hold or transcript.
 - [ ] Delayed extraction or a stale task cannot send a new actionable screening
       summary after pickup, hangup, or the end of the screening wait.
-- [ ] Record the installed iOS version and build used for this check. Public App
-      Store version metadata alone does not identify that build.
+- [ ] Record the installed **1.3.2 (42)** used for these phone checks. Public App
+      Store version metadata alone does not identify the installed build.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION`, published September 15, 2026 per owner submission instruction; see the canonical [build 39 release record](docs/releases/2026-09-15-native-frontend-ios-39.md). Partial frontend checks on the installed build are recorded there; the remaining N1 phone checks stay open.
 
 PR #239 contains the initial summary notification and feedback/review code;
@@ -180,8 +184,9 @@ Take a message uses the existing action on that screen; pickup retains captured
 screening text labeled Before you joined beside the connected call controls.
 Show the existing server screening reason when available and preserve scroll
 position while reading earlier lines. The compact card remains an optional
-dashboard entry. Source implementation and physical phone acceptance are
-separate; no new release or provider activation is implied by this approval.
+dashboard entry. The later owner instruction to continue with a test build is
+tracked in the [build 42 delivery record](docs/releases/2026-09-17-transcript-first-ios-42.md).
+Physical phone acceptance and backend reason-field deployment remain separate.
 
 - [x] Owner approved the expert-reviewed design and bounded-history direction.
 - [x] Native unit, lifecycle/ownership mutation and fixture UI checks pass.

@@ -403,8 +403,9 @@ final class FrontendUITests: XCTestCase {
         XCTAssertTrue(beforeJoinedLabel.waitForExistence(timeout: 5), "'Before you joined' label must exist")
 
         // Screening transcript bubbles are visible
-        let transcriptText = app.staticTexts["My water heater is leaking and I need someone today."]
-        XCTAssertTrue(transcriptText.waitForExistence(timeout: 5), "Screening transcript captured before pickup must be visible")
+        let transcriptText = app.scrollViews.staticTexts["My water heater is leaking and I need someone today."].firstMatch
+        XCTAssertTrue(transcriptText.waitForExistence(timeout: 5) && transcriptText.isHittable, "Screening transcript captured before pickup must be visible in the connected scroll view")
+        XCTAssertFalse(app.staticTexts["incall.emptyTranscript"].exists)
 
         // Persistent call controls exist
         let muteButton = app.buttons["incall.mute"]

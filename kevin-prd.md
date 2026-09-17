@@ -2,7 +2,7 @@
 
 **Updated:** 2026-09-16
 **Owner:** Deli Matsuo
-**Backend release baseline:** `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, revision `kevin-api-00271-q4j`, verified September 16, 2026
+**Backend release baseline:** `976202dfd418e0c4ca551a96e8075e5d5065b45b`, revision `kevin-api-00272-8z4`, verified `2026-09-17T02:25:37Z` (September 16 America/New_York)
 **Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
 **Current internal iOS candidate:** `1.3.1 (41)`, available in TestFlight QA; [confirmation repair and retest](docs/releases/2026-09-16-message-confirmation-ios-41.md)
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
@@ -83,10 +83,11 @@ completion on September 14, 2026.
 **Release acceptance:**
 
 - [x] The reviewed notification backend, including the natural message-taking
-      change, is deployed to production and `/health` identifies the approved
-      SHA: `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, revision
-      `kevin-api-00271-q4j`, verified September 16 at `20:07:42Z`.
-      See the [current release record](docs/releases/2026-09-16-natural-message-ios-40.md).
+      transition and Relay message-state correction, is deployed to production.
+      `/health` identifies approved SHA
+      `976202dfd418e0c4ca551a96e8075e5d5065b45b`, revision
+      `kevin-api-00272-8z4`, verified `2026-09-17T02:25:37Z` with 100% traffic.
+      See the [current rollout record](docs/releases/2026-09-16-relay-message-state-backend.md).
       iOS publication and device acceptance below remain separate.
 - [x] The iPhone candidate **1.2.12 (38)** passed Apple processing and is
       available in the existing internal TestFlight QA group, verified September
@@ -104,7 +105,9 @@ completion on September 14, 2026.
 - [ ] Take a message shows request/acknowledgement truthfully, preserves the
       caller connection, and cannot conflict with pickup or timeout. Verify
       completion of current speech and the conditional three-second pause
-      using the build 41 retest and its linked speech/pickup checklist.
+      using the build 41 retest and its linked speech/pickup checklist. Also
+      verify continued caller replies without repeated answered questions using
+      the [Relay phone acceptance](docs/releases/2026-09-16-relay-message-state-backend.md#phone-acceptance).
 - [ ] An unanswered urgent call leaves the owner wait after 30 seconds. The
       urgent-alert preference survives reload and the backend respects it.
 - [ ] Duplicate actions and late responses after hangup, a new call or an

@@ -144,6 +144,13 @@ correct call pickup, or subscription access. A proposed improvement does not
 become a regression simply because an older plan listed it. Each repair needs a
 concrete failing case, a bounded change, and verification of the affected flow.
 
+September 17 owner-approved correction: identify existing personal and business
+post-call summary SMS with the fixed first line **Hey Kevin: Call summary**, even
+when the remaining text is translated. Use neutral call wording instead of
+labeling an AI-screened call as missed. The [bounded implementation contract](docs/superpowers/plans/2026-09-17-owner-sms-identity.md)
+preserves recipient ownership and caller-facing messages. Backend deployment
+remains separate; no new iOS build or Twilio number change is required.
+
 ### N3 — Deliver the approved native frontend with bounded history
 
 **Approval:** On September 14, after testing notification build 38 and reviewing

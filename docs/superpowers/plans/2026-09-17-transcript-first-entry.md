@@ -20,6 +20,10 @@ screening interface; it does not reopen deferred product work.
   follow automatically only while the owner is already near the bottom.
 - Live-call entry remains available from Calls, Kevin and Account Settings.
   The compact card remains an optional dashboard entry point.
+- Owner correction later September 17: call cards and connected screens follow
+  the same system appearance as the surrounding app. Light mode uses light
+  surfaces; dark mode uses dark surfaces. This supersedes the September 14
+  plan's always-dark active-call card. No separate theme setting is added.
 
 The first two registered notification actions remain Pick up and Take a message;
 Read transcript is third. iOS controls how many actions appear in each layout.

@@ -215,18 +215,14 @@ class CallManager: NSObject, ObservableObject {
         startTime: Date = Date()
     ) {
         guard AppStoreScreenshotFixtures.isNativeUIReview else { return }
+        // Exercise the production snapshot hook without requesting CallKit or Twilio.
+        prepareConnection(auth: auth, sid: callSid, token: "", conference: "")
         self.callerName = callerName
         self.callerPhone = callerPhone
         self.callStartTime = startTime
         self.isOnCall = true
         self.isMuted = false
         self.isSpeaker = false
-        let lease = CallPresentationLease(auth: auth, scope: CallLifecycleSnapshot(callSid: callSid, revision: AppState.shared.callLifecycleRevision))
-        self.presentationLease = lease
-        self.connectionAuth = auth
-        self.connectionSid = callSid
-        self.connectionScope = AppState.shared.callLifecycleSnapshot
-        AppState.shared.captureScreeningTranscript(for: lease)
     }
     #endif
 }

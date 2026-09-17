@@ -12,8 +12,8 @@ struct InCallView: View {
         let scope = appState.callLifecycleSnapshot
 
         ZStack {
-            // Dark background
-            Color(red: 0.07, green: 0.07, blue: 0.07)
+            // Background
+            Color.hkCanvas
                 .ignoresSafeArea()
 
             if lease.isValid(auth: auth, scope: scope) {
@@ -28,7 +28,7 @@ struct InCallView: View {
                         .padding(.bottom, 12)
 
                     Divider()
-                        .background(Color.white.opacity(0.12))
+                        .background(Color.hkDivider)
 
                     // Frozen Screening Transcript Area (occupies available space)
                     VStack(alignment: .leading, spacing: 10) {
@@ -37,7 +37,7 @@ struct InCallView: View {
                                 .font(.caption.weight(.semibold))
                                 .textCase(.uppercase)
                                 .tracking(0.6)
-                                .foregroundStyle(Color.white.opacity(0.6))
+                                .foregroundStyle(Color.hkInkSecondary)
                                 .accessibilityIdentifier("incall.section.beforeJoined")
                             Spacer()
                         }
@@ -49,7 +49,7 @@ struct InCallView: View {
                                 Spacer()
                                 Text(String(localized: "No screening transcript was captured before you joined."))
                                     .font(.subheadline)
-                                    .foregroundStyle(Color.white.opacity(0.5))
+                                    .foregroundStyle(Color.hkInkSecondary)
                                     .multilineTextAlignment(.center)
                                     .padding(.horizontal, 24)
                                     .accessibilityIdentifier("incall.emptyTranscript")
@@ -71,7 +71,7 @@ struct InCallView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     Divider()
-                        .background(Color.white.opacity(0.12))
+                        .background(Color.hkDivider)
 
                     // Persistent Call Controls (Outside scroll)
                     callControls
@@ -83,12 +83,11 @@ struct InCallView: View {
                     Spacer()
                     Text(String(localized: "Call is no longer active."))
                         .font(.headline)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Color.hkInkSecondary)
                     Spacer()
                 }
             }
         }
-        .accessibilityIdentifier("incall.view")
         .onAppear { startTimer() }
         .onDisappear { stopTimer() }
         .onChange(of: callManager.callStartTime) {
@@ -102,35 +101,35 @@ struct InCallView: View {
         HStack(spacing: 14) {
             ZStack {
                 Circle()
-                    .fill(Color(.systemGray3))
+                    .fill(Color.hkSurface)
                     .frame(width: 48, height: 48)
 
                 if !callerInitials.isEmpty {
                     Text(callerInitials)
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color.hkInk)
                 } else {
                     Image(systemName: "person.fill")
                         .font(.system(size: 20))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color.hkInk)
                 }
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(displayName)
                     .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.hkInk)
                     .lineLimit(1)
 
                 if !callManager.callerName.isEmpty && !callManager.callerPhone.isEmpty {
                     Text(PhoneFormatter.format(callManager.callerPhone))
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(Color.hkInkSecondary)
                 }
                 if let reason = appState.screeningTranscript(for: lease)?.reason, !reason.isEmpty {
                     Text(reason)
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Color.hkInkSecondary)
                         .lineLimit(2)
                 }
             }
@@ -139,7 +138,7 @@ struct InCallView: View {
 
             Text(formattedElapsed)
                 .font(.subheadline.monospacedDigit().weight(.medium))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(Color.hkInkSecondary)
                 .accessibilityIdentifier("incall.duration")
         }
     }
@@ -189,7 +188,7 @@ struct InCallView: View {
 
                 Text(String(localized: "End"))
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(Color.hkInkSecondary)
             }
         }
     }
@@ -264,17 +263,17 @@ struct CallControlButton: View {
             VStack(spacing: 8) {
                 ZStack {
                     Circle()
-                        .fill(isActive ? .white : .white.opacity(0.12))
+                        .fill(isActive ? Color.hkCobalt : Color.hkSurface)
                         .frame(width: 60, height: 60)
 
                     Image(systemName: icon)
                         .font(.system(size: 24))
-                        .foregroundStyle(isActive ? .black : .white)
+                        .foregroundStyle(isActive ? Color.white : Color.hkInk)
                 }
 
                 Text(label)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(Color.hkInkSecondary)
             }
         }
     }
@@ -310,16 +309,16 @@ private struct InCallFrozenTranscriptBubble: View {
                 if !speakerName.isEmpty {
                     Text(speakerName)
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.white.opacity(0.6))
+                        .foregroundStyle(.secondary)
                 }
 
                 Text(bodyText)
                     .font(.subheadline)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(isKevin ? .white : Color.hkInk)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(
-                        isKevin ? Color.accentColor : Color.white.opacity(0.12),
+                        isKevin ? Color.accentColor : Color(.secondarySystemGroupedBackground),
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                     )
             }

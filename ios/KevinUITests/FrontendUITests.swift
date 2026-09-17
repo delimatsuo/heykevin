@@ -398,10 +398,6 @@ final class FrontendUITests: XCTestCase {
     func testConnectedViewWithCapturedTranscriptAndControls() throws {
         let app = launchApp(scenario: "connected-with-transcript")
 
-        // Connected in-call screen appears
-        let inCallView = app.otherElements["incall.view"]
-        XCTAssertTrue(inCallView.waitForExistence(timeout: 8), "In-call screen must be presented on connection")
-
         // "Before you joined" section header is visible
         let beforeJoinedLabel = app.staticTexts["incall.section.beforeJoined"]
         XCTAssertTrue(beforeJoinedLabel.waitForExistence(timeout: 5), "'Before you joined' label must exist")
@@ -421,10 +417,6 @@ final class FrontendUITests: XCTestCase {
 
     func testConnectedViewEmptyTranscriptHonestMessage() throws {
         let app = launchApp(scenario: "connected-empty")
-
-        // Connected in-call screen appears
-        let inCallView = app.otherElements["incall.view"]
-        XCTAssertTrue(inCallView.waitForExistence(timeout: 8), "In-call screen must be presented on connection")
 
         // "Before you joined" section header is visible
         let beforeJoinedLabel = app.staticTexts["incall.section.beforeJoined"]

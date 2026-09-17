@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Prominent dark active call card displayed at the top of the Calls tab.
+/// Active call card displayed at the top of the Calls tab, following the app's appearance.
 /// Backed by the actual live transcript, coordinator states, and an immutable presentation lease.
 struct ActiveCallCard: View {
     @EnvironmentObject var appState: AppState
@@ -25,14 +25,14 @@ struct ActiveCallCard: View {
                             .foregroundStyle(Color.hkOrange)
                     } else if coordinator.isDeclinePending(for: sid) {
                         ProgressView()
-                            .tint(.white)
+                            .tint(Color.hkInk)
                             .scaleEffect(0.7)
                         Text(String(localized: "Requesting a message"))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Color.hkOrange)
                     } else if coordinator.isAcceptPending(for: sid) {
                         ProgressView()
-                            .tint(.white)
+                            .tint(Color.hkInk)
                             .scaleEffect(0.7)
                         Text(String(localized: "Connecting"))
                             .font(.subheadline.weight(.semibold))
@@ -60,7 +60,7 @@ struct ActiveCallCard: View {
                         Text(formattedElapsed)
                             .font(.subheadline.weight(.medium))
                             .monospacedDigit()
-                            .foregroundStyle(Color.white.opacity(0.7))
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -77,12 +77,12 @@ struct ActiveCallCard: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(callerDisplayName)
                                 .font(.headline)
-                                .foregroundStyle(.white)
+                                .foregroundStyle(Color.hkInk)
                                 .fixedSize(horizontal: false, vertical: true)
 
                             Text(callerSubtitle)
                                 .font(.subheadline)
-                                .foregroundStyle(Color.white.opacity(0.7))
+                                .foregroundStyle(Color.hkInkSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -100,11 +100,11 @@ struct ActiveCallCard: View {
                             Image(systemName: "chevron.right")
                                 .font(.caption.weight(.bold))
                         }
-                        .foregroundStyle(Color.hkGreen)
+                        .foregroundStyle(Color.hkCobalt)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .frame(minHeight: 44)
-                        .background(Color.white.opacity(0.08), in: Capsule())
+                        .background(Color.hkInk.opacity(0.08), in: Capsule())
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("call.viewLive")
@@ -114,11 +114,11 @@ struct ActiveCallCard: View {
                 if let latestLine = latestTranscriptLine {
                     Text(latestLine)
                         .font(.subheadline)
-                        .foregroundStyle(Color.white.opacity(0.9))
+                        .foregroundStyle(Color.hkInk)
                         .lineLimit(2)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        .background(Color.hkInk.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                 }
 
                 // Coordinator Error Message
@@ -145,7 +145,7 @@ struct ActiveCallCard: View {
                             _ = await coordinator.checkStatus(callSid: sid)
                         }
                     }
-                    .buttonStyle(HKSecondaryButtonStyle(tint: .white))
+                    .buttonStyle(HKSecondaryButtonStyle(tint: .hkCobalt))
                     .disabled(AppStoreScreenshotFixtures.isEnabled)
                     .accessibilityIdentifier("call.checkStatus")
                 }
@@ -169,7 +169,7 @@ struct ActiveCallCard: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .buttonStyle(.bordered)
-                    .tint(.white)
+                    .tint(.primary)
                     .accessibilityIdentifier("call.dismiss")
                 } else {
                     ViewThatFits(in: .horizontal) {
@@ -188,13 +188,13 @@ struct ActiveCallCard: View {
             .padding(HKSpace.lg)
             .background(
                 RoundedRectangle(cornerRadius: HKRadius.card, style: .continuous)
-                    .fill(Color.hkActiveDark)
+                    .fill(Color.hkCallSurface)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: HKRadius.card, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(Color.hkDivider, lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(0.18), radius: 10, y: 4)
+            .shadow(color: Color.black.opacity(0.05), radius: 10, y: 4)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("call.activeCard")
         } else {
@@ -247,7 +247,7 @@ struct ActiveCallCard: View {
             HStack(spacing: 6) {
                 if coordinator.isDeclinePending(for: sid) {
                     ProgressView()
-                        .tint(.white)
+                        .tint(Color.hkInk)
                         .scaleEffect(0.8)
                 } else {
                     Image(systemName: "text.bubble.fill")
@@ -258,7 +258,7 @@ struct ActiveCallCard: View {
                     .multilineTextAlignment(.center)
             }
         }
-        .buttonStyle(CallActionSecondaryButtonStyle(variant: .darkCard))
+        .buttonStyle(CallActionSecondaryButtonStyle())
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.message")
     }
@@ -318,7 +318,7 @@ struct CompactReturnToCallCard: View {
 
                     Text(String(localized: "Active Call in Progress"))
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color.hkInk)
 
                     Spacer()
 
@@ -328,14 +328,14 @@ struct CompactReturnToCallCard: View {
                         Image(systemName: "chevron.right")
                             .font(.caption.weight(.semibold))
                     }
-                    .foregroundStyle(Color.hkGreen)
+                    .foregroundStyle(Color.hkCobalt)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(Color.hkActiveDark, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(Color.hkCallSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        .stroke(Color.hkDivider, lineWidth: 1)
                 )
             }
             .buttonStyle(.plain)
@@ -649,7 +649,7 @@ struct LiveCallDetailView: View {
                     .multilineTextAlignment(.center)
             }
         }
-        .buttonStyle(CallActionSecondaryButtonStyle(variant: .liveDetail))
+        .buttonStyle(CallActionSecondaryButtonStyle())
         .disabled(AppStoreScreenshotFixtures.isEnabled || coordinator.isActionPending(for: sid))
         .accessibilityIdentifier("call.liveMessage")
     }
@@ -756,22 +756,10 @@ private struct CallActionPrimaryButtonStyle: ButtonStyle {
 }
 
 private struct CallActionSecondaryButtonStyle: ButtonStyle {
-    enum Variant {
-        case darkCard
-        case liveDetail
-    }
-
-    var variant: Variant
-
     func makeBody(configuration: Configuration) -> some View {
-        let isDark = variant == .darkCard
-        let foregroundColor: Color = isDark ? .white : .hkInk
-        let fillColor: Color = isDark
-            ? Color.white.opacity(configuration.isPressed ? 0.18 : 0.10)
-            : Color.hkInk.opacity(configuration.isPressed ? 0.10 : 0.05)
-        let strokeColor: Color = isDark
-            ? Color.white.opacity(0.25)
-            : Color.hkInk.opacity(0.15)
+        let foregroundColor: Color = .hkInk
+        let fillColor: Color = Color.hkInk.opacity(configuration.isPressed ? 0.10 : 0.05)
+        let strokeColor: Color = Color.hkInk.opacity(0.15)
 
         configuration.label
             .font(.subheadline.weight(.semibold))

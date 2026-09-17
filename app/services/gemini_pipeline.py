@@ -233,6 +233,7 @@ class GeminiPipeline:
         self._inbound_audio_error_logged = False
         self._screening_summary_push_sent = False
         self._summary_task: Optional[asyncio.Task] = None
+        self._command_ws_token = ""
         self._audio_chunks_sent = 0
         self._cumulative_inbound_audio_ms = 0
         self._cumulative_outbound_audio_ms = 0
@@ -1803,6 +1804,7 @@ class GeminiPipeline:
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                ws_token=getattr(self, "_command_ws_token", "") or "",
                 is_active=lambda: (
                     self._connected
                     and self._waiting_for_owner_availability

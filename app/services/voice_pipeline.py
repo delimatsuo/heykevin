@@ -665,6 +665,7 @@ class VoicePipeline:
         self._summary_task: Optional[asyncio.Task] = None
         self._reconnect_count = 0
         self._max_reconnect_attempts = 2
+        self._command_ws_token = ""
 
         # Speaking state
         self._is_speaking = False
@@ -2065,6 +2066,7 @@ class VoicePipeline:
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                ws_token=getattr(self, "_command_ws_token", "") or "",
                 is_active=lambda: (
                     self._connected
                     and self._waiting_for_owner_availability

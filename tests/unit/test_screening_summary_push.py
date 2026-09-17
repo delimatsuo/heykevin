@@ -141,3 +141,192 @@ async def test_extract_screening_summary_llm(monkeypatch):
     )
     assert res["caller_name"] == "Jonathan from Geico"
     assert res["reason"] == "Wants to talk about insurance renewal"
+
+
+@pytest.mark.asyncio
+async def test_extract_and_send_screening_summary_feeds_both_push_and_publish(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+
+    extract_mock = AsyncMock(return_value={"caller_name": "Jonathan from Geico", "reason": "Insurance renewal"})
+    publish_mock = AsyncMock(return_value=True)
+    push_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", extract_mock)
+    monkeypatch.setattr(owner_call_actions, "publish_screening_reason", publish_mock)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    sent = await screening_summary.extract_and_send_screening_summary(
+        contractor_id="c1",
+        call_sid="CA12345",
+        caller_phone="+15551234567",
+        transcript="some transcript",
+        ws_token="ws_token_123",
+        collapse_id="call_CA12345",
+    )
+
+    assert sent is True
+    assert extract_mock.await_count == 1
+    publish_mock.assert_awaited_once_with(
+        call_sid="CA12345",
+        contractor_id="c1",
+        ws_token="ws_token_123",
+        reason="Insurance renewal",
+    )
+    push_mock.assert_awaited_once_with(
+        contractor_id="c1",
+        call_sid="CA12345",
+        caller_phone="+15551234567",
+        caller_name="Jonathan from Geico",
+        reason="Insurance renewal",
+        collapse_id="call_CA12345",
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_and_send_screening_summary_publish_rejection_suppresses_push(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+
+    extract_mock = AsyncMock(return_value={"caller_name": "Jonathan from Geico", "reason": "Insurance renewal"})
+    publish_mock = AsyncMock(return_value=False)
+    push_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", extract_mock)
+    monkeypatch.setattr(owner_call_actions, "publish_screening_reason", publish_mock)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    sent = await screening_summary.extract_and_send_screening_summary(
+        contractor_id="c1",
+        call_sid="CA12345",
+        ws_token="ws_token_123",
+    )
+
+    assert sent is False
+    assert extract_mock.await_count == 1
+    assert publish_mock.await_count == 1
+    push_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_extract_and_send_screening_summary_storage_exception_still_pushes(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+
+    extract_mock = AsyncMock(return_value={"caller_name": "Jonathan from Geico", "reason": "Insurance renewal"})
+    publish_mock = AsyncMock(side_effect=RuntimeError("storage network timeout"))
+    push_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", extract_mock)
+    monkeypatch.setattr(owner_call_actions, "publish_screening_reason", publish_mock)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    sent = await screening_summary.extract_and_send_screening_summary(
+        contractor_id="c1",
+        call_sid="CA12345",
+        ws_token="ws_token_123",
+    )
+
+    assert sent is True
+    assert publish_mock.await_count == 1
+    assert push_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_extract_and_send_screening_summary_apns_failure_retains_persisted_reason(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+
+    extract_mock = AsyncMock(return_value={"caller_name": "Jonathan from Geico", "reason": "Insurance renewal"})
+    publish_mock = AsyncMock(return_value=True)
+    push_mock = AsyncMock(return_value=False)
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", extract_mock)
+    monkeypatch.setattr(owner_call_actions, "publish_screening_reason", publish_mock)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    sent = await screening_summary.extract_and_send_screening_summary(
+        contractor_id="c1",
+        call_sid="CA12345",
+        ws_token="ws_token_123",
+    )
+
+    assert sent is False
+    publish_mock.assert_awaited_once()
+    push_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_extract_and_send_screening_summary_post_await_invalidation_suppresses_push(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+
+    active_calls = 0
+    def dynamic_is_active():
+        nonlocal active_calls
+        active_calls += 1
+        # 1st call before extract -> True
+        # 2nd call after extract -> True
+        # 3rd call after publish -> False (invalidated)
+        return active_calls < 3
+
+    extract_mock = AsyncMock(return_value={"caller_name": "Jonathan from Geico", "reason": "Insurance renewal"})
+    publish_mock = AsyncMock(return_value=True)
+    push_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", extract_mock)
+    monkeypatch.setattr(owner_call_actions, "publish_screening_reason", publish_mock)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    sent = await screening_summary.extract_and_send_screening_summary(
+        contractor_id="c1",
+        call_sid="CA12345",
+        ws_token="ws_token_123",
+        is_active=dynamic_is_active,
+    )
+
+    assert sent is False
+    publish_mock.assert_awaited_once()
+    push_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_extract_and_send_screening_summary_without_ws_token_skips_publish(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+
+    extract_mock = AsyncMock(return_value={"caller_name": "Jonathan from Geico", "reason": "Insurance renewal"})
+    publish_mock = AsyncMock(return_value=True)
+    push_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", extract_mock)
+    monkeypatch.setattr(owner_call_actions, "publish_screening_reason", publish_mock)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    sent = await screening_summary.extract_and_send_screening_summary(
+        contractor_id="c1",
+        call_sid="CA12345",
+    )
+
+    assert sent is True
+    publish_mock.assert_not_awaited()
+    push_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_slow_reason_storage_does_not_block_existing_notification(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+    async def stalled_publish(**kwargs):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(screening_summary, 'REASON_PUBLISH_TIMEOUT_SECONDS', 0.01)
+    monkeypatch.setattr(screening_summary, 'extract_screening_summary',
+                        AsyncMock(return_value={'caller_name': 'Alex', 'reason': 'Leaking pipe'}))
+    monkeypatch.setattr(owner_call_actions, 'publish_screening_reason', stalled_publish)
+    push = AsyncMock(return_value=True)
+    monkeypatch.setattr(push_notification, 'send_screening_summary_push', push)
+    async with asyncio.timeout(1):
+        assert await screening_summary.extract_and_send_screening_summary(
+            contractor_id='owner', call_sid='CA1', ws_token='ws1')
+    push.assert_awaited_once()

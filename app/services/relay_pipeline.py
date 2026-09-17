@@ -898,6 +898,7 @@ class RelayPipeline:
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                ws_token=getattr(self, "_command_ws_token", "") or "",
                 is_active=lambda: (
                     self._active
                     and not self._ending

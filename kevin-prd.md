@@ -2,10 +2,10 @@
 
 **Updated:** 2026-09-17
 **Owner:** Deli Matsuo
-**Backend release baseline:** `976202dfd418e0c4ca551a96e8075e5d5065b45b`, revision `kevin-api-00272-8z4`, verified `2026-09-17T02:25:37Z` (September 16 America/New_York)
+**Backend release baseline:** `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, revision `kevin-api-00273-f7g`, verified `2026-09-17T17:36:33Z`. See the [SMS identity and screening-reason rollout](docs/releases/2026-09-17-owner-sms-identity-backend.md).
 **Public iOS release baseline:** `1.3.0 (39)`, packaged source `4bf090acf74ac476b1b31d6a5a44db4fffc16c5b`, published September 15, 2026
 **Latest Apple version:** `1.3.1 (41)`, `READY_FOR_SALE` with review `COMPLETE`, observed September 17 at 15:16 UTC. The public US lookup still reported 1.3.0 at `15:32:01Z`; storefront propagation is not established. The [submission record](docs/releases/2026-09-16-app-store-ios-41.md) records its six updated screenshots.
-**Current internal candidate:** `1.3.2 (42)`, `VALID / IN_BETA_TESTING` in the existing QA group, verified September 17 at `15:33:58Z`. See [delivery and phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md). The new backend reason field is not deployed.
+**Current internal candidate:** `1.3.2 (42)`, `VALID / IN_BETA_TESTING` in the existing QA group, verified September 17 at `15:33:58Z`. See [delivery and phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md). The backend screening-reason field is now deployed; phone acceptance remains open.
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
 
@@ -86,9 +86,10 @@ completion on September 14, 2026.
 - [x] The reviewed notification backend, including the natural message-taking
       transition and Relay message-state correction, is deployed to production.
       `/health` identifies approved SHA
-      `976202dfd418e0c4ca551a96e8075e5d5065b45b`, revision
-      `kevin-api-00272-8z4`, verified `2026-09-17T02:25:37Z` with 100% traffic.
-      See the [current rollout record](docs/releases/2026-09-16-relay-message-state-backend.md).
+      `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, revision
+      `kevin-api-00273-f7g`, verified `2026-09-17T17:36:33Z` with 100% traffic.
+      This also includes SMS identity and the screening-reason field. See the
+      [current rollout record](docs/releases/2026-09-17-owner-sms-identity-backend.md).
       iOS publication and device acceptance below remain separate.
 - [x] The iPhone candidate **1.2.12 (38)** passed Apple processing and is
       available in the existing internal TestFlight QA group, verified September
@@ -148,8 +149,10 @@ September 17 owner-approved correction: identify existing personal and business
 post-call summary SMS with the fixed first line **Hey Kevin: Call summary**, even
 when the remaining text is translated. Use neutral call wording instead of
 labeling an AI-screened call as missed. The [bounded implementation contract](docs/superpowers/plans/2026-09-17-owner-sms-identity.md)
-preserves recipient ownership and caller-facing messages. Backend deployment
-remains separate; no new iOS build or Twilio number change is required.
+preserves recipient ownership and caller-facing messages. The
+[backend rollout](docs/releases/2026-09-17-owner-sms-identity-backend.md) is verified
+in production; receipt of an actual branded SMS remains open. No new iOS build
+or Twilio number change was required.
 
 ### N3 — Deliver the approved native frontend with bounded history
 
@@ -193,7 +196,8 @@ Show the existing server screening reason when available and preserve scroll
 position while reading earlier lines. The compact card remains an optional
 dashboard entry. The later owner instruction to continue with a test build is
 tracked in the [build 42 delivery record](docs/releases/2026-09-17-transcript-first-ios-42.md).
-Physical phone acceptance and backend reason-field deployment remain separate.
+The [backend reason field is deployed](docs/releases/2026-09-17-owner-sms-identity-backend.md).
+Physical phone acceptance remains open.
 
 - [x] Owner approved the expert-reviewed design and bounded-history direction.
 - [x] Native unit, lifecycle/ownership mutation and fixture UI checks pass.

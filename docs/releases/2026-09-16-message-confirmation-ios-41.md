@@ -4,6 +4,11 @@
 with explicit availability in the existing internal **QA** group, verified
 September 16, 2026 at **22:07:24Z**. Owner installation and retest remain open.
 
+**Later App Store submission:** At the owner's subsequent request, this same
+build was submitted with six updated screenshots at
+**2026-09-17T03:16:04.335Z**. Apple reports **WAITING_FOR_REVIEW**. See the
+[submission record](2026-09-16-app-store-ios-41.md); no second binary upload was made.
+
 ## Scope and authorization
 
 The owner reported that **Take a message** on TestFlight build 40 showed
@@ -113,7 +118,8 @@ At **22:07:24Z**, Apple returned build **41**, prerelease **1.3.1**,
 `usesNonExemptEncryption=false`. The existing internal QA group explicitly
 included this build. English What to Test notes were written and read back at
 **22:07:39Z**, covering the warning regression, speech timing, caller continuation
-and pickup. No external beta or public App Store submission was made.
+and pickup. At that delivery stage, no external beta or public App Store
+submission was made. The later public submission is recorded above.
 
 | Apple identity | Value |
 |---|---|

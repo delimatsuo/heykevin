@@ -1,7 +1,7 @@
 # Hey Kevin — Current Roadmap and Release Status
 
 **Reconciled:** 2026-09-16
-**Backend implementation baseline:** `eee7d42682bf4222ebee59f52e92082f5f9e13cb`
+**Backend implementation baseline:** `976202dfd418e0c4ca551a96e8075e5d5065b45b`
 **Repository:** `delimatsuo/heykevin`
 
 The [current PRD](../kevin-prd.md) defines necessary work and later opportunities.
@@ -14,21 +14,23 @@ External observations are dated snapshots, not a standing claim about production
 
 ## Observed release baseline
 
-Backend and internal TestFlight snapshots are dated September 16. Public iOS
-version `1.3.0` was rechecked through the US lookup at `20:03:00Z`; its build 39
-relationship comes from the earlier authenticated observation recorded below:
+Backend verification times are stated in UTC below; both deployments occurred
+on September 16 in America/New_York. Internal TestFlight snapshots are dated
+September 16. Public iOS version `1.3.0` was rechecked through the US lookup on
+September 16 at `20:03:00Z`; its build 39 relationship comes from the earlier
+authenticated observation recorded below:
 
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
-| Production backend | `kevin-api-00271-q4j`, SHA `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, verified September 16 at `20:07:42Z` | Successful [production run 35141337468](https://github.com/delimatsuo/heykevin/actions/runs/35141337468), exact live health/runtime identity, 100% serving traffic, preserved bindings, anonymous smoke and canonical pause-WAV retrieval. See the [release record](releases/2026-09-16-natural-message-ios-40.md). |
-| Staging backend | `kevin-api-staging-00171-sir`, SHA `eee7d42682bf4222ebee59f52e92082f5f9e13cb`, verified September 16 | Successful [staging run 35140358345](https://github.com/delimatsuo/heykevin/actions/runs/35140358345), live health identity, 100% serving traffic, runtime isolation, anonymous static smoke and canonical pause-WAV retrieval. Includes the natural message-taking change. |
+| Production backend | `kevin-api-00272-8z4`, SHA `976202dfd418e0c4ca551a96e8075e5d5065b45b`, verified `2026-09-17T02:25:37Z` | Successful [production run 35162039018](https://github.com/delimatsuo/heykevin/actions/runs/35162039018), exact live health/runtime identity, 100% serving traffic, unchanged allowlisted settings, anonymous smoke and canonical pause-WAV retrieval. Includes the Relay message-state correction; phone acceptance remains open. See the [rollout record](releases/2026-09-16-relay-message-state-backend.md). |
+| Staging backend | `kevin-api-staging-00173-qur`, SHA `976202dfd418e0c4ca551a96e8075e5d5065b45b`, verified `2026-09-16T23:22:06Z` | Successful [staging run 35161429321](https://github.com/delimatsuo/heykevin/actions/runs/35161429321), canonical/tagged health identity, 100% serving traffic, preserved runtime isolation, anonymous static smoke and canonical pause-WAV retrieval. See the [rollout record](releases/2026-09-16-relay-message-state-backend.md). |
 | Public iOS | Version `1.3.0`, **build 39**, `READY_FOR_DISTRIBUTION` / `READY_FOR_SALE` | Authenticated read-only inspection at `2026-09-16T00:20:10Z` (Sep 15 America/New_York) links public version 1.3.0 to build 39. Public lookup (`https://itunes.apple.com/lookup?id=6761427495&country=us`) reports release date `2026-09-15T21:35:24Z`. See canonical [release record](releases/2026-09-15-native-frontend-ios-39.md). |
 | Historical Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Historical public baseline as of September 14, now superseded by build 39. |
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
 | Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
 | Current internal iPhone candidate | **1.3.1 (41)**, **VALID** / **IN_BETA_TESTING**, available in QA at `22:07:24Z` | Fixes the reported false confirmation warning after Take a message. The [build 41 record](releases/2026-09-16-message-confirmation-ios-41.md) binds the package and open retest. Not submitted for public release. |
-| Development inventory | Native frontend 1.3.0 (39) public; call-control/transition work and iOS confirmation repair delivered for testing | [PR #253](https://github.com/delimatsuo/heykevin/pull/253) and [PR #254](https://github.com/delimatsuo/heykevin/pull/254) delivered build 40/backend; [PR #256](https://github.com/delimatsuo/heykevin/pull/256) merged the iOS-only confirmation repair packaged in build 41. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
+| Development inventory | Native frontend 1.3.0 (39) public; call-control/transition work, iOS confirmation repair and Relay message-state correction delivered for testing | [PR #253](https://github.com/delimatsuo/heykevin/pull/253) and [PR #254](https://github.com/delimatsuo/heykevin/pull/254) delivered build 40/backend; [PR #256](https://github.com/delimatsuo/heykevin/pull/256) merged the iOS-only confirmation repair packaged in build 41. [PR #258](https://github.com/delimatsuo/heykevin/pull/258) added the deployed Relay message-state correction. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
 ## Shipped
 
@@ -71,6 +73,13 @@ message-taking transition. That backend is deployed. The owner installed build
 [current retest](releases/2026-09-16-message-confirmation-ios-41.md#owner-retest--open)
 and its linked speech/pickup checklist. Provider/package verification does not
 close those physical-call rows.
+
+A later build 40 call also reported repeated questions after Take a message.
+The [Relay message-state correction](releases/2026-09-16-relay-message-state-backend.md)
+is deployed to staging and production. Install or confirm build 41 before
+retesting the warning and conversation together; finishing current speech,
+the conditional three-second pause and continued caller replies remain open
+phone checks.
 
 [PR #239](https://github.com/delimatsuo/heykevin/pull/239) adds caller/reason summary
 updates to an existing notification and the matching Pick Up action. The same

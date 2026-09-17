@@ -1,7 +1,7 @@
 # Hey Kevin — Current Roadmap and Release Status
 
 **Reconciled:** 2026-09-17
-**Backend implementation baseline:** `976202dfd418e0c4ca551a96e8075e5d5065b45b`
+**Backend implementation baseline:** `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`
 **Repository:** `delimatsuo/heykevin`
 
 The [current PRD](../kevin-prd.md) defines necessary work and later opportunities.
@@ -14,8 +14,8 @@ External observations are dated snapshots, not a standing claim about production
 
 ## Observed release baseline
 
-Backend verification times are stated in UTC below; both deployments occurred
-on September 16 in America/New_York. Apple reported version 1.3.1 (41)
+Backend verification times are stated in UTC below; both current deployments
+occurred on September 17. Apple reported version 1.3.1 (41)
 `READY_FOR_SALE` and review `COMPLETE` on September 17 at 15:16 UTC. The public
 US lookup still returned 1.3.0 at 15:32:01 UTC, so storefront propagation is not
 established. The new transcript-first internal candidate is tracked separately
@@ -23,16 +23,16 @@ from that existing release and from physical-phone acceptance:
 
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
-| Production backend | `kevin-api-00272-8z4`, SHA `976202dfd418e0c4ca551a96e8075e5d5065b45b`, verified `2026-09-17T02:25:37Z` | Successful [production run 35162039018](https://github.com/delimatsuo/heykevin/actions/runs/35162039018), exact live health/runtime identity, 100% serving traffic, unchanged allowlisted settings, anonymous smoke and canonical pause-WAV retrieval. Includes the Relay message-state correction; phone acceptance remains open. See the [rollout record](releases/2026-09-16-relay-message-state-backend.md). |
-| Staging backend | `kevin-api-staging-00173-qur`, SHA `976202dfd418e0c4ca551a96e8075e5d5065b45b`, verified `2026-09-16T23:22:06Z` | Successful [staging run 35161429321](https://github.com/delimatsuo/heykevin/actions/runs/35161429321), canonical/tagged health identity, 100% serving traffic, preserved runtime isolation, anonymous static smoke and canonical pause-WAV retrieval. See the [rollout record](releases/2026-09-16-relay-message-state-backend.md). |
+| Production backend | `kevin-api-00273-f7g`, SHA `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, verified `2026-09-17T17:36:33Z` | Successful [production run 35249645557](https://github.com/delimatsuo/heykevin/actions/runs/35249645557), exact live health/runtime identity, 100% serving traffic, unchanged runtime settings, anonymous smoke and canonical pause-WAV retrieval. Adds owner SMS identity and the screening-reason field; retains the Relay correction. Phone/SMS acceptance remains open. See the [rollout record](releases/2026-09-17-owner-sms-identity-backend.md). |
+| Staging backend | `kevin-api-staging-00175-sag`, SHA `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, verified `2026-09-17T16:55:30Z` | Successful [staging run 35248672440](https://github.com/delimatsuo/heykevin/actions/runs/35248672440), canonical/tagged health identity, 100% serving traffic, preserved runtime isolation, anonymous static smoke and canonical pause-WAV retrieval. See the [rollout record](releases/2026-09-17-owner-sms-identity-backend.md). |
 | Public iOS | Version `1.3.0`, **build 39**, `READY_FOR_DISTRIBUTION` / `READY_FOR_SALE` | Authenticated read-only inspection at `2026-09-16T00:20:10Z` (Sep 15 America/New_York) links public version 1.3.0 to build 39. Public lookup (`https://itunes.apple.com/lookup?id=6761427495&country=us`) reports release date `2026-09-15T21:35:24Z`. See canonical [release record](releases/2026-09-15-native-frontend-ios-39.md). |
 | Historical Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Historical public baseline as of September 14, now superseded by build 39. |
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
 | Native frontend iPhone release | **1.3.0 (39)**, **READY_FOR_DISTRIBUTION** on App Store, **VALID** / **IN_BETA_TESTING** in internal QA | Delivers Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and Apple release state. Physical phone acceptance remains open. |
 | Latest Apple version | **1.3.1 (41)**, **READY_FOR_SALE**, review **COMPLETE**, observed September 17 at 15:16 UTC; also **VALID** / **IN_BETA_TESTING** in QA | The [submission record](releases/2026-09-16-app-store-ios-41.md) binds six updated screenshots; the [new dated observation](releases/2026-09-17-transcript-first-ios-42.md) supersedes its waiting-for-review snapshot. Public US lookup still showed 1.3.0. Physical phone acceptance remains open. |
-| Current internal iPhone candidate | **1.3.2 (42)**, **VALID / IN_BETA_TESTING** in the existing QA group, verified `2026-09-17T15:33:58Z` | [Delivery record and phone checks](releases/2026-09-17-transcript-first-ios-42.md). Includes direct full-transcript notification entry, retained screening text after pickup and consistent system appearance. The new backend reason field is not deployed. |
-| Development inventory | Transcript-first flow and appearance correction delivered in internal build 42; notification and Relay corrections remain included | [PR #261](https://github.com/delimatsuo/heykevin/pull/261) adds the current frontend behavior. Earlier [PR #256](https://github.com/delimatsuo/heykevin/pull/256) supplied the iOS confirmation repair, and [PR #258](https://github.com/delimatsuo/heykevin/pull/258) supplied the deployed Relay correction. The new structured reason field is not deployed. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
+| Current internal iPhone candidate | **1.3.2 (42)**, **VALID / IN_BETA_TESTING** in the existing QA group, verified `2026-09-17T15:33:58Z` | [Delivery record and phone checks](releases/2026-09-17-transcript-first-ios-42.md). Includes direct full-transcript notification entry, retained screening text after pickup and consistent system appearance. The backend screening-reason field is deployed; phone acceptance remains open. |
+| Development inventory | Transcript-first flow and appearance correction delivered in internal build 42; owner SMS identity and screening reason deployed in the backend | [PR #261](https://github.com/delimatsuo/heykevin/pull/261) adds the current frontend behavior and screening-reason field. [PR #263](https://github.com/delimatsuo/heykevin/pull/263) brands owner summaries. Earlier [PR #256](https://github.com/delimatsuo/heykevin/pull/256) supplied the iOS confirmation repair, and [PR #258](https://github.com/delimatsuo/heykevin/pull/258) supplied the retained Relay correction. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
 ## Shipped
 

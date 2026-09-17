@@ -27,6 +27,14 @@ things you cannot do.
 - Opening `firestore.rules` or `database.rules.json` to client access.
 - A GitHub permission deny on merge — paste the exact command, only then.
 
+Owner authorization persists for its stated scope. On September 17, 2026, Deli
+removed the prohibition on agents approving the production environment gate:
+with express authorization for the current deployment, an agent may perform
+that approval in GitHub's UI or API after verifying the repository, run, exact
+SHA and environment. Record the authorization and result. Do not require a
+second owner click for the same authorized approval. Keep the gate and its
+protection settings intact; this is not standing approval for future deployments.
+
 Force pushes are forbidden on every branch, including `--force-with-lease`, and must not be escalated as an owner approval request; use the published-branch merge or replacement-PR procedure in the active slice instructions.
 
 Merging a reviewed-clean, default-off PR to `main` is allowed: **push to `main`

@@ -24,6 +24,15 @@ screening reason is not deployed. Missing reason metadata uses the honest
 “Finding out why they’re calling…” fallback. This candidate does not change
 backend state, retention, recording or post-pickup transcription.
 
+**Later backend rollout, September 17 at 17:36:33 UTC:** the owner separately
+authorized deployment of the screening-reason field and owner SMS identity.
+Production now reports `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, revision
+`kevin-api-00273-f7g`, with 100% traffic. See the
+[backend rollout record](2026-09-17-owner-sms-identity-backend.md). This supersedes
+the undeployed-field limitation above and in the earlier TestFlight notes;
+missing reason metadata still uses the fallback. Phone checks remain open,
+and no replacement iOS package or TestFlight metadata update was made.
+
 Apple reported the existing 1.3.1 version `READY_FOR_SALE` and its review
 submission `COMPLETE` at 15:16 UTC. The public US lookup still returned 1.3.0 at
 15:32:01 UTC. Those are separate observations; storefront propagation was not

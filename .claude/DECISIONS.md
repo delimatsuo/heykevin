@@ -73,3 +73,11 @@ Standing owner approval remains mandatory for:
 - Provider, cloud, spend, or credential provisioning.
 - Production deployments, releases, or feature flag toggles.
 - App Store submissions, Twilio configurations, real-user communication, and client Firestore security rule boundaries.
+
+Owner clarification, September 17, 2026: the production environment gate requires
+express owner authorization, not a mandatory manual click by the owner. An agent expressly
+authorized for the current production deployment may approve its GitHub
+environment gate through the UI or API after verifying the repository, run,
+exact SHA and environment, and must record the authorization and result.
+Do not ask for the same approval again. Preserve GitHub protection settings;
+this does not authorize future deployments without express owner approval.

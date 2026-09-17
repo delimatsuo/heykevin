@@ -34,7 +34,8 @@ final class FixtureFetchProvider: @unchecked Sendable {
             return AppStoreScreenshotFixtures.generate101CallsList()
         case .historyEmpty:
             return []
-        case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings:
+        case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings,
+             .connectedWithTranscript, .connectedEmpty, .longTranscript:
             return AppStoreScreenshotFixtures.businessCallsList
         case .personalLive, .personalRecents, .personalDetail, .personalKevin:
             return AppStoreScreenshotFixtures.personalCallsList
@@ -62,10 +63,13 @@ enum AppStoreScreenshotFixtures {
         case businessKevin = "business-kevin"
         case personalKevin = "personal-kevin"
         case accountSettings = "account-settings"
+        case connectedWithTranscript = "connected-with-transcript"
+        case connectedEmpty = "connected-empty"
+        case longTranscript = "long-transcript"
 
         var isBusiness: Bool {
             switch self {
-            case .businessLive, .businessRecents, .businessDetail, .businessKevin, .history101, .historyEmpty, .historyError, .historyRetainedError, .accountSettings:
+            case .businessLive, .businessRecents, .businessDetail, .businessKevin, .history101, .historyEmpty, .historyError, .historyRetainedError, .accountSettings, .connectedWithTranscript, .connectedEmpty, .longTranscript:
                 return true
             case .personalLive, .personalRecents, .personalDetail, .personalKevin:
                 return false
@@ -96,6 +100,12 @@ enum AppStoreScreenshotFixtures {
                 return "Personal call screening tailored to you"
             case .accountSettings:
                 return "Complete control of your account"
+            case .connectedWithTranscript:
+                return "Pick up with full context"
+            case .connectedEmpty:
+                return "Connected live call"
+            case .longTranscript:
+                return "Live screening transcript"
             }
         }
 
@@ -123,6 +133,12 @@ enum AppStoreScreenshotFixtures {
                 return "Adjust spam sensitivity, smart interruption, and contact sync."
             case .accountSettings:
                 return "Manage your plan, phone number, and preferences anytime."
+            case .connectedWithTranscript:
+                return "Screening transcript stays visible beside in-call controls."
+            case .connectedEmpty:
+                return "Clear call controls with honest transcript state."
+            case .longTranscript:
+                return "Review the full conversation while screening continues."
             }
         }
     }
@@ -170,7 +186,8 @@ enum AppStoreScreenshotFixtures {
             return []
         case .historyRetainedError:
             return businessCallsList
-        case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings:
+        case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings,
+             .connectedWithTranscript, .connectedEmpty, .longTranscript:
             return businessCallsList
         case .personalLive, .personalRecents, .personalDetail, .personalKevin:
             return personalCallsList
@@ -244,6 +261,71 @@ enum AppStoreScreenshotFixtures {
                 authContext: fixtureAuth,
                 callSid: "CA_APP_STORE_SCREENSHOT"
             )
+        case .connectedWithTranscript:
+            let fixtureAuth = appState.currentAuthContext()
+            appState.selectedTab = .recents
+            appState.setActiveCall(
+                callSid: "CA_APP_STORE_SCREENSHOT",
+                callerPhone: "+16505550187",
+                callerName: "Maria Santos",
+                authContext: fixtureAuth
+            )
+            appState.activeCallReason = "Water heater leaking"
+            appState.callStartTime = now.addingTimeInterval(-137)
+            appState.updateActiveCallTranscript(
+                lines: liveTranscript(forBusiness: true),
+                authContext: fixtureAuth,
+                callSid: "CA_APP_STORE_SCREENSHOT"
+            )
+            #if DEBUG
+            CallManager.shared.adoptFakeConnectionForTesting(
+                auth: fixtureAuth,
+                callSid: "CA_APP_STORE_SCREENSHOT",
+                callerName: "Maria Santos",
+                callerPhone: "+16505550187",
+                startTime: now.addingTimeInterval(-137)
+            )
+            #endif
+        case .connectedEmpty:
+            let fixtureAuth = appState.currentAuthContext()
+            appState.selectedTab = .recents
+            appState.setActiveCall(
+                callSid: "CA_APP_STORE_SCREENSHOT",
+                callerPhone: "+16505550187",
+                callerName: "Maria Santos",
+                authContext: fixtureAuth
+            )
+            appState.activeCallReason = ""
+            appState.callStartTime = now.addingTimeInterval(-137)
+            appState.updateActiveCallTranscript(
+                lines: [],
+                authContext: fixtureAuth,
+                callSid: "CA_APP_STORE_SCREENSHOT"
+            )
+            #if DEBUG
+            CallManager.shared.adoptFakeConnectionForTesting(
+                auth: fixtureAuth,
+                callSid: "CA_APP_STORE_SCREENSHOT",
+                callerName: "Maria Santos",
+                callerPhone: "+16505550187",
+                startTime: now.addingTimeInterval(-137)
+            )
+            #endif
+        case .longTranscript:
+            let fixtureAuth = appState.currentAuthContext()
+            appState.selectedTab = .recents
+            appState.setActiveCall(
+                callSid: "CA_APP_STORE_SCREENSHOT",
+                callerPhone: "+16505550187",
+                callerName: "Maria Santos",
+                authContext: fixtureAuth
+            )
+            appState.callStartTime = now.addingTimeInterval(-137)
+            appState.updateActiveCallTranscript(
+                lines: longTranscriptLines(),
+                authContext: fixtureAuth,
+                callSid: "CA_APP_STORE_SCREENSHOT"
+            )
         case .businessKevin, .personalKevin:
             appState.clearActiveCall()
             appState.selectedTab = .settings
@@ -255,7 +337,39 @@ enum AppStoreScreenshotFixtures {
             appState.clearActiveCall()
             appState.selectedTab = .recents
         }
+        #if DEBUG
+        if isNativeUIReview {
+            if ProcessInfo.processInfo.environment["KEVIN_REVIEW_NOTIFICATION"] == "cold" {
+                // Reproduce the state produced by a validated notification before root appearance.
+                appState.selectedTab = .live
+            }
+        }
+        #endif
     }
+
+    #if DEBUG
+    @MainActor static func appendReviewTranscript(_ state: AppState) {
+        guard isNativeUIReview, scenario == .longTranscript, let lease = state.ownedActiveCallLease else { return }
+        let count = state.transcriptLines.count + 1
+        state.updateActiveCallTranscript(lines: state.transcriptLines + [TranscriptLine(text: "Caller: Newly appended live transcript update #\(count).")], lease: lease)
+    }
+
+    @MainActor static func openReviewNotification(_ state: AppState) async {
+        guard isNativeUIReview, let lease = state.ownedActiveCallLease else { return }
+        let coordinator = CallActionCoordinator(
+            sendAction: { _, _, _, _, _ in throw URLError(.unsupportedURL) },
+            getStatus: { auth, sid, _ in
+                CallActionResult(callSid: sid, contractorId: auth.contractorId, operationId: "",
+                    action: "", actionStatus: "ready", accessToken: nil, conferenceName: nil,
+                    isActive: true, isUrgent: false, callerName: state.activeCallerName,
+                    callerPhone: state.activeCallerPhone, transcript: state.transcriptLines.map(\.text).joined(separator: "\n"),
+                    statusCode: 200, rawStatus: "ok", errorDetail: nil, screeningReason: state.activeCallReason)
+            }, connect: { _, _, _, _ in false }, directAnswer: { _, _ in nil }, onMessage: { _ in }, navigationState: state)
+        await AppDelegate.handleNotificationResponse(categoryIdentifier: "SCREENING_CALL",
+            actionIdentifier: "READ_TRANSCRIPT_ACTION", userInfo: ["call_sid": lease.scope.callSid, "contractor_id": lease.auth.contractorId],
+            authContext: lease.auth, currentAuth: { state.currentAuthContext() }, coordinator: coordinator)
+    }
+    #endif
 
     private static func liveTranscript(forBusiness: Bool) -> [TranscriptLine] {
         let lines: [String]
@@ -275,6 +389,32 @@ enum AppStoreScreenshotFixtures {
                 "Caller: Later today is fine. My number is 415-555-0126.",
             ]
         }
+        return lines.map(TranscriptLine.init(text:))
+    }
+
+    private static func longTranscriptLines() -> [TranscriptLine] {
+        let lines: [String] = [
+            "Kevin: Thanks for calling Northside Plumbing. How can I help?",
+            "Caller: Hi, I have a major leak under my kitchen sink.",
+            "Kevin: I can definitely help schedule someone for that. What is the address?",
+            "Caller: 742 Evergreen Terrace.",
+            "Kevin: Is the water shut off currently, or is it actively running?",
+            "Caller: We shut the main valve off under the sink so it is contained.",
+            "Kevin: Great, that helps prevent additional damage.",
+            "Caller: Do you have anyone available this afternoon?",
+            "Kevin: I can take down your preferred time.",
+            "Caller: Thank you, we also noticed low pressure in the upstairs bathroom.",
+            "Kevin: I have noted the low pressure issue as well for the technician.",
+            "Caller: Perfect. How soon will they arrive?",
+            "Kevin: I cannot confirm a time, but I can pass your request along.",
+            "Caller: Will they call before arriving?",
+            "Kevin: I will include that request in your message.",
+            "Caller: Sounds great. Can I provide gate instructions?",
+            "Kevin: Absolutely, please provide the gate code.",
+            "Caller: The gate code is #4821.",
+            "Kevin: Gate code #4821 recorded.",
+            "Caller: Appreciate your help with this.",
+        ]
         return lines.map(TranscriptLine.init(text:))
     }
 
@@ -528,7 +668,8 @@ struct AppStoreScreenshotRoot: View {
         switch scenario {
         case .businessLive, .personalLive, .businessRecents, .personalRecents,
              .history101, .historyEmpty, .historyError, .historyRetainedError,
-             .businessKevin, .personalKevin, .accountSettings:
+             .businessKevin, .personalKevin, .accountSettings,
+             .connectedWithTranscript, .connectedEmpty, .longTranscript:
             ContentView()
                 .environmentObject(appState)
         case .businessDetail, .personalDetail:

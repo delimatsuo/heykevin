@@ -166,6 +166,7 @@ final class CallActionCoordinator: ObservableObject {
     private let pollAttempts: Int
     private var observedAuth: CallAuthContext?
     private var navigationRequest = 0
+    private let navigationState: AppState
 
     private final class Operation {
         let id = UUID().uuidString
@@ -188,10 +189,12 @@ final class CallActionCoordinator: ObservableObject {
          directAnswer: (@MainActor (CallAuthContext, String) -> Bool?)? = nil,
          currentAuth: (@MainActor () -> CallAuthContext)? = nil,
          currentCall: (@MainActor () -> CallLifecycleSnapshot)? = nil,
-         onMessage: (@MainActor (String) -> Void)? = nil, pollAttempts: Int = 3) {
+         onMessage: (@MainActor (String) -> Void)? = nil, pollAttempts: Int = 3,
+         navigationState: AppState = .shared) {
+        self.navigationState = navigationState
         self.directAnswer = directAnswer ?? { auth, sid in CallManager.shared.answerPreissuedIfPresent(auth: auth, callSid: sid) }
-        self.currentAuth = currentAuth ?? { AppState.shared.currentAuthContext() }
-        self.currentCall = currentCall ?? { AppState.shared.callLifecycleSnapshot }
+        self.currentAuth = currentAuth ?? { [navigationState] in navigationState.currentAuthContext() }
+        self.currentCall = currentCall ?? { [navigationState] in navigationState.callLifecycleSnapshot }
         self.sendAction = sendAction ?? { auth, sid, action, op, message in
             try await APIClient.shared.sendCallAction(callSid: sid, action: action, operationId: op,
                 message: message, contractorId: auth.contractorId, bearerToken: auth.bearerToken, sessionGeneration: auth.generation)
@@ -391,6 +394,25 @@ final class CallActionCoordinator: ObservableObject {
         return false
     }
 
+    private func isPermittedNavigationScope(
+        capturedScope: CallLifecycleSnapshot,
+        currentScope: CallLifecycleSnapshot,
+        callSid: String,
+        capturedAuth: CallAuthContext,
+        currentAuth: CallAuthContext
+    ) -> Bool {
+        guard capturedAuth == currentAuth, currentAuth.isValid else { return false }
+        if currentScope == capturedScope && capturedScope.permits(callSid) {
+            return true
+        }
+        if capturedScope.callSid.isEmpty &&
+           currentScope.callSid == callSid &&
+           currentScope.revision == capturedScope.revision + 1 {
+            return true
+        }
+        return false
+    }
+
     @discardableResult
     func validateAndNavigate(callSid: String, fallbackCallerName: String = "", fallbackCallerPhone: String = "", authContext: CallAuthContext? = nil) async -> Bool {
         synchronizeSession()
@@ -400,21 +422,28 @@ final class CallActionCoordinator: ObservableObject {
         var result: CallActionResult?
         do { result = try await getStatus(auth, callSid, "") } catch { }
         guard currentAuth() == auth, navigationRequest == request else { return false }
-        let sameScope = currentCall() == scope && scope.permits(callSid)
+        let isPermitted = isPermittedNavigationScope(
+            capturedScope: scope,
+            currentScope: currentCall(),
+            callSid: callSid,
+            capturedAuth: auth,
+            currentAuth: currentAuth()
+        )
         if let status = result, status.validNavigation(callSid: callSid, contractorId: auth.contractorId) {
-            if status.isActive && sameScope {
-                AppState.shared.setActiveCall(callSid: callSid, callerPhone: status.callerPhone ?? "", callerName: status.callerName ?? "", authContext: auth)
+            if status.isActive && isPermitted {
+                navigationState.setActiveCall(callSid: callSid, callerPhone: status.callerPhone ?? "", callerName: status.callerName ?? "", authContext: auth)
                 observeStatus(status, auth: auth)
-                if let transcript = status.transcript { AppState.shared.updateActiveCallTranscript(text: transcript, authContext: auth, callSid: callSid) }
-                AppState.shared.showActiveCall = true; AppState.shared.selectedTab = .live
+                if let transcript = status.transcript { navigationState.updateActiveCallTranscript(text: transcript, authContext: auth, callSid: callSid) }
+                navigationState.updateActiveCallReason(reason: status.screeningReason, authContext: auth, callSid: callSid)
+                navigationState.showActiveCall = true; navigationState.selectedTab = .live
                 return true
             }
-            if status.isEnded && sameScope && AppState.shared.activeCallSid == callSid { AppState.shared.clearActiveCall() }
+            if status.isEnded && isPermitted && navigationState.activeCallSid == callSid { navigationState.clearActiveCall() }
         }
         // A transport failure is unknown, not evidence of a finished call.
-        AppState.shared.notificationCallSid = callSid
-        AppState.shared.notificationCallMessage = result?.isEnded == true ? "" : "Live status unavailable. The call may still be active."
-        AppState.shared.selectedTab = .recents
+        navigationState.notificationCallSid = callSid
+        navigationState.notificationCallMessage = result?.isEnded == true ? "" : "Live status unavailable. The call may still be active."
+        navigationState.selectedTab = .recents
         return false
     }
 }

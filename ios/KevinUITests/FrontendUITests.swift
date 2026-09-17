@@ -23,11 +23,13 @@ final class FrontendUITests: XCTestCase {
         currentApp = nil
     }
 
-    private func launchApp(scenario: String) -> XCUIApplication {
+    private func launchApp(scenario: String, notification: String? = nil, announcement: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["APP_STORE_SCREENSHOT_SCENARIO"] = scenario
         app.launchEnvironment["KEVIN_NATIVE_UI_REVIEW"] = "1"
         app.launchEnvironment["KEVIN_UNIT_TESTS"] = "0"
+        app.launchEnvironment["KEVIN_REVIEW_NOTIFICATION"] = notification
+        if announcement { app.launchEnvironment["KEVIN_REVIEW_ANNOUNCEMENT"] = "1" }
         app.launchArguments = ["-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
         app.launch()
         self.currentApp = app
@@ -101,6 +103,22 @@ final class FrontendUITests: XCTestCase {
     }
 
     // MARK: - 1. Bounded History & Pagination UI
+
+    func testColdNotificationOpensFullTranscript() throws {
+        let app = launchApp(scenario: "business-live", notification: "cold")
+        XCTAssertTrue(app.buttons["call.liveDone"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["My water heater is leaking and I need someone today."].exists)
+    }
+
+    func testColdNotificationTakesPriorityOverAnnouncement() throws {
+        let app = launchApp(scenario: "business-live", notification: "cold", announcement: true)
+        XCTAssertTrue(app.buttons["call.liveDone"].waitForExistence(timeout: 8), "Notification must open the full transcript even when an announcement is due")
+    }
+
+    func testWarmNotificationTakesPriorityOverAnnouncement() throws {
+        let app = launchApp(scenario: "business-live", notification: "warm", announcement: true)
+        XCTAssertTrue(app.buttons["call.liveDone"].waitForExistence(timeout: 8), "Notification must dismiss the announcement and open the full transcript")
+    }
 
     func testBoundedHistoryPagination101AndExpansion() throws {
         executionTimeAllowance = 180
@@ -373,5 +391,89 @@ final class FrontendUITests: XCTestCase {
         let foundScreenAll = scrollToElement(screenAllToggle, in: app, direction: .down, requireHittable: false)
         XCTAssertTrue(foundScreenAll && screenAllToggle.exists, "Screen all calls toggle must exist")
         XCTAssertFalse(screenAllToggle.isEnabled, "Screen all calls toggle must be disabled in screenshot fixtures")
+    }
+
+    // MARK: - 10. Connected Call Screening Transcript and Persistent Controls
+
+    func testConnectedViewWithCapturedTranscriptAndControls() throws {
+        let app = launchApp(scenario: "connected-with-transcript")
+
+        // Connected in-call screen appears
+        let inCallView = app.otherElements["incall.view"]
+        XCTAssertTrue(inCallView.waitForExistence(timeout: 8), "In-call screen must be presented on connection")
+
+        // "Before you joined" section header is visible
+        let beforeJoinedLabel = app.staticTexts["incall.section.beforeJoined"]
+        XCTAssertTrue(beforeJoinedLabel.waitForExistence(timeout: 5), "'Before you joined' label must exist")
+
+        // Screening transcript bubbles are visible
+        let transcriptText = app.staticTexts["My water heater is leaking and I need someone today."]
+        XCTAssertTrue(transcriptText.waitForExistence(timeout: 5), "Screening transcript captured before pickup must be visible")
+
+        // Persistent call controls exist
+        let muteButton = app.buttons["incall.mute"]
+        let speakerButton = app.buttons["incall.speaker"]
+        let endButton = app.buttons["incall.end"]
+        XCTAssertTrue(muteButton.waitForExistence(timeout: 5) && muteButton.isHittable, "Mute button must exist")
+        XCTAssertTrue(speakerButton.waitForExistence(timeout: 5) && speakerButton.isHittable, "Speaker button must exist")
+        XCTAssertTrue(endButton.waitForExistence(timeout: 5) && endButton.isHittable, "End call button must exist")
+    }
+
+    func testConnectedViewEmptyTranscriptHonestMessage() throws {
+        let app = launchApp(scenario: "connected-empty")
+
+        // Connected in-call screen appears
+        let inCallView = app.otherElements["incall.view"]
+        XCTAssertTrue(inCallView.waitForExistence(timeout: 8), "In-call screen must be presented on connection")
+
+        // "Before you joined" section header is visible
+        let beforeJoinedLabel = app.staticTexts["incall.section.beforeJoined"]
+        XCTAssertTrue(beforeJoinedLabel.waitForExistence(timeout: 5), "'Before you joined' label must exist")
+
+        // Honest empty message is displayed
+        let emptyMessage = app.staticTexts["incall.emptyTranscript"]
+        XCTAssertTrue(emptyMessage.waitForExistence(timeout: 5), "Honest empty transcript message must be displayed")
+        XCTAssertEqual(emptyMessage.label, "No screening transcript was captured before you joined.")
+
+        // Persistent call controls still exist
+        XCTAssertTrue(app.buttons["incall.mute"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["incall.speaker"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["incall.end"].waitForExistence(timeout: 5))
+    }
+
+    // MARK: - 11. Transcript Scroll Preservation & Auto-Follow
+
+    private func openLongTranscript() -> XCUIApplication {
+        let app = launchApp(scenario: "long-transcript")
+        XCTAssertTrue(app.buttons["call.viewLive"].waitForExistence(timeout: 5))
+        app.buttons["call.viewLive"].tap()
+        XCTAssertTrue(app.buttons["call.liveDone"].waitForExistence(timeout: 5))
+        return app
+    }
+
+    func testScrolledTranscriptPreservesReadingPositionOnAppend() throws {
+        let app = openLongTranscript()
+        let firstLine = app.staticTexts["Hi, I have a major leak under my kitchen sink."]
+        let scroll = app.scrollViews.firstMatch
+        for _ in 0..<12 where !firstLine.isHittable { scroll.swipeDown() }
+        XCTAssertTrue(firstLine.isHittable)
+        let y = firstLine.frame.minY
+        let append = app.buttons["fixture.appendTranscript"]
+        append.tap()
+        let appended = expectation(for: NSPredicate(format: "value == '21'"), evaluatedWith: append)
+        wait(for: [appended], timeout: 5)
+        XCTAssertTrue(firstLine.isHittable, "Reading earlier text must not jump to the new line")
+        XCTAssertEqual(firstLine.frame.minY, y, accuracy: 2)
+    }
+
+    func testBottomTranscriptAutoFollowsOnAppend() throws {
+        let app = openLongTranscript()
+        let lastInitial = app.staticTexts["Appreciate your help with this."]
+        let atBottom = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: lastInitial)
+        wait(for: [atBottom], timeout: 5)
+        app.buttons["fixture.appendTranscript"].tap()
+        let appended = app.staticTexts["Newly appended live transcript update #21."]
+        let follows = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: appended)
+        wait(for: [follows], timeout: 5)
     }
 }

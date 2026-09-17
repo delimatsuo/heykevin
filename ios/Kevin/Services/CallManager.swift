@@ -144,7 +144,13 @@ class CallManager: NSObject, ObservableObject {
 
     private func prepareConnection(auth: CallAuthContext, sid: String, token: String, conference: String) {
         connectionAuth = auth; connectionSid = sid; connectionScope = AppState.shared.callLifecycleSnapshot
-        presentationLease = CallPresentationLease(auth: auth, scope: AppState.shared.callLifecycleSnapshot)
+        let lease = CallPresentationLease(auth: auth, scope: AppState.shared.callLifecycleSnapshot)
+        presentationLease = lease
+        AppState.shared.captureScreeningTranscript(for: lease)
+        if lease.isValid(auth: AppState.shared.currentAuthContext(), scope: AppState.shared.callLifecycleSnapshot) {
+            callerName = AppState.shared.activeCallerName
+            callerPhone = AppState.shared.activeCallerPhone
+        }
         pendingAccessToken = token; pendingConferenceName = conference
     }
     private func connectionIsCurrent(_ uuid: UUID) -> Bool {
@@ -190,10 +196,39 @@ class CallManager: NSObject, ObservableObject {
     }
     private func cleanup(uuid: UUID) {
         guard activeCallUUID == uuid else { return }
+        if let lease = presentationLease {
+            AppState.shared.clearScreeningTranscript(for: lease)
+        }
+        presentationLease = nil
         activeCall = nil; activeCallUUID = nil; answeringUUID = nil
         pendingAccessToken = nil; pendingConferenceName = nil; connectionAuth = nil; connectionScope = nil; connectionSid = ""
         isOnCall = false; isMuted = false; isSpeaker = false; callerName = ""; callerPhone = ""; callStartTime = nil
     }
+
+    #if DEBUG
+    @MainActor
+    func adoptFakeConnectionForTesting(
+        auth: CallAuthContext,
+        callSid: String,
+        callerName: String,
+        callerPhone: String,
+        startTime: Date = Date()
+    ) {
+        guard AppStoreScreenshotFixtures.isNativeUIReview else { return }
+        self.callerName = callerName
+        self.callerPhone = callerPhone
+        self.callStartTime = startTime
+        self.isOnCall = true
+        self.isMuted = false
+        self.isSpeaker = false
+        let lease = CallPresentationLease(auth: auth, scope: CallLifecycleSnapshot(callSid: callSid, revision: AppState.shared.callLifecycleRevision))
+        self.presentationLease = lease
+        self.connectionAuth = auth
+        self.connectionSid = callSid
+        self.connectionScope = AppState.shared.callLifecycleSnapshot
+        AppState.shared.captureScreeningTranscript(for: lease)
+    }
+    #endif
 }
 
 extension CallManager: CXProviderDelegate {

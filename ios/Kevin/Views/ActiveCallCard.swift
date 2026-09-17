@@ -352,6 +352,7 @@ struct LiveCallDetailView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject var coordinator = CallActionCoordinator.shared
+    @State private var visibleTranscriptIndex: Int?
     let lease: CallPresentationLease
     var onDone: (() -> Void)? = nil
 
@@ -369,7 +370,7 @@ struct LiveCallDetailView: View {
                 // Scrollable Live Transcript
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(spacing: 12) {
+                        LazyVStack(spacing: 12) {
                             if appState.transcriptLines.isEmpty {
                                 VStack(spacing: 8) {
                                     ProgressView()
@@ -385,12 +386,21 @@ struct LiveCallDetailView: View {
                                         .id(idx)
                                 }
                             }
+
                         }
+                        .scrollTargetLayout()
                         .padding(.horizontal, 16)
                         .padding(.vertical, 14)
                     }
-                    .onChange(of: appState.transcriptLines.count) { _, newCount in
-                        if newCount > 0 {
+                    .scrollPosition(id: $visibleTranscriptIndex, anchor: .bottom)
+                    .onAppear {
+                        if !appState.transcriptLines.isEmpty {
+                            proxy.scrollTo(appState.transcriptLines.count - 1, anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: appState.transcriptLines.count) { oldCount, newCount in
+                        // The old visible row records where the reader was before the append.
+                        if newCount > 0 && (visibleTranscriptIndex ?? oldCount) >= oldCount - 2 {
                             withAnimation {
                                 proxy.scrollTo(newCount - 1, anchor: .bottom)
                             }
@@ -418,6 +428,18 @@ struct LiveCallDetailView: View {
             .navigationTitle(String(localized: "Live Call"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                #if DEBUG
+                if AppStoreScreenshotFixtures.isNativeUIReview,
+                   AppStoreScreenshotFixtures.scenario == .longTranscript {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Append fixture line") {
+                            AppStoreScreenshotFixtures.appendReviewTranscript(appState)
+                        }
+                        .accessibilityIdentifier("fixture.appendTranscript")
+                        .accessibilityValue(String(appState.transcriptLines.count))
+                    }
+                }
+                #endif
                 ToolbarItem(placement: .confirmationAction) {
                     Button(String(localized: "Done")) {
                         onDone?()
@@ -640,10 +662,11 @@ struct LiveCallDetailView: View {
     }
 
     private var callerSubtitle: String {
-        if !appState.activeCallerName.isEmpty {
-            return PhoneFormatter.format(appState.activeCallerPhone)
+        let reason = appState.activeCallReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !reason.isEmpty {
+            return reason
         }
-        return String(localized: "Screened by Kevin")
+        return String(localized: "Finding out why they’re calling…")
     }
 
     private var formattedElapsed: String {

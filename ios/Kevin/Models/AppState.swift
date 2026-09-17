@@ -1,6 +1,12 @@
 import Foundation
 import Combine
 
+struct CapturedScreeningTranscript: Equatable, Sendable {
+    let lease: CallPresentationLease
+    let lines: [String]
+    let reason: String
+}
+
 enum AppTab {
     case live, recents, settings
 }
@@ -305,6 +311,8 @@ class AppState: ObservableObject {
     }
     @Published var activeCallerPhone: String = ""
     @Published var activeCallerName: String = ""
+    @Published var activeCallReason: String = ""
+    @Published private var capturedScreeningTranscript: CapturedScreeningTranscript? = nil
     @Published var showActiveCall: Bool = false
     @Published var transcriptLines: [TranscriptLine] = []
     @Published var callStartTime: Date? = nil
@@ -508,6 +516,8 @@ class AppState: ObservableObject {
             activeCallAuth = authContext
             activeCallerPhone = callerPhone
             activeCallerName = callerName
+            activeCallReason = ""
+            capturedScreeningTranscript = nil
             transcriptLines = []
             callIgnored = false
             callStartTime = Date()
@@ -516,6 +526,58 @@ class AppState: ObservableObject {
             activeCallerPhone = callerPhone
             activeCallerName = callerName
         }
+    }
+
+    /// Captures in-memory frozen screening transcript snapshot for the exact valid presentation lease
+    func captureScreeningTranscript(for lease: CallPresentationLease) {
+        let currentAuth = currentAuthContext()
+        let currentScope = callLifecycleSnapshot
+        guard lease.isValid(auth: currentAuth, scope: currentScope) else { return }
+        if let existing = capturedScreeningTranscript, existing.lease == lease {
+            return
+        }
+        capturedScreeningTranscript = CapturedScreeningTranscript(
+            lease: lease,
+            lines: transcriptLines.map(\.text),
+            reason: activeCallReason
+        )
+    }
+
+    /// Retrieves captured screening transcript only if matching a valid presentation lease
+    func screeningTranscript(for lease: CallPresentationLease) -> CapturedScreeningTranscript? {
+        guard let snapshot = capturedScreeningTranscript,
+              snapshot.lease == lease,
+              lease.isValid(auth: currentAuthContext(), scope: callLifecycleSnapshot) else {
+            return nil
+        }
+        return snapshot
+    }
+
+    /// Clears captured screening transcript scoped to its own presentation lease
+    func clearScreeningTranscript(for lease: CallPresentationLease) {
+        if let current = capturedScreeningTranscript, current.lease == lease {
+            capturedScreeningTranscript = nil
+        }
+    }
+
+    /// Updates active call reason with origin auth and owned SID validation
+    func updateActiveCallReason(reason: String, authContext: CallAuthContext, callSid: String) {
+        guard let origin = activeCallAuth,
+              origin == authContext,
+              origin == currentAuthContext(),
+              origin.isValid,
+              activeCallSid == callSid,
+              !callSid.isEmpty else {
+            return
+        }
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.activeCallReason = trimmed == "Speaking with Kevin" ? "" : String(trimmed.prefix(160))
+    }
+
+    /// Updates active call reason using presentation lease
+    func updateActiveCallReason(reason: String, lease: CallPresentationLease) {
+        guard lease.isValid(auth: currentAuthContext(), scope: callLifecycleSnapshot) else { return }
+        updateActiveCallReason(reason: reason, authContext: lease.auth, callSid: lease.scope.callSid)
     }
 
     /// Updates active call transcript with origin auth and owned SID validation
@@ -560,6 +622,8 @@ class AppState: ObservableObject {
         activeCallSid = ""
         activeCallerPhone = ""
         activeCallerName = ""
+        activeCallReason = ""
+        capturedScreeningTranscript = nil
         showActiveCall = false
         transcriptLines = []
         callStartTime = nil

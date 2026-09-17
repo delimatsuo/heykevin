@@ -58,6 +58,7 @@ final class LiveCallObserver: ObservableObject {
             if let text = status.transcript {
                 AppState.shared.updateActiveCallTranscript(text: text, authContext: auth, callSid: status.callSid)
             }
+            AppState.shared.updateActiveCallReason(reason: status.screeningReason, authContext: auth, callSid: status.callSid)
         },
         clearActiveCall: @escaping ClearActiveCallEffect = { sid, auth in
             guard AppState.shared.currentAuthContext() == auth else { return }

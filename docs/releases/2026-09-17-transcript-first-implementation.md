@@ -8,7 +8,8 @@ cards mixed into the light interface. The accepted contract is in
 
 Base main: `04d796a5c0e1af1b48fb930fb925374082504a7f`.
 Reviewed production implementation: `c9a4828d03a200b8dc01a9201f2ab3a1d8bf9375`.
-Later commits strengthen the connected UI assertion and record evidence only.
+Subsequent commits strengthen the connected UI assertion, restore prompt
+notification completion, and record evidence.
 Worktree: `.worktrees/transcript-first-entry`; branch `codex/transcript-first-entry`.
 
 Notification body/read actions enter the exact authenticated call's full
@@ -107,6 +108,23 @@ connection, mute/speaker/end behavior, and live speech timing remain open.
 VoiceOver qualification remains deferred by the owner. No physical pass is
 inferred from simulator or source results.
 
+## GitHub review follow-up
+
+Initial PR #261 HEAD `5616651fe3e1297db77ffd27db852fb0d03e8f8c` passed all nine
+CI jobs in run `35236138645`; both deploy jobs were skipped. Codex's exact-head
+review found a valid P2: notification delegate completion had moved inside the
+async network task. Status/action requests and reconciliation polls could delay
+that callback. The follow-up restores completion immediately after task creation,
+as the previous implementation did, while captured-session validation remains
+inside the foreground task. No call action or navigation is skipped. The app
+compiled and all ten focused NotificationEntryTests passed with zero failures
+or skips in `kevin-notification-completion-20260917T145510Z-17754`.
+
+The optional Cursor security review could not start because its integration
+required a usage-based billing allowance. It is unavailable evidence, not a
+security pass; no billing settings were changed. Independent source reviews and
+Codex review remain the review evidence for this slice.
+
 ## CI envelope
 
 Read-only check at 2026-09-17 14:37 UTC: public `delimatsuo/heykevin`, personal
@@ -138,7 +156,7 @@ Input tokens: 1118520
 Output tokens: 169125
 Total tokens: 1287645
 Retries: 0 builder dispatch retries
-Audit defects found: 8 categories — captured-session handling, invalid test seams/fixtures, scroll anchoring, stale reason-lease writes, unbounded optional metadata delay, pickup caller identity, propagated test identifiers, and a hidden-background transcript assertion
+Audit defects found: 9 categories — captured-session handling, invalid test seams/fixtures, scroll anchoring, stale reason-lease writes, unbounded optional metadata delay, pickup caller identity, propagated test identifiers, a hidden-background transcript assertion, and notification completion coupled to network waits
 Audit disposition: remediated and independently reviewed; runtime limitations stated above
 
 ## Release boundary

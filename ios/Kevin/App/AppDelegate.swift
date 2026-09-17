@@ -186,8 +186,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 userInfo: userInfo,
                 authContext: auth
             )
-            completionHandler()
         }
+        // Foreground navigation/actions continue in the task; never hold the
+        // notification callback through status, action or reconciliation waits.
+        completionHandler()
     }
 
     // MARK: - Notification Categories

@@ -3,8 +3,9 @@
 All times in this record are UTC.
 
 **Deployment complete:** staging and production serve the approved source with
-100% traffic. Production was independently verified at **17:36:33Z**; phone
-and received-SMS acceptance remain open.
+100% traffic. Production was independently verified at **17:36:33Z**. The owner
+subsequently confirmed the SMS fix working on September 17; the separate call
+and frontend phone checks remain open.
 
 ## Approved scope
 
@@ -155,10 +156,13 @@ migration rollback is needed; a rollback cannot recall already delivered SMS.
 The later release-status and authorization-rule documentation changes do not
 alter the backend or iOS trees and do not require another deployment or upload.
 
-## Acceptance still open
+## Owner acceptance
 
-- [ ] The owner receives an actual post-call SMS and confirms its first line is
-  `Hey Kevin: Call summary` with the expected caller details.
+- [x] Owner-reported SMS receipt and identification passed on September 17.
+  After being asked to check new post-call summaries beginning with
+  `Hey Kevin: Call summary`, Deli replied: “tested. All working. What's next?”
+  This records acceptance of the SMS fix; the separate build 42 call checks
+  below require their own results.
 - [ ] On installed build 42, the owner observes the reason when it becomes
   available on the exact live call; unavailable reason retains the honest fallback.
 - [ ] Existing N1/N3 phone acceptance remains open. Backend health, CI and mocks

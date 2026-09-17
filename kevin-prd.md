@@ -151,8 +151,8 @@ when the remaining text is translated. Use neutral call wording instead of
 labeling an AI-screened call as missed. The [bounded implementation contract](docs/superpowers/plans/2026-09-17-owner-sms-identity.md)
 preserves recipient ownership and caller-facing messages. The
 [backend rollout](docs/releases/2026-09-17-owner-sms-identity-backend.md) is verified
-in production; receipt of an actual branded SMS remains open. No new iOS build
-or Twilio number change was required.
+in production, and the owner confirmed the SMS fix working on September 17.
+No new iOS build or Twilio number change was required.
 
 ### N3 — Deliver the approved native frontend with bounded history
 

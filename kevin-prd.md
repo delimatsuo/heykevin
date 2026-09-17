@@ -173,6 +173,16 @@ records the expert panel, competitor research and verification contract.
 
 **Delivery acceptance:**
 
+September 17 scope extension: the owner approved the expert-reviewed
+[transcript-first notification workflow](docs/superpowers/plans/2026-09-17-transcript-first-entry.md).
+Notification body/Read transcript opens the full exact-call conversation;
+Take a message uses the existing action on that screen; pickup retains captured
+screening text labeled Before you joined beside the connected call controls.
+Show the existing server screening reason when available and preserve scroll
+position while reading earlier lines. The compact card remains an optional
+dashboard entry. Source implementation and physical phone acceptance are
+separate; no new release or provider activation is implied by this approval.
+
 - [x] Owner approved the expert-reviewed design and bounded-history direction.
 - [x] Native unit, lifecycle/ownership mutation and fixture UI checks pass.
       The [release record](docs/releases/2026-09-15-native-frontend-ios-39.md)

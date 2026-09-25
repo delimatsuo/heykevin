@@ -12,6 +12,13 @@ updated screenshots. Apple reports **WAITING_FOR_REVIEW** and release remains
 This supersedes the internal-only authorization and no-submission status above
 for this release. No binary was uploaded again; unperformed phone checks stay open.
 
+**Later public-release observation, September 25 at 12:49:41 UTC:** the public
+US lookup confirms **1.3.2**, released **2026-09-18T14:56:03Z**. The
+[dated public-release update](2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026)
+separately records the September 25 authenticated version/build and review
+readback. The existing package is
+unchanged; every owner phone checkbox below remains open.
+
 ## Authorization and compatibility
 
 The owner said “ok, continue” after the source merge report named a new test

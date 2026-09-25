@@ -5,6 +5,44 @@ at **2026-09-17T18:32:28Z**. All six updated screenshots are processed and
 included. Release policy is **AFTER_APPROVAL**. Submission is not Apple approval
 or public availability.
 
+## Public-release update — September 25, 2026
+
+The [public US lookup](https://itunes.apple.com/lookup?id=6761427495&country=us)
+at **2026-09-25T12:49:41Z** returns app **6761427495**, bundle
+`com.kevin.callscreen`, version **1.3.2**, and release time
+**2026-09-18T14:56:03Z**. This establishes public version availability and
+supersedes the September 17 public lookup below, which still returned 1.3.1.
+
+At **2026-09-25T13:45:15Z**, signed-in App Store Connect displayed
+**1.3.2 Ready for Distribution**, with build
+`a81a22cf-cf59-43c8-889e-3f0774df9bea` (**42**) selected. Its gallery displayed
+the same six screenshots in the order recorded below. **Automatically release
+this version** remained selected. The App Review page listed the exact
+submission `f5b9b307-d6d1-4a42-ae6a-8c17ea2bf1fd` for iOS 1.3.2 as
+**Review Completed**. These are current UI observations; they agree with the
+September 24 authenticated API readback recorded in the handoff, which reported
+version `c8a5941a-cf13-4848-b765-2d6d0c3a2e0c` as `READY_FOR_SALE`, the same
+build, review `COMPLETE`, release policy `AFTER_APPROVAL`, and six screenshots
+`COMPLETE` at **2026-09-24T23:25:47Z**.
+
+Production [health](https://kevin-api-752910912062.us-central1.run.app/health)
+at **2026-09-25T12:49:41Z** returns `status=ok`, `environment=production`,
+revision `kevin-api-00273-f7g`, and
+`deploy_sha=2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`. This confirms the
+reported backend identity; it does not repeat the earlier traffic/runtime audit
+or prove live-call behavior.
+
+The documentation reconciliation starts from merged main
+`37dc7fe7e1e40ed40d7c17dfd9934b437ddb48ce`. Its iOS tree remains
+`7dc72a8660313def1efe8fc217e28664ce2b41fd`, matching the packaged source below.
+The dated September 17 submission, screenshot provenance and package evidence
+are preserved. No new binary, submission or provider change is needed.
+
+All [build 42 owner phone checks](2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
+and unperformed N1/N3 rows stay open. Public availability does not prove the
+installed build, locked-screen notification behavior, CallKit, audio, transcript
+navigation or natural speech timing. VoiceOver remains deferred by the owner.
+
 ## Authorization and scope
 
 The owner said “go ahead and upload” after the recommendation to submit build

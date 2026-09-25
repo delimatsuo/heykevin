@@ -77,6 +77,25 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    /// An authorization change in iOS Settings does not relaunch the app, and
+    /// a previously cached token does not prove registration is still usable.
+    /// Re-register on activation so enabling permission repairs that path.
+    @MainActor
+    static func recoverPushRegistrationOnActive(
+        status: UNAuthorizationStatus,
+        requestAuthorization: () -> Void = { requestPushAuthorization() },
+        registerForRemoteNotifications: () -> Void = { UIApplication.shared.registerForRemoteNotifications() }
+    ) {
+        switch status {
+        case .notDetermined:
+            requestAuthorization()
+        case .authorized, .provisional:
+            registerForRemoteNotifications()
+        default:
+            break
+        }
+    }
+
     // Got device token for regular push notifications
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()

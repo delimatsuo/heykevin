@@ -67,12 +67,12 @@ struct KevinApp: App {
                 // fires once the user is already onboarded, so they have seen
                 // what Kevin does before the system alert appears.
                 if appState.isOnboarded {
-                    Task {
+                    Task { @MainActor in
                         let status = await UNUserNotificationCenter.current()
                             .notificationSettings().authorizationStatus
-                        if status == .notDetermined {
-                            AppDelegate.requestPushAuthorization()
-                        }
+                        AppDelegate.recoverPushRegistrationOnActive(
+                            status: status
+                        )
                     }
                 }
 

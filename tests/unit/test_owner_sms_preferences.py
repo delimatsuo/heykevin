@@ -589,3 +589,19 @@ async def test_owner_estimate_has_no_generic_sender_fallback(monkeypatch):
     await send_estimate_notifications("", {"owner_phone": "+12025550123"}, "CA_test", "test-hash", send_sms_fn=generic)
     generic.assert_not_awaited()
     owner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write_raises", [False, True])
+async def test_sync_provider_opt_out_persistence_failure_is_not_successful_suppression(monkeypatch, write_raises):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    account = {"contractor_id": "c1", "owner_phone": "+12025550123", "twilio_number": "+12025550199"}
+    monkeypatch.setattr(contractor_db, "get_contractor", AsyncMock(return_value=account))
+    create = Mock(side_effect=TwilioRestException(status=400, uri="/test", msg="blocked", code=21610))
+    monkeypatch.setattr(owner_sms_service, "Client", lambda *a: SimpleNamespace(messages=SimpleNamespace(create=create)))
+    transition = AsyncMock(side_effect=RuntimeError("unavailable")) if write_raises else AsyncMock(return_value=(False, {"error": "write failed"}))
+    monkeypatch.setattr(owner_sms_db, "apply_owner_sms_consent_transition", transition)
+    assert await owner_sms_service.send_owner_sms("c1", "Completed summary") is False
+    create.assert_called_once()  # Surface failure without retrying a blocked recipient.
+    transition.assert_awaited_once()

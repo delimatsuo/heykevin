@@ -127,7 +127,7 @@ async def send_owner_sms(contractor_id: str, body: str) -> Optional[bool]:
             logger.warning("Owner SMS provider error code=21610 type=TwilioRestException")
             dedupe_key = f"sync:{uuid.uuid4()}"
             try:
-                await owner_sms_db.apply_owner_sms_consent_transition(
+                persisted, _ = await owner_sms_db.apply_owner_sms_consent_transition(
                     clean_cid,
                     opt_out=True,
                     source="provider_21610_sync",
@@ -136,8 +136,12 @@ async def send_owner_sms(contractor_id: str, body: str) -> Optional[bool]:
                     expected_owner_phone=owner_phone,
                     expected_twilio_number=twilio_number,
                 )
+                if not persisted:
+                    logger.error("Failed to persist sync 21610 opt-out: transition rejected")
+                    return False
             except Exception as sync_err:
                 logger.error("Failed to persist sync 21610 opt-out: %s", type(sync_err).__name__)
+                return False
             return None
         logger.warning("Owner SMS provider error code=%s type=%s", code, type(e).__name__)
         return False

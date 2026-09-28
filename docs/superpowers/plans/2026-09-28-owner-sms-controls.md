@@ -50,6 +50,8 @@ can finish. Existing caller-facing SMS/MMS gates stay separate.
 Owner texts retain the configured Messaging Service and explicit Kevin sender,
 and append `Reply STOP to stop texts.` outside generated/translated content.
 Both synchronous and asynchronous Twilio 21610 failures persist the provider block.
+A rejected or failed persistence is reported as an actual failure, without
+retrying a blocked recipient; only confirmed transitions count as suppression.
 The per-message status callback uses the existing Twilio signature validator,
 including its contractor/revision query. No new secret or provider configuration
 is needed by this source change.
@@ -82,8 +84,9 @@ Kevin number; turning on the app switch cannot clear STOP.
 - 201 focused backend regression tests passed across SMS consent/delivery,
   post-call lifecycle/operations, estimates, number release, caller messaging,
   call status and inbound messages, with external network/Firestore access denied.
-- A final 48-test owner SMS run passed after adding voicemail suppression coverage
-  and restoring all mutation probes. This overlaps the regression suite.
+- A final 54-test owner SMS/consent/delivery run passed after voicemail coverage
+  and synchronous provider-block persistence failure tests. All mutation probes
+  were restored. This overlaps the regression suite.
 - All 350 Kevin iOS unit tests passed on Kevin-Native-Review (iOS 26.0) through
   `xcodebuild-external`, including 21 SMS preference tests. XcodeGen regenerated
   the checked-in project.

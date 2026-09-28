@@ -1,9 +1,9 @@
 # SMS release preparation — iOS 1.3.3 (44)
 
-**The reviewed backend is deployed to staging. Production was dispatched;
+**The reviewed backend is now deployed and verified in production.
 App Store 1.3.3 (44) is prepared but has not been submitted to Apple review.**
-This is a preparation checkpoint, not production or physical-phone acceptance.
-All timestamps are UTC.
+Owner phone checks for SMS delivery and opt-out behavior remain pending. All
+timestamps are UTC.
 
 The owner authorized these commands after the release-readiness checklist.
 The owner also confirmed that a call they pick up needs no summary SMS. That
@@ -56,13 +56,37 @@ at the release source. [Production run 36488930257](https://github.com/delimatsu
 was dispatched from main with `target=production` and without `candidate_sha`.
 All nine validation jobs passed. Readback confirmed `Deploy to Production`
 waiting for environment `production` (`13924929328`), with `delimatsuo` as the
-required reviewer. Its approval and deployment completion remain outstanding at
-this checkpoint.
+required reviewer at the initial checkpoint. The owner subsequently reported
+completion; GitHub's approval history confirms `delimatsuo` approved that exact
+environment. The workflow then completed successfully for the release source.
 
 The current **owner-supplied AGENTS.md instructions in this conversation** say:
 “only Deli approves it, never an agent and never via the API.” Those newer
 instructions override the older September 17 agent-approval text in repository
 guidance. The agent did not approve the production environment.
+
+### Production verification
+
+Live readback and smoke checks at `22:20:12Z` verified:
+
+- `kevin-api-00274-5fv` receives 100% of production traffic and is Ready.
+- Both the canonical production URL and Cloud Run service URL return healthy
+  responses with source `56de9e64a11de0819a5101ca12298aa1d2032ce5`, the expected
+  environment, service and revision.
+- Compared with prior revision `kevin-api-00273-f7g`, the runtime service account
+  and all 58 environment entries were preserved except `DEPLOY_SHA`. Values were
+  compared in memory using hashes; credentials were not printed or copied into
+  this receipt.
+- Admin HTML, CSS and JavaScript return 200. Unsigned empty requests to the
+  inbound SMS and owner SMS status webhooks return 403. An unauthenticated
+  synthetic contractor lookup returns 401. These probes send no texts.
+- No error, worker-error, traceback or exception-type entries were found for the
+  new revision in the inspected 30-minute log window.
+
+The production image is
+`us-central1-docker.pkg.dev/kevin-491315/cloud-run-source-deploy/kevin-api@sha256:cbed472ff7609b787db07ab6c45e63af9e8ad0c4d341b5fa6ed230b2f6364880`.
+This confirms backend deployment and the bounded server checks above, not SMS
+delivery, authenticated app preference behavior, or phone notification delivery.
 
 ## App Store preparation
 
@@ -95,16 +119,22 @@ The latest public version remains 1.3.2 at this checkpoint. READY_FOR_REVIEW
 describes the editable submission draft; it does not mean WAITING_FOR_REVIEW,
 approval, or public availability.
 
+After production verification, the existing English TestFlight notes for build
+44 were updated to state that the matching backend is live and to describe the
+completed-call, app-off, STOP/START and locked-phone checks. Apple readback matched
+the exact notes. Localization ID: `f45ddb27-4bee-4cb3-924c-261a0db9e675`;
+notes SHA-256:
+`775c256b0b538dfc30846954a99079af3c919aa25119c547fdf7a62965f6406d`.
+No build or testing-group assignment changed. App Review submission is still
+pending the phone checks.
+
 ## Remaining release checks
 
-1. Deli approves the production environment in the linked production run.
-2. Verify its completed workflow, live SHA/revision, preserved runtime settings,
-   HTTP security checks and worker logs before asking for phone acceptance.
-3. Owner tests a call Kevin handles through hang-up and confirms the summary SMS
+1. Owner tests a call Kevin handles through hang-up and confirms the summary SMS
    arrives afterward. Confirm the app switch disables owner texts, STOP blocks
    them, and START does not override an app switch left off. Confirm notification
    recovery on the phone; source tests do not establish delivery.
-4. Submit the prepared Apple review submission after acceptance, then read back
+2. Submit the prepared Apple review submission after acceptance, then read back
    its actual review state. Manual release keeps public publication separate.
 
 No database migration, new secret, new provider configuration or feature flag

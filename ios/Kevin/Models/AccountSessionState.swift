@@ -1,5 +1,13 @@
 import Foundation
 
+/// One atomic Keychain value preserves the verified recovery target even if
+/// the process stops before writing the first individual credential.
+struct AccountRecoveryCheckpoint: Codable, Equatable {
+    let contractorId: String
+    let appleUserId: String
+    let allowsUnfinishedSetup: Bool
+}
+
 /// Observable lifecycle and authentication readiness state for an account session.
 enum AccountSessionState: Equatable, Sendable {
     /// Initial unverified state before secure storage and keychain are checked.
@@ -8,7 +16,7 @@ enum AccountSessionState: Equatable, Sendable {
     case notOnboarded
     /// Authenticated session with valid, nonempty contractor ID and API token.
     case ready
-    /// Onboarded installation lacking one or both credentials (e.g. after phone migration or session expiration).
+    /// Missing credentials or an interrupted existing-account restore.
     case needsRecovery
     /// Secure storage is temporarily locked or inaccessible (e.g. before first device unlock).
     case storageUnavailable(reason: String)

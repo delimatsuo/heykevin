@@ -67,6 +67,7 @@ class AppState: ObservableObject {
     private var inMemoryBearerToken = ""
     private var inMemoryGeneration = 0
     private(set) var recoveryCommitPending = false
+    private(set) var pendingAccountRecovery: AccountRecoveryCheckpoint?
     private static let recoveryMarkerKey = "accountRecoveryCommit"
 
     private static func migrateToKeychain(_ key: String) -> String {
@@ -657,21 +658,29 @@ class AppState: ObservableObject {
     /// A marker is written before any credential replacement. An interrupted
     /// multi-item Keychain commit must remain in recovery on the next launch.
     @MainActor
-    func beginAccountRecovery() {
+    func beginAccountRecovery(checkpoint: AccountRecoveryCheckpoint? = nil) {
+        let checkpoint = checkpoint ?? pendingAccountRecovery ?? AccountRecoveryCheckpoint(
+            contractorId: contractorId, appleUserId: appleUserId, allowsUnfinishedSetup: false)
         recoveryCommitPending = true
+        pendingAccountRecovery = checkpoint
         isRegistered = false
-        sessionState = isOnboarded ? .needsRecovery : .notOnboarded
-        if (!inMemory || injectedSecureStore != nil) && !inScreenshotFixture {
-            _ = secureStore.save(Self.recoveryMarkerKey, value: "pending")
+        sessionState = checkpoint.allowsUnfinishedSetup && !isOnboarded ? .notOnboarded : .needsRecovery
+        if (!inMemory || injectedSecureStore != nil) && !inScreenshotFixture,
+           let data = try? JSONEncoder().encode(checkpoint), let marker = String(data: data, encoding: .utf8) {
+            _ = secureStore.save(Self.recoveryMarkerKey, value: marker)
         }
     }
 
     @MainActor
-    func persistRecoveredCredentials(_ values: [String: String]) -> Bool {
+    func persistRecoveredCredentials(_ values: [String: String], checkpoint: AccountRecoveryCheckpoint? = nil) -> Bool {
+        let checkpoint = checkpoint ?? AccountRecoveryCheckpoint(contractorId: values["contractorId"] ?? "",
+            appleUserId: values["appleUserId"] ?? "", allowsUnfinishedSetup: false)
         recoveryCommitPending = true
+        pendingAccountRecovery = checkpoint
         if inMemory && injectedSecureStore == nil { return true }
-        guard secureStore.save(Self.recoveryMarkerKey, value: "pending"),
-              secureStore.read(Self.recoveryMarkerKey) == .value("pending") else { return false }
+        guard let data = try? JSONEncoder().encode(checkpoint), let marker = String(data: data, encoding: .utf8),
+              secureStore.save(Self.recoveryMarkerKey, value: marker),
+              secureStore.read(Self.recoveryMarkerKey) == .value(marker) else { return false }
         for key in values.keys.sorted() {
             guard let value = values[key], secureStore.save(key, value: value),
                   secureStore.read(key) == .value(value) else { return false }
@@ -694,6 +703,7 @@ class AppState: ObservableObject {
             CallSessionEpoch.shared.advance()
         }
         recoveryCommitPending = false
+        pendingAccountRecovery = nil
         needsReauth = false
         isRegistered = false
         sessionState = isOnboarded ? .ready : .notOnboarded
@@ -703,10 +713,33 @@ class AppState: ObservableObject {
     @MainActor
     func refreshSecureStorageForActiveUse() {
         if inScreenshotFixture { sessionState = .ready; return }
-        guard isOnboarded else { sessionState = .notOnboarded; return }
-        if inMemory && injectedSecureStore == nil { return }
+        if inMemory && injectedSecureStore == nil {
+            if !isOnboarded && !recoveryCommitPending { sessionState = .notOnboarded }
+            return
+        }
 
         let marker = secureStore.read(Self.recoveryMarkerKey)
+        let storedCheckpoint: AccountRecoveryCheckpoint?
+        switch marker {
+        case .missing, .value("complete"): storedCheckpoint = nil
+        case .value("pending"):
+            storedCheckpoint = AccountRecoveryCheckpoint(contractorId: "", appleUserId: "", allowsUnfinishedSetup: false)
+        case .value(let value):
+            guard let data = value.data(using: .utf8),
+                  let checkpoint = try? JSONDecoder().decode(AccountRecoveryCheckpoint.self, from: data),
+                  !checkpoint.allowsUnfinishedSetup || (!checkpoint.contractorId.isEmpty && !checkpoint.appleUserId.isEmpty) else {
+                sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+                return
+            }
+            storedCheckpoint = checkpoint
+        case .error:
+            sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+            return
+        }
+        let pending = recoveryCommitPending ? pendingAccountRecovery : storedCheckpoint
+        // A clean installation can also contain an interrupted returning-user
+        // commit. Inspect it before permitting ordinary onboarding.
+        guard isOnboarded || pending != nil else { sessionState = .notOnboarded; return }
         var reads = Dictionary(uniqueKeysWithValues: Self.keychainBackedKeys.map { ($0, secureStore.read($0)) })
         for result in [marker] + Array(reads.values) {
             if case .error = result {
@@ -724,16 +757,19 @@ class AppState: ObservableObject {
         }
         // Surviving identity constrains recovery even if the other credential
         // is missing after an initially unavailable Keychain read.
-        if let cid = reads["contractorId"]?.stringValue, !cid.isEmpty, contractorId != cid { contractorId = cid }
-        if let apple = reads["appleUserId"]?.stringValue, !apple.isEmpty, appleUserId != apple { appleUserId = apple }
-        if recoveryCommitPending || marker == .value("pending") {
+        let retainedId = pending.flatMap { $0.contractorId.isEmpty ? nil : $0.contractorId } ?? reads["contractorId"]?.stringValue
+        let retainedApple = pending.flatMap { $0.appleUserId.isEmpty ? nil : $0.appleUserId } ?? reads["appleUserId"]?.stringValue
+        if let cid = retainedId, !cid.isEmpty, contractorId != cid { contractorId = cid }
+        if let apple = retainedApple, !apple.isEmpty, appleUserId != apple { appleUserId = apple }
+        if let pending {
             if !recoveryCommitPending {
                 // After an interrupted commit, the stored ID may be staged.
                 // Cached consent cannot establish its original owner.
                 contactsUploadConsent = false
             }
             recoveryCommitPending = true
-            sessionState = .needsRecovery
+            pendingAccountRecovery = pending
+            sessionState = pending.allowsUnfinishedSetup && !isOnboarded ? .notOnboarded : .needsRecovery
             return
         }
         guard let cid = reads["contractorId"]?.stringValue, !cid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

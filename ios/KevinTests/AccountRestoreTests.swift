@@ -223,6 +223,55 @@ final class AccountRestoreTests: XCTestCase {
         }
     }
 
+    func testInterruptedCleanInstallRestoreRetainsPurposeAndIdentityBeforeFirstCredentialWrite() async {
+        for number in ["+15005550006", ""] {
+            let h = Harness(); h.state.isOnboarded = false; h.state.contractorId = ""
+            h.state.appleUserId = ""; h.state.kevinNumber = ""; h.profile?["twilio_number"] = number
+            h.store.failingKey = "appleUserId"
+            guard case .failed = await h.restore(recovery: false) else { return XCTFail("Partial commit accepted") }
+            XCTAssertNil(h.store.values["contractorId"])
+            let restarted = AppState(inMemory: true, secureStore: h.store.client)
+            restarted.contactsUploadConsent = true
+            restarted.refreshSecureStorageForActiveUse()
+            XCTAssertEqual(restarted.sessionState, number.isEmpty ? .notOnboarded : .needsRecovery)
+            XCTAssertEqual(restarted.pendingAccountRecovery?.allowsUnfinishedSetup, number.isEmpty)
+            XCTAssertEqual(restarted.contractorId, "owner"); XCTAssertEqual(restarted.appleUserId, "apple")
+            XCTAssertFalse(restarted.contactsUploadConsent)
+            var lookup: AppleLookupResult = .found(contractorId: "owner", apiToken: "new-token")
+            let coordinator = AccountRestoreCoordinator(state: restarted,
+                lookupHandler: { _, _ in lookup }, profileFetcher: { _, _ in h.profile },
+                notificationReconciler: {}, contactSyncHandler: { _ in XCTFail("Restored unowned consent") })
+            func retry(apple: String = "apple") async -> AccountRestoreOutcome {
+                // Even an ordinary onboarding caller must honor the checkpoint.
+                await coordinator.restoreAccount(appleUserId: apple, appleIdentityToken: "fresh",
+                    isRecoveryMode: false, attemptRevision: coordinator.beginAttempt()!)
+            }
+            guard case .failed = await retry(apple: "wrong-apple") else { return XCTFail("Wrong Apple identity accepted") }
+            lookup = .found(contractorId: "wrong", apiToken: "wrong")
+            guard case .failed = await retry() else { return XCTFail("Wrong account accepted") }
+            lookup = .notFound
+            guard case .notFound = await retry() else { return XCTFail("Pending commit allowed new account") }
+            let newResponse: [String: Any] = ["status": "ok", "contractor_id": "another", "api_token": "token"]
+            let bootstrap = await coordinator.restoreBootstrapResponse(newResponse,
+                appleUserId: "apple", appleIdentityToken: "fresh", attemptRevision: coordinator.beginAttempt()!)
+            guard case .failed = bootstrap else { return XCTFail("Pending commit accepted new bootstrap account") }
+            lookup = .found(contractorId: "owner", apiToken: "new-token")
+            if !number.isEmpty {
+                h.profile?["twilio_number"] = ""
+                guard case .failed = await retry() else { return XCTFail("Existing-number recovery allowed provisioning") }
+                h.profile?["twilio_number"] = number
+            }
+            h.store.failingKey = "contractorApiToken"
+            guard case .failed = await retry() else { return XCTFail("Second partial commit accepted") }
+            XCTAssertEqual(restarted.pendingAccountRecovery?.allowsUnfinishedSetup, number.isEmpty)
+            h.store.failingKey = nil
+            let recovered = await retry()
+            XCTAssertEqual(recovered, .success(contractorId: "owner", needsProvisioning: number.isEmpty))
+            XCTAssertEqual(restarted.sessionState, number.isEmpty ? .notOnboarded : .ready)
+            XCTAssertNil(restarted.pendingAccountRecovery)
+        }
+    }
+
     func testLateProfileCannotRestoreAfterAccountChangesBackToOriginalId() async {
         let h = Harness(); let entered = expectation(description: "profile entered")
         var continuation: CheckedContinuation<[String: Any]?, Never>?

@@ -152,4 +152,30 @@ final class AccountSessionRecoveryTests: XCTestCase {
         state.refreshSecureStorageForActiveUse()
         XCTAssertEqual(state.sessionState, .notOnboarded)
     }
+
+    func testPendingExistingAccountCommitPrecedesUnfinishedOnboardingAfterRestart() {
+        let store = RecoveryTestKeychain(); store.failingKey = "appleUserId"
+        let state = AppState(inMemory: true, secureStore: store.client)
+        XCTAssertFalse(state.persistRecoveredCredentials(["contractorId": "owner", "appleUserId": "apple", "contractorApiToken": "token"]))
+        XCTAssertNil(store.values["contractorId"])
+        let restarted = AppState(inMemory: true, secureStore: store.client)
+        restarted.contactsUploadConsent = true
+        restarted.refreshSecureStorageForActiveUse()
+        XCTAssertEqual(restarted.sessionState, .needsRecovery)
+        XCTAssertFalse(restarted.isOnboarded)
+        XCTAssertEqual(restarted.contractorId, "owner")
+        XCTAssertEqual(restarted.appleUserId, "apple")
+        XCTAssertFalse(restarted.contactsUploadConsent)
+    }
+
+    func testUnavailableMarkerOnFreshInstallStaysUnavailableWithoutWrites() {
+        let store = RecoveryTestKeychain(); store.readError = errSecInteractionNotAllowed
+        let state = AppState(inMemory: true, secureStore: store.client)
+        state.refreshSecureStorageForActiveUse()
+        XCTAssertTrue(state.sessionState.isUnavailable)
+        XCTAssertTrue(store.writes.isEmpty)
+        store.readError = nil
+        state.refreshSecureStorageForActiveUse()
+        XCTAssertEqual(state.sessionState, .notOnboarded)
+    }
 }

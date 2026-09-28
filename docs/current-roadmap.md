@@ -1,7 +1,7 @@
 # Hey Kevin — Current Roadmap and Release Status
 
-**Reconciled:** 2026-09-25
-**Backend implementation baseline:** `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`
+**Reconciled:** 2026-09-28
+**Backend implementation baseline:** `f45fa6295cfcd290f4c6df2532318f1eb79dfa57` (registration repair; production approval pending)
 **Repository:** `delimatsuo/heykevin`
 
 The [current PRD](../kevin-prd.md) defines necessary work and later opportunities.
@@ -13,6 +13,12 @@ Dates below use America/New_York unless a timestamp explicitly ends in `Z`.
 External observations are dated snapshots, not a standing claim about production.
 
 ## Observed release baseline
+
+September 28 notification recovery update: [PR #269](https://github.com/delimatsuo/heykevin/pull/269)
+is merged, the backend repair passed staging, and **1.3.3 (43)** is
+**VALID / IN_BETA_TESTING** in the existing QA group, verified `2026-09-28T17:42:07Z`.
+Production deployment still waits for Deli's environment approval. The [release record](releases/2026-09-28-notification-recovery-ios-43.md)
+separates those states from the public build 42 baseline and unperformed phone checks.
 
 The public US lookup at `2026-09-25T12:49:41Z` confirms **1.3.2**, released
 `2026-09-18T14:56:03Z`. Signed-in App Store Connect at
@@ -27,15 +33,16 @@ Public availability and physical-phone acceptance remain separate:
 | Surface | Observed state | Evidence and limit |
 |---|---|---|
 | Production backend | `kevin-api-00273-f7g`, SHA `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, verified `2026-09-17T17:36:33Z` | Successful [production run 35249645557](https://github.com/delimatsuo/heykevin/actions/runs/35249645557), exact live health/runtime identity, 100% serving traffic, unchanged runtime settings, anonymous smoke and canonical pause-WAV retrieval. Adds owner SMS identity and the screening-reason field; retains the Relay correction. The owner confirmed the SMS fix working on September 17; separate call/frontend phone acceptance remains open. See the [rollout record](releases/2026-09-17-owner-sms-identity-backend.md). |
-| Staging backend | `kevin-api-staging-00175-sag`, SHA `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, verified `2026-09-17T16:55:30Z` | Successful [staging run 35248672440](https://github.com/delimatsuo/heykevin/actions/runs/35248672440), canonical/tagged health identity, 100% serving traffic, preserved runtime isolation, anonymous static smoke and canonical pause-WAV retrieval. See the [rollout record](releases/2026-09-17-owner-sms-identity-backend.md). |
+| Staging backend | `kevin-api-staging-00177-zis`, SHA `f45fa6295cfcd290f4c6df2532318f1eb79dfa57`, verified `2026-09-28T17:28:05Z` | Successful [staging run 36457541519](https://github.com/delimatsuo/heykevin/actions/runs/36457541519), canonical/tagged health, 100% traffic, unchanged runtime isolation and serving smoke. Includes the registration repair. See the [release record](releases/2026-09-28-notification-recovery-ios-43.md). |
 | Public iOS | Version **1.3.2**, publicly available; build **42** selected in App Store Connect | Public US lookup at `2026-09-25T12:49:41Z` confirms 1.3.2, released `2026-09-18T14:56:03Z`. See the [dated public-release update](releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026). The lookup alone does not identify the installed build or establish phone acceptance. |
 | Historical Public iOS | Version `1.2.11`, **build 36**, `READY_FOR_DISTRIBUTION` | Historical public baseline as of September 14, now superseded by build 39. |
 | Previous TestFlight candidate | `1.2.11 (37)`, `VALID`, `IN_BETA_TESTING` | Historical TestFlight state prior to build 38/39. |
 | Notification iPhone candidate | `1.2.12 (38)`, **VALID**, **IN_BETA_TESTING** | Historical candidate delivering N1 notifications, superseded by build 39. See [candidate record](releases/2026-09-14-notification-ios-38.md). |
 | Original native frontend release | **1.3.0 (39)**, first published September 15 with internal QA availability | Delivered Calls + Kevin design, bounded history and notification enhancement. [Release record](releases/2026-09-15-native-frontend-ios-39.md) binds packaged source `4bf090a...`, CI, reviews, and the dated Apple release state. Current public version is 1.3.2, as recorded above. Physical phone acceptance remains open. |
-| Latest authenticated Apple observation | **1.3.2 (42)**, **Ready for Distribution**, **Review Completed**, automatic release after App Review, observed `2026-09-25T13:45:15Z` | The [submission record](releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026) identifies the exact selected build and review submission. All six screenshots appear in the signed-in gallery; physical phone acceptance remains open. |
+| Latest authenticated public App Store observation | **1.3.2 (42)**, **Ready for Distribution**, **Review Completed**, automatic release after App Review, observed `2026-09-25T13:45:15Z` | The [submission record](releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026) identifies the exact selected build and review submission. All six screenshots appear in the signed-in gallery; physical phone acceptance remains open. |
+| Build 43 internal delivery (September 28) | **1.3.3 (43)**, **VALID / IN_BETA_TESTING**, existing QA group, verified `2026-09-28T17:42:07Z` | [Release record and current phone checks](releases/2026-09-28-notification-recovery-ios-43.md). Includes migration recovery and registration fixes from PR #269; no new public App Store submission. Physical acceptance remains open. |
 | Build 42 internal delivery (September 17) | **1.3.2 (42)**, **VALID / IN_BETA_TESTING** in the existing QA group, verified `2026-09-17T15:33:58Z` | [Delivery record and phone checks](releases/2026-09-17-transcript-first-ios-42.md). Includes direct full-transcript notification entry, retained screening text after pickup and consistent system appearance. The same version is now public; phone acceptance remains open. |
-| Development inventory | Transcript-first flow and appearance correction delivered in internal build 42; owner SMS identity and screening reason deployed in the backend | [PR #261](https://github.com/delimatsuo/heykevin/pull/261) adds the current frontend behavior and screening-reason field. [PR #263](https://github.com/delimatsuo/heykevin/pull/263) brands owner summaries. Earlier [PR #256](https://github.com/delimatsuo/heykevin/pull/256) supplied the iOS confirmation repair, and [PR #258](https://github.com/delimatsuo/heykevin/pull/258) supplied the retained Relay correction. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
+| Development inventory | Notification migration recovery delivered in internal build 43; registration repair staged and awaiting production approval; earlier transcript-first flow, SMS identity and screening reason retained | [PR #261](https://github.com/delimatsuo/heykevin/pull/261) adds the current frontend behavior and screening-reason field. [PR #263](https://github.com/delimatsuo/heykevin/pull/263) brands owner summaries. Earlier [PR #256](https://github.com/delimatsuo/heykevin/pull/256) supplied the iOS confirmation repair, and [PR #258](https://github.com/delimatsuo/heykevin/pull/258) supplied the retained Relay correction. N1/N3 phone acceptance remains open; issue #33 and later PRD features remain deferred. |
 
 ## Shipped
 
@@ -78,9 +85,10 @@ message-taking transition. That backend is deployed. The owner installed build
 [submitted for App Review](releases/2026-09-16-app-store-ios-41.md) with six updated
 screenshots at the owner's request. Apple reported `READY_FOR_SALE` with review
 `COMPLETE` at the September 17 15:16 UTC check. The owner then approved a test
-build of the transcript-first flow and consistent appearance. Use the
+build of the transcript-first flow and consistent appearance. The
 [build 42 phone checks](releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
-alongside the earlier speech/pickup checklist. QA availability is verified.
+preserve its acceptance scenarios alongside the earlier speech/pickup checklist.
+Build 42 QA availability was verified; the newer recovery candidate is recorded above.
 At the owner's later request, build 42 was [submitted for App Review](releases/2026-09-17-app-store-ios-42.md)
 with six updated screenshots; Apple reported `WAITING_FOR_REVIEW` on September 17
 at 18:32:28 UTC. The [September 25 public lookup](releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026)
@@ -89,8 +97,8 @@ Provider/package verification does not close those physical-call rows.
 
 A later build 40 call also reported repeated questions after Take a message.
 The [Relay message-state correction](releases/2026-09-16-relay-message-state-backend.md)
-is deployed to staging and production. Install or confirm build 42 before
-retesting the warning and conversation together; finishing current speech,
+is deployed to staging and production. Install or confirm **1.3.3 (43)** from
+TestFlight before retesting the warning and conversation together; finishing current speech,
 the conditional three-second pause and continued caller replies remain open
 phone checks.
 
@@ -160,13 +168,13 @@ list remain outside active implementation.
       [candidate record](releases/2026-09-14-notification-ios-38.md) includes
       package identity, verification and the owner test sequence.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION` (verified September 16, 2026 at `00:20:10Z` / Sep 15 America/New_York) following owner's submission instruction ("submit the last build"). See the canonical [build 39 release record](releases/2026-09-15-native-frontend-ios-39.md).
-- [ ] Record the owner's installed **1.3.2 (42)** and the remaining notification/
+- [ ] Record the owner's installed **1.3.3 (43)** and the remaining notification/
       pickup acceptance from [N1 in the PRD](../kevin-prd.md#n1--finish-the-screening-notification-enhancement),
       including stale-alert, ended-call, banner, urgent-preference and failure
-      scenarios. The [build 42 phone checks](releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
+      scenarios. First complete the [build 43 recovery checks](releases/2026-09-28-notification-recovery-ios-43.md#owner-phone-checks--open). The [build 42 phone checks](releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
       cover the transcript-first flow alongside the confirmation and button/timing
       checks; passing them does not close other unperformed N1 rows. Earlier
-      build 39/41 records remain historical evidence.
+      build 39/41/42 records remain historical package evidence.
 
 Deli's approval and the completed September 14 production deployment above did
 not authorize an Apple release. The owner

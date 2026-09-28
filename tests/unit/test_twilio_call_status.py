@@ -37,6 +37,7 @@ async def test_twilio_completed_status_persists_duration_and_final_status(monkey
 
     async def fake_save_call(call_sid, updates):
         saved_calls.append((call_sid, dict(updates)))
+        return True
 
     monkeypatch.setattr("app.db.cache._init_firebase", lambda: None)
     monkeypatch.setattr(

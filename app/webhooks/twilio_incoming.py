@@ -15,6 +15,7 @@ import secrets
 import time
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Dial, Connect
 
 from app.config import settings
@@ -1203,35 +1204,102 @@ async def _notify_owner_of_inbound_message(contractor_id: str) -> bool:
 
 @router.post("/webhooks/twilio/mms-incoming")
 async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signature)):
-    """Receive SMS/MMS sent to a Kevin number.
+    """Receive replies at each provisioned number's sms_url.
 
-    Every provisioned number points its `sms_url` here (see
-    `app/db/contractors.py`), but this route did not exist — so every text a
-    caller sent to a Kevin number returned 404 and Twilio recorded an 11200
-    HTTP retrieval failure. The messages were lost silently.
-
-    Deliberately does not auto-reply. Responding to inbound traffic carries A2P
-    and consent implications and is a product decision; this handler's job is to
-    stop dropping messages.
-
-    Response semantics matter here (review finding on PR #143): an unrecognized
-    To number returns 200 — redelivery cannot make the number recognized. But a
-    lookup or persistence failure returns 500 so Twilio redelivers the webhook
-    and the message gets another chance to be stored. Redelivery is idempotent
-    because the record is keyed by MessageSid.
+    Resolve the receiving tenant before handling owner consent. Twilio handles
+    consent confirmations; do not send a duplicate reply. Ordinary caller
+    replies retain their MessageSid-keyed record and owner push notification.
+    Persistence errors return 500 so the provider can redeliver safely.
     """
     form_data = await request.form()
-    to_number = str(form_data.get("To", "") or "")
-    message_sid = str(form_data.get("MessageSid", "") or "")
+    to_number = str(form_data.get("To", "") or "").strip()
+    from_number = str(form_data.get("From", "") or "").strip()
+    message_sid = str(form_data.get("MessageSid", "") or "").strip()
+    body_text = str(form_data.get("Body", "") or "")
+    opt_out_type = str(form_data.get("OptOutType", "") or "").strip().upper()
+
+    norm_to = normalize_phone(to_number)
+    if not norm_to:
+        logger.warning("Inbound message missing or unnormalizable To")
+        return twiml_response("<Response></Response>")
+
+    norm_from = normalize_phone(from_number) or from_number
+
+    try:
+        contractor = await _lookup_contractor_for_message(norm_to)
+        if not contractor and to_number != norm_to:
+            contractor = await _lookup_contractor_for_message(to_number)
+    except Exception as e:
+        logger.error(f"Failed looking up contractor for inbound message: {type(e).__name__}")
+        return twiml_response("<Response></Response>", status_code=500)
+
+    if not contractor:
+        logger.warning("Inbound message to an unrecognized number — dropped")
+        return twiml_response("<Response></Response>")
+
+    contractor_id = contractor["contractor_id"]
+    from app.db.owner_sms import resolve_contractor_owner_sms_identities, _MESSAGESID_PATTERN, apply_owner_sms_consent_transition
+    owner_phone, _ = resolve_contractor_owner_sms_identities(contractor)
+    is_owner_sender = bool(norm_from and owner_phone and norm_from == owner_phone)
+
+    is_stop = False
+    is_start = False
+    is_help = False
+
+    STOP_KEYWORDS = frozenset({"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "REVOKE", "OPTOUT"})
+    START_KEYWORDS = frozenset({"START", "UNSTOP"})
+    HELP_KEYWORDS = frozenset({"HELP", "INFO"})
+
+    if opt_out_type:
+        if opt_out_type == "STOP":
+            is_stop = True
+        elif opt_out_type == "START":
+            is_start = True
+        elif opt_out_type == "HELP":
+            is_help = True
+    else:
+        trimmed_body = body_text.strip().upper()
+        if trimmed_body in STOP_KEYWORDS:
+            is_stop = True
+        elif trimmed_body in START_KEYWORDS:
+            is_start = True
+        elif trimmed_body in HELP_KEYWORDS:
+            is_help = True
+
+    if is_owner_sender and (is_stop or is_start or is_help):
+        if is_stop or is_start:
+            if not _MESSAGESID_PATTERN.match(message_sid):
+                logger.error("Invalid MessageSid on inbound consent")
+                return twiml_response("<Response></Response>", status_code=400)
+
+            dedupe_key = f"inbound:{message_sid}"
+            try:
+                success, details = await apply_owner_sms_consent_transition(
+                    contractor_id,
+                    opt_out=is_stop,
+                    source="inbound_stop" if is_stop else "inbound_start",
+                    dedupe_key=dedupe_key,
+                    expected_owner_phone=norm_from,
+                    expected_twilio_number=norm_to,
+                )
+                if not success:
+                    logger.error(f"Failed to apply owner SMS transition for {contractor_id}: {details.get('error', 'unknown')}")
+                    return twiml_response("<Response></Response>", status_code=500)
+                logger.info(f"Owner SMS consent transition applied for {contractor_id} (opt_out={is_stop}, outcome={details.get('outcome')})")
+            except Exception as e:
+                logger.error(f"Exception applying owner SMS consent for {contractor_id}: {type(e).__name__}")
+                return twiml_response("<Response></Response>", status_code=500)
+
+        elif is_help:
+            logger.info(f"Owner SMS HELP received for {contractor_id}")
+
+        return twiml_response("<Response></Response>")
 
     try:
         num_media = int(str(form_data.get("NumMedia", "0") or "0"))
     except (TypeError, ValueError):
         num_media = 0
 
-    # MMS attachments arrive as MediaUrl{N}/MediaContentType{N} form fields.
-    # Without capturing them, an image-only message would be acknowledged and
-    # its content silently discarded.
     media = []
     for i in range(min(num_media, 10)):
         url = str(form_data.get(f"MediaUrl{i}", "") or "")
@@ -1242,37 +1310,26 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
             })
 
     try:
-        contractor = await _lookup_contractor_for_message(to_number)
-        if contractor:
-            await _record_inbound_message(
-                contractor["contractor_id"],
-                {
-                    "message_sid": message_sid,
-                    "from_number": normalize_phone(str(form_data.get("From", "") or ""))
-                    or str(form_data.get("From", "") or ""),
-                    "to_number": to_number,
-                    "body": str(form_data.get("Body", "") or ""),
-                    "num_media": num_media,
-                    "media": media,
-                    "received_at": time.time(),
-                },
-            )
-            logger.info(
-                "Inbound message recorded for %s (media=%d)",
-                contractor["contractor_id"],
-                num_media,
-            )
-            # Storing the message is not the same as the owner seeing it.
-            # Nothing reads contractors/{id}/inbound_messages, so before this
-            # every caller reply landed in Firestore unseen. Now that
-            # appointment confirmations invite a reply, a silent store would be
-            # worse than not texting at all.
-            await _notify_owner_of_inbound_message(contractor["contractor_id"])
-        else:
-            logger.warning("Inbound message to an unrecognized number — dropped")
+        await _record_inbound_message(
+            contractor_id,
+            {
+                "message_sid": message_sid,
+                "from_number": norm_from,
+                "to_number": to_number,
+                "body": body_text,
+                "num_media": num_media,
+                "media": media,
+                "received_at": time.time(),
+            },
+        )
+        logger.info(
+            "Inbound message recorded for %s (media=%d)",
+            contractor_id,
+            num_media,
+        )
+        await _notify_owner_of_inbound_message(contractor_id)
     except Exception as e:
         logger.error(f"Failed to record inbound message: {type(e).__name__}")
-        # Non-2xx → Twilio redelivers later; the write is idempotent by SID.
         return twiml_response("<Response></Response>", status_code=500)
 
     return twiml_response("<Response></Response>")
@@ -1306,9 +1363,13 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
         if call_sid:
             try:
                 from app.db.calls import save_call
-                await save_call(call_sid, updates)
+                saved = await save_call(call_sid, updates)
+                if not saved:
+                    logger.error(f"Failed to save terminal call status for {call_sid}")
+                    return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to save call status"})
             except Exception as e:
-                logger.warning(f"Failed to save call status: {e}")
+                logger.error("Failed to save call status: %s", type(e).__name__)
+                return JSONResponse(status_code=500, content={"status": "error", "message": "Exception saving call status"})
         try:
             from app.db.cache import _init_firebase, ACTIVE_CALLS_PATH
             _init_firebase()
@@ -1318,6 +1379,63 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
             logger.info(f"Active call cleaned up: {call_sid}")
         except Exception as e:
             logger.warning(f"Failed to clean up active call: {e}")
+
+    return {"status": "ok"}
+
+
+@router.post("/webhooks/twilio/owner-sms-status")
+async def handle_owner_sms_status(request: Request, _=Depends(verify_twilio_signature)):
+    """Handle Twilio status callback for owner SMS delivery."""
+    contractor_id = request.query_params.get("contractor_id", "").strip()
+    revision_str = request.query_params.get("revision", "")
+
+    try:
+        revision = int(revision_str)
+    except (TypeError, ValueError):
+        revision = None
+
+    if not contractor_id or revision is None or revision < 0:
+        logger.warning("Owner SMS status callback missing parameters")
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Missing parameters"})
+
+    form_data = await request.form()
+    message_sid = str(form_data.get("MessageSid", "") or "").strip()
+    message_status = str(form_data.get("MessageStatus", "") or "").lower()
+    error_code = str(form_data.get("ErrorCode", "") or "").strip()
+    to_phone = normalize_phone(str(form_data.get("To", "") or "").strip())
+    from_phone = normalize_phone(str(form_data.get("From", "") or "").strip())
+
+    if not message_sid:
+        return {"status": "ok"}
+
+    if message_status in ("failed", "undelivered") and error_code == "21610":
+        from app.db.owner_sms import _MESSAGESID_PATTERN, apply_owner_sms_consent_transition
+        if not _MESSAGESID_PATTERN.match(message_sid):
+            logger.warning("Owner SMS async callback invalid MessageSid")
+            return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid MessageSid"})
+
+        if not to_phone or not from_phone:
+            logger.warning("Owner SMS async callback unresolvable phone identities")
+            return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid phone identities"})
+
+        logger.warning("Owner SMS provider error code=21610 type=StatusCallback")
+        try:
+            success, details = await apply_owner_sms_consent_transition(
+                contractor_id,
+                opt_out=True,
+                source="provider_21610_async",
+                dedupe_key=f"delivery:{message_sid}",
+                expected_revision=revision,
+                expected_owner_phone=to_phone,
+                expected_twilio_number=from_phone,
+            )
+            if not success:
+                logger.error("Failed to apply async 21610 transition for %s: %s", contractor_id, details.get("error", "unknown"))
+                return JSONResponse(status_code=500, content={"status": "error"})
+            logger.info("Owner SMS async 21610 transition for %s: success=%s outcome=%s", contractor_id, success, details.get("outcome"))
+        except Exception as e:
+            logger.error("Exception handling async 21610: %s", type(e).__name__)
+            return JSONResponse(status_code=500, content={"status": "error"})
 
     return {"status": "ok"}
 
@@ -1352,11 +1470,6 @@ async def handle_voicemail_transcription(request: Request, _=Depends(verify_twil
         if not contractor:
             return {"status": "ok"}
 
-        owner_phone = contractor.get("owner_phone", "")
-        if not owner_phone:
-            return {"status": "ok"}
-
-        from app.services.sms import send_sms
         caller_display = caller_phone or "Unknown"
 
         if transcription_text:
@@ -1373,9 +1486,9 @@ async def handle_voicemail_transcription(request: Request, _=Depends(verify_twil
                 f"To remove call forwarding, visit kevinai.app/support."
             )
 
-        twilio_number = contractor.get("twilio_number", "")
-        await send_sms(owner_phone, sms_body, from_number=twilio_number)
-        logger.info(f"Voicemail SMS sent to {contractor['contractor_id']}")
+        from app.services.owner_sms import send_owner_sms
+        await send_owner_sms(contractor["contractor_id"], sms_body)
+        logger.info(f"Voicemail SMS processed for {contractor['contractor_id']}")
         return {"status": "ok"}
 
     except Exception as e:

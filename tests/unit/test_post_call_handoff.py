@@ -20,6 +20,35 @@ from app.webhooks import media_stream
 import app.main as app_main
 
 
+@pytest.fixture(autouse=True)
+def _default_handoff_seams(monkeypatch):
+    import time
+    now = time.time()
+    monkeypatch.setattr(post_call_handoff, "_pending_cursor", None)
+
+    async def default_get_handoff(call_sid):
+        return {
+            "call_sid": call_sid,
+            "status": "pending",
+            "contractor_id": "contractor-test",
+            "caller_language": "en",
+            "created_at": now,
+        }
+
+    async def default_get_call(call_sid):
+        return {
+            "call_sid": call_sid,
+            "call_status": "completed",
+            "contractor_id": "contractor-test",
+            "caller_phone": "test-caller-number",
+            "transcript": "Caller: routine request",
+        }
+
+    monkeypatch.setattr(post_call_handoff.handoff_db, "get_handoff", default_get_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "get_call", default_get_call)
+
+
+
 def test_pending_handoff_claims_once_with_a_lease():
     claimed, updates = handoff_db._claim_transition(
         {"status": "pending", "attempts": 1},
@@ -315,20 +344,23 @@ async def test_worker_hydrates_pending_handoff_from_durable_records(monkeypatch)
     processed = []
     mirrored = []
 
-    async def list_ids(status, *, limit):
+    async def list_ids(status, *, limit, start_after=None):
         assert limit > 0
-        return ["CA_test"] if status == "pending" else []
+        return ["CA_test"] if status == "pending" and start_after is None else []
 
     async def claim(_call_sid):
         return True
 
     async def get_handoff(_call_sid):
-        return {"contractor_id": "contractor-test", "caller_language": "es"}
+        import time
+        return {"status": "pending", "contractor_id": "contractor-test", "caller_language": "es", "created_at": time.time()}
 
     async def get_call(_call_sid):
         return {
             "transcript": "Caller: routine request\nKevin: thank you",
             "caller_phone": "test-caller-number",
+            "call_status": "completed",
+            "contractor_id": "contractor-test",
         }
 
     async def get_contractor(_contractor_id):
@@ -381,7 +413,7 @@ async def test_worker_mirrors_stale_uncertain_handoff_without_replaying(
 ):
     mirrored = []
 
-    async def list_ids(status, *, limit):
+    async def list_ids(status, *, limit, start_after=None):
         assert limit > 0
         return ["CA_test"] if status == "in_progress" else []
 

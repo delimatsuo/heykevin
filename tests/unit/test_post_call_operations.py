@@ -374,6 +374,14 @@ async def test_partial_delivery_emits_attention_level_telemetry(monkeypatch, cap
     async def save_call(_call_sid, _updates):
         return True
 
+    async def ready_handoff(_sid):
+        return {"status": "pending", "contractor_id": "contractor-test", "created_at": 1.0}
+
+    async def terminal_call(_sid):
+        return {"call_status": "completed", "contractor_id": "contractor-test"}
+
+    monkeypatch.setattr(post_call_handoff.handoff_db, "get_handoff", ready_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "get_call", terminal_call)
     monkeypatch.setattr(post_call_handoff.handoff_db, "claim_handoff", claim)
     monkeypatch.setattr(post_call_handoff.handoff_db, "finish_handoff", finish)
     monkeypatch.setattr(post_call_handoff, "process_post_call", process)

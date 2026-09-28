@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+from unittest.mock import AsyncMock
 import time
 from typing import Optional
 
@@ -18,6 +19,14 @@ from app.api import estimates
 from app.config import settings
 from app.services import estimate_notifications, estimate_worker
 from app.services.gated_actions import ActionKey
+
+
+@pytest.fixture(autouse=True)
+def owner_notification_boundary(monkeypatch):
+    async def capture_owner(contractor_id, body):
+        assert contractor_id == "c1"
+        return await estimate_notifications.send_sms(contractor_id, body)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", capture_owner)
 
 
 class FakeDocSnapshot:
@@ -284,7 +293,7 @@ async def test_background_analysis_failure_marks_failed_and_sends_sms_with_watch
     # Caller failure SMS and Owner failure SMS with watch URL
     assert len(sms_sent) == 2
     caller_sms = [s for s in sms_sent if s["to"] == "+15551234567"][0]
-    owner_sms = [s for s in sms_sent if s["to"] == "+15550000000"][0]
+    owner_sms = [s for s in sms_sent if s["to"] == "c1"][0]
 
     assert "couldn't process this media" in caller_sms["msg"]
     assert "AI ESTIMATE FAILED" in owner_sms["msg"]
@@ -331,7 +340,7 @@ async def test_video_analysis_success_marks_complete_and_sends_sms_with_watch_ur
 
     assert len(sms_sent) == 2
     caller_sms = [s for s in sms_sent if s["to"] == "+15551234567"][0]
-    owner_sms = [s for s in sms_sent if s["to"] == "+15550000000"][0]
+    owner_sms = [s for s in sms_sent if s["to"] == "c1"][0]
 
     assert "AI Diagnosis: Main pipe leak" in caller_sms["msg"]
     assert "AI ESTIMATE SENT" in owner_sms["msg"]
@@ -544,7 +553,7 @@ async def test_reupload_after_failed_creates_fresh_media_id_and_object(setup_env
 
     monkeypatch.setattr(estimates, "archive_media", track_archive)
     monkeypatch.setattr(estimates, "analyze_media", fast_analyze)
-    monkeypatch.setattr(estimate_notifications, "send_sms", lambda *a, **kw: None)
+    monkeypatch.setattr(estimate_notifications, "send_sms", AsyncMock(return_value=True))
 
     request = _StreamingRequest(body=b"retry-video-data", content_type="video/mp4")
     resp = await estimates.upload_and_analyze(token, request=request)
@@ -583,7 +592,7 @@ async def test_description_parameter_passed_to_analyzer_and_stored_never_logged(
 
     monkeypatch.setattr(estimates, "analyze_media", capture_analyzer)
     monkeypatch.setattr(estimates, "archive_media", lambda *a, **kw: f"{token_hash}/media.mp4")
-    monkeypatch.setattr(estimate_notifications, "send_sms", lambda *a, **kw: None)
+    monkeypatch.setattr(estimate_notifications, "send_sms", AsyncMock(return_value=True))
     monkeypatch.setattr(estimates.logger, "info", capture_log)
 
     sensitive_text = "SECRET_CALLER_DESCRIPTION_TEXT_12345"
@@ -712,7 +721,7 @@ async def test_claim_appends_media_history(setup_env, monkeypatch):
         return {"diagnosis": "x", "confidence": "high"}
 
     monkeypatch.setattr(estimates, "analyze_media", hold_analyzer)
-    monkeypatch.setattr(estimates, "send_sms", lambda *a, **kw: None)
+    monkeypatch.setattr(estimates, "send_sms", AsyncMock(return_value=True))
 
     request = _StreamingRequest(body=b"video-bytes", content_type="video/mp4")
     resp = await estimates.upload_and_analyze(token, request=request)

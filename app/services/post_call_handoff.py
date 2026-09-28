@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import math
 import re
+import time
 
 from app.db import calls as call_db
 from app.db import post_call_handoffs as handoff_db
@@ -107,6 +109,10 @@ async def _hydrate_handoff(call_sid: str) -> dict:
     }
 
 
+TERMINAL_CALL_STATUSES = frozenset({"completed", "busy", "no-answer", "canceled", "failed"})
+_pending_cursor: str | None = None
+
+
 async def run_post_call_handoff(
     call_sid: str,
     *,
@@ -118,6 +124,92 @@ async def run_post_call_handoff(
     caller_language: str = "en",
 ) -> str:
     """Claim and execute one handoff; uncertain work is never replayed."""
+    try:
+        handoff = await handoff_db.get_handoff(call_sid)
+    except Exception as error:
+        _log_handoff(
+            "get_handoff_error",
+            call_sid,
+            level=logging.ERROR,
+            exception_type=type(error).__name__,
+        )
+        return "pending"
+
+    if handoff is None:
+        return "pending"
+
+    handoff_status = handoff.get("status")
+    if handoff_status != "pending":
+        return "deduplicated"
+
+    try:
+        call_record = await call_db.get_call(call_sid)
+    except Exception as error:
+        _log_handoff(
+            "get_call_error",
+            call_sid,
+            level=logging.WARNING,
+            exception_type=type(error).__name__,
+        )
+        call_record = None
+
+    now = time.time()
+    created_at = handoff.get("created_at")
+    has_valid_created_at = (
+        isinstance(created_at, (int, float))
+        and not isinstance(created_at, bool)
+        and math.isfinite(created_at)
+    )
+    is_older_than_24h = (not has_valid_created_at) or (now - float(created_at) > 86400)
+
+    if call_record is None:
+        if is_older_than_24h:
+            quarantined = await handoff_db.quarantine_pending_handoff(call_sid, "call_end_unconfirmed")
+            if quarantined:
+                await _mirror_status(call_sid, "needs_attention", failure_code="call_end_unconfirmed")
+                _log_handoff("quarantined", call_sid, failure_code="call_end_unconfirmed")
+                return "needs_attention"
+        return "pending"
+
+    handoff_cid = str(handoff.get("contractor_id") or "").strip()
+    call_cid = str(call_record.get("contractor_id") or "").strip()
+    inline_cid = str((contractor or {}).get("contractor_id") or "").strip() if contractor else ""
+
+    if handoff_cid and call_cid and handoff_cid != call_cid:
+        quarantined = await handoff_db.quarantine_pending_handoff(call_sid, "contractor_mismatch")
+        if quarantined:
+            await _mirror_status(call_sid, "needs_attention", failure_code="contractor_mismatch")
+            _log_handoff("quarantined", call_sid, failure_code="contractor_mismatch")
+            return "needs_attention"
+        return "needs_attention"
+
+    if inline_cid and ((handoff_cid and inline_cid != handoff_cid) or (call_cid and inline_cid != call_cid)):
+        quarantined = await handoff_db.quarantine_pending_handoff(call_sid, "contractor_mismatch")
+        if quarantined:
+            await _mirror_status(call_sid, "needs_attention", failure_code="contractor_mismatch")
+            _log_handoff("quarantined", call_sid, failure_code="contractor_mismatch")
+            return "needs_attention"
+        return "needs_attention"
+
+    if not handoff_cid or not call_cid:
+        if is_older_than_24h:
+            quarantined = await handoff_db.quarantine_pending_handoff(call_sid, "call_end_unconfirmed")
+            if quarantined:
+                await _mirror_status(call_sid, "needs_attention", failure_code="call_end_unconfirmed")
+                _log_handoff("quarantined", call_sid, failure_code="call_end_unconfirmed")
+                return "needs_attention"
+        return "pending"
+
+    call_status = str(call_record.get("call_status") or "").strip().lower()
+    if call_status not in TERMINAL_CALL_STATUSES:
+        if is_older_than_24h:
+            quarantined = await handoff_db.quarantine_pending_handoff(call_sid, "call_end_unconfirmed")
+            if quarantined:
+                await _mirror_status(call_sid, "needs_attention", failure_code="call_end_unconfirmed")
+                _log_handoff("quarantined", call_sid, failure_code="call_end_unconfirmed")
+                return "needs_attention"
+        return "pending"
+
     terminal_persisted = False
     try:
         claimed = await handoff_db.claim_handoff(call_sid)
@@ -266,7 +358,25 @@ async def enqueue_and_run_post_call(
 
 async def run_pending_post_calls_once(*, limit: int = 10) -> None:
     """Process pending work and quarantine stale uncertain claims."""
-    pending_ids = await handoff_db.list_handoff_ids("pending", limit=limit)
+    global _pending_cursor
+    bounded_limit = max(1, min(int(limit), 100))
+    pending_ids = await handoff_db.list_handoff_ids(
+        "pending",
+        limit=bounded_limit,
+        start_after=_pending_cursor,
+    )
+    if len(pending_ids) < bounded_limit and _pending_cursor is not None:
+        remaining = bounded_limit - len(pending_ids)
+        wrap_ids = await handoff_db.list_handoff_ids("pending", limit=remaining, start_after=None)
+        for sid in wrap_ids:
+            if sid not in pending_ids:
+                pending_ids.append(sid)
+
+    if pending_ids:
+        _pending_cursor = pending_ids[-1]
+    else:
+        _pending_cursor = None
+
     for call_sid in pending_ids:
         await run_post_call_handoff(call_sid)
 

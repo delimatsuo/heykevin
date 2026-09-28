@@ -90,6 +90,7 @@ struct SettingsHost<Root: View>: View {
     @State private var smartInterruptionSelection = AppState.shared.smartInterruption
     @State private var isSavingSmartInterruption = false
     @State private var smartInterruptionSaveError = ""
+    @State private var ownerSMSPreference = OwnerSMSPreferenceState()
 
     // Fences
     @State private var urgentPreferenceFence = PreferenceWriteFence()
@@ -229,7 +230,7 @@ struct SettingsHost<Root: View>: View {
         }
 
         var profileSuccess = false
-        if plan.shouldFetchProfile {
+        if plan.shouldFetchProfile || isForegroundOrTabSwitch {
             profileSuccess = await loadProfileAndHydrate(capturedAuth: plan.authContext)
         } else {
             profileSuccess = true
@@ -250,6 +251,7 @@ struct SettingsHost<Root: View>: View {
         activePaywallDestination = nil
         cancelPendingDeleteConfirmation()
         loadCoordinator.handleAuthChange(newAuth: newAuth)
+        ownerSMSPreference.reset(auth: newAuth)
 
         urgentPreferenceFence = PreferenceWriteFence()
         screenAllCallsFence = PreferenceWriteFence()
@@ -616,6 +618,78 @@ struct SettingsHost<Root: View>: View {
                 Text(smartInterruptionSaveError)
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+
+            if ownerSMSPreference.isLoaded && !ownerSMSPreference.isUnsupportedBackend {
+                Toggle(isOn: smsNotificationsBinding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "SMS notifications"))
+                            .font(.subheadline.weight(.medium))
+                        Text(OwnerSMSPreferenceState.summaryDescription)
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
+                }
+                .disabled(ownerSMSPreference.isSaving || isFixtureMode)
+                .accessibilityIdentifier("settings.smsNotifications")
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "SMS notifications"))
+                        .font(.subheadline.weight(.medium))
+                    if ownerSMSPreference.loadError.isEmpty {
+                        ProgressView(String(localized: "Loading SMS settings…"))
+                            .font(.caption)
+                    }
+                }
+            }
+
+            if !ownerSMSPreference.loadError.isEmpty {
+                HStack {
+                    Text(ownerSMSPreference.loadError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    Spacer()
+                    Button(String(localized: "Retry")) {
+                        Task { await coalesceLoad(isForegroundOrTabSwitch: true) }
+                    }
+                    .font(.caption.weight(.medium))
+                    .disabled(isFixtureMode || ownerSMSPreference.isSaving)
+                    .accessibilityIdentifier("settings.smsNotifications.loadRetry")
+                }
+            }
+
+            if ownerSMSPreference.isCarrierBlocked {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(OwnerSMSPreferenceState.carrierBlockedNotice)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    if !kevinNumber.isEmpty {
+                        Text(String(localized: "Kevin number: \(PhoneFormatter.format(kevinNumber))"))
+                            .font(.caption2)
+                            .foregroundStyle(Color.secondary)
+                    }
+                    Text(OwnerSMSPreferenceState.appSwitchRequiredNotice)
+                        .font(.caption2)
+                        .foregroundStyle(Color.secondary)
+                }
+                .padding(.vertical, 2)
+            }
+
+            if !ownerSMSPreference.saveError.isEmpty && ownerSMSPreference.isLoaded {
+                HStack {
+                    Text(ownerSMSPreference.saveError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    Spacer()
+                    Button(String(localized: "Retry")) {
+                        if let requested = ownerSMSPreference.requestedEnabled {
+                            saveOwnerSMSPreference(requested)
+                        }
+                    }
+                    .font(.caption.weight(.medium))
+                    .disabled(ownerSMSPreference.isSaving || ownerSMSPreference.requestedEnabled == nil)
+                    .accessibilityIdentifier("settings.smsNotifications.retry")
+                }
             }
 
             if appState.isPersonalMode {
@@ -1444,6 +1518,47 @@ struct SettingsHost<Root: View>: View {
         }
     }
 
+    private var smsNotificationsBinding: Binding<Bool> {
+        Binding(
+            get: { ownerSMSPreference.displayedEnabled },
+            set: { newValue in
+                guard !ownerSMSPreference.isSaving else { return }
+                saveOwnerSMSPreference(newValue)
+            }
+        )
+    }
+
+    private func saveOwnerSMSPreference(_ newValue: Bool) {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !ownerSMSPreference.isSaving else { return }
+        guard let (token, _) = ownerSMSPreference.beginSave(targetEnabled: newValue, auth: auth) else { return }
+
+        Task { @MainActor in
+            #if DEBUG
+            if isFixtureMode {
+                ownerSMSPreference.finishSave(
+                    result: .success(
+                        enabled: newValue,
+                        optedOut: ownerSMSPreference.carrierOptedOut,
+                        revision: ownerSMSPreference.optOutRevision,
+                        version: 1
+                    ),
+                    operationToken: token,
+                    auth: auth
+                )
+                return
+            }
+            #endif
+            let result = await APIClient.shared.patchOwnerSMSPreference(
+                contractorId: auth.contractorId,
+                enabled: newValue,
+                bearerToken: auth.bearerToken
+            )
+            guard appState.currentAuthContext() == auth else { return }
+            ownerSMSPreference.finishSave(result: result, operationToken: token, auth: auth)
+        }
+    }
+
     private var countryBinding: Binding<String> {
         Binding(
             get: { countrySelection },
@@ -1657,6 +1772,7 @@ struct SettingsHost<Root: View>: View {
     }
 
     private func loadProfileAndHydrate(capturedAuth: CallAuthContext) async -> Bool {
+        let capturedSMSToken = ownerSMSPreference.captureLoadToken(auth: capturedAuth)
         let capturedRevisions = SettingsProfileHydrator.CapturedRevisions(
             urgentRevision: urgentPreferenceFence.revision,
             screenAllRevision: screenAllCallsFence.revision,
@@ -1665,7 +1781,7 @@ struct SettingsHost<Root: View>: View {
             fieldMutationRevisions: loadCoordinator.fieldMutationRevisions
         )
 
-        return await SettingsProfileHydrator.hydrate(
+        let succeeded = await SettingsProfileHydrator.hydrate(
             capturedAuth: capturedAuth,
             capturedRevisions: capturedRevisions,
             fetchProfile: {
@@ -1706,12 +1822,26 @@ struct SettingsHost<Root: View>: View {
                 loadCoordinator.fieldMutationRevisions
             },
             applyProfile: { [self] contractor, decision in
-                applyHydratedProfile(contractor: contractor, decision: decision)
+                applyHydratedProfile(
+                    contractor: contractor,
+                    decision: decision,
+                    capturedSMSToken: capturedSMSToken,
+                    capturedAuth: capturedAuth
+                )
             }
         )
+        if !succeeded, let token = capturedSMSToken, appState.currentAuthContext() == capturedAuth {
+            ownerSMSPreference.recordLoadFailure(token: token, auth: capturedAuth)
+        }
+        return succeeded
     }
 
-    private func applyHydratedProfile(contractor: [String: Any], decision: SettingsHydrationDecision) {
+    private func applyHydratedProfile(
+        contractor: [String: Any],
+        decision: SettingsHydrationDecision,
+        capturedSMSToken: Int? = nil,
+        capturedAuth: CallAuthContext? = nil
+    ) {
         let name = contractor["owner_name"] as? String ?? ""
         let biz = contractor["business_name"] as? String ?? ""
         let svc = contractor["service_type"] as? String ?? ""
@@ -1726,6 +1856,10 @@ struct SettingsHost<Root: View>: View {
 
         let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
         appState.autoReplySms = autoReply
+
+        if let token = capturedSMSToken, let auth = capturedAuth {
+            ownerSMSPreference.applyHydration(dict: contractor, token: token, auth: auth)
+        }
 
         var projection = SettingsGuardedStateProjection(
             baseline: confirmedBaseline,

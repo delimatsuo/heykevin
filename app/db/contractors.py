@@ -148,6 +148,12 @@ PROTECTED_FIELDS = frozenset({
     "owner_phone",
     "owner_phone_e164",
     "apple_user_id",
+    # Owner SMS carrier/provider opt-out fields — server-owned, mutated strictly
+    # through signed consent webhooks and status callbacks.
+    "owner_sms_opted_out",
+    "owner_sms_opt_out_revision",
+    "owner_sms_opt_out_source",
+    "owner_sms_opt_out_updated_at",
 })
 
 # Supported countries for Kevin AI
@@ -519,6 +525,11 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("subscription_expires", trial_start + TRIAL_PERIOD_DAYS * 86400)
     data.setdefault("deleted_app_detected_at", None)
     data.setdefault("subscription_uuid", str(_uuid.uuid4()))
+    data.setdefault("owner_sms_enabled", True)
+    data.setdefault("owner_sms_opted_out", False)
+    data.setdefault("owner_sms_opt_out_revision", 0)
+    data.setdefault("owner_sms_opt_out_source", None)
+    data.setdefault("owner_sms_opt_out_updated_at", None)
     loop = asyncio.get_event_loop()
     doc_ref = await loop.run_in_executor(
         None,

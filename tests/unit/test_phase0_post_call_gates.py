@@ -122,10 +122,17 @@ async def _run_business(monkeypatch, *, job_data, contractor, vcard_url="", crea
     monkeypatch.setattr(post_call.job_db, "get_job_by_call_sid", fake_get_job_by_call_sid)
     monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
     monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", fake_send_sms)
     monkeypatch.setattr(post_call, "send_mms", fake_send_mms)
     monkeypatch.setattr(post_call, "_capture_jobber_lead", fake_capture_jobber_lead)
     monkeypatch.setattr(post_call, "_send_summary_push", fake_save_call)
     monkeypatch.setattr(post_call, "_get_vcard_url", lambda _contractor: vcard_url)
+    async def no_appointment(_sid):
+        return {}
+
+    monkeypatch.setattr(post_call, "_load_appointment_request", no_appointment)
+    monkeypatch.setattr(post_call, "_validate_job_address", fake_save_call)
+    monkeypatch.setattr(post_call, "_update_customer_memory", fake_save_call)
     monkeypatch.setattr(
         post_call,
         "_update_caller_contact",

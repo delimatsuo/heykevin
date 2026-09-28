@@ -14,6 +14,14 @@ from app.config import settings
 from app.services import estimate_notifications, estimate_worker
 
 
+@pytest.fixture(autouse=True)
+def owner_notification_boundary(monkeypatch):
+    async def capture_owner(contractor_id, body):
+        assert contractor_id == "c1"
+        return await estimate_notifications.send_sms(contractor_id, body)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", capture_owner)
+
+
 class FakeDocSnapshot:
     def __init__(self, key: str, data: Optional[dict], doc_ref: "FakeDocRef"):
         self.id = key
@@ -279,7 +287,7 @@ async def test_estimate_worker_loop_marks_failed_after_max_attempts(monkeypatch)
 
     assert len(sms_sent) == 2
     caller_sms = [s for s in sms_sent if s["to"] == "+15551234567"][0]
-    owner_sms = [s for s in sms_sent if s["to"] == "+15550000000"][0]
+    owner_sms = [s for s in sms_sent if s["to"] == "c1"][0]
 
     assert "couldn't process this media" in caller_sms["msg"]
     assert "AI ESTIMATE FAILED" in owner_sms["msg"]

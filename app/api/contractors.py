@@ -47,8 +47,18 @@ _SENSITIVE_KEYS = frozenset({
 
 def _redact_contractor(data: dict) -> dict:
     """Return a copy of contractor data with credential fields removed."""
+    from app.db.owner_sms import (
+        resolve_owner_sms_enabled,
+        resolve_owner_sms_opted_out,
+        resolve_owner_sms_opt_out_revision,
+    )
     enriched = with_entitlement_flags(data)
-    return {k: v for k, v in enriched.items() if k not in _SENSITIVE_KEYS}
+    redacted = {k: v for k, v in enriched.items() if k not in _SENSITIVE_KEYS}
+    redacted["owner_sms_enabled"] = resolve_owner_sms_enabled(data)
+    redacted["owner_sms_opted_out"] = resolve_owner_sms_opted_out(data)
+    redacted["owner_sms_opt_out_revision"] = resolve_owner_sms_opt_out_revision(data)
+    redacted["owner_sms_settings_version"] = 1
+    return redacted
 
 
 def _require_admin(request: Request):
@@ -161,6 +171,7 @@ class ContractorUpdate(BaseModel):
     dial_in_pin: Optional[str] = Field(default=None, max_length=10)
     cnam_lookup_enabled: Optional[bool] = None
     smart_interruption: Optional[StrictBool] = None
+    owner_sms_enabled: Optional[StrictBool] = None
     # Forwarding-step intent. Deliberately NOT in PROTECTED_FIELDS: these record
     # what the user told us they did, which is client-side by definition. Server
     # truth about forwarding lives in forwarding_last_seen_at, which IS protected.
@@ -523,7 +534,26 @@ async def api_update_contractor(contractor_id: str, body: ContractorUpdate, requ
                 detail="Business mode requires an active Business subscription. Please upgrade your plan."
             )
 
-    await update_contractor(contractor_id, updates)
+    updated = await update_contractor(contractor_id, updates)
+    if "owner_sms_enabled" in updates:
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to persist preferences")
+        fresh = await get_contractor(contractor_id)
+        if not fresh or fresh.get("contractor_id") != contractor_id:
+            raise HTTPException(status_code=500, detail="Failed to read back authoritative state")
+        from app.db.owner_sms import (
+            resolve_owner_sms_enabled,
+            resolve_owner_sms_opted_out,
+            resolve_owner_sms_opt_out_revision,
+        )
+        return {
+            "status": "ok",
+            "owner_sms_enabled": resolve_owner_sms_enabled(fresh),
+            "owner_sms_opted_out": resolve_owner_sms_opted_out(fresh),
+            "owner_sms_opt_out_revision": resolve_owner_sms_opt_out_revision(fresh),
+            "owner_sms_settings_version": 1,
+        }
+
     return {"status": "ok"}
 
 

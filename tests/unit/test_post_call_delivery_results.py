@@ -32,10 +32,12 @@ async def test_personal_sms_false_return_produces_partial_result(monkeypatch):
     async def skip_push(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(post_call, "extract_job_card", extract)
+    monkeypatch.setattr("app.services.job_card.extract_job_card", extract)
     monkeypatch.setattr(post_call.call_db, "save_call", save_call)
     monkeypatch.setattr(post_call, "send_sms", send_sms)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", send_sms)
     monkeypatch.setattr(post_call, "_send_summary_push", skip_push)
+    monkeypatch.setattr(post_call, "_update_caller_contact", skip_push)
 
     result = await post_call.process_post_call(
         transcript_lines=["Caller: routine request"],
@@ -43,7 +45,7 @@ async def test_personal_sms_false_return_produces_partial_result(monkeypatch):
         call_sid="CA_test",
         contractor_phone="test-owner-number",
         twilio_number="test-twilio-number",
-        contractor={"effective_mode": "personal"},
+        contractor={"contractor_id": "contractor-test", "effective_mode": "personal"},
     )
 
     assert result.status == "partial"
@@ -70,9 +72,17 @@ async def test_missing_tenant_delivery_config_never_uses_process_fallback(monkey
     async def skip_effect(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(post_call, "extract_job_card", extract)
+    monkeypatch.setattr("app.services.job_card.extract_job_card", extract)
     monkeypatch.setattr(post_call.call_db, "save_call", save_call)
     monkeypatch.setattr(post_call, "send_sms", unexpected_send)
+    async def authoritative_account(_cid):
+        return {"contractor_id": "contractor-test"}
+
+    def unexpected_provider(*_args, **_kwargs):
+        pytest.fail("Missing authoritative identities must not reach Twilio")
+
+    monkeypatch.setattr("app.db.contractors.get_contractor", authoritative_account)
+    monkeypatch.setattr("app.services.owner_sms.Client", unexpected_provider)
     monkeypatch.setattr(post_call, "_send_summary_push", skip_effect)
     monkeypatch.setattr(post_call, "_update_caller_contact", skip_effect)
 

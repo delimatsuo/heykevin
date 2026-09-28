@@ -16,6 +16,14 @@ from app.api import estimates
 from app.services.gated_actions import ActionKey, GateContext, GateReason
 
 
+@pytest.fixture(autouse=True)
+def owner_notification_boundary(monkeypatch):
+    async def capture_owner(contractor_id, body):
+        assert contractor_id == "c1"
+        return await estimates.send_sms(contractor_id, body)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", capture_owner)
+
+
 class _Request:
     def __init__(self, body=b"data", headers=None):
         self.body = body
@@ -337,9 +345,9 @@ async def test_estimate_result_sms_allowed_passes_gate_context_to_caller_sms_onl
     assert token_hash_prefix in caller_kwargs["gate_context"].idempotency_key
 
     owner_args, owner_kwargs = sent[1]
-    assert owner_args[0] == "+15550000000"
+    assert owner_args[0] == "c1"
     assert "AI ESTIMATE SENT" in owner_args[1]
-    assert owner_kwargs == {"from_number": "+15559999999"}
+    assert owner_kwargs == {}
 
     assert audits
     audit = audits[0]

@@ -19,14 +19,22 @@ private func regulatoryAddressErrorMessage(for result: RegulatoryAddress.Validat
 
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
-    @State private var step: OnboardingStep = .welcome
+    var isRecoveryMode: Bool = false
+    @State private var step: OnboardingStep
     @State private var businessName = ""
     @State private var ownerName = ""
     @State private var serviceType = "general"
     @State private var selectedMode = "business"
     @State private var isLoading = false
+    @State private var signInAttemptRevision: Int?
+    @State private var signupContinuation: SignupContinuation?
     @State private var kevinNumber = ""
     @State private var errorMessage = ""
+
+    init(isRecoveryMode: Bool = false) {
+        self.isRecoveryMode = isRecoveryMode
+        _step = State(initialValue: isRecoveryMode ? .signIn : .welcome)
+    }
     @State private var contactsSynced = 0
     @State private var acceptedTerms = false
     @State private var phoneNumber = ""
@@ -82,6 +90,13 @@ struct OnboardingView: View {
                     }
                 }
                 .padding()
+            }
+        }
+        .onDisappear {
+            if appState.sessionState != .ready, let revision = signInAttemptRevision,
+               AccountRestoreCoordinator.shared.activeAttemptRevision == revision {
+                AccountRestoreCoordinator.shared.cancelAttempt()
+                signInAttemptRevision = nil
             }
         }
         .sheet(isPresented: $showPaywall) {
@@ -199,13 +214,27 @@ struct OnboardingView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            Text(String(localized: "Sign In"))
-                .font(.title.bold())
+            if isRecoveryMode {
+                KevinMark(size: 64)
+                    .padding(.bottom, 8)
 
-            Text(String(localized: "Create your account to get started."))
-                .foregroundStyle(.secondary)
+                Text(String(localized: "Reconnect Your Account"))
+                    .font(.title.bold())
+                    .multilineTextAlignment(.center)
 
-            SignInWithAppleButton(.signUp) { request in
+                Text(String(localized: "Sign in with Apple to reconnect your Kevin number and restore your account."))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            } else {
+                Text(String(localized: "Sign In"))
+                    .font(.title.bold())
+
+                Text(String(localized: "Create your account to get started."))
+                    .foregroundStyle(.secondary)
+            }
+
+            SignInWithAppleButton(isRecoveryMode ? .signIn : .signUp) { request in
                 request.requestedScopes = [.fullName, .email]
             } onCompletion: { result in
                 handleSignIn(result)
@@ -213,33 +242,42 @@ struct OnboardingView: View {
             .signInWithAppleButtonStyle(.black)
             .frame(height: 50)
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            .disabled(!acceptedTerms)
-            .opacity(acceptedTerms ? 1.0 : 0.5)
+            .disabled(isLoading || (!isRecoveryMode && !acceptedTerms))
+            .opacity((isLoading || (!isRecoveryMode && !acceptedTerms)) ? 0.5 : 1.0)
 
-            // Terms acceptance
-            HStack(alignment: .top, spacing: 10) {
-                Button {
-                    acceptedTerms.toggle()
-                } label: {
-                    Image(systemName: acceptedTerms ? "checkmark.square.fill" : "square")
-                        .foregroundStyle(acceptedTerms ? .blue : .secondary)
-                        .font(.title3)
+            if !isRecoveryMode {
+                // Terms acceptance
+                HStack(alignment: .top, spacing: 10) {
+                    Button {
+                        acceptedTerms.toggle()
+                    } label: {
+                        Image(systemName: acceptedTerms ? "checkmark.square.fill" : "square")
+                            .foregroundStyle(acceptedTerms ? .blue : .secondary)
+                            .font(.title3)
+                    }
+
+                    Text(String(localized: "I agree to the ")) +
+                    Text("[\(String(localized: "Terms of Service"))](https://heykevin.one/terms)")
+                        .foregroundColor(.blue) +
+                    Text(String(localized: " and ")) +
+                    Text("[\(String(localized: "Privacy Policy"))](https://heykevin.one/privacy)")
+                        .foregroundColor(.blue)
                 }
-
-                Text(String(localized: "I agree to the ")) +
-                Text("[\(String(localized: "Terms of Service"))](https://heykevin.one/terms)")
-                    .foregroundColor(.blue) +
-                Text(String(localized: " and ")) +
-                Text("[\(String(localized: "Privacy Policy"))](https://heykevin.one/privacy)")
-                    .foregroundColor(.blue)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+
+            if isLoading {
+                ProgressView()
+                    .padding(.top, 8)
+            }
 
             if !errorMessage.isEmpty {
                 Text(errorMessage)
                     .foregroundStyle(.red)
                     .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
             }
 
             Spacer()
@@ -517,6 +555,7 @@ struct OnboardingView: View {
                         let granted = await ContactSyncManager.shared.requestAccess()
                         if granted {
                             appState.contactsUploadConsent = true
+                            signupContinuation?.explicitContactConsent = true
                         }
                         step = .provisioning
                         await provision(mode: selectedMode)
@@ -533,6 +572,7 @@ struct OnboardingView: View {
 
                 Button(String(localized: "Not now")) {
                     appState.contactsUploadConsent = false
+                    signupContinuation?.explicitContactConsent = false
                     step = .provisioning
                     Task { await provision(mode: selectedMode) }
                 }
@@ -881,138 +921,89 @@ struct OnboardingView: View {
     // MARK: - Logic
 
     private func handleSignIn(_ result: Result<ASAuthorization, Error>) {
+        guard !isLoading else { return }
         switch result {
-        case .success(let auth):
-            if let credential = auth.credential as? ASAuthorizationAppleIDCredential {
-                let userId = credential.user
-                let fullName = credential.fullName
-                let name = [fullName?.givenName, fullName?.familyName]
-                    .compactMap { $0 }
-                    .joined(separator: " ")
-
-                if !name.isEmpty {
-                    ownerName = name
-                }
-
-                // Store Apple user ID
-                appState.appleUserId = userId
-
-                // Send identity token to backend for verification
-                if let tokenData = credential.identityToken,
-                   let token = String(data: tokenData, encoding: .utf8) {
-                    appState.appleIdentityToken = token
-                }
-
-                // Try to restore existing account
-                Task {
-                    isLoading = true
-                    await tryRestore()
-                    isLoading = false
-                }
-            }
-        case .failure(let error):
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func tryRestore() async {
-        // 1. Check if contractorId is already saved (Keychain, migrated from UserDefaults)
-        if !appState.contractorId.isEmpty {
-            if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
-                let active = profile["active"] as? Bool ?? false
-                if active {
-                    await restoreFromProfile(profile)
-                    return
-                }
-            }
-        }
-
-        // 2. Look up by Apple User ID on backend. Retries with a refreshed
-        //    Apple identity token if the first call returns 401 (token expired).
-        if !appState.appleUserId.isEmpty {
-            let lookup = await callWithFreshAppleTokenOnAuthFailure { [appState] in
-                try await APIClient.shared.findContractorByAppleId(
-                    appleUserId: appState.appleUserId,
-                    appleIdentityToken: appState.appleIdentityToken
-                )
-            }
-            switch lookup {
-            case .success(let result):
-                if let result = result, let contractorId = result["contractor_id"] as? String {
-                    appState.contractorId = contractorId
-                    // Save API token returned by lookup (login flow)
-                    if let apiToken = result["api_token"] as? String, !apiToken.isEmpty {
-                        APIClient.shared.contractorToken = apiToken
-                    }
-                    if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
-                        await restoreFromProfile(profile)
-                        return
-                    }
-                }
-            case .authFailed:
-                await handleBootstrapAuthFailure()
+        case .failure(let error): errorMessage = error.localizedDescription
+        case .success(let authorization):
+            guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+                  let tokenData = credential.identityToken,
+                  let token = String(data: tokenData, encoding: .utf8), !token.isEmpty else {
+                errorMessage = String(localized: "Sign in expired. Please tap Sign in with Apple again to continue.")
                 return
             }
-        }
-
-        // 3. No account found — new user, collect their phone number before
-        // choosing a mode so account creation can bind owner_phone/country.
-        await MainActor.run { step = .phoneEntry }
-    }
-
-    private func restoreFromProfile(_ profile: [String: Any]) async {
-        let name = profile["owner_name"] as? String ?? ""
-        let biz = profile["business_name"] as? String ?? ""
-        let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? "personal"
-        let number = profile["twilio_number"] as? String ?? ""
-        let subUUID = profile["subscription_uuid"] as? String ?? ""
-        // Audit F-2: previously this method propagated everything except
-        // subscription state, so a returning user whose server-side status
-        // was "expired" reinstalled the app, signed in, and landed in the
-        // main UI with the local default "trial". The expired-paywall in
-        // ContentView never fired because iOS still believed the trial was
-        // active. Read both server-authoritative fields here and apply them
-        // before flipping isOnboarded.
-        let subStatus = profile["subscription_status"] as? String ?? ""
-        let subTier = profile["subscription_tier"] as? String ?? ""
-
-        await MainActor.run {
-            if !name.isEmpty { appState.userName = name }
-            if !biz.isEmpty { appState.businessName = biz }
-            appState.mode = (mode == "personal") ? "personal" : "business"
-            if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
-            if !subStatus.isEmpty { appState.subscriptionStatus = subStatus }
-            if !subTier.isEmpty { appState.subscriptionTier = subTier }
-            // The forwarding step keys its dial codes on the account country.
-            if let country = SettingsCountry.accountCountry(from: profile) {
-                appState.countryCode = country
+            let coordinator = AccountRestoreCoordinator.shared
+            guard let revision = coordinator.beginAttempt() else { return }
+            signInAttemptRevision = revision
+            isLoading = true
+            errorMessage = ""
+            let retainedId = appState.contractorId
+            let retainedApple = appState.appleUserId
+            let retainedNumber = appState.kevinNumber
+            let name = [credential.fullName?.givenName, credential.fullName?.familyName].compactMap { $0 }.joined(separator: " ")
+            Task { @MainActor in
+                let outcome = await coordinator.restoreAccount(
+                    appleUserId: credential.user, appleIdentityToken: token,
+                    isRecoveryMode: isRecoveryMode, retainedContractorId: retainedId,
+                    retainedAppleUserId: retainedApple, retainedKevinNumber: retainedNumber,
+                    attemptRevision: revision)
+                guard signInAttemptRevision == revision else { return }
+                isLoading = false
+                signInAttemptRevision = nil
+                switch outcome {
+                case .success(_, let needsProvisioning):
+                    if needsProvisioning && !isRecoveryMode {
+                        step = .provisioning
+                        await provision(mode: appState.isPersonalMode ? "personal" : "business")
+                    }
+                case .newAccountNeeded:
+                    guard !isRecoveryMode else { return }
+                    signupContinuation = nil
+                    appState.appleUserId = credential.user
+                    appState.appleIdentityToken = token
+                    if !name.isEmpty { ownerName = name }
+                    step = .phoneEntry
+                case .authFailed(let message), .notFound(let message), .failed(let message): errorMessage = message
+                case .superseded: break
+                }
             }
         }
+    }
 
-        // If account has no Kevin number, provision one before completing restore
-        if number.isEmpty {
-            await MainActor.run { step = .provisioning }
-            await provision(mode: (mode == "personal") ? "personal" : "business")
-            return
-        }
-
-        await MainActor.run {
-            appState.kevinNumber = number
-            // Even an expired account completes "onboarding" here; the
-            // ContentView gate (subscriptionStatus == "expired") then
-            // immediately presents the forced paywall on the first frame.
-            // This is the right shape: onboarding is "I have an account",
-            // ContentView's gate is "I have a paid subscription".
-            appState.isOnboarded = true
-        }
-
-        // Sync contacts in background only if user has previously consented to upload
-        if appState.contactsUploadConsent {
-            _ = await ContactSyncManager.shared.syncContacts(contractorId: appState.contractorId, force: true)
+    /// The phone lookup can also discover a returning user. Re-verify that
+    /// identity and use the same staged restore as Sign in with Apple.
+    private func restoreBootstrapResponse(_ response: [String: Any]?, provisioningMode: String? = nil) async {
+        guard !isRecoveryMode else { return }
+        let coordinator = AccountRestoreCoordinator.shared
+        guard let revision = coordinator.beginAttempt() else { return }
+        signInAttemptRevision = revision
+        let outcome = await coordinator.restoreBootstrapResponse(response,
+            appleUserId: appState.appleUserId, appleIdentityToken: appState.appleIdentityToken,
+            retainedContractorId: appState.contractorId,
+            retainedAppleUserId: appState.appleUserId, retainedKevinNumber: appState.kevinNumber,
+            signupContinuation: signupContinuation,
+            attemptRevision: revision)
+        guard signInAttemptRevision == revision else { return }
+        signInAttemptRevision = nil
+        switch outcome {
+        case .success(_, let needsProvisioning):
+            if needsProvisioning {
+                step = .provisioning
+                await provision(mode: provisioningMode ?? (appState.isPersonalMode ? "personal" : "business"))
+            }
+        case .authFailed(let message), .notFound(let message), .failed(let message): errorMessage = message
+        case .newAccountNeeded:
+            if let id = response?["contractor_id"] as? String {
+                signupContinuation = SignupContinuation(contractorId: id, appleUserId: appState.appleUserId)
+            }
+            step = .modeSelect
+        case .superseded: break
         }
     }
 
     private func restoreOrContinue() async {
+        guard !isRecoveryMode else { return }
+        let originAuth = appState.currentAuthContext()
+        let originApple = appState.appleUserId
         // Try to find existing contractor via phone number. Auto-refreshes the
         // Apple identity token and retries on 401 (token expired in flight).
         let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber, ownerName] in
@@ -1026,28 +1017,19 @@ struct OnboardingView: View {
             )
         }
 
+        guard appState.currentAuthContext() == originAuth, appState.appleUserId == originApple else { return }
+
         switch outcome {
         case .authFailed:
             await handleBootstrapAuthFailure()
             return
         case .success(let result):
-            if let contractorId = result?["contractor_id"] as? String,
-               let isExisting = result?["existing"] as? Bool, isExisting {
-                // Existing account found — restore it
-                appState.contractorId = contractorId
-                if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
-                    await restoreFromProfile(profile)
-                } else {
-                    await MainActor.run { appState.isOnboarded = true }
-                }
-            } else {
-                // New user — continue with onboarding
-                await MainActor.run { step = .modeSelect }
-            }
+            await restoreBootstrapResponse(result)
         }
     }
 
     private func provision(mode: String) async {
+        guard !isRecoveryMode else { return }
         // Resolve names: prefer the form-state values (when the user just typed them
         // during onboarding) but fall back to the values already on appState so we
         // don't overwrite a restored profile with empty strings, which the backend
@@ -1137,6 +1119,8 @@ struct OnboardingView: View {
         if contractorId.isEmpty {
             // No existing contractor — create one (with Apple User ID for dedup).
             // Retries with a refreshed Apple identity token on 401.
+            let originAuth = appState.currentAuthContext()
+            let originApple = appState.appleUserId
             let createOutcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber] in
                 try await APIClient.shared.createContractor(
                     ownerName: resolvedOwnerName,
@@ -1149,6 +1133,10 @@ struct OnboardingView: View {
                     businessAddress: resolvedBusinessAddress,
                     businessCity: resolvedBusinessCity
                 )
+            }
+            guard appState.currentAuthContext() == originAuth, appState.appleUserId == originApple else {
+                isLoading = false
+                return
             }
             let result: [String: Any]?
             switch createOutcome {
@@ -1165,35 +1153,17 @@ struct OnboardingView: View {
                 isLoading = false
                 return
             }
+            if result?["existing"] as? Bool == true {
+                await restoreBootstrapResponse(result, provisioningMode: mode)
+                isLoading = false
+                return
+            }
             appState.contractorId = contractorId
             // Store per-contractor API token if returned
             if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
                 APIClient.shared.contractorToken = apiToken
             }
 
-            // If the create endpoint restored an existing account by phone,
-            // persist the selected mode/profile before continuing.
-            if result?["existing"] as? Bool == true {
-                var updateBody: [String: Any] = ["mode": mode]
-                if !resolvedOwnerName.isEmpty { updateBody["owner_name"] = resolvedOwnerName }
-                if !bizName.isEmpty { updateBody["business_name"] = bizName }
-                do {
-                    let updated = try await APIClient.shared.patchContractor(contractorId, body: updateBody)
-                    if !updated {
-                        errorMessage = mode == "business"
-                            ? String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
-                            : String(localized: "Failed to update profile. Please try again.")
-                        isLoading = false
-                        return
-                    }
-                } catch {
-                    errorMessage = String(localized: "Failed to update profile. Please try again.")
-                    isLoading = false
-                    return
-                }
-                if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }
-                if !bizName.isEmpty { appState.businessName = bizName }
-            }
         } else {
             // Existing contractor — update profile info. Only patch fields we have
             // values for so we don't overwrite restored profile data with empties.

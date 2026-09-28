@@ -300,7 +300,7 @@ struct ContentView: View {
         .alert(String(localized: "Session Expired"), isPresented: $appState.needsReauth) {
             Button(String(localized: "Sign In Again")) {
                 appState.needsReauth = false
-                appState.isOnboarded = false
+                appState.beginAccountRecovery()
             }
             Button(String(localized: "Later"), role: .cancel) {
                 appState.needsReauth = false

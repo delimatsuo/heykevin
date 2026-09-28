@@ -63,6 +63,20 @@ struct CallHistoryView: View {
                     }
                 }
 
+                if historyModel.needsAccountRecovery {
+                    Section {
+                        VStack(spacing: 12) {
+                            Text(String(localized: "Sign in to reconnect your account and view call history."))
+                                .multilineTextAlignment(.center)
+                            Button(String(localized: "Sign In Again")) { appState.beginAccountRecovery() }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
+                        .accessibilityIdentifier("calls.reconnect")
+                    }
+                }
+
                 // Initial load error state when no calls are cached
                 if let errorMessage = historyModel.errorMessage, !historyModel.hasCalls {
                     Section {

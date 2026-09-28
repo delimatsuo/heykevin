@@ -77,40 +77,12 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    /// An authorization change in iOS Settings does not relaunch the app, and
-    /// a previously cached token does not prove registration is still usable.
-    /// Re-register on activation so enabling permission repairs that path.
-    @MainActor
-    static func recoverPushRegistrationOnActive(
-        status: UNAuthorizationStatus,
-        requestAuthorization: () -> Void = { requestPushAuthorization() },
-        registerForRemoteNotifications: () -> Void = { UIApplication.shared.registerForRemoteNotifications() }
-    ) {
-        switch status {
-        case .notDetermined:
-            requestAuthorization()
-        case .authorized, .provisional:
-            registerForRemoteNotifications()
-        default:
-            break
-        }
-    }
-
     // Got device token for regular push notifications
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
-        #if DEBUG
-        print("Push device token: \(token)")
-        #endif
-
-        // Save to app state so it's visible in Settings
-        DispatchQueue.main.async {
-            AppState.shared.pushToken = token
-        }
-
-        // Register with backend
-        Task {
-            await APIClient.shared.registerDevice(pushToken: token)
+        // Register through PushRegistrationCoordinator
+        Task { @MainActor in
+            await PushRegistrationCoordinator.shared.handlePushToken(token)
         }
     }
 
@@ -248,14 +220,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
         let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
-        #if DEBUG
-        print("VoIP push token: \(token)")
-        #endif
-
-        // Register VoIP token with backend
-        AppState.shared.voipToken = token
-        Task {
-            await APIClient.shared.registerDevice(pushToken: AppState.shared.pushToken, voipToken: token)
+        // Register through PushRegistrationCoordinator
+        Task { @MainActor in
+            await PushRegistrationCoordinator.shared.handleVoIPToken(token)
         }
     }
 

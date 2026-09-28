@@ -1636,4 +1636,19 @@ final class CallHistoryTests: XCTestCase {
         XCTAssertFalse(resultMissingId)
         XCTAssertEqual(model.allCalls.first?.appointmentStatus, "pending")
     }
+
+    // MARK: - 33. Invalid Auth Error Message & Call Invalidation
+
+    func testInvalidAuthShowsSeparateRecoveryStateWithoutUnownedHistoryOrErrors() async {
+        var auth = CallAuthContext(contractorId: "owner", bearerToken: "token", generation: 1)
+        let model = CallHistoryModel(authProvider: { auth }, fetchCalls: { _ in throw CallHistoryError.serverError(statusCode: 500) })
+        await model.loadCalls()
+        XCTAssertNotNil(model.errorMessage)
+        auth = CallAuthContext(contractorId: "", bearerToken: "", generation: 2)
+        XCTAssertTrue(model.needsAccountRecovery)
+        XCTAssertNil(model.errorMessage, "Prior account error must be hidden even before invalidate")
+        await model.loadCalls()
+        XCTAssertTrue(model.needsAccountRecovery); XCTAssertFalse(model.hasCalls)
+        XCTAssertNil(model.errorMessage)
+    }
 }

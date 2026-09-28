@@ -7,7 +7,6 @@ struct KevinApp: App {
     @StateObject private var appState: AppState
     @Environment(\.scenePhase) var scenePhase
     @State private var lastSyncTime: Date = .distantPast
-    @State private var lastDeviceRegistrationTime: Date = .distantPast
     @State private var isFirstLaunch = true
     @State private var listenerStarted = false
 
@@ -26,13 +25,41 @@ struct KevinApp: App {
                     .environmentObject(appState)
             } else {
                 Group {
-                    if appState.isOnboarded {
-                        ContentView()
+                    switch appState.sessionState {
+                    case .uninitialized:
+                        ZStack {
+                            Color.hkWarmCanvas.ignoresSafeArea()
+                            ProgressView()
+                        }
+                    case .storageUnavailable(let reason):
+                        storageUnavailableView(reason: reason)
+                    case .needsRecovery:
+                        OnboardingView(isRecoveryMode: true)
                             .environmentObject(appState)
-                    } else {
-                        OnboardingView()
+                    case .notOnboarded:
+                        OnboardingView(isRecoveryMode: false)
                             .environmentObject(appState)
+                    case .ready:
+                        if appState.isOnboarded {
+                            ContentView()
+                                .environmentObject(appState)
+                        } else {
+                            OnboardingView(isRecoveryMode: false)
+                                .environmentObject(appState)
+                        }
                     }
+                }
+                .onChange(of: appState.isOnboarded) {
+                    appState.refreshSecureStorageForActiveUse()
+                }
+                .onChange(of: appState.sessionState) {
+                    guard appState.isOnboarded, appState.sessionState == .ready else { return }
+                    Task { @MainActor in await PushRegistrationCoordinator.shared.handleAccountReady() }
+                }
+                .onChange(of: appState.currentAuthContext()) {
+                    PushRegistrationCoordinator.shared.handleAuthChange()
+                    guard appState.isOnboarded, appState.sessionState == .ready else { return }
+                    Task { @MainActor in await PushRegistrationCoordinator.shared.handleAccountReady() }
                 }
                 .appVersionGate()
                 .task {
@@ -57,23 +84,9 @@ struct KevinApp: App {
                     SubscriptionManager.shared.startTransactionListener()
                 }
 
-                // Safety net for accounts that finished onboarding before the
-                // permission prompt moved into it. Those users are never routed
-                // through the provisioning step again, so nothing ever asks them
-                // — and iOS shows no Notifications row in Settings for an app
-                // that has never requested, leaving no way to switch it on.
-                //
-                // This is not the cold-launch prompt that was removed: it only
-                // fires once the user is already onboarded, so they have seen
-                // what Kevin does before the system alert appears.
-                if appState.isOnboarded {
-                    Task { @MainActor in
-                        let status = await UNUserNotificationCenter.current()
-                            .notificationSettings().authorizationStatus
-                        AppDelegate.recoverPushRegistrationOnActive(
-                            status: status
-                        )
-                    }
+                // Push Registration and Permission Reconciliation via coordinator
+                Task { @MainActor in
+                    await PushRegistrationCoordinator.shared.handleSceneActive()
                 }
 
                 #if DEBUG
@@ -116,37 +129,15 @@ struct KevinApp: App {
                         try? await Task.sleep(nanoseconds: 3_000_000_000)
                     }
 
-                    // Retry device registration after network is warm, and again
-                    // periodically in case a token callback arrived while the
-                    // secure session was unavailable during a locked background launch.
-                    if !appState.contractorId.isEmpty,
-                       (!appState.pushToken.isEmpty || !appState.voipToken.isEmpty),
-                       Date().timeIntervalSince(lastDeviceRegistrationTime) > 3600 {
-                        lastDeviceRegistrationTime = Date()
-                        await APIClient.shared.registerDevice(
-                            pushToken: appState.pushToken,
-                            voipToken: appState.voipToken
-                        )
-                    }
-
+                    let auth = appState.currentAuthContext()
+                    guard appState.isOnboarded, appState.sessionState == .ready, auth.isValid else { return }
                     if wasFirstLaunch {
-                        // Verify subscription entitlements once on cold launch.
-                        //
-                        // Audit F-5: verifyCurrentEntitlements only iterates
-                        // `Transaction.currentEntitlements`. If Apple has no
-                        // active entitlement to report (typical for an
-                        // expired or never-subscribed user), the loop is a
-                        // no-op and `appState.subscriptionStatus` stays at
-                        // whatever was in Keychain — which can be a stale
-                        // "trial" or "active" while the server already says
-                        // "expired". Always fetch the contractor profile
-                        // explicitly so the server view wins, then run the
-                        // entitlement loop for any active StoreKit
-                        // transactions.
-                        if !appState.contractorId.isEmpty {
+                        // Keep the server subscription snapshot bound to this session.
+                        if auth.isValid {
                             if let profile = await APIClient.shared.getContractorProfile(
-                                contractorId: appState.contractorId
+                                contractorId: auth.contractorId, bearerToken: auth.bearerToken
                             ) {
+                                guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
                                 let status = profile["subscription_status"] as? String ?? ""
                                 let tier = profile["subscription_tier"] as? String ?? ""
                                 await MainActor.run {
@@ -154,27 +145,58 @@ struct KevinApp: App {
                                     if !tier.isEmpty { appState.subscriptionTier = tier }
                                 }
                             }
+                            guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
                             await SubscriptionManager.shared.verifyCurrentEntitlements()
                         }
                     }
+                    guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
                     appState.checkForActiveCall()
                 }
 
                 // Ask for an automatic contact sync at most once per foreground hour.
                 // ContactSyncManager also persists a longer battery guard across launches.
-                if !appState.contractorId.isEmpty,
+                let syncAuth = appState.currentAuthContext()
+                if appState.isOnboarded, appState.sessionState == .ready, syncAuth.isValid,
                    appState.contactsUploadConsent,
                    Date().timeIntervalSince(lastSyncTime) > 3600 {
                     lastSyncTime = Date()
                     Task {
                         // Delay 2s to let other startup tasks finish first
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        _ = await ContactSyncManager.shared.syncContacts(
-                            contractorId: appState.contractorId
-                        )
+                        guard appState.currentAuthContext() == syncAuth, appState.sessionState == .ready,
+                              appState.contactsUploadConsent else { return }
+                        _ = await ContactSyncManager.shared.syncContacts(contractorId: syncAuth.contractorId)
                     }
                 }
             }
         }
+    }
+
+    private func storageUnavailableView(reason: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 48))
+                .foregroundStyle(Color.hkOrange)
+
+            Text(String(localized: "Storage Unavailable"))
+                .font(.title2.bold())
+                .multilineTextAlignment(.center)
+
+            Text(String(localized: "Kevin cannot access secure storage on this device right now. Please unlock your device and retry."))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+
+            Button(String(localized: "Retry")) {
+                appState.refreshSecureStorageForActiveUse()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.hkCobalt)
+            .frame(minHeight: 44)
+            .padding(.top, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.hkWarmCanvas.ignoresSafeArea())
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UIKit
 
 struct CapturedScreeningTranscript: Equatable, Sendable {
     let lease: CallPresentationLease
@@ -56,28 +57,28 @@ class AppState: ObservableObject {
     private var inScreenshotFixture: Bool { false }
     #endif
 
+    // Observable account session gate
+    @Published var sessionState: AccountSessionState = .uninitialized
+
     let inMemory: Bool
     private let authProviderClosure: (() -> CallAuthContext)?
+    private let injectedSecureStore: KeychainManager?
+    private var secureStore: KeychainManager { injectedSecureStore ?? .shared }
+    private var inMemoryBearerToken = ""
+    private var inMemoryGeneration = 0
+    private(set) var recoveryCommitPending = false
+    private(set) var pendingAccountRecovery: AccountRecoveryCheckpoint?
+    private static let recoveryMarkerKey = "accountRecoveryCommit"
 
-    // One-time migration from UserDefaults to Keychain for existing users
-    private static func migrateToKeychain(_ key: String, keychainKey: String? = nil) -> String {
-        let kcKey = keychainKey ?? key
-        // If already in Keychain, use that
-        if let existing = KeychainManager.shared.retrieve(kcKey), !existing.isEmpty {
-            return existing
-        }
-        // Migrate from UserDefaults if present
-        if let legacy = UserDefaults.standard.string(forKey: key), !legacy.isEmpty {
-            KeychainManager.shared.save(kcKey, value: legacy)
-            UserDefaults.standard.removeObject(forKey: key)
-            return legacy
-        }
-        return ""
+    private static func migrateToKeychain(_ key: String) -> String {
+        KeychainManager.shared.readMigratingLegacy(key).stringValue ?? ""
     }
 
-    init(authProvider: (() -> CallAuthContext)? = nil, inMemory: Bool = false) {
+    init(authProvider: (() -> CallAuthContext)? = nil, inMemory: Bool = false,
+         secureStore: KeychainManager? = nil) {
         self.inMemory = inMemory
         self.authProviderClosure = authProvider
+        self.injectedSecureStore = secureStore
 
         if !inMemory && !inScreenshotFixture {
             let initialContractor = Self.migrateToKeychain("contractorId")
@@ -115,11 +116,21 @@ class AppState: ObservableObject {
                 name: CallSessionEpoch.didChangeNotification,
                 object: nil
             )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleProtectedDataBecameAvailable),
+                name: UIApplication.protectedDataDidBecomeAvailableNotification,
+                object: nil
+            )
         }
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleProtectedDataBecameAvailable() {
+        Task { @MainActor [weak self] in self?.refreshSecureStorageForActiveUse() }
     }
 
     @objc private func handleAuthEpochChanged() {
@@ -133,6 +144,7 @@ class AppState: ObservableObject {
     }
 
     func applyAuthChange() {
+        isRegistered = false
         let currentAuth = currentAuthContext()
         if let origin = activeCallAuth, origin != currentAuth || !currentAuth.isValid {
             clearActiveCall()
@@ -153,7 +165,7 @@ class AppState: ObservableObject {
         if let custom = authProviderClosure?() {
             return custom.generation
         }
-        return CallSessionEpoch.shared.generation
+        return inMemory ? inMemoryGeneration : CallSessionEpoch.shared.generation
     }
 
     // Onboarding
@@ -162,6 +174,9 @@ class AppState: ObservableObject {
             let loggedOut = oldValue && !isOnboarded
             if !inScreenshotFixture && !inMemory {
                 DispatchQueue.main.async { UserDefaults.standard.set(self.isOnboarded, forKey: "isOnboarded") }
+            }
+            if !isOnboarded {
+                sessionState = .notOnboarded
             }
             if loggedOut {
                 callLifecycleRevision += 1
@@ -182,6 +197,7 @@ class AppState: ObservableObject {
                 }
             }
             if changed {
+                if inMemory { inMemoryGeneration += 1 }
                 callLifecycleRevision += 1
                 if !inMemory && !inScreenshotFixture {
                     readCallIds = Self.loadReadCallIds(for: contractorId)
@@ -382,7 +398,7 @@ class AppState: ObservableObject {
     @Published var contactsUploadConsent: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.contactsUploadConsent, forKey: "contactsUploadConsent") }
+            UserDefaults.standard.set(contactsUploadConsent, forKey: "contactsUploadConsent")
         }
     }
 
@@ -497,7 +513,7 @@ class AppState: ObservableObject {
         #endif
         return CallAuthContext(
             contractorId: contractorId,
-            bearerToken: APIClient.shared.contractorToken,
+            bearerToken: inMemory ? inMemoryBearerToken : APIClient.shared.contractorToken,
             generation: sessionGeneration
         )
     }
@@ -639,43 +655,141 @@ class AppState: ObservableObject {
         }
     }
 
+    /// A marker is written before any credential replacement. An interrupted
+    /// multi-item Keychain commit must remain in recovery on the next launch.
+    @MainActor
+    func beginAccountRecovery(checkpoint: AccountRecoveryCheckpoint? = nil) {
+        let checkpoint = checkpoint ?? pendingAccountRecovery ?? AccountRecoveryCheckpoint(
+            contractorId: contractorId, appleUserId: appleUserId, allowsUnfinishedSetup: false)
+        recoveryCommitPending = true
+        pendingAccountRecovery = checkpoint
+        isRegistered = false
+        sessionState = checkpoint.allowsUnfinishedSetup && !isOnboarded ? .notOnboarded : .needsRecovery
+        if (!inMemory || injectedSecureStore != nil) && !inScreenshotFixture,
+           let data = try? JSONEncoder().encode(checkpoint), let marker = String(data: data, encoding: .utf8) {
+            _ = secureStore.save(Self.recoveryMarkerKey, value: marker)
+        }
+    }
+
+    @MainActor
+    func persistRecoveredCredentials(_ values: [String: String], checkpoint: AccountRecoveryCheckpoint? = nil) -> Bool {
+        let checkpoint = checkpoint ?? AccountRecoveryCheckpoint(contractorId: values["contractorId"] ?? "",
+            appleUserId: values["appleUserId"] ?? "", allowsUnfinishedSetup: false)
+        recoveryCommitPending = true
+        pendingAccountRecovery = checkpoint
+        if inMemory && injectedSecureStore == nil { return true }
+        guard let data = try? JSONEncoder().encode(checkpoint), let marker = String(data: data, encoding: .utf8),
+              secureStore.save(Self.recoveryMarkerKey, value: marker),
+              secureStore.read(Self.recoveryMarkerKey) == .value(marker) else { return false }
+        for key in values.keys.sorted() {
+            guard let value = values[key], secureStore.save(key, value: value),
+                  secureStore.read(key) == .value(value) else { return false }
+        }
+        return true
+    }
+
+    @MainActor
+    func finishAccountRecovery(bearerToken: String) -> Bool {
+        if !inMemory || injectedSecureStore != nil {
+            guard secureStore.save(Self.recoveryMarkerKey, value: "complete"),
+                  secureStore.read(Self.recoveryMarkerKey) == .value("complete") else { return false }
+        }
+        if inMemory {
+            inMemoryBearerToken = bearerToken
+            inMemoryGeneration += 1
+        } else {
+            // The staged Keychain write already replaced the token, so a
+            // token setter comparing its new value cannot advance this epoch.
+            CallSessionEpoch.shared.advance()
+        }
+        recoveryCommitPending = false
+        pendingAccountRecovery = nil
+        needsReauth = false
+        isRegistered = false
+        sessionState = isOnboarded ? .ready : .notOnboarded
+        return true
+    }
+
     @MainActor
     func refreshSecureStorageForActiveUse() {
-        #if DEBUG
-        if inScreenshotFixture { return }
-        #endif
-        if inMemory { return }
-
-        KeychainManager.shared.migrateAccessibility(for: Self.keychainBackedKeys)
-
-        if contractorId.isEmpty,
-           let savedContractorId = KeychainManager.shared.retrieve("contractorId"),
-           !savedContractorId.isEmpty {
-            contractorId = savedContractorId
+        if inScreenshotFixture { sessionState = .ready; return }
+        if inMemory && injectedSecureStore == nil {
+            if !isOnboarded && !recoveryCommitPending { sessionState = .notOnboarded }
+            return
         }
 
-        if appleUserId.isEmpty,
-           let savedAppleUserId = KeychainManager.shared.retrieve("appleUserId"),
-           !savedAppleUserId.isEmpty {
-            appleUserId = savedAppleUserId
+        let marker = secureStore.read(Self.recoveryMarkerKey)
+        let storedCheckpoint: AccountRecoveryCheckpoint?
+        switch marker {
+        case .missing, .value("complete"): storedCheckpoint = nil
+        case .value("pending"):
+            storedCheckpoint = AccountRecoveryCheckpoint(contractorId: "", appleUserId: "", allowsUnfinishedSetup: false)
+        case .value(let value):
+            guard let data = value.data(using: .utf8),
+                  let checkpoint = try? JSONDecoder().decode(AccountRecoveryCheckpoint.self, from: data),
+                  !checkpoint.allowsUnfinishedSetup || (!checkpoint.contractorId.isEmpty && !checkpoint.appleUserId.isEmpty) else {
+                sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+                return
+            }
+            storedCheckpoint = checkpoint
+        case .error:
+            sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+            return
         }
+        let pending = recoveryCommitPending ? pendingAccountRecovery : storedCheckpoint
+        // A clean installation can also contain an interrupted returning-user
+        // commit. Inspect it before permitting ordinary onboarding.
+        guard isOnboarded || pending != nil else { sessionState = .notOnboarded; return }
+        var reads = Dictionary(uniqueKeysWithValues: Self.keychainBackedKeys.map { ($0, secureStore.read($0)) })
+        for result in [marker] + Array(reads.values) {
+            if case .error = result {
+                sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+                return
+            }
+        }
+        if !inMemory {
+            for key in ["contractorId", "contractorApiToken", "appleUserId"] where reads[key] == .missing {
+                let migrated = secureStore.readMigratingLegacy(key)
+                guard case .error = migrated else { reads[key] = migrated; continue }
+                sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+                return
+            }
+        }
+        // Surviving identity constrains recovery even if the other credential
+        // is missing after an initially unavailable Keychain read.
+        let retainedId = pending.flatMap { $0.contractorId.isEmpty ? nil : $0.contractorId } ?? reads["contractorId"]?.stringValue
+        let retainedApple = pending.flatMap { $0.appleUserId.isEmpty ? nil : $0.appleUserId } ?? reads["appleUserId"]?.stringValue
+        if let cid = retainedId, !cid.isEmpty, contractorId != cid { contractorId = cid }
+        if let apple = retainedApple, !apple.isEmpty, appleUserId != apple { appleUserId = apple }
+        if let pending {
+            if !recoveryCommitPending {
+                // After an interrupted commit, the stored ID may be staged.
+                // Cached consent cannot establish its original owner.
+                contactsUploadConsent = false
+            }
+            recoveryCommitPending = true
+            pendingAccountRecovery = pending
+            sessionState = pending.allowsUnfinishedSetup && !isOnboarded ? .notOnboarded : .needsRecovery
+            return
+        }
+        guard let cid = reads["contractorId"]?.stringValue, !cid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let token = reads["contractorApiToken"]?.stringValue, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            sessionState = .needsRecovery
+            return
+        }
+        guard secureStore.migrateAccessibility(for: Self.keychainBackedKeys) else {
+            sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+            return
+        }
+        if inMemory { inMemoryBearerToken = token }
+        hydrateRemainingKeychainItems()
+        sessionState = .ready
+    }
 
-        if subscriptionUUID.isEmpty,
-           let savedSubscriptionUUID = KeychainManager.shared.retrieve("subscriptionUUID"),
-           !savedSubscriptionUUID.isEmpty {
-            subscriptionUUID = savedSubscriptionUUID
-        }
-
-        if let savedSubscriptionStatus = KeychainManager.shared.retrieve("subscriptionStatus"),
-           !savedSubscriptionStatus.isEmpty,
-           subscriptionStatus != savedSubscriptionStatus {
-            subscriptionStatus = savedSubscriptionStatus
-        }
-
-        if let savedSubscriptionTier = KeychainManager.shared.retrieve("subscriptionTier"),
-           !savedSubscriptionTier.isEmpty,
-           subscriptionTier != savedSubscriptionTier {
-            subscriptionTier = savedSubscriptionTier
-        }
+    private func hydrateRemainingKeychainItems() {
+        if let value = secureStore.retrieve("appleUserId") { appleUserId = value }
+        if let value = secureStore.retrieve("subscriptionUUID") { subscriptionUUID = value }
+        if let value = secureStore.retrieve("subscriptionStatus"), !value.isEmpty { subscriptionStatus = value }
+        if let value = secureStore.retrieve("subscriptionTier"), !value.isEmpty { subscriptionTier = value }
     }
 }

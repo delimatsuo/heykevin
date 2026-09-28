@@ -1651,4 +1651,21 @@ final class SettingsRefreshPolicyTests: XCTestCase {
         XCTAssertTrue(validFinish)
         XCTAssertFalse(fence.isPending)
     }
+
+    // MARK: - 32. Push Permission Sequencing
+
+    func testSettingsPermissionRefreshPrecedesMissingAuthAndCoalescingGates() async {
+        let coordinator = SettingsLoadCoordinator()
+        var events: [String] = []
+        let missing = CallAuthContext(contractorId: "", bearerToken: "", generation: 1)
+        let absent = await coordinator.prepareLoad(refreshPermission: { events.append("permission") },
+            authProvider: { events.append("auth"); return missing }, isBusinessMode: false)
+        XCTAssertNil(absent); XCTAssertEqual(events, ["permission", "auth"])
+        let auth = makeAuthContext()
+        _ = coordinator.beginLoad(auth: auth, isBusinessMode: false)
+        events = []
+        let coalesced = await coordinator.prepareLoad(refreshPermission: { events.append("permission") },
+            authProvider: { events.append("auth"); return auth }, isBusinessMode: false)
+        XCTAssertNil(coalesced); XCTAssertEqual(events, ["permission", "auth"])
+    }
 }

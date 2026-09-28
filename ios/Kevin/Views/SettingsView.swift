@@ -219,11 +219,9 @@ struct SettingsHost<Root: View>: View {
             return
         }
         #endif
-        let auth = appState.currentAuthContext()
-        guard auth.isValid else { return }
-
-        guard let plan = loadCoordinator.beginLoad(
-            auth: auth,
+        guard let plan = await loadCoordinator.prepareLoad(
+            refreshPermission: { await refreshPushPermission() },
+            authProvider: { appState.currentAuthContext() },
             isBusinessMode: !appState.isPersonalMode,
             isForegroundOrTabSwitch: isForegroundOrTabSwitch
         ) else {
@@ -240,8 +238,6 @@ struct SettingsHost<Root: View>: View {
         if plan.shouldCheckIntegrations {
             await checkIntegrationsStatus(capturedAuth: plan.authContext)
         }
-
-        await refreshPushPermission()
 
         _ = loadCoordinator.finishLoad(
             flightToken: plan.flightToken,

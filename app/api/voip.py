@@ -133,7 +133,9 @@ class CallAction(BaseModel):
 async def register_device(request: Request, body: DeviceRegister):
     """Register an iOS device's push and/or VoIP token."""
     if not body.contractor_id:
-        return {"status": "error", "message": "contractor_id required"}
+        raise HTTPException(status_code=400, detail="contractor_id required")
+    if not body.push_token and not body.voip_token:
+        raise HTTPException(status_code=400, detail="At least one token (push_token or voip_token) required")
     require_contractor_access(request, body.contractor_id)
     try:
         from app.db.firestore_client import get_firestore_client
@@ -159,41 +161,28 @@ async def register_device(request: Request, body: DeviceRegister):
         # device restore would stamp deleted_app_detected_at permanently, and the
         # 14-day cleanup could later release the number of a user whose app is
         # still on their phone.
-        device_updates = {}
-        try:
-            from app.db.contractors import get_contractor
-            existing = await get_contractor(body.contractor_id)
-            if existing and existing.get("deleted_app_detected_at"):
-                # None is deliberate, not a bug: update_contractor passes the
-                # dict straight to Firestore .update(), which stores null — and
-                # null is this field's canonical "not deleted" state
-                # (create_contractor defaults it to None; every reader checks
-                # truthiness). DELETE_FIELD would also work but would make old
-                # and new records look different.
-                device_updates["deleted_app_detected_at"] = None
-                logger.info(
-                    "Device re-registered for %s — clearing stale deletion signal",
-                    body.contractor_id,
-                )
-        except Exception as e:
-            logger.warning("Could not check deletion signal: %s", type(e).__name__)
+        # Null is the canonical "not deleted" state. This required write must
+        # not depend on a best-effort read of the previous deletion signal.
+        device_updates = {"deleted_app_detected_at": None}
 
         # Save timezone and language to contractor doc (updates on every app launch)
         if body.timezone:
             device_updates["timezone"] = body.timezone
         if body.language:
             device_updates["user_language"] = body.language
-        if device_updates:
-            from app.db.contractors import update_contractor
-            await update_contractor(body.contractor_id, device_updates)
+        from app.db.contractors import update_contractor
+        if not await update_contractor(body.contractor_id, device_updates):
+            raise RuntimeError("Device profile update was not acknowledged")
 
         token_preview = (body.push_token or body.voip_token)[:8] if (body.push_token or body.voip_token) else "none"
         logger.info(f"Device registered: {token_preview}... ({body.platform}) contractor={body.contractor_id} tz={body.timezone or 'not set'} lang={body.language or 'not set'}")
         return {"status": "ok"}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Device registration failed: {e}", exc_info=True)
-        return {"status": "error", "message": "Internal error"}
+        logger.error("Device registration persistence failed: %s", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Device registration failed")
 
 
 @router.post("/voip-token")

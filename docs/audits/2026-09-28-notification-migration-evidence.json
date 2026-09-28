@@ -1,0 +1,327 @@
+{
+  "root_evidence": {
+    "audited_at_utc": "2026-09-28",
+    "worktree": "/Volumes/Extreme Pro/MYPROJECTS/Kevin/.worktrees/build42-missing-notification-triage",
+    "audited_head": "8bb4f122e776b9d3ad7b1dd23767fcc1dc722fd3",
+    "origin_main": "6e35cb250f8d26f72dd7d36999fa7af6ce15640f",
+    "installed_build": "1.3.2 (42)",
+    "packaged_source": "043b4c8e9cea09f95def904e98045abe901f94d5",
+    "deployed_sha": "2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12",
+    "deployed_revision": "kevin-api-00273-f7g",
+    "shared_backend_tree": "39f721c4f72af480c939488ad63a091c9be1a781",
+    "observed_phone": [
+      "Owner confirms recent iPhone 18 migration",
+      "iOS notification authorization and presentation settings enabled",
+      "Kevin shows Not enabled and empty Calls after cold launch",
+      "Cached Kevin number and Free Trial visible"
+    ],
+    "cold_launch_api_evidence": {
+      "window": "2026-09-28T13:17:00Z/2026-09-28T13:28:00Z",
+      "rows": 2,
+      "events": [
+        {
+          "time": "13:19:21.962690Z",
+          "route": "/api/app/version",
+          "status": 200,
+          "user_agent_build": 42
+        },
+        {
+          "time": "13:25:38.754157Z",
+          "route": "/api/app/version",
+          "status": 200,
+          "user_agent_build": 42
+        }
+      ],
+      "protected_requests": 0,
+      "registration_requests": 0,
+      "device_attribution": "Inferred from timing and shared Kevin/42 user agent; not device-specific proof"
+    },
+    "push_evidence": {
+      "window_start": "2026-09-17T00:00:00Z",
+      "matched_rows": 45,
+      "ordinary_accepted": 42,
+      "voip_accepted": 2,
+      "urgent_accepted": 1,
+      "matching_error_events": 0,
+      "owner_attribution": "not confirmed",
+      "recent_token_last_registered": "2026-09-24T19:20:23.266882Z"
+    },
+    "registration_evidence": {
+      "window_start": "2026-09-01T00:00:00Z",
+      "matched_rows": 284,
+      "matched_accounts": 11,
+      "matching_write_error_events": 0
+    },
+    "denied_read": {
+      "operation": "projected Firestore owner account lookup",
+      "status": 403,
+      "further_attempts": 0
+    },
+    "offline_probe": {
+      "production_backend_source_equal": true,
+      "passed": 3,
+      "checks": [
+        "VoIP-only registration preserves old regular token",
+        "Subsequent regular registration replaces old token",
+        "Write exception returns error body instead of HTTP error"
+      ],
+      "initial_attempt": "settings initialization failed before probes; repeated with synthetic test configuration"
+    },
+    "external_sources": [
+      "https://developer.apple.com/documentation/security/ksecattraccessibleafterfirstunlockthisdeviceonly",
+      "https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns"
+    ],
+    "limits": [
+      "No physical Keychain inspection",
+      "No new-device token equality proof",
+      "APNs acceptance is not on-phone display proof",
+      "No implementation, build upload, deployment, notification toggles or test call placement"
+    ]
+  },
+  "reduction": {
+    "expected_nodes": 2,
+    "returned_nodes": 2,
+    "expected_findings": 12,
+    "returned_findings": 12,
+    "unique_categories": 11
+  },
+  "categories": [
+    {
+      "category": "missing-local-session",
+      "findings": [
+        {
+          "id": "IOS-01",
+          "category": "missing-local-session",
+          "severity": "P1",
+          "certainty": "source path confirmed; owner-device occurrence strongly supported but not directly inspected",
+          "claim": "A restored isOnboarded=true flag opens main UI without the device-only Keychain contractor ID/token. Missing credentials suppress protected requests and device registration without prompting recovery.",
+          "introduced": "0fae05119ec01bed33c1ece0cc706a591739bf81",
+          "date": "2026-04-08",
+          "evidence": [
+            "ios/Kevin/Services/KeychainManager.swift:7-8",
+            "ios/Kevin/Models/AppState.swift:82-91",
+            "ios/Kevin/App/KevinApp.swift:28-35",
+            "ios/Kevin/Services/APIClient.swift:459-477"
+          ],
+          "node": "ios"
+        },
+        {
+          "id": "B4",
+          "category": "missing-local-session",
+          "severity": "P2",
+          "certainty": "same hypothesis as IOS-01",
+          "claim": "Missing local contractor ID/token prevents registration before network I/O.",
+          "introduced": "710ca64d163d08ddf5864e25e8172fe934ef1837",
+          "date": "2026-05-19",
+          "evidence": [
+            "ios/Kevin/Services/APIClient.swift:461-477"
+          ],
+          "node": "backend"
+        }
+      ]
+    },
+    {
+      "category": "misleading-permission-and-history",
+      "findings": [
+        {
+          "id": "IOS-02",
+          "category": "misleading-permission-and-history",
+          "severity": "P1",
+          "certainty": "confirmed source",
+          "claim": "Settings refreshes notification authorization only after a valid local auth gate. CallHistoryModel clears and returns for invalid auth, showing neither calls nor a recovery error.",
+          "introduced": "11eccd1cd8055cc627047dd5a8a4a50b5fd5f689",
+          "date": "2026-09-14",
+          "evidence": [
+            "ios/Kevin/Views/SettingsView.swift:80,216-244,540-555,1617-1625",
+            "ios/Kevin/Models/CallHistoryModel.swift:402-407,460-490",
+            "ios/Kevin/Views/ContentView.swift:299-309"
+          ],
+          "node": "ios"
+        }
+      ]
+    },
+    {
+      "category": "returning-install-bootstrap",
+      "findings": [
+        {
+          "id": "IOS-03",
+          "category": "returning-install-bootstrap",
+          "severity": "P2",
+          "certainty": "confirmed source",
+          "claim": "Existing-account restore saves credentials and completes onboarding without reconciling notification authorization or retrying device registration. Token callbacks/foreground retry may precede sign-in.",
+          "introduced": "0fae05119ec01bed33c1ece0cc706a591739bf81",
+          "date": "2026-04-08",
+          "evidence": [
+            "ios/Kevin/Views/OnboardingView.swift:918-1013,1276-1280",
+            "ios/Kevin/App/KevinApp.swift:48-77,113-130"
+          ],
+          "node": "ios"
+        }
+      ]
+    },
+    {
+      "category": "unshipped-incomplete-repair",
+      "findings": [
+        {
+          "id": "IOS-04",
+          "category": "unshipped-incomplete-repair",
+          "severity": "P2",
+          "certainty": "confirmed source and release ancestry",
+          "claim": "The September25 active-registration fix is not in build42 and cannot restore missing credentials. Build42 already re-registers APNs on an authorized cold launch.",
+          "introduced": "8bb4f122e776b9d3ad7b1dd23767fcc1dc722fd3",
+          "date": "2026-09-25",
+          "evidence": [
+            "ios/Kevin/App/AppDelegate.swift:40-45,80-98",
+            "ios/Kevin/App/KevinApp.swift:69-76",
+            "ios/Kevin/Services/APIClient.swift:467-477"
+          ],
+          "node": "ios"
+        }
+      ]
+    },
+    {
+      "category": "weaker-storage-and-rejected-token-alternatives",
+      "findings": [
+        {
+          "id": "IOS-05",
+          "category": "weaker-storage-and-rejected-token-alternatives",
+          "severity": "info",
+          "certainty": "weaker explanations, not conclusively excluded on the physical device",
+          "claim": "AfterFirstUnlock accessibility and active storage refresh weaken an ordinary lock-only explanation. A nonempty rejected token would allow requests and usually produce a visible auth failure.",
+          "introduced": "710ca64d163d08ddf5864e25e8172fe934ef1837",
+          "date": "2026-05-19",
+          "evidence": [
+            "ios/Kevin/Services/KeychainManager.swift:8,69-73",
+            "ios/Kevin/Models/AppState.swift:642-680",
+            "ios/Kevin/Models/CallHistoryModel.swift:460-478"
+          ],
+          "node": "ios"
+        }
+      ]
+    },
+    {
+      "category": "mixed-device-channels",
+      "findings": [
+        {
+          "id": "B1",
+          "category": "mixed-device-channels",
+          "severity": "P2",
+          "certainty": "confirmed source and offline probe",
+          "claim": "VoIP-only registration preserves the old regular token in one account primary document; channels can refer to different installations.",
+          "introduced": "0fae05119ec01bed33c1ece0cc706a591739bf81",
+          "date": "2026-04-08",
+          "evidence": [
+            "app/api/voip.py:143-155",
+            "app/services/push_notification.py:445-473"
+          ],
+          "node": "backend"
+        }
+      ]
+    },
+    {
+      "category": "old-phone-target",
+      "findings": [
+        {
+          "id": "B2",
+          "category": "old-phone-target",
+          "severity": "P2",
+          "certainty": "owner-specific hypothesis unconfirmed",
+          "claim": "Accepted pushes may be addressed to a still-valid previous installation; no current-phone/owner-token equality proof is available.",
+          "introduced": "0fae05119ec01bed33c1ece0cc706a591739bf81",
+          "date": "2026-04-08",
+          "evidence": [
+            "app/services/push_notification.py:293-305",
+            "redacted delivery and registration logs"
+          ],
+          "node": "backend"
+        }
+      ]
+    },
+    {
+      "category": "false-registration-success",
+      "findings": [
+        {
+          "id": "B3",
+          "category": "false-registration-success",
+          "severity": "P2",
+          "certainty": "confirmed source and offline probe; no matching live write failures",
+          "claim": "Backend write failures return an error dictionary with default HTTP200; build42 ignores the body and sets isRegistered based on HTTP200.",
+          "introduced": "backend catch predates April8 per-account registration; iOS HTTP-only handling 5418500163efecfafa7b1d51fc575935430ec513",
+          "date": "2026-04-08",
+          "evidence": [
+            "app/api/voip.py:194-196",
+            "ios/Kevin/Services/APIClient.swift:498-505"
+          ],
+          "node": "backend"
+        }
+      ]
+    },
+    {
+      "category": "independent-sms-and-push",
+      "findings": [
+        {
+          "id": "B5",
+          "category": "independent-sms-and-push",
+          "severity": "info",
+          "certainty": "confirmed source",
+          "claim": "SMS and ordinary/VoIP push are independent. Successful SMS does not verify APNs registration or display.",
+          "introduced": "154b359829c9a67780a6b2008094db18ab527c5c",
+          "date": "2026-04-10",
+          "evidence": [
+            "app/webhooks/twilio_incoming.py:373-399,648-663,857-874",
+            "app/services/post_call.py:353-409,1000-1035",
+            "app/services/urgent_handoff.py:40-74"
+          ],
+          "node": "backend"
+        }
+      ]
+    },
+    {
+      "category": "backend-change-exclusion",
+      "findings": [
+        {
+          "id": "B6",
+          "category": "backend-change-exclusion",
+          "severity": "info",
+          "certainty": "confirmed source equality; no evidence of recent wholesale push disable",
+          "claim": "Live and audited app trees match. September changes retain ordinary screening and summary pushes. The current revision matches the documented September17 deployment; no later active backend source divergence was found. An intervening deployment or rollback is not excluded.",
+          "introduced": null,
+          "date": "2026-09-28",
+          "evidence": [
+            "app tree 39f721c4f72af480c939488ad63a091c9be1a781",
+            "health revision kevin-api-00273-f7g"
+          ],
+          "node": "backend"
+        }
+      ]
+    },
+    {
+      "category": "apns-contract",
+      "findings": [
+        {
+          "id": "B7",
+          "category": "apns-contract",
+          "severity": "info",
+          "certainty": "source contract matches; service-wide failure unsupported by accepted sends",
+          "claim": "Build42 production entitlement and bundle match backend production requirements. This does not verify a particular phone's token.",
+          "introduced": "154b359829c9a67780a6b2008094db18ab527c5c",
+          "date": "2026-04-10",
+          "evidence": [
+            "ios/Kevin/Kevin.entitlements:5-12",
+            "app/config.py:380-384",
+            "app/services/push_notification.py:25-34,293-312"
+          ],
+          "node": "backend"
+        }
+      ]
+    }
+  ],
+  "staff_review": {
+    "decision": "approve_with_conditions",
+    "conditions": [
+      "Qualify phone attribution from launch requests as inference",
+      "Qualify current deployment continuity without excluding intervening deploy or rollback"
+    ],
+    "disposition": "both wording corrections applied"
+  }
+}

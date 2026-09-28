@@ -94,6 +94,8 @@ final class CallHistoryModel: ObservableObject {
         return active == authProvider()
     }
 
+    var needsAccountRecovery: Bool { !authProvider().isValid }
+
     var errorMessage: String? {
         guard hasOwnedSnapshot else { return nil }
         return rawErrorMessage

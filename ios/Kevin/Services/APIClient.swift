@@ -142,6 +142,47 @@ enum CallActionResponseParser {
     }
 }
 
+enum AppleLookupResult: Equatable, Sendable {
+    case found(contractorId: String, apiToken: String)
+    case notFound
+    case authFailure
+    case failure(String)
+}
+
+enum AppleLookupResponseParser {
+    static func parse(data: Data, response: HTTPURLResponse) -> AppleLookupResult {
+        if response.statusCode == 401 { return .authFailure }
+        if response.statusCode == 404 { return .notFound }
+        let failure = AppleLookupResult.failure(String(localized: "Could not reconnect your account. Please try again."))
+        guard response.statusCode == 200,
+              let object = try? JSONSerialization.jsonObject(with: data) else { return failure }
+        // The deployed FastAPI route serializes its not-found tuple as a 200
+        // array. Only this exact legacy shape means absence, never an outage.
+        if let array = object as? [Any], array.count == 2,
+           let error = array[0] as? [String: String], error == ["error": "Not found"],
+           let code = array[1] as? NSNumber,
+           CFGetTypeID(code) != CFBooleanGetTypeID(), code == NSNumber(value: 404) {
+            return .notFound
+        }
+        guard let json = object as? [String: Any],
+              json["error"] == nil,
+              let id = json["contractor_id"] as? String,
+              let token = json["api_token"] as? String,
+              !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return failure }
+        return .found(contractorId: id, apiToken: token)
+    }
+}
+
+enum DeviceRegistrationResponseParser {
+    static func succeeded(data: Data, response: URLResponse) -> Bool {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["status"] as? String == "ok", json["error"] == nil else { return false }
+        return true
+    }
+}
+
 /// Errors specific to the unauthenticated bootstrap calls (lookup-by-apple-id,
 /// create contractor). These run before we have a contractor API token and
 /// authenticate solely with the Apple identity token, which expires after
@@ -294,16 +335,7 @@ final class APIClient: @unchecked Sendable {
     /// Migrates from UserDefaults on first access for existing users
     var contractorToken: String {
         get {
-            if let existing = KeychainManager.shared.retrieve("contractorApiToken"), !existing.isEmpty {
-                return existing
-            }
-            // Migrate from UserDefaults if present
-            if let legacy = UserDefaults.standard.string(forKey: "contractorApiToken"), !legacy.isEmpty {
-                KeychainManager.shared.save("contractorApiToken", value: legacy)
-                UserDefaults.standard.removeObject(forKey: "contractorApiToken")
-                return legacy
-            }
-            return ""
+            KeychainManager.shared.readMigratingLegacy("contractorApiToken").stringValue ?? ""
         }
         set {
             let changed = CallSessionEpoch.shared.synchronized { () -> Bool in
@@ -456,26 +488,21 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Device Registration
 
-    func registerDevice(pushToken: String, voipToken: String = "") async {
+    @discardableResult
+    func registerDevice(pushToken: String, voipToken: String = "", authContext: CallAuthContext? = nil) async -> Bool {
+        guard !pushToken.isEmpty || !voipToken.isEmpty else { return false }
+
+        let currentAuth = await MainActor.run { AppState.shared.currentAuthContext() }
+        let auth = authContext ?? currentAuth
+        guard auth == currentAuth else { return false }
+        let contractorId = auth.contractorId
+        let token = auth.bearerToken
+        guard auth.isValid, !contractorId.isEmpty, !token.isEmpty else {
+            debugLog("Register device skipped: contractor auth unavailable")
+            return false
+        }
+
         do {
-            guard !pushToken.isEmpty || !voipToken.isEmpty else { return }
-
-            await MainActor.run {
-                AppState.shared.refreshSecureStorageForActiveUse()
-            }
-
-            let contractorId = await MainActor.run { AppState.shared.contractorId }
-            guard !contractorId.isEmpty else {
-                debugLog("Register device skipped: no contractor ID yet")
-                return
-            }
-
-            let token = contractorToken
-            guard !token.isEmpty else {
-                debugLog("Register device skipped: contractor token unavailable")
-                return
-            }
-
             let url = URL(string: "\(baseURL)/api/register-device")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -487,34 +514,19 @@ final class APIClient: @unchecked Sendable {
                 "timezone": TimeZone.current.identifier,
                 "language": Locale.current.language.languageCode?.identifier ?? "en",
                 "urgent_handoff_v1": true,
+                "contractor_id": contractorId,
             ]
             if !voipToken.isEmpty {
                 body["voip_token"] = voipToken
             }
-            body["contractor_id"] = contractorId
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-            let (_, response) = try await retryRequest(request, signalReauth: false)
-            if let http = response as? HTTPURLResponse {
-                debugLog("Register device: HTTP \(http.statusCode)")
-                if http.statusCode == 200 {
-                    debugLog("Device registered successfully")
-                    await MainActor.run {
-                        AppState.shared.isRegistered = true
-                        if !pushToken.isEmpty {
-                            AppState.shared.pushToken = pushToken
-                        }
-                        if !voipToken.isEmpty {
-                            AppState.shared.voipToken = voipToken
-                        }
-                    }
-                } else if http.statusCode == 401 {
-                    debugLog("Device registration unauthorized; will retry on next foreground")
-                }
-            }
+            let (data, response) = try await session.data(for: request)
+            return DeviceRegistrationResponseParser.succeeded(data: data, response: response)
         } catch {
             debugLog("Device registration failed: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -732,36 +744,34 @@ final class APIClient: @unchecked Sendable {
     /// The backend strictly verifies the Apple identity token. Throws
     /// ``BootstrapAuthError/unauthenticated`` on HTTP 401 so the caller can
     /// re-prompt for a fresh Sign-in with Apple credential and retry. Returns
-    /// `nil` on any other non-2xx response or transport failure to preserve
-    /// the original "soft fail and continue onboarding" behaviour.
-    func findContractorByAppleId(appleUserId: String, appleIdentityToken: String = "") async throws -> [String: Any]? {
-        do {
-            let url = URL(string: "\(baseURL)/api/contractors/lookup-by-apple-id")!
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 10
-            request.httpBody = try JSONSerialization.data(withJSONObject: [
-                "apple_user_id": appleUserId,
-                "apple_identity_token": appleIdentityToken,
-            ])
-            authorize(&request)
+    /// an explicit ``AppleLookupResult`` distinguishing found, not found, and failure.
+    func findContractorByAppleId(appleUserId: String, appleIdentityToken: String = "") async throws -> AppleLookupResult {
+        let url = URL(string: "\(baseURL)/api/contractors/lookup-by-apple-id")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "apple_user_id": appleUserId,
+            "apple_identity_token": appleIdentityToken,
+        ])
+        authorize(&request)
 
+        do {
             let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 401 {
-                    throw BootstrapAuthError.unauthenticated
-                }
-                if http.statusCode == 200 {
-                    return try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                }
+            guard let http = response as? HTTPURLResponse else {
+                return .failure("Invalid response")
             }
+            if http.statusCode == 401 {
+                throw BootstrapAuthError.unauthenticated
+            }
+            return AppleLookupResponseParser.parse(data: data, response: http)
         } catch let error as BootstrapAuthError {
             throw error
         } catch {
             debugLog("Lookup by Apple ID failed: \(error.localizedDescription)")
+            return .failure(error.localizedDescription)
         }
-        return nil
     }
 
     // MARK: - Contractor Onboarding

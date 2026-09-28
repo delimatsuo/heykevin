@@ -604,6 +604,17 @@ final class SettingsLoadCoordinator {
         }
     }
 
+    /// Local permission must refresh even when auth is absent or a profile
+    /// request is already in flight. SettingsHost uses this ordering directly.
+    func prepareLoad(refreshPermission: () async -> Void,
+                     authProvider: () -> CallAuthContext,
+                     isBusinessMode: Bool,
+                     isForegroundOrTabSwitch: Bool = false) async -> LoadPlan? {
+        await refreshPermission()
+        return beginLoad(auth: authProvider(), isBusinessMode: isBusinessMode,
+                         isForegroundOrTabSwitch: isForegroundOrTabSwitch)
+    }
+
     /// Begin a load request. Returns a LoadPlan if started, or nil if coalesced with an active flight.
     func beginLoad(
         auth: CallAuthContext,

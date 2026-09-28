@@ -556,13 +556,17 @@ async def test_new_same_state_start_fences_old_failure_and_old_start_cannot_repl
 ])
 @pytest.mark.parametrize("raises", [False, True])
 async def test_failed_persistence_returns_real_http_500(monkeypatch, path, form, raises):
-    from unittest.mock import AsyncMock
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
     account = {"contractor_id": "c1", "owner_phone": "+12025550123", "twilio_number": "+12025550199"}
     monkeypatch.setattr("app.db.contractors.get_contractor_by_twilio_number", AsyncMock(return_value=account))
     transition = AsyncMock(side_effect=RuntimeError("unavailable")) if raises else AsyncMock(return_value=(False, {"error": "test"}))
     save = AsyncMock(side_effect=RuntimeError("unavailable")) if raises else AsyncMock(return_value=False)
     monkeypatch.setattr(owner_sms_db, "apply_owner_sms_consent_transition", transition)
     monkeypatch.setattr(call_db, "save_call", save)
+    cleanup = Mock()
+    monkeypatch.setattr("app.db.cache._init_firebase", lambda: None)
+    monkeypatch.setattr("firebase_admin.db.reference", lambda path: SimpleNamespace(delete=cleanup))
     app = FastAPI()
     app.include_router(twilio_router)
     url = "https://test.kevinai.app" + path
@@ -570,6 +574,10 @@ async def test_failed_persistence_returns_real_http_500(monkeypatch, path, form,
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test.kevinai.app") as client:
         response = await client.post(path, data=form, headers={"X-Twilio-Signature": sig})
     assert response.status_code == 500
+    if path == "/webhooks/twilio/status":
+        cleanup.assert_called_once()
+    else:
+        cleanup.assert_not_called()
 
 
 @pytest.mark.asyncio

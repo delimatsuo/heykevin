@@ -67,3 +67,21 @@ async def test_twilio_completed_status_persists_duration_and_final_status(monkey
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("save_raises", [False, True])
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+async def test_terminal_write_failure_still_cleans_live_call_and_requests_retry(monkeypatch, save_raises, cleanup_raises):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    save = AsyncMock(side_effect=RuntimeError("unavailable")) if save_raises else AsyncMock(return_value=False)
+    cleanup = Mock(side_effect=RuntimeError("unavailable")) if cleanup_raises else Mock()
+    reference = Mock(return_value=SimpleNamespace(delete=cleanup))
+    monkeypatch.setattr("app.db.calls.save_call", save)
+    monkeypatch.setattr("app.db.cache._init_firebase", lambda: None)
+    monkeypatch.setattr("firebase_admin.db.reference", reference)
+    response = await twilio_incoming.handle_status(_FakeFormRequest({"CallSid": "CA_test", "CallStatus": "completed"}))
+    assert response.status_code == 500
+    reference.assert_called_once_with("/active_calls/CA_test")
+    cleanup.assert_called_once()

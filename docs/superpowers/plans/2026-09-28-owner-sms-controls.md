@@ -20,7 +20,8 @@ calls. After 24 hours, unresolved records can be quarantined by a transaction
 that rechecks readiness and refuses claimed/completed work. Existing at-most-once
 claims and uncertain-delivery handling remain intact. The media stream already
 persists transcripts before enqueue; terminal callbacks may arrive before or
-after that persistence. Terminal status write failure now returns HTTP 500.
+after that persistence. Terminal status write failure returns HTTP 500 after
+attempting live-call cleanup, so a failed Firestore save does not skip RTDB cleanup.
 
 Voicemail recaps continue from their signed final transcription callback. That
 expired-account route does not create the screening call record.
@@ -87,6 +88,8 @@ Kevin number; turning on the app switch cannot clear STOP.
 - A final 54-test owner SMS/consent/delivery run passed after voicemail coverage
   and synchronous provider-block persistence failure tests. All mutation probes
   were restored. This overlaps the regression suite.
+- The terminal-status cleanup follow-up passed 91 focused SMS, consent, status
+  and handoff tests. Reintroducing the early return was detected by two failures.
 - All 350 Kevin iOS unit tests passed on Kevin-Native-Review (iOS 26.0) through
   `xcodebuild-external`, including 21 SMS preference tests. XcodeGen regenerated
   the checked-in project.

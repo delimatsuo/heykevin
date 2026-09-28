@@ -1353,6 +1353,7 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
 
     # Clean up RTDB active call when call ends
     if status in ("completed", "busy", "no-answer", "canceled", "failed"):
+        persistence_error = None
         updates = {"call_status": status, "ended_at": time.time()}
         duration = form_data.get("CallDuration") or form_data.get("Duration")
         if duration:
@@ -1366,10 +1367,10 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
                 saved = await save_call(call_sid, updates)
                 if not saved:
                     logger.error(f"Failed to save terminal call status for {call_sid}")
-                    return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to save call status"})
+                    persistence_error = JSONResponse(status_code=500, content={"status": "error", "message": "Failed to save call status"})
             except Exception as e:
                 logger.error("Failed to save call status: %s", type(e).__name__)
-                return JSONResponse(status_code=500, content={"status": "error", "message": "Exception saving call status"})
+                persistence_error = JSONResponse(status_code=500, content={"status": "error", "message": "Exception saving call status"})
         try:
             from app.db.cache import _init_firebase, ACTIVE_CALLS_PATH
             _init_firebase()
@@ -1379,6 +1380,8 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
             logger.info(f"Active call cleaned up: {call_sid}")
         except Exception as e:
             logger.warning(f"Failed to clean up active call: {e}")
+        if persistence_error is not None:
+            return persistence_error
 
     return {"status": "ok"}
 

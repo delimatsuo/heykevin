@@ -1,10 +1,11 @@
 # Hey Kevin — Current Product Requirements
 
-**Updated:** 2026-09-25
+**Updated:** 2026-09-28
 **Owner:** Deli Matsuo
 **Backend release baseline:** `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, revision `kevin-api-00273-f7g`, verified `2026-09-17T17:36:33Z`. See the [SMS identity and screening-reason rollout](docs/releases/2026-09-17-owner-sms-identity-backend.md).
 **Public iOS release baseline:** `1.3.2 (42)`. Public US lookup at `2026-09-25T12:49:41Z` confirms version 1.3.2, released `2026-09-18T14:56:03Z`; see the [dated public-release update](docs/releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026). The lookup identifies the version; the Apple version/build binding is recorded separately.
-**Latest authenticated Apple observation:** at `2026-09-25T13:45:15Z`, App Store Connect displays **1.3.2 Ready for Distribution**, selected build **42**, six screenshots, automatic release after App Review, and **Review Completed** for the exact submission. This supersedes the September 17 `WAITING_FOR_REVIEW` snapshot preserved in the [submission record](docs/releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026). Public availability and phone acceptance remain separate.
+**Latest authenticated public App Store observation:** at `2026-09-25T13:45:15Z`, App Store Connect displays **1.3.2 Ready for Distribution**, selected build **42**, six screenshots, automatic release after App Review, and **Review Completed** for the exact submission. This supersedes the September 17 `WAITING_FOR_REVIEW` snapshot preserved in the [submission record](docs/releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026). Public availability and phone acceptance remain separate.
+**September 28 recovery release:** [PR #269](https://github.com/delimatsuo/heykevin/pull/269) is merged and its backend passed staging. Corrected **1.3.3 (43)** is `VALID / IN_BETA_TESTING` in the existing QA group, verified `2026-09-28T17:42:07Z`; production deployment still awaits Deli's environment approval. See the [release record](docs/releases/2026-09-28-notification-recovery-ios-43.md). Physical acceptance targets this corrected build.
 **Build 42 internal delivery (September 17):** `1.3.2 (42)`, `VALID / IN_BETA_TESTING` in the existing QA group, verified at `15:33:58Z`. See [delivery and phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md). The backend screening-reason field is deployed; phone acceptance remains open.
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
 **Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
@@ -101,11 +102,16 @@ completion on September 14, 2026.
       [submission record](docs/releases/2026-09-16-app-store-ios-41.md) preserves
       the earlier submission and six updated screenshots. Build 41 is historical
       evidence for this repair, not the current phone-test target.
-- [x] Current internal candidate **1.3.2 (42)** is `VALID / IN_BETA_TESTING` in
+- [x] Earlier internal candidate **1.3.2 (42)** is `VALID / IN_BETA_TESTING` in
       QA, verified September 17 at `15:33:58Z`. It retains the confirmation repair
-      and adds the transcript-first flow and appearance correction. Use the
+      and adds the transcript-first flow and appearance correction. The
       [build 42 phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md#owner-phone-checks--open)
-      for the remaining acceptance rows; installation and physical checks remain open.
+      preserve those scenarios; perform them on the corrected build 43 candidate.
+      Installation and physical checks remain open.
+- [x] Current internal candidate **1.3.3 (43)** is `VALID / IN_BETA_TESTING` in
+      the existing QA group, verified September 28 at `17:42:07Z`. Complete its
+      [account recovery and notification checks](docs/releases/2026-09-28-notification-recovery-ios-43.md#owner-phone-checks--open)
+      before the remaining call scenarios. This delivery does not establish phone acceptance.
 - [x] **1.3.2 (42)** was [submitted for App Review](docs/releases/2026-09-17-app-store-ios-42.md)
       with six updated screenshots at the owner's request. Apple reported
       `WAITING_FOR_REVIEW` at `2026-09-17T18:32:28Z`; release policy was `AFTER_APPROVAL`.
@@ -118,7 +124,7 @@ completion on September 14, 2026.
 - [ ] Take a message shows request/acknowledgement truthfully, preserves the
       caller connection, and cannot conflict with pickup or timeout. Verify
       completion of current speech and the conditional three-second pause
-      using the build 42 phone checks and the earlier linked speech/pickup checklist. Also
+      on build 43, using the earlier linked transcript and speech/pickup checklists. Also
       verify continued caller replies without repeated answered questions using
       the [Relay phone acceptance](docs/releases/2026-09-16-relay-message-state-backend.md#phone-acceptance).
 - [ ] An unanswered urgent call leaves the owner wait after 30 seconds. The
@@ -131,7 +137,7 @@ completion on September 14, 2026.
       the hold or transcript.
 - [ ] Delayed extraction or a stale task cannot send a new actionable screening
       summary after pickup, hangup, or the end of the screening wait.
-- [ ] Record the installed **1.3.2 (42)** used for these phone checks. Public App
+- [ ] Record the installed **1.3.3 (43)** and complete the [recovery checks](docs/releases/2026-09-28-notification-recovery-ios-43.md#owner-phone-checks--open). Public App
       Store version metadata alone does not identify the installed build.
 - [x] Public App Store release: **1.3.0 (39)** is `READY_FOR_DISTRIBUTION`, published September 15, 2026 per owner submission instruction; see the canonical [build 39 release record](docs/releases/2026-09-15-native-frontend-ios-39.md). Partial frontend checks on the installed build are recorded there; the remaining N1 phone checks stay open.
 

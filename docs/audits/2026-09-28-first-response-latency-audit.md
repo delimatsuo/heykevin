@@ -2,9 +2,9 @@
 
 ## Finding
 
-Recent production calls reproduce a delay consistent with the owner's report of a 6–8 second pause after the first introduction and request to speak with the owner. The slow interval is in the ConversationRelay reply-generation/streaming path. Startup, an availability lookup, the 30-second owner hold, and the new notification repair do not explain the measured interval.
+Recent production calls contain unusually slow completed generation rounds alongside the owner's report of a 6–8 second pause after the first introduction and request to speak with the owner. The measured generation/streaming interval is longer than earlier calls on the same revision. These clocks do **not** reproduce or locate the reported initial silent pause: text could have started streaming before the generation completed, and playback could have started before its first receipt.
 
-This localizes the slowdown; it does **not** establish whether Gemini's first token, connection setup, token streaming, or outbound socket backpressure caused it. No performance fix or provider change was made by this audit.
+The generation path is a concrete lead, but the cause of the caller-heard pause remains unresolved. First model text, first outbound text send, and speech-start timing are needed to distinguish model/connection delay from Twilio synthesis/playback delay. Startup, tools, owner-hold sequencing, and the recent notification repair do not explain the measured long generation round. No performance fix or provider change was made by this audit.
 
 ## Source and runtime binding
 
@@ -25,7 +25,7 @@ Only timing events were selected. The export projected timestamp, revision, and 
 | Sep 28, 1:57:41 p.m. | 188 ms | 5,445 ms | 6,520 ms | 0 |
 | Sep 28, 1:58:52 p.m. | 174 ms | 5,884 ms | 7,028 ms | 0 |
 
-Both pipelines were ready well before the final caller prompt. In the second call, a short three-character prompt preceded the fuller prompt; the reported interval starts at the fuller prompt, which superseded the first generation. The exact utterance identity remains unverified because the audit did not read transcripts. These recent calls match the reported duration; they are not asserted to be a transcript-confirmed match.
+Both pipelines were ready well before the final caller prompt. In the second call, a short three-character prompt preceded the fuller prompt; the reported interval starts at the fuller prompt, which superseded the first generation. The exact utterance identity remains unverified because the audit did not read transcripts. The recent receipt intervals are numerically similar to the reported duration; neither a transcript match nor acoustic timing is confirmed.
 
 The 29 completed rounds logged September 22–27 were all at or below **1,174 ms**. The first completed round in the September 28 morning call was **743 ms**. The two afternoon first replies then rose to **5,445 and 5,884 ms**, and the first afternoon call had a later **6,383 ms** round. The second afternoon call subsequently had **3,335, 1,410, and 838 ms** rounds. This is variation within one production revision, not evidence of a newly deployed voice-code regression.
 
@@ -54,7 +54,7 @@ Twilio documents streaming text as it becomes available and describes `tokens-pl
 
 Add metadata-only timing around the existing Relay path before tuning it: generation/request start, HTTP headers, first SSE data, first model text, first completed outbound text send, and stream completion. Bind each event to a pseudonymous session label, generation epoch, and model round so cancelled/superseded prompts cannot be mistaken for the active turn. Record safe model/config names and numeric usage counts where available; exclude text, audio, phone numbers, credentials, raw call identifiers, and error bodies.
 
-Use those measurements to select the repair: reuse a managed HTTP connection if setup dominates; evaluate Google's recommended minimal thinking level and the existing prompt if model first-text latency dominates; inspect websocket/backpressure if first-send is delayed. Add Twilio speaker-event timing if acoustic start must be distinguished from receipt arrival. Preserve multilingual behavior and owner-hold sequencing during comparison. No model switch, endpointing change, paid benchmark, real call, or deployment is justified as a proven fix by this audit alone.
+Capture Twilio speaker-event timing alongside those measurements, with owner-controlled audible validation, to distinguish timely first text followed by delayed synthesis/playback from a delayed first text. Use the measured stage to select the repair: reuse a managed HTTP connection if setup dominates; evaluate Google's recommended minimal thinking level and the existing prompt if model first-text latency dominates; inspect websocket/backpressure if first-send is delayed; investigate Twilio synthesis/playback if speech starts late after a timely send. Preserve multilingual behavior and owner-hold sequencing during comparison. No model switch, endpointing change, paid benchmark, real call, or deployment is justified as a proven fix by this audit alone.
 
 For an eventual fix, compare first usable caller turn to first outgoing text and caller-heard onset on an owner-controlled call, with the exact deployed SHA and model setting recorded. A passing mock test cannot prove provider or audible latency improvement.
 
@@ -73,4 +73,4 @@ KEVIN_DISABLE_DOTENV=1 '<clone>/.venv/bin/python' -m pytest -q \
 
 Result: **64 passed**, four existing dependency deprecation warnings, 2.90 seconds. The initial invocation listed `test_relay_pipeline.py` first and failed collection because required synthetic settings were absent. Reordering the existing modules let their built-in fictional test configuration initialize first; no credentials or dotenv file were loaded. No application or test source changed. These are protocol/state tests, not live performance measurements.
 
-The audit's confirmed result is a localized production delay and a concrete measurement gap. The exact provider/transport bottleneck and an audible improvement remain unverified.
+The audit confirms unusually slow completed generation rounds and a concrete measurement gap. The location and cause of the reported initial silent pause, and any audible improvement, remain unverified.

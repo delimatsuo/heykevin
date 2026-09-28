@@ -226,6 +226,7 @@
     }
   ],
   "limitations": [
+    "Long completed generation rounds do not establish or locate an initial silent pause: first text and first speech may occur before the logged completion and playback receipt. Twilio synthesis/playback remains a candidate.",
     "No call transcripts or recordings were read; these recent calls match the reported duration but exact utterance identity is unverified.",
     "Completed-round duration is not time to first token; a tokens-played receipt is not acoustic speech onset.",
     "Metrics include only successfully completed generation rounds present in retained logs, not cancelled or failed requests.",

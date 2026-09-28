@@ -140,6 +140,7 @@ def mock_post_call_io(monkeypatch):
     monkeypatch.setattr(post_call.job_db, "get_job_by_call_sid", fake_get_job_by_call_sid)
     monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
     monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", fake_send_sms)
     monkeypatch.setattr(post_call, "send_mms", fake_send_mms)
     monkeypatch.setattr(post_call, "_send_summary_push", fake_summary_push)
     monkeypatch.setattr(post_call, "_update_caller_contact", fake_update_contact)
@@ -194,8 +195,8 @@ async def test_personal_process_post_call_owner_sms_identity_and_formatting(
     args, kwargs = sent[0]
     to_number, body = args[0], args[1]
 
-    assert to_number == CONTRACTOR_PHONE
-    assert kwargs.get("from_number") == TWILIO_NUMBER
+    assert to_number == "c1"
+    assert kwargs == {}  # Owner sender resolves current phone identities.
 
     # Body must start with exact header line
     assert body.startswith(f"{EXPECTED_HEADER}\n")
@@ -275,7 +276,7 @@ async def test_translation_excludes_identity_and_preserves_english_header(
 
     # 2. Captured SMS verification: starts with exact English identity followed by translated body
     sent = mock_post_call_io["sent_sms"]
-    owner_sends = [s for s in sent if s[0][0] == CONTRACTOR_PHONE]
+    owner_sends = [s for s in sent if s[0][0] == "c1"]
     assert len(owner_sends) == 1
     body = owner_sends[0][0][1]
 
@@ -333,7 +334,7 @@ async def test_translation_fallback_preserves_body_and_identity(
     assert "owner_sms" in result.completed_effects
 
     sent = mock_post_call_io["sent_sms"]
-    owner_sends = [s for s in sent if s[0][0] == CONTRACTOR_PHONE]
+    owner_sends = [s for s in sent if s[0][0] == "c1"]
     assert len(owner_sends) == 1
     body = owner_sends[0][0][1]
 
@@ -475,10 +476,10 @@ async def test_business_post_call_integration_and_caller_confirmation_branding_s
     assert len(sent) == 2
 
     # 1. Owner SMS
-    owner_sms = next(s for s in sent if s[0][0] == CONTRACTOR_PHONE)
+    owner_sms = next(s for s in sent if s[0][0] == contractor["contractor_id"])
     owner_args, owner_kwargs = owner_sms
     owner_body = owner_args[1]
-    assert owner_kwargs.get("from_number") == TWILIO_NUMBER
+    assert owner_kwargs == {}
     assert owner_body.startswith(f"{EXPECTED_HEADER}\n")
     assert "\U0001f6a8 NEW LEAD" in owner_body
     assert "From: Jordan Lee" in owner_body

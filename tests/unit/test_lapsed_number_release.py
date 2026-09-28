@@ -92,8 +92,11 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
     apple: dict[str, object] = {}
     apple_calls: list[str] = []
 
-    async def fake_sms(to, body, from_number=""):
-        sms.append((to, body, from_number))
+    async def fake_sms(contractor_id, body):
+        account = store[contractor_id]
+        if not account.get("owner_phone"):
+            return False
+        sms.append((account["owner_phone"], body, account["twilio_number"]))
         return True
 
     async def fake_deactivate(contractor_id, user_requested=False):
@@ -118,7 +121,7 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
         return value
 
     monkeypatch.setattr(number_release, "get_firestore_client", lambda: _Db({"contractors": store, "system": system}))
-    monkeypatch.setattr(number_release, "send_sms", fake_sms)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", fake_sms)
     monkeypatch.setattr(number_release, "deactivate_contractor", fake_deactivate)
     monkeypatch.setattr(number_release, "latest_call_timestamp", fake_latest)
     if fake_apple:

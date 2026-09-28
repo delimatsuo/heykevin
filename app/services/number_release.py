@@ -225,7 +225,11 @@ async def run_expired_contractor_cleanup_once(now: Optional[float] = None) -> di
         # Notice goes out before the number is gone so it is sent from it.
         if owner_phone:
             notice = LAPSED_NOTICE if reason == "lapsed" else DELETED_APP_NOTICE
-            await send_sms(owner_phone, notice, from_number=twilio_number)
+            try:
+                from app.services.owner_sms import send_owner_sms
+                await send_owner_sms(contractor_id, notice)
+            except Exception as sms_err:
+                logger.warning("Failed to send number release SMS to %s: %s", contractor_id, type(sms_err).__name__)
 
         try:
             await deactivate_contractor(contractor_id)

@@ -1,6 +1,7 @@
 """Firestore outbox state for replay-safe post-call processing."""
 
 import asyncio
+import math
 from datetime import datetime, timedelta, timezone
 import re
 import time
@@ -44,6 +45,8 @@ SAFE_EFFECTS = frozenset(
 SAFE_FAILURE_CODES = frozenset(
     {
         "",
+        "call_end_unconfirmed",
+        "contractor_mismatch",
         "enqueue_failed",
         "handoff_finish_failed",
         "invalid_reclaim",
@@ -372,6 +375,83 @@ async def mark_needs_attention(call_sid: str, failure_code: str) -> bool:
         return False
 
 
+async def quarantine_pending_handoff(call_sid: str, failure_code: str) -> bool:
+    """Atomically quarantine pending work before claim."""
+    if failure_code not in ("call_end_unconfirmed", "contractor_mismatch"):
+        return False
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(call_sid)
+    call_ref = db.collection("calls").document(call_sid)
+
+    def _quarantine() -> bool:
+        transaction = db.transaction()
+
+        @firestore.transactional
+        def _txn(tx) -> bool:
+            snapshot = doc_ref.get(transaction=tx)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("status") != "pending":
+                return False
+
+            now = time.time()
+            if failure_code == "call_end_unconfirmed":
+                created_at = data.get("created_at")
+                has_valid_age = (
+                    isinstance(created_at, (int, float))
+                    and not isinstance(created_at, bool)
+                    and math.isfinite(created_at)
+                )
+                if has_valid_age and (now - float(created_at) <= 86400):
+                    return False
+
+                call_snap = call_ref.get(transaction=tx)
+                if call_snap.exists:
+                    call_data = call_snap.to_dict() or {}
+                    call_status = str(call_data.get("call_status") or "").strip().lower()
+                    h_cid = str(data.get("contractor_id") or "").strip()
+                    c_cid = str(call_data.get("contractor_id") or "").strip()
+                    if (
+                        call_status in {"completed", "busy", "no-answer", "canceled", "failed"}
+                        and h_cid
+                        and c_cid
+                        and h_cid == c_cid
+                    ):
+                        return False
+
+            elif failure_code == "contractor_mismatch":
+                call_snap = call_ref.get(transaction=tx)
+                if not call_snap.exists:
+                    return False
+                call_data = call_snap.to_dict() or {}
+                h_cid = str(data.get("contractor_id") or "").strip()
+                c_cid = str(call_data.get("contractor_id") or "").strip()
+                if not h_cid or not c_cid or h_cid == c_cid:
+                    return False
+
+            updates = {
+                "status": "needs_attention",
+                "finished_at": now,
+                "lease_expires_at": 0,
+                "failure_code": failure_code,
+            }
+            tx.update(doc_ref, updates)
+            return True
+
+        return _txn(transaction)
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, _quarantine)
+    except Exception as error:
+        logger.error(
+            "post_call_handoff quarantine failed call=%s exception_type=%s",
+            _call_label(call_sid),
+            type(error).__name__,
+        )
+        return False
+
+
 async def get_handoff(call_sid: str) -> dict | None:
     db = get_firestore_client()
     doc_ref = db.collection(COLLECTION).document(call_sid)
@@ -381,21 +461,31 @@ async def get_handoff(call_sid: str) -> dict | None:
     return snapshot.to_dict() or {}
 
 
-async def list_handoff_ids(status: str, *, limit: int = 10) -> list[str]:
+async def list_handoff_ids(
+    status: str,
+    *,
+    limit: int = 10,
+    start_after: str | None = None,
+) -> list[str]:
     """List bounded work IDs by status without returning payload data."""
     db = get_firestore_client()
     bounded_limit = max(1, min(int(limit), 100))
 
     def _query():
-        return list(
-            db.collection(COLLECTION)
+        collection = db.collection(COLLECTION)
+        q = (
+            collection
             .where(filter=FieldFilter("status", "==", status))
-            .limit(bounded_limit)
-            .stream()
+            .order_by("__name__")
         )
+        if start_after:
+            cursor_ref = collection.document(start_after)
+            q = q.start_after({"__name__": cursor_ref})
+        docs = list(q.limit(bounded_limit).stream())
+        return [doc.id for doc in docs]
 
     docs = await asyncio.get_running_loop().run_in_executor(None, _query)
-    return [doc.id for doc in docs]
+    return docs
 
 
 async def list_handoffs(status: str, *, limit: int = 50) -> list[dict]:

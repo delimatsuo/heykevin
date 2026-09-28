@@ -1336,4 +1336,45 @@ final class APIClient: @unchecked Sendable {
         }
         return false
     }
+
+    // MARK: - Owner SMS Preferences
+
+    func patchOwnerSMSPreference(
+        contractorId: String,
+        enabled: Bool,
+        bearerToken: String
+    ) async -> OwnerSMSPatchResult {
+        guard !contractorId.isEmpty else {
+            return .failure(String(localized: "Missing contractor ID."))
+        }
+        let token = bearerToken
+        guard !token.isEmpty else {
+            return .failure(String(localized: "Authentication required."))
+        }
+
+        let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
+        guard let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)") else {
+            return .failure(String(localized: "Invalid URL."))
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "owner_sms_enabled": enabled
+            ])
+            let (data, response) = try await retryRequest(request, maxRetries: 0, signalReauth: false)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(String(localized: "Invalid server response."))
+            }
+            return OwnerSMSResponseParser.parsePatchResponse(data: data, response: http)
+        } catch {
+            debugLog("Patch owner SMS preference failed: \(error.localizedDescription)")
+            return .failure(String(localized: "Failed to save setting. Please check your connection and try again."))
+        }
+    }
 }

@@ -351,8 +351,8 @@ async def _process_personal(
     )
 
     # Send simple SMS to owner (in their language)
-    owner_phone = contractor_phone
-    if owner_phone and twilio_number:
+    contractor_id = (contractor or {}).get("contractor_id", "")
+    if contractor_id:
         sms = (
             f"Call from {name}\n"
             f"Re: {reason}\n"
@@ -378,16 +378,19 @@ async def _process_personal(
                 _log_post_call_exception("personal_sms_translation_error", error, call_sid)
         sms = f"{OWNER_SMS_HEADER}\n{sms}"
         try:
-            sent = await send_sms(owner_phone, sms, from_number=twilio_number)
+            from app.services.owner_sms import send_owner_sms
+            sent = await send_owner_sms(contractor_id, sms)
             _record_effect(tracker, "owner_sms", sent)
-            if sent:
+            if sent is True:
                 _log_post_call_event("personal_sms_sent", call_sid)
-            else:
+            elif sent is False:
                 _log_post_call_event(
                     "personal_sms_failed",
                     call_sid,
                     level=logging.ERROR,
                 )
+            else:
+                _log_post_call_event("personal_sms_suppressed", call_sid)
         except Exception as error:
             _record_effect(tracker, "owner_sms", False)
             _log_post_call_exception(
@@ -499,25 +502,24 @@ async def _process_business(
 
     # 3. Send SMS to contractor (in their language)
     user_language = contractor.get("user_language", "en")
-    if contractor_phone and twilio_number:
+    if contractor_id:
         contractor_sms = await _format_contractor_sms(
             job_data, job_id, user_language=user_language, contractor=contractor
         )
         try:
-            sent = await send_sms(
-                contractor_phone,
-                contractor_sms,
-                from_number=twilio_number,
-            )
+            from app.services.owner_sms import send_owner_sms
+            sent = await send_owner_sms(contractor_id, contractor_sms)
             _record_effect(tracker, "owner_sms", sent)
-            if sent:
+            if sent is True:
                 _log_post_call_event("contractor_sms_sent", call_sid)
-            else:
+            elif sent is False:
                 _log_post_call_event(
                     "contractor_sms_failed",
                     call_sid,
                     level=logging.ERROR,
                 )
+            else:
+                _log_post_call_event("contractor_sms_suppressed", call_sid)
         except Exception as error:
             _record_effect(tracker, "owner_sms", False)
             _log_post_call_exception(

@@ -23,7 +23,6 @@ async def send_estimate_notifications(
     _send_sms = send_sms_fn or send_sms
     business_name = (contractor or {}).get("business_name", "the business")
     twilio_number = (contractor or {}).get("twilio_number", "")
-    contractor_phone = (contractor or {}).get("owner_phone", "")
 
     # Customer SMS
     if caller_phone:
@@ -75,8 +74,9 @@ async def send_estimate_notifications(
                 type(e).__name__,
             )
 
-    # Contractor SMS
-    if contractor_phone:
+    # Contractor SMS: single body construction block, sent only through send_owner_sms when contractor_id is present
+    contractor_id = (contractor or {}).get("contractor_id", "")
+    if contractor_id:
         if is_failure:
             contractor_msg = (
                 f"📋 AI ESTIMATE FAILED\n"
@@ -108,7 +108,8 @@ async def send_estimate_notifications(
             contractor_msg += f"\n\nWatch the caller's video: {watch_url}"
 
         try:
-            await _send_sms(contractor_phone, contractor_msg, from_number=twilio_number)
+            from app.services.owner_sms import send_owner_sms
+            await send_owner_sms(contractor_id, contractor_msg)
         except Exception as e:
             logger.error(
                 "Failed to send contractor estimate SMS for %s: %s",

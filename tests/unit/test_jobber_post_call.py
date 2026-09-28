@@ -213,6 +213,7 @@ async def test_process_business_awaits_jobber_lead_capture_when_enabled(monkeypa
     monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
     monkeypatch.setattr(post_call, "_send_summary_push", lambda *args, **kwargs: _async_return(None))
     monkeypatch.setattr(post_call, "send_sms", fake_send_sms)
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", fake_send_sms)
     monkeypatch.setattr(post_call, "_capture_jobber_lead", fake_capture_jobber_lead)
     monkeypatch.setattr(
         post_call,
@@ -267,6 +268,7 @@ async def test_process_business_mirrors_summary_and_call_type_to_call(monkeypatc
     monkeypatch.setattr(post_call.job_db, "save_job", fake_save_job)
     monkeypatch.setattr(post_call, "_send_summary_push", lambda *args, **kwargs: _async_return(None))
     monkeypatch.setattr(post_call, "send_sms", lambda *args, **kwargs: _async_return(True))
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", lambda *args, **kwargs: _async_return(True))
     monkeypatch.setattr(
         post_call,
         "_update_caller_contact",

@@ -85,11 +85,11 @@ enum AppStoreScreenshotFixtures {
             case .businessDetail:
                 return "Call back with the whole story"
             case .personalLive:
-                return "Unknown caller? Let Kevin ask why"
+                return "Know who's calling and why"
             case .personalRecents:
-                return "Keep the people. Lose the robocalls."
+                return "Catch up on your time"
             case .personalDetail:
-                return "Know what they need before you call back"
+                return "Get the context before calling back"
             case .historyEmpty:
                 return "Screened calls when you need them"
             case .historyError, .historyRetainedError:
@@ -118,11 +118,11 @@ enum AppStoreScreenshotFixtures {
             case .businessDetail:
                 return "Review what the customer needs before you return the call."
             case .personalLive:
-                return "Watch the conversation live and pick up only when you want."
+                return "Kevin screens calls routed to your Kevin number."
             case .personalRecents:
-                return "Contacts ring through; unknown callers are screened and summarized."
+                return "Review recent calls and their summaries."
             case .personalDetail:
-                return "Read the conversation and decide whether the call deserves your time."
+                return "Read what the caller said."
             case .historyEmpty:
                 return "Kevin screens callers and keeps your day distraction-free."
             case .historyError, .historyRetainedError:

@@ -8,6 +8,7 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15005550006")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("USER_PHONE", "+15555550123")
 
+import asyncio
 import math
 import threading
 import time
@@ -542,3 +543,173 @@ def test_reducer_parameterized_malformed_records(bad_record):
     """Verify reducer validator raises ValueError on malformed IDs and scalar types without echoing values."""
     with pytest.raises(ValueError):
         validate_measurement_record(bad_record)
+
+
+@pytest.mark.asyncio
+async def test_schedule_payment_measurement_default_off(monkeypatch):
+    """Verify scheduler drops task immediately when measurement is disabled or org ID is unconfigured."""
+    assert len(acquisition._pending_payment_tasks) == 0
+
+    # 1. Default settings (disabled)
+    acquisition.schedule_payment_measurement("cnt_1", "personal", {"price": 999})
+    assert len(acquisition._pending_payment_tasks) == 0
+
+    # 2. Enabled flag True but expected org ID is 0
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 0)
+    acquisition.schedule_payment_measurement("cnt_1", "personal", {"price": 999})
+    assert len(acquisition._pending_payment_tasks) == 0
+
+
+@pytest.mark.parametrize("bad_contractor_id, bad_tier, bad_tx", [
+    ("", "personal", {"price": 999}),
+    (None, "personal", {"price": 999}),
+    (123, "personal", {"price": 999}),
+    ("cnt_1", "invalid_tier", {"price": 999}),
+    ("cnt_1", "", {"price": 999}),
+    ("cnt_1", None, {"price": 999}),
+    ("cnt_1", "personal", None),
+    ("cnt_1", "personal", "not_a_dict"),
+    ("cnt_1", "personal", [1, 2, 3]),
+])
+@pytest.mark.asyncio
+async def test_schedule_payment_measurement_validation_filters(monkeypatch, bad_contractor_id, bad_tier, bad_tx):
+    """Verify scheduler drops tasks with invalid contractor ID, tier, or non-dict transaction info."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    acquisition.schedule_payment_measurement(bad_contractor_id, bad_tier, bad_tx)
+    assert len(acquisition._pending_payment_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_schedule_payment_measurement_cap_32_and_drop(monkeypatch):
+    """Verify scheduler bounds pending tasks at 32 and discards additional tasks at capacity."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    release_event = asyncio.Event()
+
+    async def fake_held_writer(cid, tier, tx):
+        await release_event.wait()
+
+    monkeypatch.setattr(acquisition, "record_payment_measurement", fake_held_writer)
+
+    try:
+        # Schedule 32 tasks
+        for i in range(32):
+            acquisition.schedule_payment_measurement(f"cnt_{i}", "personal", {"price": 999})
+        assert len(acquisition._pending_payment_tasks) == 32
+
+        # 33rd task must be dropped immediately without waiting
+        acquisition.schedule_payment_measurement("cnt_overflow", "personal", {"price": 999})
+        assert len(acquisition._pending_payment_tasks) == 32
+    finally:
+        release_event.set()
+        if acquisition._pending_payment_tasks:
+            await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+        assert len(acquisition._pending_payment_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_schedule_payment_measurement_payload_allowlist_and_mutation_isolation(monkeypatch):
+    """Verify scheduler copies only classification fields and isolates against subsequent caller dict mutations."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    captured_payloads = []
+    release_event = asyncio.Event()
+
+    async def fake_held_writer(cid, tier, tx):
+        captured_payloads.append(dict(tx))
+        await release_event.wait()
+
+    monkeypatch.setattr(acquisition, "record_payment_measurement", fake_held_writer)
+
+    valid_ms = 1788960100000
+    tx_orig = {
+        "environment": "Production",
+        "productId": "com.kevin.callscreen.personal.monthly",
+        "revocationDate": valid_ms + 1000,
+        "purchaseDate": valid_ms,
+        "price": 999,
+        "offerDiscountType": "FREE_TRIAL",
+        # Sensitive and arbitrary fields that MUST NOT be retained
+        "appAccountToken": "SECRET_UUID_12345",
+        "transactionId": "TX_SENSITIVE_999",
+        "originalTransactionId": "ORIG_TX_123",
+        "callerMutableDict": {"nested": "data"},
+    }
+
+    try:
+        acquisition.schedule_payment_measurement("cnt_1", "personal", tx_orig)
+
+        # Mutate caller dict in place before task is released
+        tx_orig["price"] = 0
+        tx_orig["productId"] = "mutated.product"
+        tx_orig["environment"] = "Sandbox"
+        tx_orig.clear()
+
+        # Let task proceed
+        release_event.set()
+        await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+
+        assert len(captured_payloads) == 1
+        captured = captured_payloads[0]
+        # Assert only classification fields present with original values
+        assert captured == {
+            "environment": "Production",
+            "productId": "com.kevin.callscreen.personal.monthly",
+            "revocationDate": valid_ms + 1000,
+            "purchaseDate": valid_ms,
+            "price": 999,
+            "offerDiscountType": "FREE_TRIAL",
+        }
+        assert "appAccountToken" not in captured
+        assert "transactionId" not in captured
+        assert "originalTransactionId" not in captured
+        assert "callerMutableDict" not in captured
+    finally:
+        release_event.set()
+        if acquisition._pending_payment_tasks:
+            await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_schedule_payment_measurement_cleanup_on_completion_error_and_cancellation(monkeypatch):
+    """Verify done callback safely cleans up task set on success, exceptions, and task cancellation."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    # 1. Successful completion
+    async def fake_success(cid, tier, tx):
+        pass
+
+    monkeypatch.setattr(acquisition, "record_payment_measurement", fake_success)
+    acquisition.schedule_payment_measurement("cnt_1", "personal", {"price": 999})
+    await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+    assert len(acquisition._pending_payment_tasks) == 0
+
+    # 2. Exception in task
+    async def fake_throw(cid, tier, tx):
+        raise RuntimeError("DB pool connection error")
+
+    monkeypatch.setattr(acquisition, "record_payment_measurement", fake_throw)
+    acquisition.schedule_payment_measurement("cnt_2", "personal", {"price": 999})
+    await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+    assert len(acquisition._pending_payment_tasks) == 0
+
+    # 3. Cancelled task
+    release_event = asyncio.Event()
+
+    async def fake_held(cid, tier, tx):
+        await release_event.wait()
+
+    monkeypatch.setattr(acquisition, "record_payment_measurement", fake_held)
+    acquisition.schedule_payment_measurement("cnt_3", "personal", {"price": 999})
+    assert len(acquisition._pending_payment_tasks) == 1
+    task = next(iter(acquisition._pending_payment_tasks))
+    task.cancel()
+    release_event.set()
+    await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+    assert len(acquisition._pending_payment_tasks) == 0

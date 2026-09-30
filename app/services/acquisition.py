@@ -728,6 +728,70 @@ def classify_apple_transaction_payment(transaction_info: dict) -> dict:
 
 
 VALID_PAYMENT_TIERS = frozenset({"personal", "business", "businessPro"})
+MAX_PENDING_PAYMENT_TASKS = 32
+_pending_payment_tasks: set[asyncio.Task] = set()
+PAYMENT_CLASSIFICATION_FIELDS = frozenset({
+    "environment",
+    "productId",
+    "revocationDate",
+    "purchaseDate",
+    "price",
+    "offerDiscountType",
+})
+
+
+def schedule_payment_measurement(
+    contractor_id: str,
+    tier: str,
+    transaction_info: dict,
+) -> None:
+    """Synchronously enqueue payment measurement task without awaiting or blocking."""
+    if not is_acquisition_measurement_enabled():
+        return
+    if not contractor_id or not isinstance(contractor_id, str):
+        return
+    if not isinstance(tier, str) or tier not in VALID_PAYMENT_TIERS:
+        return
+    if not isinstance(transaction_info, dict):
+        return
+    if len(_pending_payment_tasks) >= MAX_PENDING_PAYMENT_TASKS:
+        return
+
+    clean_tx = {
+        k: transaction_info[k]
+        for k in PAYMENT_CLASSIFICATION_FIELDS
+        if k in transaction_info
+    }
+
+    coro = record_payment_measurement(contractor_id, tier, clean_tx)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        coro.close()
+        return
+
+    try:
+        task = loop.create_task(coro)
+    except Exception:
+        coro.close()
+        return
+
+    _pending_payment_tasks.add(task)
+
+    def _done_cb(t: asyncio.Task) -> None:
+        _pending_payment_tasks.discard(t)
+        if t.cancelled():
+            return
+        try:
+            exc = t.exception()
+            if exc:
+                logger.warning(f"Payment measurement task failed: {type(exc).__name__}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Payment measurement task error: {type(e).__name__}")
+
+    task.add_done_callback(_done_cb)
 
 
 async def record_payment_measurement(

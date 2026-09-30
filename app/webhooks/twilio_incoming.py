@@ -236,24 +236,22 @@ async def _record_forwarding_evidence(contractor_id: str, seen_at: float):
     account does not write on every inbound call.
     """
     try:
+        from app.db.contractors import get_contractor, update_contractor
+
+        contractor = await get_contractor(contractor_id)
+        if contractor:
+            previous = contractor.get("forwarding_last_seen_at") or 0
+            if not (isinstance(previous, (int, float)) and seen_at - previous < 3600):
+                await update_contractor(contractor_id, {"forwarding_last_seen_at": seen_at})
+                logger.info(f"Forwarding confirmed live via ForwardedFrom: {contractor_id}")
+    except Exception as e:
+        logger.warning(f"Could not record forwarding evidence: {type(e).__name__}")
+
+    try:
         from app.services.acquisition import record_forwarded_call_measurement
         await record_forwarded_call_measurement(contractor_id, seen_at)
     except Exception as e:
         logger.warning(f"Could not record forwarding measurement: {type(e).__name__}")
-
-    try:
-        from app.db.contractors import get_contractor, update_contractor
-
-        contractor = await get_contractor(contractor_id)
-        if not contractor:
-            return
-        previous = contractor.get("forwarding_last_seen_at") or 0
-        if isinstance(previous, (int, float)) and seen_at - previous < 3600:
-            return
-        await update_contractor(contractor_id, {"forwarding_last_seen_at": seen_at})
-        logger.info(f"Forwarding confirmed live via ForwardedFrom: {contractor_id}")
-    except Exception as e:
-        logger.warning(f"Could not record forwarding evidence: {type(e).__name__}")
 
 
 async def _record_inbound_call_evidence(contractor_id: str, seen_at: float):
@@ -266,23 +264,21 @@ async def _record_inbound_call_evidence(contractor_id: str, seen_at: float):
     _record_forwarding_evidence: best-effort, fire-and-forget, hourly throttle.
     """
     try:
+        from app.db.contractors import get_contractor, update_contractor
+
+        contractor = await get_contractor(contractor_id)
+        if contractor:
+            previous = contractor.get("last_inbound_call_at") or 0
+            if not (isinstance(previous, (int, float)) and seen_at - previous < 3600):
+                await update_contractor(contractor_id, {"last_inbound_call_at": seen_at})
+    except Exception as e:
+        logger.warning(f"Failed to record inbound call evidence for {contractor_id}: {e}")
+
+    try:
         from app.services.acquisition import record_inbound_call_measurement
         await record_inbound_call_measurement(contractor_id, seen_at)
     except Exception as e:
         logger.warning(f"Could not record inbound call measurement: {type(e).__name__}")
-
-    try:
-        from app.db.contractors import get_contractor, update_contractor
-
-        contractor = await get_contractor(contractor_id)
-        if not contractor:
-            return
-        previous = contractor.get("last_inbound_call_at") or 0
-        if isinstance(previous, (int, float)) and seen_at - previous < 3600:
-            return
-        await update_contractor(contractor_id, {"last_inbound_call_at": seen_at})
-    except Exception as e:
-        logger.warning(f"Failed to record inbound call evidence for {contractor_id}: {e}")
 
 
 async def _handle_deleted_app(

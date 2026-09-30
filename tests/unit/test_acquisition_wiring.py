@@ -28,6 +28,7 @@ from app.services.subscription import (
     handle_appstore_notification,
     update_subscription_from_transaction,
 )
+from app.webhooks import twilio_incoming
 from scripts.summarize_acquisition_funnel import summarize_acquisition_funnel, validate_measurement_record
 
 
@@ -294,38 +295,167 @@ async def test_create_contractor_initializes_unknown_intent_and_roundtrips_reduc
     assert validated["declared_onboarding_intent"] == "unknown"
 
 
+@pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
+    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
+    ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
+])
 @pytest.mark.asyncio
-async def test_twilio_evidence_helpers_precede_throttle_and_isolate_failures(monkeypatch):
-    """Verify Twilio evidence helpers execute measurement before throttle and handle measurement errors safely."""
-    from app.webhooks import twilio_incoming
+async def test_twilio_evidence_helpers_order_with_held_measurement(
+    monkeypatch, helper_name, helper_fn, legacy_field, measurement_attr
+):
+    """Verify legacy timestamp update completes before optional measurement enters, even when measurement is held."""
+    legacy_updates = []
+    entered_event = asyncio.Event()
+    release_event = asyncio.Event()
 
-    measurement_called = []
-    async def fake_inbound_measurement(contractor_id, seen_at):
-        measurement_called.append((contractor_id, seen_at))
-        raise RuntimeError("Measurement transient failure")
+    async def fake_get_contractor(cid):
+        return {"contractor_id": cid, legacy_field: 0}
 
-    monkeypatch.setattr("app.services.acquisition.record_inbound_call_measurement", fake_inbound_measurement)
-
-    updated_doc = {}
-    async def fake_update_contractor(contractor_id, updates):
-        updated_doc.update(updates)
+    async def fake_update_contractor(cid, updates):
+        legacy_updates.append((cid, updates))
         return True
-
-    async def fake_get_contractor(contractor_id):
-        return {"contractor_id": contractor_id, "last_inbound_call_at": 1000.0}
 
     monkeypatch.setattr("app.db.contractors.get_contractor", fake_get_contractor)
     monkeypatch.setattr("app.db.contractors.update_contractor", fake_update_contractor)
 
-    # Call with seen_at satisfying throttle (seen_at = 5000 > 1000 + 3600)
-    await twilio_incoming._record_inbound_call_evidence("cnt_1", 5000.0)
+    async def fake_held_measurement(cid, seen_at):
+        # Assert legacy update already completed before measurement entered
+        assert len(legacy_updates) == 1
+        assert legacy_updates[0] == (cid, {legacy_field: seen_at})
+        entered_event.set()
+        await release_event.wait()
 
-    # Measurement was executed with exact seen_at
-    assert len(measurement_called) == 1
-    assert measurement_called[0] == ("cnt_1", 5000.0)
+    monkeypatch.setattr(f"app.services.acquisition.{measurement_attr}", fake_held_measurement)
 
-    # Exception in measurement did NOT prevent last-seen update
-    assert updated_doc == {"last_inbound_call_at": 5000.0}
+    task = asyncio.create_task(helper_fn("cnt_1", 5000.0))
+    try:
+        await asyncio.wait_for(entered_event.wait(), timeout=1.0)
+        assert len(legacy_updates) == 1
+    finally:
+        release_event.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
+    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
+    ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
+])
+@pytest.mark.asyncio
+async def test_twilio_evidence_helpers_recent_stamp_throttle_and_thrown_measurement(
+    monkeypatch, helper_name, helper_fn, legacy_field, measurement_attr
+):
+    """Verify recent legacy stamp skips duplicate write while measurement still runs, and thrown measurement isolates legacy stamp."""
+    # 1. Recent stamp throttle (seen_at - previous < 3600): skips legacy write, measurement still executes
+    legacy_updates = []
+    measurement_calls = []
+
+    async def fake_get_contractor_recent(cid):
+        return {"contractor_id": cid, legacy_field: 4500.0}
+
+    async def fake_update_contractor(cid, updates):
+        legacy_updates.append((cid, updates))
+        return True
+
+    async def fake_measurement(cid, seen_at):
+        measurement_calls.append((cid, seen_at))
+
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get_contractor_recent)
+    monkeypatch.setattr("app.db.contractors.update_contractor", fake_update_contractor)
+    monkeypatch.setattr(f"app.services.acquisition.{measurement_attr}", fake_measurement)
+
+    await helper_fn("cnt_1", 5000.0)
+    assert len(legacy_updates) == 0  # throttled
+    assert len(measurement_calls) == 1  # measurement still ran
+    assert measurement_calls[0] == ("cnt_1", 5000.0)
+
+    # 2. Thrown measurement isolates legacy stamp
+    legacy_updates.clear()
+    measurement_calls.clear()
+
+    async def fake_get_contractor_old(cid):
+        return {"contractor_id": cid, legacy_field: 0}
+
+    async def fake_measurement_throw(cid, seen_at):
+        raise RuntimeError("Measurement write dropped")
+
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get_contractor_old)
+    monkeypatch.setattr(f"app.services.acquisition.{measurement_attr}", fake_measurement_throw)
+
+    await helper_fn("cnt_2", 5000.0)
+    assert len(legacy_updates) == 1
+    assert legacy_updates[0] == ("cnt_2", {legacy_field: 5000.0})
+
+
+@pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
+    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
+    ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
+])
+@pytest.mark.asyncio
+async def test_twilio_evidence_helpers_cancellation_during_held_lookup_prevents_measurement(
+    monkeypatch, helper_name, helper_fn, legacy_field, measurement_attr
+):
+    """Verify cancelling helper during held contractor lookup cancels promptly and starts no measurement."""
+    lookup_entered = asyncio.Event()
+    lookup_release = asyncio.Event()
+    measurement_called = []
+
+    async def fake_held_get(cid):
+        lookup_entered.set()
+        await lookup_release.wait()
+        return {"contractor_id": cid, legacy_field: 0}
+
+    async def fake_measurement(cid, seen_at):
+        measurement_called.append((cid, seen_at))
+
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_held_get)
+    monkeypatch.setattr(f"app.services.acquisition.{measurement_attr}", fake_measurement)
+
+    task = asyncio.create_task(helper_fn("cnt_cancel_lookup", 5000.0))
+    await asyncio.wait_for(lookup_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(measurement_called) == 0
+
+
+@pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
+    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
+    ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
+])
+@pytest.mark.asyncio
+async def test_twilio_evidence_helpers_cancellation_during_held_update_prevents_measurement(
+    monkeypatch, helper_name, helper_fn, legacy_field, measurement_attr
+):
+    """Verify cancelling helper during held contractor update cancels promptly and starts no measurement."""
+    update_entered = asyncio.Event()
+    update_release = asyncio.Event()
+    measurement_called = []
+
+    async def fake_get(cid):
+        return {"contractor_id": cid, legacy_field: 0}
+
+    async def fake_held_update(cid, updates):
+        update_entered.set()
+        await update_release.wait()
+        return True
+
+    async def fake_measurement(cid, seen_at):
+        measurement_called.append((cid, seen_at))
+
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get)
+    monkeypatch.setattr("app.db.contractors.update_contractor", fake_held_update)
+    monkeypatch.setattr(f"app.services.acquisition.{measurement_attr}", fake_measurement)
+
+    task = asyncio.create_task(helper_fn("cnt_cancel_update", 5000.0))
+    await asyncio.wait_for(update_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(measurement_called) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -521,8 +651,107 @@ def test_purge_sync_removes_acquisition_measurement(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_subscription_response_isolation_with_held_payment_measurement(monkeypatch):
+    """Verify verification and renewal notifications return ACTIVE/True immediately without awaiting held payment measurement."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    contractor_id = "cnt_held_test"
+    sub_uuid = "uuid-held-123"
+
+    async def fake_get_contractor(cid):
+        return {"contractor_id": cid, "subscription_uuid": sub_uuid, "active": True}
+
+    async def fake_get_by_uuid(uuid_val, include_inactive=False):
+        if uuid_val == sub_uuid:
+            return {"contractor_id": contractor_id, "subscription_uuid": sub_uuid, "active": True}
+        return None
+
+    async def fake_claim_ok(*args, **kwargs):
+        return True, contractor_id
+
+    async def fake_activate_ok(*args, **kwargs):
+        return True
+
+    async def fake_update_ok(cid, updates):
+        return True
+
+    monkeypatch.setattr("app.db.contractors.get_contractor", fake_get_contractor)
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_subscription_uuid", fake_get_by_uuid)
+    monkeypatch.setattr("app.db.apple_transactions.claim_transaction", fake_claim_ok)
+    monkeypatch.setattr("app.db.contractors.activate_subscription_entitlement", fake_activate_ok)
+    monkeypatch.setattr("app.db.contractors.update_contractor", fake_update_ok)
+
+    entered_event = asyncio.Event()
+    release_event = asyncio.Event()
+
+    async def fake_held_record(cid, tier, tx):
+        entered_event.set()
+        await release_event.wait()
+
+    monkeypatch.setattr(acquisition, "record_payment_measurement", fake_held_record)
+
+    valid_tx = {
+        "productId": "com.kevin.callscreen.personal.monthly",
+        "appAccountToken": sub_uuid,
+        "originalTransactionId": "orig_held_123",
+        "transactionId": "tx_held_123",
+        "expiresDate": (time.time() + 86400) * 1000,
+        "environment": "Production",
+        "price": 999,
+        "purchaseDate": int(time.time() * 1000),
+    }
+
+    # 1. Direct verification: returns ACTIVE without waiting for held measurement
+    try:
+        res = await asyncio.wait_for(
+            update_subscription_from_transaction(contractor_id, valid_tx),
+            timeout=0.5,
+        )
+        assert res.outcome == SubscriptionUpdateOutcome.ACTIVE
+        assert len(acquisition._pending_payment_tasks) == 1
+
+        # Wait until background task enters held writer
+        await asyncio.wait_for(entered_event.wait(), timeout=0.5)
+        assert not release_event.is_set()
+    finally:
+        release_event.set()
+        if acquisition._pending_payment_tasks:
+            await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+        assert len(acquisition._pending_payment_tasks) == 0
+
+    # 2. App Store notification: returns True without waiting for held measurement
+    entered_event.clear()
+    release_event.clear()
+
+    notif_payload = {
+        "notificationType": "DID_RENEW",
+        "subtype": "BILLING_RECOVERY",
+        "data": {
+            "signedTransactionInfo": _unsigned_jws(valid_tx)
+        }
+    }
+
+    try:
+        handled = await asyncio.wait_for(
+            handle_appstore_notification(notif_payload),
+            timeout=0.5,
+        )
+        assert handled is True
+        assert len(acquisition._pending_payment_tasks) == 1
+
+        await asyncio.wait_for(entered_event.wait(), timeout=0.5)
+        assert not release_event.is_set()
+    finally:
+        release_event.set()
+        if acquisition._pending_payment_tasks:
+            await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
+        assert len(acquisition._pending_payment_tasks) == 0
+
+
+@pytest.mark.asyncio
 async def test_update_subscription_from_transaction_measurement_hooks(monkeypatch):
-    """Verify update_subscription_from_transaction triggers measurement once on success, zero on failure/throw, and isolates measurement exceptions."""
+    """Verify update_subscription_from_transaction schedules measurement once on success, zero on failure/throw, and isolates scheduler exceptions."""
     contractor_id = "cnt_sub_hook_test"
     sub_uuid = "uuid-sub-hook-123"
 
@@ -533,11 +762,11 @@ async def test_update_subscription_from_transaction_measurement_hooks(monkeypatc
 
     monkeypatch.setattr("app.db.contractors.get_contractor", fake_get_contractor)
 
-    measurement_calls = []
-    async def fake_record_measurement(cid, tier, tx_info):
-        measurement_calls.append((cid, tier, tx_info))
+    scheduled_calls = []
+    def fake_schedule_measurement(cid, tier, tx_info):
+        scheduled_calls.append((cid, tier, tx_info))
 
-    monkeypatch.setattr("app.services.acquisition.record_payment_measurement", fake_record_measurement)
+    monkeypatch.setattr("app.services.acquisition.schedule_payment_measurement", fake_schedule_measurement)
 
     valid_tx = {
         "productId": "com.kevin.callscreen.personal.monthly",
@@ -549,7 +778,7 @@ async def test_update_subscription_from_transaction_measurement_hooks(monkeypatc
         "price": 999,
     }
 
-    # 1. Accepted transaction -> record_payment_measurement called once
+    # 1. Accepted transaction -> schedule_payment_measurement called once
     async def fake_claim_ok(*args, **kwargs):
         return True, contractor_id
     async def fake_activate_ok(*args, **kwargs):
@@ -560,11 +789,11 @@ async def test_update_subscription_from_transaction_measurement_hooks(monkeypatc
 
     res = await update_subscription_from_transaction(contractor_id, valid_tx)
     assert res.outcome == SubscriptionUpdateOutcome.ACTIVE
-    assert len(measurement_calls) == 1
-    assert measurement_calls[0][0] == contractor_id
-    assert measurement_calls[0][1] == "personal"
+    assert len(scheduled_calls) == 1
+    assert scheduled_calls[0][0] == contractor_id
+    assert scheduled_calls[0][1] == "personal"
 
-    measurement_calls.clear()
+    scheduled_calls.clear()
 
     # 2a. False update from activate_subscription_entitlement -> zero measurement calls
     async def fake_activate_fail(*args, **kwargs):
@@ -573,19 +802,19 @@ async def test_update_subscription_from_transaction_measurement_hooks(monkeypatc
 
     res_fail = await update_subscription_from_transaction(contractor_id, valid_tx)
     assert res_fail.outcome == SubscriptionUpdateOutcome.MALFORMED_TRANSACTION
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
     # 2b. Rejected payload (unknown product) -> zero measurement calls
     bad_prod_tx = dict(valid_tx, productId="unknown.product.id")
     res_unknown = await update_subscription_from_transaction(contractor_id, bad_prod_tx)
     assert res_unknown.outcome == SubscriptionUpdateOutcome.UNKNOWN_PRODUCT
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
     # 2c. Rejected payload (ownership mismatch) -> zero measurement calls
     bad_owner_tx = dict(valid_tx, appAccountToken="wrong-uuid")
     res_mismatch = await update_subscription_from_transaction(contractor_id, bad_owner_tx)
     assert res_mismatch.outcome == SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
     # 2d. Rejected payload (cross-contractor receipt replay) -> zero measurement calls, raises CrossContractorReceiptError
     async def fake_claim_cross(*args, **kwargs):
@@ -594,7 +823,7 @@ async def test_update_subscription_from_transaction_measurement_hooks(monkeypatc
 
     with pytest.raises(CrossContractorReceiptError):
         await update_subscription_from_transaction(contractor_id, valid_tx)
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
     # 3. Thrown update -> zero measurement calls
     monkeypatch.setattr("app.db.apple_transactions.claim_transaction", fake_claim_ok)
@@ -604,13 +833,13 @@ async def test_update_subscription_from_transaction_measurement_hooks(monkeypatc
 
     with pytest.raises(RuntimeError):
         await update_subscription_from_transaction(contractor_id, valid_tx)
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
-    # 4. Measurement throws -> existing successful entitlement result still succeeds
+    # 4. Measurement scheduler throws -> existing successful entitlement result still succeeds
     monkeypatch.setattr("app.db.contractors.activate_subscription_entitlement", fake_activate_ok)
-    async def fake_record_throw(cid, tier, tx_info):
-        raise RuntimeError("Measurement write failed")
-    monkeypatch.setattr("app.services.acquisition.record_payment_measurement", fake_record_throw)
+    def fake_schedule_throw(cid, tier, tx_info):
+        raise RuntimeError("Scheduler internal error")
+    monkeypatch.setattr("app.services.acquisition.schedule_payment_measurement", fake_schedule_throw)
 
     res_safe = await update_subscription_from_transaction(contractor_id, valid_tx)
     assert res_safe.outcome == SubscriptionUpdateOutcome.ACTIVE
@@ -618,7 +847,7 @@ async def test_update_subscription_from_transaction_measurement_hooks(monkeypatc
 
 @pytest.mark.asyncio
 async def test_handle_appstore_notification_measurement_hooks(monkeypatch):
-    """Verify handle_appstore_notification DID_RENEW/SUBSCRIBED triggers measurement only when contractor updated, and isolates exceptions."""
+    """Verify handle_appstore_notification DID_RENEW/SUBSCRIBED schedules measurement only when contractor updated, and isolates exceptions."""
     contractor_id = "cnt_notif_hook_test"
     sub_uuid = "uuid-notif-hook-123"
 
@@ -643,11 +872,11 @@ async def test_handle_appstore_notification_measurement_hooks(monkeypatch):
     monkeypatch.setattr("app.services.push_notification.get_device_token", fake_get_device_token)
     monkeypatch.setattr("app.services.push_notification.send_regular_push", fake_send_regular_push)
 
-    measurement_calls = []
-    async def fake_record_measurement(cid, tier, tx_info):
-        measurement_calls.append((cid, tier, tx_info))
+    scheduled_calls = []
+    def fake_schedule_measurement(cid, tier, tx_info):
+        scheduled_calls.append((cid, tier, tx_info))
 
-    monkeypatch.setattr("app.services.acquisition.record_payment_measurement", fake_record_measurement)
+    monkeypatch.setattr("app.services.acquisition.schedule_payment_measurement", fake_schedule_measurement)
 
     valid_tx = {
         "productId": "com.kevin.callscreen.business.monthly",
@@ -668,18 +897,18 @@ async def test_handle_appstore_notification_measurement_hooks(monkeypatch):
         }
     }
 
-    # 1. Accepted notification with update_contractor returning True -> measurement called once
+    # 1. Accepted notification with update_contractor returning True -> measurement scheduled once
     async def fake_update_ok(cid, updates):
         return True
     monkeypatch.setattr("app.db.contractors.update_contractor", fake_update_ok)
 
     handled = await handle_appstore_notification(notif_payload)
     assert handled is True
-    assert len(measurement_calls) == 1
-    assert measurement_calls[0][0] == contractor_id
-    assert measurement_calls[0][1] == "business"
+    assert len(scheduled_calls) == 1
+    assert scheduled_calls[0][0] == contractor_id
+    assert scheduled_calls[0][1] == "business"
 
-    measurement_calls.clear()
+    scheduled_calls.clear()
 
     # 2a. False update from update_contractor -> zero measurement calls
     async def fake_update_false(cid, updates):
@@ -688,7 +917,7 @@ async def test_handle_appstore_notification_measurement_hooks(monkeypatch):
 
     handled_false = await handle_appstore_notification(notif_payload)
     assert handled_false is True  # Notification processing completes
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
     # 2b. Rejected payload (unknown product) -> zero measurement calls
     bad_prod_tx = dict(valid_tx, productId="unknown.product")
@@ -699,7 +928,7 @@ async def test_handle_appstore_notification_measurement_hooks(monkeypatch):
     }
     handled_bad = await handle_appstore_notification(bad_prod_payload)
     assert handled_bad is False
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
     # 2c. Non-renewal/subscription notification type (EXPIRED) -> zero measurement calls and pushes isolated
     expired_payload = {
@@ -714,7 +943,7 @@ async def test_handle_appstore_notification_measurement_hooks(monkeypatch):
 
     handled_exp = await handle_appstore_notification(expired_payload)
     assert handled_exp is True
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
     # 3. Thrown update from update_contractor -> zero measurement calls
     async def fake_update_throw(cid, updates):
@@ -723,13 +952,13 @@ async def test_handle_appstore_notification_measurement_hooks(monkeypatch):
 
     with pytest.raises(RuntimeError):
         await handle_appstore_notification(notif_payload)
-    assert len(measurement_calls) == 0
+    assert len(scheduled_calls) == 0
 
-    # 4. Measurement throws -> notification handling still succeeds (returns True)
+    # 4. Measurement scheduler throws -> notification handling still succeeds (returns True)
     monkeypatch.setattr("app.db.contractors.update_contractor", fake_update_ok)
-    async def fake_record_throw(cid, tier, tx_info):
-        raise RuntimeError("Measurement write error")
-    monkeypatch.setattr("app.services.acquisition.record_payment_measurement", fake_record_throw)
+    def fake_schedule_throw(cid, tier, tx_info):
+        raise RuntimeError("Scheduler error")
+    monkeypatch.setattr("app.services.acquisition.schedule_payment_measurement", fake_schedule_throw)
 
     handled_safe = await handle_appstore_notification(notif_payload)
     assert handled_safe is True

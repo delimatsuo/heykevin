@@ -236,6 +236,12 @@ async def _record_forwarding_evidence(contractor_id: str, seen_at: float):
     account does not write on every inbound call.
     """
     try:
+        from app.services.acquisition import record_forwarded_call_measurement
+        await record_forwarded_call_measurement(contractor_id, seen_at)
+    except Exception as e:
+        logger.warning(f"Could not record forwarding measurement: {type(e).__name__}")
+
+    try:
         from app.db.contractors import get_contractor, update_contractor
 
         contractor = await get_contractor(contractor_id)
@@ -259,6 +265,12 @@ async def _record_inbound_call_evidence(contractor_id: str, seen_at: float):
     stamp they would be invisible to that check. Same contract as
     _record_forwarding_evidence: best-effort, fire-and-forget, hourly throttle.
     """
+    try:
+        from app.services.acquisition import record_inbound_call_measurement
+        await record_inbound_call_measurement(contractor_id, seen_at)
+    except Exception as e:
+        logger.warning(f"Could not record inbound call measurement: {type(e).__name__}")
+
     try:
         from app.db.contractors import get_contractor, update_contractor
 

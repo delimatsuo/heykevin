@@ -1152,7 +1152,8 @@ struct OnboardingView: View {
                     appleUserId: appState.appleUserId,
                     appleIdentityToken: appState.appleIdentityToken,
                     businessAddress: resolvedBusinessAddress,
-                    businessCity: resolvedBusinessCity
+                    businessCity: resolvedBusinessCity,
+                    declaredOnboardingIntent: mode
                 )
             }
             guard appState.currentAuthContext() == originAuth, appState.appleUserId == originApple else {
@@ -1336,7 +1337,8 @@ struct OnboardingView: View {
                     mode: "personal",
                     ownerPhone: phoneNumber,
                     appleUserId: appState.appleUserId,
-                    appleIdentityToken: appState.appleIdentityToken
+                    appleIdentityToken: appState.appleIdentityToken,
+                    declaredOnboardingIntent: "business"
                 )
             }
             let result: [String: Any]?

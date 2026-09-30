@@ -42,6 +42,7 @@ _SENSITIVE_KEYS = frozenset({
     "subscription_auto_renews",
     "subscription_renewal_status_signed_at_ms",
     "subscription_forwarded_from",
+    "acquisition_measurement",
 })
 
 
@@ -127,11 +128,20 @@ class ContractorCreate(BaseModel):
     business_hours_start: str = "07:00"
     business_hours_end: str = "18:00"
     home_base_address: str = Field(default="", max_length=500)
+    # Acquisition measurement onboarding intent (optional, 'personal' or 'business')
+    declared_onboarding_intent: Optional[str] = Field(default=None, max_length=20)
     # International fields
     country_code: str = Field(default="", max_length=2)
     business_address: str = Field(default="", max_length=500)
     business_city: str = Field(default="", max_length=100)
     business_country_name: str = Field(default="", max_length=100)
+
+    @field_validator("declared_onboarding_intent")
+    @classmethod
+    def validate_declared_onboarding_intent(cls, v):
+        if v is not None and v not in ("personal", "business"):
+            raise ValueError("declared_onboarding_intent must be 'personal' or 'business'")
+        return v
 
     @field_validator("country_code")
     @classmethod

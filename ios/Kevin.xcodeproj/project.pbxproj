@@ -62,6 +62,7 @@
 		C9EA0A211944CEE40CEC243D /* CallHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09A23D5E418687FDCFD9F90B /* CallHistoryView.swift */; };
 		CB80A009443FB46C1AD74EAF /* CallActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 055D3AEE6FAF53B070EF5886 /* CallActionTests.swift */; };
 		CBC1321AF32D63C2E942389B /* PhoneFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B2CDD06B01EAAE824F1B2D /* PhoneFormatter.swift */; };
+		CD2A17878FF41110865E42A5 /* AcquisitionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9DDBAE88AB8840997A9045A /* AcquisitionCoordinator.swift */; };
 		CE4E2CEC954085A7FD2B48AB /* SettingsCountryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05B544A0AB86C4DE6799512 /* SettingsCountryTests.swift */; };
 		D63496DC4CB2027823E00AD6 /* StoreReviewManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 870D15DAE77727CB39244218 /* StoreReviewManager.swift */; };
 		D6BC1935FC705C7FDBBF684F /* PaywallFlowCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69C8CE051BFA7F3186E45B9B /* PaywallFlowCoordinator.swift */; };
@@ -77,6 +78,7 @@
 		F32453F5B03451C8BD41203F /* SettingsCountry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B7722B929833EF075295A83 /* SettingsCountry.swift */; };
 		F9A91D699C206F4EA85584A3 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 5B8F3D0C955D71321170BC03 /* InfoPlist.strings */; };
 		FC8F8078E613ED44B1E7008A /* LiveCallObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C986B1ABF16392D88910894A /* LiveCallObserver.swift */; };
+		FF0700968CF1914794A453A0 /* AcquisitionCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D12F4B8DDAC9C2F4FC08B543 /* AcquisitionCoordinatorTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -155,11 +157,13 @@
 		97A370961228A61EA03ED1C9 /* OwnerSMSPreferenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnerSMSPreferenceTests.swift; sourceTree = "<group>"; };
 		A88828214BCFD33CE2F29216 /* UpdateGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateGate.swift; sourceTree = "<group>"; };
 		B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersionService.swift; sourceTree = "<group>"; };
+		B9DDBAE88AB8840997A9045A /* AcquisitionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcquisitionCoordinator.swift; sourceTree = "<group>"; };
 		C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionVerificationTests.swift; sourceTree = "<group>"; };
 		C0D4DE4C8F970089D5E1D7A9 /* NotificationEntryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationEntryTests.swift; sourceTree = "<group>"; };
 		C51F526945B632953AAD92E2 /* AccountRestoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRestoreTests.swift; sourceTree = "<group>"; };
 		C986B1ABF16392D88910894A /* LiveCallObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCallObserver.swift; sourceTree = "<group>"; };
 		CB4523976C8CA1F94FD69173 /* ForwardingInstructionsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForwardingInstructionsTests.swift; sourceTree = "<group>"; };
+		D12F4B8DDAC9C2F4FC08B543 /* AcquisitionCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcquisitionCoordinatorTests.swift; sourceTree = "<group>"; };
 		D63ACE0E69E2007E754E2B30 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		E7C19B72552CD77728455C37 /* KevinTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = KevinTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E9C60ADD184DE388F0BB4232 /* LiveCallObserverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCallObserverTests.swift; sourceTree = "<group>"; };
@@ -255,6 +259,7 @@
 				EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */,
 				C51F526945B632953AAD92E2 /* AccountRestoreTests.swift */,
 				35E38B581B4C22A31DFD3E56 /* AccountSessionRecoveryTests.swift */,
+				D12F4B8DDAC9C2F4FC08B543 /* AcquisitionCoordinatorTests.swift */,
 				3C3EADDA5E5E888AB9E19746 /* AppStateOwnershipTests.swift */,
 				8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */,
 				055D3AEE6FAF53B070EF5886 /* CallActionTests.swift */,
@@ -307,6 +312,7 @@
 			children = (
 				3218F28F84345FE46322FFD3 /* AccountDeletion.swift */,
 				237F1E1714AAEC08C0F7A0F6 /* AccountRestoreCoordinator.swift */,
+				B9DDBAE88AB8840997A9045A /* AcquisitionCoordinator.swift */,
 				47EE37D6867D61B09BEC0482 /* APIClient.swift */,
 				88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */,
 				B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */,
@@ -488,6 +494,7 @@
 				3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */,
 				BE8FCBC0DF500DCAEB88B5EA /* AccountRestoreTests.swift in Sources */,
 				DDFA69E97CC4C340840D3077 /* AccountSessionRecoveryTests.swift in Sources */,
+				FF0700968CF1914794A453A0 /* AcquisitionCoordinatorTests.swift in Sources */,
 				713D90BFE7D394C1B628B965 /* AppStateOwnershipTests.swift in Sources */,
 				2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */,
 				CB80A009443FB46C1AD74EAF /* CallActionTests.swift in Sources */,
@@ -516,6 +523,7 @@
 				32E28E1C8F27DA9EB56FEEAC /* AccountDeletion.swift in Sources */,
 				8C5DE299F9414A0EA6E5A241 /* AccountRestoreCoordinator.swift in Sources */,
 				822102F6EF03D8BEE9017F00 /* AccountSessionState.swift in Sources */,
+				CD2A17878FF41110865E42A5 /* AcquisitionCoordinator.swift in Sources */,
 				B9AC9B9621CF69893008F61A /* ActiveCallCard.swift in Sources */,
 				AEEEB58F01869C0D299ACC4C /* AppDelegate.swift in Sources */,
 				04E14990283A4EB360D3FF82 /* AppState.swift in Sources */,

@@ -154,6 +154,8 @@ PROTECTED_FIELDS = frozenset({
     "owner_sms_opt_out_revision",
     "owner_sms_opt_out_source",
     "owner_sms_opt_out_updated_at",
+    # Acquisition and activation measurement — server-owned embedded map.
+    "acquisition_measurement",
 })
 
 # Supported countries for Kevin AI
@@ -530,6 +532,27 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("owner_sms_opt_out_revision", 0)
     data.setdefault("owner_sms_opt_out_source", None)
     data.setdefault("owner_sms_opt_out_updated_at", None)
+
+    # Acquisition and activation measurement cohort tracking (default off).
+    # Declared onboarding intent is stripped from ordinary contractor persistence
+    # and placed only inside the protected acquisition_measurement map on eligible accounts.
+    raw_intent = data.pop("declared_onboarding_intent", None)
+    from app.services.acquisition import is_acquisition_measurement_enabled
+    if is_acquisition_measurement_enabled():
+        intent = raw_intent if raw_intent in ("personal", "business") else "unknown"
+        created_ts = data.get("created_at") or time.time()
+        data.setdefault("acquisition_measurement", {
+            "schema_version": 1,
+            "cohort": created_ts,
+            "created_at": created_ts,
+            "declared_onboarding_intent": intent,
+            "attempts": 0,
+            "last_attempt_at": None,
+            "attribution_status": None,
+            "attribution": None,
+            "lease_attempt": None,
+            "lease_expires_at": None,
+        })
     loop = asyncio.get_event_loop()
     doc_ref = await loop.run_in_executor(
         None,

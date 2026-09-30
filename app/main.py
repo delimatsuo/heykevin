@@ -36,6 +36,7 @@ from app.api.subscription import router as subscription_router
 from app.webhooks.appstore import router as appstore_router
 from app.api.admin import router as admin_router
 from app.api.app_version import router as app_version_router
+from app.api.acquisition import router as acquisition_router
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -84,6 +85,7 @@ app.include_router(subscription_router)
 app.include_router(appstore_router)
 app.include_router(admin_router)
 app.include_router(app_version_router)
+app.include_router(acquisition_router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 

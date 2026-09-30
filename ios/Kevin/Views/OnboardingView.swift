@@ -101,11 +101,12 @@ struct OnboardingView: View {
         }
         .sheet(isPresented: $showPaywall) {
             PaywallView(
+                purpose: .businessActivation,
                 canDismiss: true,
                 isOnboarding: false,
-                preferredProductID: businessProductID,
-                onSubscribed: {
-                    Task { await activateBusinessAfterPurchase() }
+                preferredProductID: PaywallPolicy.businessProductID,
+                onSubscribed: { authContext in
+                    await activateBusinessAfterPurchase(authContext: authContext)
                 },
                 showsTrialSkip: false
             )
@@ -914,8 +915,28 @@ struct OnboardingView: View {
         // No "Maybe later" or "Done" bypass — we don't want users skipping
         // payment entry and silently churning when the server-side trial
         // expires 14 days later.
-        PaywallView(canDismiss: false, isOnboarding: true)
+        if selectedMode == "business" {
+            PaywallView(
+                purpose: .businessActivation,
+                canDismiss: false,
+                isOnboarding: true,
+                preferredProductID: PaywallPolicy.businessProductID,
+                onSubscribed: { authContext in
+                    await activateBusinessAfterPurchase(authContext: authContext) {
+                        appState.isOnboarded = true
+                    }
+                }
+            )
             .environmentObject(appState)
+        } else {
+            PaywallView(
+                purpose: .allPlans,
+                canDismiss: false,
+                isOnboarding: true,
+                preferredProductID: PaywallPolicy.personalProductID
+            )
+            .environmentObject(appState)
+        }
     }
 
     // MARK: - Logic
@@ -1131,7 +1152,8 @@ struct OnboardingView: View {
                     appleUserId: appState.appleUserId,
                     appleIdentityToken: appState.appleIdentityToken,
                     businessAddress: resolvedBusinessAddress,
-                    businessCity: resolvedBusinessCity
+                    businessCity: resolvedBusinessCity,
+                    declaredOnboardingIntent: mode
                 )
             }
             guard appState.currentAuthContext() == originAuth, appState.appleUserId == originApple else {
@@ -1315,7 +1337,8 @@ struct OnboardingView: View {
                     mode: "personal",
                     ownerPhone: phoneNumber,
                     appleUserId: appState.appleUserId,
-                    appleIdentityToken: appState.appleIdentityToken
+                    appleIdentityToken: appState.appleIdentityToken,
+                    declaredOnboardingIntent: "business"
                 )
             }
             let result: [String: Any]?
@@ -1380,37 +1403,40 @@ struct OnboardingView: View {
     }
 
     @MainActor
-    private func activateBusinessAfterPurchase() async {
-        guard appState.hasBusinessEntitlement else {
-            errorMessage = String(localized: "Business purchase is still being verified. Tap Restore Purchases or try again.")
-            return
-        }
-        guard !appState.contractorId.isEmpty else {
-            errorMessage = String(localized: "Set up your Kevin account before activating Business mode.")
-            return
-        }
-
-        do {
-            let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: [
-                "owner_name": ownerName,
-                "business_name": businessName,
-                "service_type": serviceType,
-                "mode": "business",
-            ])
-            if updated {
+    private func activateBusinessAfterPurchase(
+        authContext: CallAuthContext,
+        onCommit: (@MainActor () -> Void)? = nil
+    ) async -> PaywallCompletionResult {
+        await BusinessActivationOperation.activate(
+            capturedAuth: authContext,
+            currentAuth: { appState.currentAuthContext() },
+            hasBusinessEntitlement: { appState.hasBusinessEntitlement },
+            patch: { contractorId, _, bearerToken in
+                try await APIClient.shared.patchContractor(
+                    contractorId,
+                    body: [
+                        "owner_name": ownerName,
+                        "business_name": businessName,
+                        "service_type": serviceType,
+                        "mode": "business",
+                    ],
+                    bearerToken: bearerToken
+                )
+            },
+            commit: {
                 selectedMode = "business"
                 appState.mode = "business"
                 appState.userName = ownerName
                 appState.businessName = businessName
                 appState.serviceType = serviceType
-                showPaywall = false
-                step = .contactsPermission
-            } else {
-                errorMessage = String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
+                if let onCommit {
+                    onCommit()
+                } else {
+                    showPaywall = false
+                    step = .contactsPermission
+                }
             }
-        } catch {
-            errorMessage = String(localized: "Failed to activate Business mode. Please try again.")
-        }
+        )
     }
 
     /// Record which exit the user took from the forwarding step.

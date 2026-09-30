@@ -58,6 +58,9 @@ struct KevinApp: App {
                 }
                 .onChange(of: appState.currentAuthContext()) {
                     PushRegistrationCoordinator.shared.handleAuthChange()
+                    Task { @MainActor in
+                        await AcquisitionCoordinator.shared.handleAuthChange()
+                    }
                     guard appState.isOnboarded, appState.sessionState == .ready else { return }
                     Task { @MainActor in await PushRegistrationCoordinator.shared.handleAccountReady() }
                 }
@@ -87,6 +90,11 @@ struct KevinApp: App {
                 // Push Registration and Permission Reconciliation via coordinator
                 Task { @MainActor in
                     await PushRegistrationCoordinator.shared.handleSceneActive()
+                }
+
+                // Acquisition Attribution Coordinator
+                Task { @MainActor in
+                    await AcquisitionCoordinator.shared.handleSceneActive()
                 }
 
                 #if DEBUG

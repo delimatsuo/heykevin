@@ -936,6 +936,11 @@ async def update_subscription_from_transaction(
             reason="activation_failed",
         )
     logger.info(f"Subscription updated: contractor={contractor_id} tier={tier}")
+    try:
+        from app.services.acquisition import schedule_payment_measurement
+        schedule_payment_measurement(contractor_id, tier, transaction_info)
+    except Exception as e:
+        logger.warning(f"Failed to schedule payment measurement: {type(e).__name__}")
     return SubscriptionUpdateResult(SubscriptionUpdateOutcome.ACTIVE)
 
 
@@ -1457,12 +1462,18 @@ async def handle_appstore_notification(payload: dict) -> bool:
         tier = PRODUCT_TO_TIER.get(product_id, "")
         expires_ts = _active_subscription_expires_ts(transaction_info)
         if tier and expires_ts:
-            await update_contractor(contractor_id, {
+            updated = await update_contractor(contractor_id, {
                 "subscription_tier": tier,
                 "subscription_status": "active",
                 "subscription_expires": expires_ts,
             })
-            logger.info(f"Subscription renewed: {contractor_id} → {tier}")
+            if updated:
+                logger.info(f"Subscription renewed: {contractor_id} → {tier}")
+                try:
+                    from app.services.acquisition import schedule_payment_measurement
+                    schedule_payment_measurement(contractor_id, tier, transaction_info)
+                except Exception as e:
+                    logger.warning(f"Failed to schedule payment measurement: {type(e).__name__}")
         else:
             logger.warning(f"Rejected active subscription notification: {contractor_id} product={product_id}")
             return False

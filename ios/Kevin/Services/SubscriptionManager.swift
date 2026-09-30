@@ -200,10 +200,28 @@ class SubscriptionManager: ObservableObject {
     /// entitlement was found and confirmed by the backend.
     @discardableResult
     func restorePurchases() async -> Bool {
+        guard let context = currentVerificationContext() else {
+            purchaseError = SubscriptionError.missingContractor.localizedDescription
+            return false
+        }
         do {
             purchaseError = nil
-            try await AppStore.sync()
-            return await verifyCurrentEntitlements(source: .restore)
+            let restored = try await SubscriptionRestoreOperation.performRestore(
+                context: context,
+                isCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return self.isCurrent(context)
+                },
+                sync: { try await AppStore.sync() },
+                verify: { [weak self] capturedContext in
+                    guard let self else { return false }
+                    return await self.verifyCurrentEntitlements(source: .restore, context: capturedContext)
+                }
+            )
+            if !restored && !isCurrent(context) {
+                purchaseError = SubscriptionError.accountChanged.localizedDescription
+            }
+            return restored
         } catch {
             purchaseError = "Restore failed: \(error.localizedDescription)"
             return false
@@ -218,11 +236,13 @@ class SubscriptionManager: ObservableObject {
     /// confirmed it as `subscription_status == "active"`).
     @discardableResult
     func verifyCurrentEntitlements(
-        source: SubscriptionVerificationSource = .launch
+        source: SubscriptionVerificationSource = .launch,
+        context: SubscriptionVerificationContext? = nil
     ) async -> Bool {
-        guard let context = currentVerificationContext() else { return false }
+        guard let context = context ?? currentVerificationContext() else { return false }
         var anyActive = false
         for await result in Transaction.currentEntitlements {
+            guard isCurrent(context) else { return false }
             guard case .verified(let transaction) = result else { continue }
             // Only count this entitlement if the refreshed backend profile
             // says the contractor is currently active. A
@@ -254,7 +274,18 @@ class SubscriptionManager: ObservableObject {
 
         let key = verificationKey(context: context, transactionID: transactionID)
         let outcome = await verificationCoordinator.result(for: key) {
-            await APIClient.shared.verifySubscription(
+            let isCurrent = await MainActor.run {
+                let auth = AppState.shared.currentAuthContext()
+                return context.matches(
+                    contractorID: auth.contractorId,
+                    bearerToken: auth.bearerToken,
+                    generation: auth.generation
+                )
+            }
+            guard isCurrent else {
+                return .rejected(reason: "account_changed")
+            }
+            return await APIClient.shared.verifySubscription(
                 transactionId: transactionID,
                 source: source,
                 context: context
@@ -459,22 +490,24 @@ class SubscriptionManager: ObservableObject {
     }
 
     private func currentVerificationContext() -> SubscriptionVerificationContext? {
-        let contractorID = AppState.shared.contractorId
-        let bearerToken = APIClient.shared.contractorToken
-        guard !contractorID.isEmpty, !bearerToken.isEmpty else { return nil }
+        let auth = AppState.shared.currentAuthContext()
+        guard auth.isValid else { return nil }
 
         let context = SubscriptionVerificationContext(
-            contractorID: contractorID,
-            bearerToken: bearerToken
+            contractorID: auth.contractorId,
+            bearerToken: auth.bearerToken,
+            generation: auth.generation
         )
         cancelRetriesNotMatching(context)
         return context
     }
 
     private func isCurrent(_ context: SubscriptionVerificationContext) -> Bool {
-        context.matches(
-            contractorID: AppState.shared.contractorId,
-            bearerToken: APIClient.shared.contractorToken
+        let auth = AppState.shared.currentAuthContext()
+        return context.matches(
+            contractorID: auth.contractorId,
+            bearerToken: auth.bearerToken,
+            generation: auth.generation
         )
     }
 

@@ -303,9 +303,354 @@ final class SubscriptionVerificationTests: XCTestCase {
             bearerToken: "token-1"
         )
 
-        XCTAssertTrue(context.matches(contractorID: "c1", bearerToken: "token-1"))
-        XCTAssertFalse(context.matches(contractorID: "c2", bearerToken: "token-1"))
-        XCTAssertFalse(context.matches(contractorID: "c1", bearerToken: "token-2"))
+        XCTAssertTrue(context.matches(contractorID: "c1", bearerToken: "token-1", generation: 0))
+        XCTAssertFalse(context.matches(contractorID: "c2", bearerToken: "token-1", generation: 0))
+        XCTAssertFalse(context.matches(contractorID: "c1", bearerToken: "token-2", generation: 0))
+    }
+
+    func testVerificationContextIncludesGenerationInMatchesAndCacheNamespace() {
+        let c1 = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        let c2 = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 2
+        )
+
+        XCTAssertEqual(c1.cacheNamespace, "c1:1")
+        XCTAssertEqual(c2.cacheNamespace, "c1:2")
+        XCTAssertTrue(c1.matches(contractorID: "c1", bearerToken: "token-1", generation: 1))
+        XCTAssertFalse(c1.matches(contractorID: "c1", bearerToken: "token-1", generation: 2))
+        XCTAssertNotEqual(c1, c2)
+    }
+
+    func testRestoreOperation_normalSyncVerifyOrder_succeeds() async throws {
+        var callOrder: [String] = []
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+
+        let result = try await SubscriptionRestoreOperation.performRestore(
+            context: context,
+            isCurrent: { true },
+            sync: {
+                callOrder.append("sync")
+            },
+            verify: { passedContext in
+                XCTAssertEqual(passedContext, context)
+                callOrder.append("verify")
+                return true
+            }
+        )
+
+        XCTAssertTrue(result)
+        XCTAssertEqual(callOrder, ["sync", "verify"])
+    }
+
+    func testRestoreOperation_syncThrows_throwsError() async {
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+
+        do {
+            _ = try await SubscriptionRestoreOperation.performRestore(
+                context: context,
+                isCurrent: { true },
+                sync: {
+                    throw URLError(.notConnectedToInternet)
+                },
+                verify: { _ in
+                    XCTFail("Verify should not be called on sync error")
+                    return true
+                }
+            )
+            XCTFail("Should have thrown error")
+        } catch {
+            XCTAssertTrue(error is URLError)
+        }
+    }
+
+    func testRestoreOperation_staleContextBeforeStart_abortsWithoutSyncOrVerify() async throws {
+        var syncCalled = false
+        var verifyCalled = false
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+
+        let result = try await SubscriptionRestoreOperation.performRestore(
+            context: context,
+            isCurrent: { false },
+            sync: { syncCalled = true },
+            verify: { _ in
+                verifyCalled = true
+                return true
+            }
+        )
+
+        XCTAssertFalse(result)
+        XCTAssertFalse(syncCalled)
+        XCTAssertFalse(verifyCalled)
+    }
+
+    func testRestoreOperation_staleContextAfterSync_abortsWithoutVerify() async throws {
+        var currentGeneration = 1
+        var verifyCalled = false
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+
+        let result = try await SubscriptionRestoreOperation.performRestore(
+            context: context,
+            isCurrent: { currentGeneration == 1 },
+            sync: {
+                // Generation changes during sync suspension (different session)
+                currentGeneration = 2
+            },
+            verify: { _ in
+                verifyCalled = true
+                return true
+            }
+        )
+
+        XCTAssertFalse(result)
+        XCTAssertFalse(verifyCalled)
+    }
+
+    func testRestoreOperation_staleContextAfterVerify_abortsWithoutSuccess() async throws {
+        var currentGeneration = 1
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+
+        let result = try await SubscriptionRestoreOperation.performRestore(
+            context: context,
+            isCurrent: { currentGeneration == 1 },
+            sync: {},
+            verify: { _ in
+                // Generation changes during verify suspension
+                currentGeneration = 2
+                return true
+            }
+        )
+
+        XCTAssertFalse(result)
+    }
+
+    // MARK: - SubscriptionVerificationResponseEffect Tests
+
+    func testResponseEffect_current401_triggersReauth() {
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        let currentAuth = CallAuthContext(
+            contractorId: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        var reauthCalled = false
+
+        let applied = SubscriptionVerificationResponseEffect.apply(
+            statusCode: 401,
+            capturedContext: context,
+            currentAuth: currentAuth,
+            markNeedsReauth: { reauthCalled = true }
+        )
+
+        XCTAssertTrue(applied)
+        XCTAssertTrue(reauthCalled)
+    }
+
+    func testResponseEffect_changedContractorId401_noEffect() {
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        let currentAuth = CallAuthContext(
+            contractorId: "c2",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        var reauthCalled = false
+
+        let applied = SubscriptionVerificationResponseEffect.apply(
+            statusCode: 401,
+            capturedContext: context,
+            currentAuth: currentAuth,
+            markNeedsReauth: { reauthCalled = true }
+        )
+
+        XCTAssertFalse(applied)
+        XCTAssertFalse(reauthCalled)
+    }
+
+    func testResponseEffect_changedBearerToken401_noEffect() {
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        let currentAuth = CallAuthContext(
+            contractorId: "c1",
+            bearerToken: "token-2",
+            generation: 1
+        )
+        var reauthCalled = false
+
+        let applied = SubscriptionVerificationResponseEffect.apply(
+            statusCode: 401,
+            capturedContext: context,
+            currentAuth: currentAuth,
+            markNeedsReauth: { reauthCalled = true }
+        )
+
+        XCTAssertFalse(applied)
+        XCTAssertFalse(reauthCalled)
+    }
+
+    func testResponseEffect_sameIdAndTokenChangedGeneration401_noEffect() {
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        let currentAuth = CallAuthContext(
+            contractorId: "c1",
+            bearerToken: "token-1",
+            generation: 2
+        )
+        var reauthCalled = false
+
+        let applied = SubscriptionVerificationResponseEffect.apply(
+            statusCode: 401,
+            capturedContext: context,
+            currentAuth: currentAuth,
+            markNeedsReauth: { reauthCalled = true }
+        )
+
+        XCTAssertFalse(applied)
+        XCTAssertFalse(reauthCalled)
+    }
+
+    func testResponseEffect_non401StatusCode_noEffect() {
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        let currentAuth = CallAuthContext(
+            contractorId: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        for non401 in [200, 204, 400, 403, 404, 409, 429, 500, 503] {
+            var reauthCalled = false
+            let applied = SubscriptionVerificationResponseEffect.apply(
+                statusCode: non401,
+                capturedContext: context,
+                currentAuth: currentAuth,
+                markNeedsReauth: { reauthCalled = true }
+            )
+            XCTAssertFalse(applied, "Status \(non401) should have no reauth effect")
+            XCTAssertFalse(reauthCalled, "Status \(non401) should not call markNeedsReauth")
+        }
+    }
+
+    // MARK: - Held-Continuation Restore Tests
+
+    func testRestoreOperation_heldSync_generationChangesWhileSuspended_abortsWithoutVerifying() async throws {
+        let gate = AsyncGate()
+        defer { gate.open() }
+
+        var currentGeneration = 1
+        var verifyCallCount = 0
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+
+        let task = Task {
+            try await SubscriptionRestoreOperation.performRestore(
+                context: context,
+                isCurrent: { currentGeneration == 1 },
+                sync: {
+                    await gate.signalAndPause()
+                },
+                verify: { _ in
+                    verifyCallCount += 1
+                    return true
+                }
+            )
+        }
+
+        let entered = await gate.waitForEntry()
+        XCTAssertTrue(entered)
+        XCTAssertEqual(verifyCallCount, 0)
+
+        // Externally change generation while held suspended in sync
+        currentGeneration = 2
+
+        gate.open()
+        let result = try await task.value
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(verifyCallCount, 0)
+    }
+
+    func testRestoreOperation_heldSync_accountChangesWhileSuspended_abortsWithoutVerifying() async throws {
+        let gate = AsyncGate()
+        defer { gate.open() }
+
+        var currentAccount = "c1"
+        var verifyCallCount = 0
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+
+        let task = Task {
+            try await SubscriptionRestoreOperation.performRestore(
+                context: context,
+                isCurrent: { currentAccount == "c1" },
+                sync: {
+                    await gate.signalAndPause()
+                },
+                verify: { _ in
+                    verifyCallCount += 1
+                    return true
+                }
+            )
+        }
+
+        let entered = await gate.waitForEntry()
+        XCTAssertTrue(entered)
+        XCTAssertEqual(verifyCallCount, 0)
+
+        // Externally change account while held suspended in sync
+        currentAccount = "c2"
+
+        gate.open()
+        let result = try await task.value
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(verifyCallCount, 0)
     }
 
     private func httpResponse(

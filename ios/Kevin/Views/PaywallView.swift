@@ -2,6 +2,8 @@ import SwiftUI
 import StoreKit
 
 struct PaywallView: View {
+    /// Purpose of the paywall: all plans (default) or business activation
+    var purpose: PaywallPurpose = .allPlans
     /// When false (trial expired), the paywall cannot be dismissed without subscribing.
     var canDismiss: Bool = true
     /// When true, shown as the final onboarding step — skip link says "Maybe later"
@@ -9,7 +11,7 @@ struct PaywallView: View {
     /// Optional plan to preselect when the paywall opens from an upgrade path.
     var preferredProductID: String? = nil
     /// Called after a purchase has been verified by the server.
-    var onSubscribed: (() -> Void)? = nil
+    var onSubscribed: (@MainActor (CallAuthContext) async -> PaywallCompletionResult)? = nil
     /// Whether trial/grace users should see the non-purchase skip link.
     var showsTrialSkip: Bool = true
 
@@ -17,13 +19,22 @@ struct PaywallView: View {
     @ObservedObject private var subscriptionManager = SubscriptionManager.shared
     @Environment(\.dismiss) var dismiss
 
+    @StateObject private var coordinator = PaywallFlowCoordinator()
     @State private var isPromoEligible = false
     @State private var isCheckingPromo = true
-    @State private var isPurchasing = false
-    @State private var isRestoring = false
-    @State private var purchaseError: String?
-    @State private var restoreMessage: String?
     @State private var selectedProductID: String?
+
+    private var eligibleProducts: [Product] {
+        PaywallPolicy.filterEligibleProducts(subscriptionManager.products, for: purpose)
+    }
+
+    private var resolvedSelectedProductID: String? {
+        PaywallPolicy.resolveSelectedProductID(
+            selectedID: selectedProductID,
+            preferredID: preferredProductID,
+            eligibleIDs: eligibleProducts.map(\.id)
+        )
+    }
 
     /// Promotional offers are intentionally disabled. A server-side expired trial
     /// does not prove that this Apple ID is a current or former subscriber, which is
@@ -51,7 +62,7 @@ struct PaywallView: View {
                     if subscriptionManager.isLoading {
                         ProgressView(String(localized: "Loading plans..."))
                             .padding(.vertical, 40)
-                    } else if subscriptionManager.products.isEmpty {
+                    } else if eligibleProducts.isEmpty {
                         VStack(spacing: 12) {
                             Text(String(localized: "Could not load plans."))
                                 .foregroundStyle(.secondary)
@@ -68,18 +79,18 @@ struct PaywallView: View {
                         }
                         .padding(.vertical, 40)
                     } else {
-                        ForEach(subscriptionManager.products, id: \.id) { product in
+                        ForEach(eligibleProducts, id: \.id) { product in
                             TierCard(
                                 product: product,
                                 showFoundingMemberPromo: canShowFoundingMemberPromo,
-                                isSelected: selectedProductID == product.id,
+                                isSelected: resolvedSelectedProductID == product.id,
                                 onSelect: { selectedProductID = product.id }
                             )
                         }
                     }
 
                     // CTA Button
-                    if !subscriptionManager.products.isEmpty {
+                    if !eligibleProducts.isEmpty {
                         purchaseButton
                     }
 
@@ -95,59 +106,36 @@ struct PaywallView: View {
                         }
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .disabled(coordinator.isBusy)
                     }
 
                     // Cancel Forwarding
                     cancelForwardingButton
 
                     // Restore Purchases
-                    //
-                    // Audit F-1: this used to set `isOnboarded = true` whenever
-                    // `appState.subscriptionStatus == "trial"`, which is the
-                    // default on a fresh install. Restore on a device with no
-                    // Apple entitlement would land here, see the default
-                    // "trial" status, and bypass the onboarding paywall.
-                    // We now require `restorePurchases()` to return an
-                    // explicit success signal — i.e. the backend confirmed
-                    // an actually-active subscription — before progressing.
                     Button {
                         Task {
-                            isRestoring = true
-                            restoreMessage = nil
-                            purchaseError = nil
-                            let restoredOK = await subscriptionManager.restorePurchases()
-                            isRestoring = false
-
-                            if restoredOK {
-                                if isOnboarding {
-                                    appState.isOnboarded = true
-                                }
-                                dismiss()
-                            } else if let err = subscriptionManager.purchaseError, !err.isEmpty {
-                                purchaseError = err
-                            } else {
-                                restoreMessage = "No active subscription found for this Apple ID."
-                            }
+                            await coordinator.restorePurchases()
                         }
                     } label: {
-                        if isRestoring {
+                        if coordinator.isRestoring {
                             ProgressView().scaleEffect(0.8)
                         } else {
-                            Text("Restore Purchases")
+                            Text(String(localized: "Restore Purchases"))
                         }
                     }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .disabled(isRestoring)
+                    .disabled(coordinator.isBusy)
 
-                    if let msg = restoreMessage {
+                    if let msg = coordinator.restoreMessage {
                         Text(msg)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
 
-                    if let error = purchaseError {
+                    if let error = coordinator.purchaseError {
                         Text(error)
                             .font(.caption)
                             .foregroundStyle(.red)
@@ -186,13 +174,24 @@ struct PaywallView: View {
                             }
                             dismiss()
                         }
+                        .disabled(coordinator.isBusy)
                     }
                 }
             }
             .task {
+                coordinator.configure(
+                    purpose: purpose,
+                    activationHandler: onSubscribed,
+                    onComplete: {
+                        if isOnboarding {
+                            appState.isOnboarded = true
+                        }
+                        dismiss()
+                    }
+                )
                 await loadData()
             }
-            .interactiveDismissDisabled(!canDismiss)
+            .interactiveDismissDisabled(!canDismiss || coordinator.isBusy)
         }
     }
 
@@ -267,50 +266,22 @@ struct PaywallView: View {
 
     private var purchaseButton: some View {
         Button {
-            guard let productID = selectedProductID ?? subscriptionManager.products.first?.id else { return }
-            guard let product = subscriptionManager.products.first(where: { $0.id == productID }) else { return }
-            isPurchasing = true
-            purchaseError = nil
+            guard let productID = resolvedSelectedProductID else { return }
+            guard let product = eligibleProducts.first(where: { $0.id == productID }) else { return }
+            let offerID = canShowFoundingMemberPromo ? promoOfferID(for: product.id) : nil
             Task {
-                do {
-                    // Only attach the promo offer for users who have already completed an
-                    // intro offer (expired/cancelled). Users in trial or new users go
-                    // through the standard StoreKit introductory offer (2-week free trial).
-                    let offerID = canShowFoundingMemberPromo ? promoOfferID(for: product.id) : nil
-                    let purchased = try await subscriptionManager.purchase(product, offerID: offerID)
-                    if purchased {
-                        isPurchasing = false
-                        onSubscribed?()
-                        if isOnboarding {
-                            appState.isOnboarded = true
-                        }
-                        dismiss()
-                        return
-                    }
-                    if let err = subscriptionManager.purchaseError, !err.isEmpty {
-                        purchaseError = err
-                    }
-                } catch {
-                    // If promo offer was rejected, fall back to regular price automatically
-                    if canShowFoundingMemberPromo {
-                        isPromoEligible = false
-                        purchaseError = "Promo offer unavailable for your account — plans now shown at regular price. Tap the button again to subscribe."
-                    } else {
-                        purchaseError = error.localizedDescription
-                    }
-                }
-                isPurchasing = false
+                await coordinator.purchase(product: product, offerID: offerID)
             }
         } label: {
-            if isPurchasing {
+            if coordinator.isPurchasing {
                 ProgressView().tint(.white)
             } else {
-                let product = subscriptionManager.products.first(where: { $0.id == (selectedProductID ?? subscriptionManager.products.first?.id ?? "") })
+                let product = eligibleProducts.first(where: { $0.id == (resolvedSelectedProductID ?? "") })
                 Text(purchaseButtonTitle(for: product))
             }
         }
         .buttonStyle(HKDarkPrimaryButtonStyle())
-        .disabled(isPurchasing || subscriptionManager.products.isEmpty)
+        .disabled(coordinator.isBusy || eligibleProducts.isEmpty)
     }
 
     private func purchaseButtonTitle(for product: Product?) -> String {
@@ -396,8 +367,11 @@ struct PaywallView: View {
 
     private func loadData() async {
         await subscriptionManager.fetchProducts()
-        selectedProductID = subscriptionManager.products.first(where: { $0.id == preferredProductID })?.id
-            ?? subscriptionManager.products.first?.id
+        selectedProductID = PaywallPolicy.resolveSelectedProductID(
+            selectedID: selectedProductID,
+            preferredID: preferredProductID,
+            eligibleIDs: eligibleProducts.map(\.id)
+        )
 
         // Promotional offers remain fail-closed until eligibility comes from
         // verified Apple subscription history rather than server trial state.

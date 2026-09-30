@@ -161,6 +161,10 @@ class Settings(DotenvProtectedBaseSettings):
     # until eligibility is derived from verified Apple subscription history.
     subscription_promotional_offers_enabled: bool = False
 
+    # Acquisition and activation measurement (default OFF)
+    acquisition_measurement_enabled: bool = False
+    apple_ads_expected_org_id: int = 0
+
     # Cloud Run URL (for WebSocket URL generation)
     cloud_run_url: str = PRODUCTION_CLOUD_RUN_URL
 
@@ -206,6 +210,25 @@ class Settings(DotenvProtectedBaseSettings):
         raise ValueError(
             "INTEGRATION_TOKEN_ENCRYPTED_WRITES_ENABLED must be exact bool or lowercase 'true'/'false'"
         )
+
+    @field_validator("apple_ads_expected_org_id", mode="before")
+    @classmethod
+    def _validate_apple_ads_expected_org_id(cls, v: object) -> int:
+        if isinstance(v, bool):
+            raise ValueError("apple_ads_expected_org_id must not be a boolean")
+        if isinstance(v, (int, str)):
+            try:
+                val = int(v)
+            except (ValueError, TypeError):
+                raise ValueError("apple_ads_expected_org_id must be an integer")
+            if val < 0:
+                raise ValueError("apple_ads_expected_org_id must be non-negative")
+            if val > (1 << 63) - 1:
+                raise ValueError("apple_ads_expected_org_id exceeds signed 64-bit integer range")
+            if val == 1234567890:
+                raise ValueError("apple_ads_expected_org_id cannot be a development placeholder ID")
+            return val
+        raise ValueError("apple_ads_expected_org_id must be an integer")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

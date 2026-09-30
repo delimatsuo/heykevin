@@ -1,46 +1,65 @@
-# Apple Ads campaign map
+# Apple Ads campaign recovery map
 
-Keep intent, product page, and bid decisions separate. Start with exact-match campaigns so early conversion data is interpretable; use discovery to find new terms, not to absorb the whole budget.
+September 30 plan: prepare one Personal call-screening experiment. Keep existing
+broad, competitor and contractor acquisition paused while activation is repaired.
+This replaces the earlier five-campaign percentage allocation; no budget expansion
+or new campaign activation is authorized by this document.
 
-## Campaigns
+## Next experiment
 
-| Campaign | Product page | Match | Starting budget share | Example intent |
-|---|---|---:|---:|---|
-| Business Exact | `contractor-after-hours` | Exact | 40% | ai receptionist, call answering service, virtual receptionist, after hours answering service |
-| Trade Exact | `contractor-after-hours` | Exact | 25% | plumber answering service, hvac answering service, electrician answering service, contractor answering service |
-| Personal Exact | `personal-call-screening` | Exact | 20% | call screening, unknown caller screening, spam call blocker, ai phone assistant |
-| Discovery | Matching CPP by ad group | Broad and Search Match | 10% | New-term harvesting only |
-| Brand | Default | Exact | 5% | hey kevin, hey kevin app |
+| Setting | Prepared choice |
+|---|---|
+| Audience hypothesis | People screening unknown calls for personal use |
+| Product page | Approved `personal-call-screening` CPP with current app screenshots |
+| Match type | Exact |
+| Candidate keywords | `ai call screening`, `call screening assistant`, `personal phone assistant` |
+| Search Match | Off |
+| Broad and general AI-chat competitor terms | Keep paused |
+| Spend | Existing owner-approved test allowance; enforce a total cap independently of daily budget |
+| Launch gate | Released fixes, disclosed/enabled measurement and owner-observed Personal activation |
 
-Budget shares are starting hypotheses, not permanent targets. Reallocate only after each segment has enough taps and first-time downloads to avoid reacting to noise.
+Low query volume is a valid outcome. Do not raise bids or broaden into general
+chat-assistant searches simply to force delivery. Inspect actual search terms;
+an exact keyword's name alone does not establish the searcher's intent.
 
-## Negative-keyword boundaries
+## Search-term exclusions
 
-- Business campaigns: exclude `free`, `jobs`, `salary`, `software developer`, and unrelated human-receptionist employment intent.
-- Personal campaigns: exclude trade terms such as `plumber`, `hvac`, `electrician`, `contractor`, and `answering service for business`.
-- Move converting discovery terms into Exact weekly, then add them as Exact negatives in Discovery to prevent overlap.
+Exclude unrelated general chat assistants, employment searches (`jobs`, `career`,
+`salary`), reverse lookup, pranks, outbound dialers and business/trade answering
+intent from this Personal experiment when those terms are observed. Evaluate
+free-only searches against paid-product intent. Keep a change log with the query,
+reason and spend; do not silently mix business lead capture into this test.
 
-## Weekly decision table
+## Decisions after launch
 
-| Signal | Likely issue | Action |
-|---|---|---|
-| Low tap-through rate | Keyword/creative mismatch | Tighten keyword theme or route to the correct CPP |
-| Healthy tap-through, low download rate | Product-page message or screenshot weakness | Change the first three screenshots or promotional text |
-| Healthy downloads, weak completed setup | Onboarding/forwarding friction | Fix activation; do not increase bids |
-| Healthy setup, weak first screened call | Trial value not reached | Add a safe test-call path or stronger setup guidance |
-| Healthy activation, weak paid conversion | Pricing/value mismatch | Review plans and paywall only after cohort data is stable |
+| Evidence | Next action |
+|---|---|
+| Few impressions | Check eligibility and search demand before changing bids |
+| Taps but few downloads | Inspect query intent and Personal product-page message |
+| Downloads but few accounts | Investigate first launch and account creation; attribution cannot count pre-account abandonment |
+| Accounts but little confirmed forwarding | Observe carrier setup with consenting testers |
+| Forwarding but little useful screening | Perform owner-authorized calls and inspect the product experience |
+| Trial interest but few paid conversions | Wait for eligible cohorts to mature, then review value and pricing |
 
-## Measurement contract
+Small samples cannot establish a winning keyword or audience. Pause at the total
+allowance, a material activation regression, or unusable measurement. Expanding
+the test requires evidence and the applicable spend authorization.
 
-At minimum, review by product-page/campaign segment:
+## Measurement interpretation
 
-1. Impressions
-2. Taps and tap-through rate
-3. First-time downloads and product-page conversion rate
-4. Account creation
-5. Forwarding activated
-6. First screened call
-7. Trial-to-paid conversion by tier
+Keep downloads, account creation, inbound observations, carrier-confirmed forwarding,
+verified entitlements, Apple free trials, positive-price purchases and active paid
+plans separate. An inbound observation does not prove a completed screening or a
+non-test customer call. A purchase observation does not prove current retention.
 
-Apple Ads and App Store Connect cover the top of this funnel. Hey Kevin currently has no product analytics layer connecting acquisition to activation. Until that is implemented with an explicit privacy review, use aggregate App Store metrics plus server counts for account creation, forwarding activation, first calls, and paid subscriptions; do not claim user-level campaign attribution.
+The acquisition source implementation is default off. Historical installs cannot
+be retrospectively linked to it. Until a verified release and collection activation,
+use aggregate Apple reports and label the attribution gap explicitly. After activation,
+the offline reducer groups eligible new accounts by immutable declared intent and
+Apple attribution; unknown and Apple-unattributed results remain separate. Missing
+declared intent is unknown, even when the runtime account defaults to Personal.
 
+Use Apple subscription reports for active paid plans and financial reports for
+settlement. Account deletion removes the measurement map, so the funnel report
+is not a permanent accounting ledger. Distinguish owner/team paid test purchases
+from outside customer acquisition before drawing a commercial conclusion.

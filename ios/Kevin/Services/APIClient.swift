@@ -1258,7 +1258,13 @@ final class APIClient: @unchecked Sendable {
                 return .retryable(after: 30)
             }
             if http.statusCode == 401 {
-                await MainActor.run { AppState.shared.needsReauth = true }
+                await MainActor.run {
+                    SubscriptionVerificationResponseEffect.apply(
+                        statusCode: http.statusCode,
+                        capturedContext: context,
+                        currentAuth: AppState.shared.currentAuthContext()
+                    )
+                }
             }
             return SubscriptionVerificationResponseParser.parse(data: data, response: http)
         } catch {

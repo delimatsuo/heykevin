@@ -1,4 +1,27 @@
 import Foundation
+import StoreKit
+
+@MainActor
+enum SubscriptionVerificationResponseEffect {
+    @discardableResult
+    static func apply(
+        statusCode: Int,
+        capturedContext: SubscriptionVerificationContext,
+        currentAuth: CallAuthContext,
+        markNeedsReauth: () -> Void = { AppState.shared.needsReauth = true }
+    ) -> Bool {
+        guard statusCode == 401 else { return false }
+        guard capturedContext.matches(
+            contractorID: currentAuth.contractorId,
+            bearerToken: currentAuth.bearerToken,
+            generation: currentAuth.generation
+        ) else {
+            return false
+        }
+        markNeedsReauth()
+        return true
+    }
+}
 
 enum SubscriptionVerificationSource: String, Sendable {
     case purchase
@@ -18,11 +41,35 @@ enum SubscriptionVerificationOutcome: Equatable, Sendable {
 struct SubscriptionVerificationContext: Equatable, Sendable {
     let contractorID: String
     let bearerToken: String
+    let generation: Int
 
-    var cacheNamespace: String { contractorID }
+    init(contractorID: String, bearerToken: String, generation: Int = 0) {
+        self.contractorID = contractorID
+        self.bearerToken = bearerToken
+        self.generation = generation
+    }
 
-    func matches(contractorID: String, bearerToken: String) -> Bool {
-        self.contractorID == contractorID && self.bearerToken == bearerToken
+    var cacheNamespace: String { "\(contractorID):\(generation)" }
+
+    func matches(contractorID: String, bearerToken: String, generation: Int = 0) -> Bool {
+        self.contractorID == contractorID && self.bearerToken == bearerToken && self.generation == generation
+    }
+}
+
+@MainActor
+enum SubscriptionRestoreOperation {
+    static func performRestore(
+        context: SubscriptionVerificationContext,
+        isCurrent: @MainActor () -> Bool,
+        sync: () async throws -> Void = { try await AppStore.sync() },
+        verify: (SubscriptionVerificationContext) async -> Bool
+    ) async throws -> Bool {
+        guard isCurrent() else { return false }
+        try await sync()
+        guard isCurrent() else { return false }
+        let verifiedOK = await verify(context)
+        guard isCurrent() else { return false }
+        return verifiedOK
     }
 }
 

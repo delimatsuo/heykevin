@@ -3,14 +3,15 @@
 Observed September 30, 2026; timestamps below are UTC. Backend purchase fixes and
 acquisition measurement are live. Build 45 is available in internal TestFlight.
 The iOS version and revised Personal custom product page are waiting for Apple
-review. Advertising remains paused. Physical forwarding and paid conversion are
-not established by this receipt.
+review. Advertising remains paused. The owner reported the requested build 45
+phone test passed. Paid conversion is not established by this receipt.
 
 ## Authorization and source
 
 The owner's “ok, complete the tasks” covered the previously listed backend,
 measurement/privacy, iOS delivery and Personal store/ad work. The owner agreed to
-run a two-phone test when the build became ready. No live customer call, outreach,
+run a two-phone test when the build became ready and has now reported success.
+No agent-initiated live call, outreach,
 new analytics vendor, campaign budget increase or recurring automation occurred.
 
 - Behavior source: `b62eea38d9ab5656fb8d809fb872f05d9c81147d`,
@@ -113,6 +114,8 @@ Review submission `28384f4e-656b-4b9f-b096-fea77377a8a7` contains exactly the
 1.3.4 app version and Personal CPP version 3. Submitted at `17:01:41Z`; both
 read back `WAITING_FOR_REVIEW`. The app version uses manual release. Public
 1.3.4 availability has not been observed.
+Fresh App Store Connect readback at `17:49:19Z` still showed 1.3.4 Waiting for
+Review, attached build 45, and manual release selected.
 
 Apple Ads account/org `19089740`, campaign `2144778097`, remains paused.
 Its actual settings are September 30 at 00:00 through October 6 at 23:45,
@@ -129,21 +132,31 @@ $0 spend for these groups. Before launch, verify that Apple Ads has refreshed to
 the newly approved CPP assets and select the Personal ad as active; the default
 ad remains the fallback inside the paused group.
 
+## Owner phone acceptance — September 30, 2026
+
+The owner reported: “i tested build 45. All working”. This answers the requested
+two-phone carrier-forwarding, transcript/summary and locked-phone notification
+check for **1.3.4 (45)**. Record that bounded check as passed based on the owner's
+report. No agent placed or observed the live call. Carrier family was not
+provided; no phone numbers or call content were collected.
+
+This report does not establish five separate new-user onboarding sessions,
+purchase cancellation/restore outcomes, or a paid production conversion.
+
 ## Remaining acceptance
 
 1. Apple must approve the app and revised CPP; release the approved app manually
    only after the required owner-controlled checks. Recheck public availability.
-2. Owner must run the two-phone carrier-forwarding, transcript/summary and
-   locked-phone notification check on build 45. No result has been reported yet.
-3. Complete the five consenting Personal onboarding checks in the
+2. Complete the five consenting Personal onboarding checks in the
    [acceptance plan](../superpowers/plans/2026-09-30-acquisition-recovery.md),
    including cancellation/restore and carrier setup. One phone check does not
    satisfy all five cases, and these are usability checks, not conversion proof.
-4. After those gates, recheck campaign spend, remaining allowance and end date,
+3. After those gates, recheck campaign spend, remaining allowance and end date,
    confirm the fresh Personal creative, and activate only the Personal experiment.
    Do not increase bids to force volume, extend October 6, or enable older groups.
 
-No new calls, customers, purchases or conversion improvement are claimed.
+The owner's test report establishes the bounded phone acceptance above. No new
+customer acquisition, paid purchase or conversion improvement is claimed.
 
 ## Local cleanup and receipt
 

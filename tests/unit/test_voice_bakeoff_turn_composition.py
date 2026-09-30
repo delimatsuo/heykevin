@@ -107,8 +107,10 @@ _BASELINE_HASHES = {
     # Re-pinned 2026-09-03: _expired_contractor_cleanup now delegates to
     # app/services/number_release.py (30-day lapsed-number release, owner
     # decision 2026-09-03). Still only a wiring change to main.py.
+    # Re-pinned 2026-09-30 for reviewed acquisition router registration.
+    # Voice bakeoff imports and activation remain prohibited.
     "app/main.py":
-        "06cd4871ed673137d0d86c6f3b1f9b0ed7d3c2998e23e15a886f2ac9ef39dd6e",
+        "01400ead214cfa38caf4c621b3ded62f377bf902d91639874c3a9ad212aadcb1",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

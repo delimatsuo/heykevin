@@ -8,7 +8,10 @@ from app.services import owner_call_actions as actions
 from app.services.push_notification import send_urgent_push, send_voip_push
 
 
-def safe_urgent_push_body(caller_name='', caller_phone=''):
+def safe_urgent_push_body(caller_name='', caller_phone='', user_language='en'):
+    from app.services.personal_language import is_portuguese
+    if is_portuguese(user_language):
+        return 'Chamada urgente precisa de atenção. Abra o Kevin para detalhes.'
     return 'Urgent call needs review. Open Kevin for details.'
 
 
@@ -27,6 +30,7 @@ async def dispatch_urgent_escalation(*, call_sid, contractor_id, transcript_snip
         contractor = await get_contractor(contractor_id)
         if not contractor or contractor.get('smart_interruption', True) is not True:
             return {'status': 'suppressed'}
+        user_language = contractor.get('user_language', 'en')
         nonce, now = secrets.token_hex(16), time.time()
         def txn(current):
             if (not actions.live_record(current, contractor_id, now) or current.get('owner_action')
@@ -51,15 +55,19 @@ async def dispatch_urgent_escalation(*, call_sid, contractor_id, transcript_snip
                 if device.get('voip_token') and device.get('urgent_handoff_v1') is True and await eligible():
                     return await send_voip_push(device_token=device['voip_token'], caller_phone=claimed.get('caller_phone', ''),
                         caller_name=claimed.get('caller_name', ''), reason='urgent_call', call_sid=call_sid,
-                        contractor_id=contractor_id, expires_at=int(deadline), conference_name='', access_token='')
+                        contractor_id=contractor_id, expires_at=int(deadline), conference_name='', access_token='',
+                        user_language=user_language)
             except Exception:
                 pass
             return False
         async def banner():
             try:
                 if device.get('push_token') and await eligible():
-                    return await send_urgent_push(device_token=device['push_token'], title='URGENT CALL',
-                        body=safe_urgent_push_body(), call_sid=call_sid, caller_phone=claimed.get('caller_phone', ''),
+                    from app.services.personal_language import is_portuguese
+                    is_pt = is_portuguese(user_language)
+                    title = 'CHAMADA URGENTE' if is_pt else 'URGENT CALL'
+                    return await send_urgent_push(device_token=device['push_token'], title=title,
+                        body=safe_urgent_push_body(user_language=user_language), call_sid=call_sid, caller_phone=claimed.get('caller_phone', ''),
                         caller_name=claimed.get('caller_name', ''), contractor_id=contractor_id,
                         collapse_id=f'call_{call_sid}', category='SCREENING_CALL')
             except Exception:

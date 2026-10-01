@@ -146,8 +146,11 @@ def _record_effect(
         tracker.record(effect, succeeded)
 
 
-def _safe_summary_push_body(caller_name: str, call_type: str, urgency: str = "") -> str:
+def _safe_summary_push_body(caller_name: str, call_type: str, urgency: str = "", user_language: str = "en") -> str:
     """Return lock-screen-safe summary copy with no raw issue text."""
+    from app.services.personal_language import is_portuguese
+    if is_portuguese(user_language):
+        return "Novo resumo de chamada. Abra o Kevin para detalhes."
     urgency_label = SAFE_SUMMARY_URGENCY_LABELS.get((urgency or "").strip().lower())
     if urgency_label:
         return f"New {urgency_label} call summary. Open Kevin for details."
@@ -304,10 +307,17 @@ async def _process_personal(
     """Personal mode: simple notification, no job card extraction."""
     # Simple extraction: just get name and reason via Claude (with retry)
     from app.services.job_card import extract_job_card
+    from app.services.personal_language import is_portuguese
+    is_pt = is_portuguese(user_language)
+
     job_data = None
     for attempt in range(2):
         try:
-            job_data = await extract_job_card(transcript_text, caller_phone)
+            job_data = await extract_job_card(
+                transcript_text,
+                caller_phone,
+                user_language=user_language,
+            )
             break
         except Exception as error:
             if attempt == 0:
@@ -322,12 +332,17 @@ async def _process_personal(
                 )
                 job_data = {"caller_phone": caller_phone, "call_type": "unknown"}
 
-    name = job_data.get("caller_name", "") or "Unknown caller"
-    reason = job_data.get("issue_description", "") or job_data.get("message", "") or "No details"
+    default_name = "Número desconhecido" if is_pt else "Unknown caller"
+    default_reason = "Sem detalhes" if is_pt else "No details"
+
+    name = job_data.get("caller_name", "") or default_name
+    reason = job_data.get("issue_description", "") or job_data.get("message", "") or default_reason
     callback = job_data.get("callback_number", "") or caller_phone
 
     call_job_data = dict(job_data)
     call_job_data["caller_name"] = name
+    if "issue_description" not in call_job_data and "message" not in call_job_data:
+        call_job_data["issue_description"] = reason
     call_job_data.setdefault("caller_phone", caller_phone)
     call_job_data = _normalize_job_callback_data(call_job_data)
     call_saved = await call_db.save_call(
@@ -353,30 +368,38 @@ async def _process_personal(
     # Send simple SMS to owner (in their language)
     contractor_id = (contractor or {}).get("contractor_id", "")
     if contractor_id:
-        sms = (
-            f"Call from {name}\n"
-            f"Re: {reason}\n"
-            f"\U0001f4de {callback}"
-        )
-        if user_language and user_language != "en":
-            try:
-                import anthropic
-                client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-                resp = await client.messages.create(
-                    model=settings.anthropic_model,
-                    max_tokens=200,
-                    messages=[{"role": "user", "content": (
-                        f"Translate this call summary notification to language code '{user_language}'. "
-                        f"Keep phone numbers and names exactly as-is. Keep emojis. "
-                        f"Return ONLY the translated message:\n\n{sms}"
-                    )}],
-                )
-                translated = resp.content[0].text.strip()
-                if translated:
-                    sms = translated
-            except Exception as error:
-                _log_post_call_exception("personal_sms_translation_error", error, call_sid)
-        sms = f"{OWNER_SMS_HEADER}\n{sms}"
+        if is_pt:
+            sms = (
+                f"Hey Kevin: Resumo da chamada\n"
+                f"Chamada de {name}\n"
+                f"Assunto: {reason}\n"
+                f"\U0001f4de {callback}"
+            )
+        else:
+            sms = (
+                f"Call from {name}\n"
+                f"Re: {reason}\n"
+                f"\U0001f4de {callback}"
+            )
+            if user_language and user_language != "en":
+                try:
+                    import anthropic
+                    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+                    resp = await client.messages.create(
+                        model=settings.anthropic_model,
+                        max_tokens=200,
+                        messages=[{"role": "user", "content": (
+                            f"Translate this call summary notification to language code '{user_language}'. "
+                            f"Keep phone numbers and names exactly as-is. Keep emojis. "
+                            f"Return ONLY the translated message:\n\n{sms}"
+                        )}],
+                    )
+                    translated = resp.content[0].text.strip()
+                    if translated:
+                        sms = translated
+                except Exception as error:
+                    _log_post_call_exception("personal_sms_translation_error", error, call_sid)
+            sms = f"{OWNER_SMS_HEADER}\n{sms}"
         try:
             from app.services.owner_sms import send_owner_sms
             sent = await send_owner_sms(contractor_id, sms)
@@ -1007,8 +1030,13 @@ async def _send_summary_push(job_data: dict, contractor: dict):
     """
     try:
         from app.services.push_notification import send_regular_push, get_device_token
+        from app.services.personal_language import is_portuguese
 
-        caller_name = job_data.get("caller_name", "") or "Unknown caller"
+        user_language = (contractor or {}).get("user_language", "en")
+        is_pt = is_portuguese(user_language)
+
+        default_caller_name = "Número desconhecido" if is_pt else "Unknown caller"
+        caller_name = job_data.get("caller_name", "") or default_caller_name
         issue = job_data.get("issue_description", "") or job_data.get("message", "")
         call_type = job_data.get("call_type", "unknown")
 
@@ -1022,12 +1050,13 @@ async def _send_summary_push(job_data: dict, contractor: dict):
         if not device_token:
             return None
 
+        title = "Resumo da chamada" if is_pt else "Call Summary"
         urgency = job_data.get("urgency", "")
-        body = _safe_summary_push_body(caller_name, call_type, urgency)
+        body = _safe_summary_push_body(caller_name, call_type, urgency, user_language=user_language)
 
         sent = await send_regular_push(
             device_token=device_token,
-            title="Call Summary",
+            title=title,
             body=body,
             call_sid=job_data.get("call_sid", ""),
             caller_phone=job_data.get("caller_phone", ""),

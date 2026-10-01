@@ -72,10 +72,18 @@ def build_greeting_text(
     after_hours: bool,
 ) -> str:
     """Build one deterministic greeting shared by all production engines."""
+    from app.services.personal_language import is_portuguese
+
     config = contractor_config or {}
+    mode = config.get("effective_mode") or effective_mode(config)
+    user_lang = config.get("user_language")
+    is_pt = is_portuguese(user_lang)
+
     known_first_name = returning_caller_first_name(config)
     if known_first_name:
-        if after_hours and effective_mode(config) != "personal":
+        if is_pt and mode == "personal":
+            return f"Olá, {known_first_name}. Como posso ajudar hoje?"
+        if after_hours and mode != "personal":
             return (
                 f"Hello, {known_first_name}. We're currently closed, but I can still "
                 "help with your request."
@@ -92,9 +100,10 @@ def build_greeting_text(
     owner_name = str(config.get("owner_name", settings.user_name) or "")
     owner_parts = owner_name.split()
     owner_first = owner_parts[0] if owner_parts else "the owner"
-    mode = config.get("effective_mode") or effective_mode(config)
 
     if mode == "personal":
+        if is_pt:
+            return f"Olá, sou o Kevin, assistente de {owner_first}. Como posso ajudar?"
         return f"Hi, this is Kevin, {owner_first}'s assistant. How can I help?"
     if after_hours:
         return f"{business_name} is currently closed. My name is Kevin. How can I help?"

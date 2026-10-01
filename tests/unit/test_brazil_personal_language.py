@@ -182,6 +182,50 @@ class TestPortugueseHoldRecognition:
     @pytest.mark.parametrize(
         "text",
         [
+            # True committed announcements with polite question tags
+            "One moment while I check if Deli is available, okay?",
+            "Let me check if Deli is available, all right?",
+            "Vou verificar se Ana está disponível, tudo bem?",
+            "Um momento, vou tentar falar com Ana, tá?",
+            "Deixe-me ver se o Carlos está disponível, tá bom?",
+            "Aguarde um instante, vou checar se Deli está livre, ok?",
+            "One moment, let me check if I can reach him, okay?",
+            "Let me see if he's available, alright?",
+        ],
+    )
+    def test_positive_hold_recognition_with_question_tags(self, text):
+        assert is_owner_availability_hold(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Optional offers (must return False)
+            "Can I ask you to please hold while I check if Deli is available?",
+            "Would you like to hold on while I try to reach Deli?",
+            "Should I ask you to hold on while I try Deli?",
+            "Posso transferir a ligação para Carlos?",
+            "Você quer que eu verifique se Ana está disponível?",
+            "May I check if Deli is available?",
+            "Shall I see if Deli is available?",
+            "Do you want me to check if Deli is available?",
+            "Would you like me to see if Deli is available?",
+            "Posso ver se Deli está disponível?",
+            "Podemos verificar se Ana pode atender?",
+            "Você gostaria de aguardar enquanto verifico se Deli está disponível?",
+            "Can I try to reach Deli for you?",
+            "Should I try to connect you?",
+            "Devo verificar se Ana está disponível?",
+            "Deveria verificar se Ana está disponível?",
+            "Devemos verificar se Ana está disponível?",
+            "Deveríamos verificar se Ana está disponível?",
+        ],
+    )
+    def test_optional_offers_return_false(self, text):
+        assert is_owner_availability_hold(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
             # Dangerous false positives that MUST return False
             "Posso transferir a ligação para Carlos?",
             "Não vou transferir a ligação para Carlos.",
@@ -200,6 +244,13 @@ class TestPortugueseHoldRecognition:
             "Sinto muito, o Deli não está disponível agora. Você pode deixar um recado.",
             "Ele está indisponível hoje.",
             "Ele não pode atender agora.",
+            # Trailing question marks on negations/unavailable/language objects
+            "Infelizmente, o Deli não está disponível no momento?",
+            "Preciso verificar se você pode falar português?",
+            "Vou checar se há horário disponível?",
+            "Não vou transferir a ligação para Carlos?",
+            "Ele não pode atender agora?",
+            "Unfortunately, Deli is not available. Can I take a message?",
             # General conversation
             "Como posso ajudar você hoje?",
             "Pode soletrar seu sobrenome?",
@@ -231,8 +282,27 @@ def test_message_taking_unavailable_speech_text_pt():
         hold_offered=False,
         language="pt-BR",
     )
+    assert pt_no_hold == "Sinto muito, Deli não está disponível agora. Você pode deixar um recado, e eu vou repassar a mensagem."
     assert "Deli não está disponível agora" in pt_no_hold
     assert "deixar um recado" in pt_no_hold
+    assert "para ele" not in pt_no_hold
+    assert "para ela" not in pt_no_hold
+
+
+@pytest.mark.parametrize("name", ["Maria", "João", "Alex"])
+@pytest.mark.parametrize("lang", ["pt", "pt-BR"])
+def test_message_taking_unavailable_speech_text_pt_neutral(name, lang):
+    text = build_unavailable_speech_text(
+        owner_name=name,
+        hold_offered=False,
+        language=lang,
+    )
+    expected = f"Sinto muito, {name} não está disponível agora. Você pode deixar um recado, e eu vou repassar a mensagem."
+    assert text == expected
+    assert "para ele" not in text
+    assert "para ela" not in text
+    assert "dele" not in text
+    assert "dela" not in text
 
 
 def test_message_taking_unavailable_speech_text_en_preserved():

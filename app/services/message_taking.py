@@ -35,7 +35,7 @@ def is_owner_availability_hold(text: str) -> bool:
     if not isinstance(text, str):
         return False
     trimmed = text.strip()
-    if not trimmed or trimmed.endswith("?"):
+    if not trimmed:
         return False
 
     normalized = f" {trimmed.lower()} "
@@ -85,9 +85,17 @@ def is_owner_availability_hold(text: str) -> bool:
     if any(
         q in normalized
         for q in (
-            " posso ", " podemos ", " você quer ", " voce quer ", " quer que ",
+            " posso ", " podemos ", " devo ", " deveria ", " devemos ", " deveríamos ", " deveriamos ",
+            " você quer ", " voce quer ", " quer que ",
             " gostaria de ", " prefere ",
+            " can i ", " may i ", " should i ", " shall i ", " could i ",
+            " would you like ", " do you want ", " would you prefer ", " do you prefer ",
+            " can we ", " may we ", " should we ", " shall we ", " could we ",
         )
+    ) or re.search(
+        r"\b(?:can\s+i|may\s+i|should\s+i|shall\s+i|could\s+i|would\s+you\s+like|do\s+you\s+want|would\s+you\s+prefer|do\s+you\s+prefer|can\s+we|may\s+we|should\s+we|shall\s+we|could\s+we|posso|podemos|devo|deveria|devemos|dever[ií]amos|voc[eê]\s+quer|quer\s+que|gostaria\s+de|prefere)\b",
+        normalized,
+        re.IGNORECASE,
     ):
         return False
 
@@ -233,7 +241,7 @@ def build_unavailable_speech_text(
     if is_portuguese(language):
         if hold_offered:
             return f"Infelizmente, {owner} não está disponível. Posso anotar um recado?"
-        return f"Sinto muito, {owner} não está disponível agora. Você pode deixar um recado e eu vou repassar para ele."
+        return f"Sinto muito, {owner} não está disponível agora. Você pode deixar um recado, e eu vou repassar a mensagem."
     if hold_offered:
         return f"Unfortunately, {owner} is not available. Can I take a message?"
     return f"I'm sorry, {owner} is not available right now. You can leave me a message and I'll make sure they get it."

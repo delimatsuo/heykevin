@@ -11,13 +11,13 @@ enum SettingsCountry {
 
     static func displayName(_ code: String, locale: Locale = .current) -> String {
         let clean = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !clean.isEmpty else {
+        guard isSupported(clean) else {
             return String(localized: "Unknown Country")
         }
         if let name = locale.localizedString(forRegionCode: clean), !name.isEmpty {
             return name
         }
-        return isSupported(clean) ? clean : String(localized: "Unknown Country")
+        return clean
     }
 
     /// The account country carried by a contractor profile or provisioning

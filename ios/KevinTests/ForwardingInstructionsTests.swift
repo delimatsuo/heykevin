@@ -122,14 +122,19 @@ final class ForwardingInstructionsTests: XCTestCase {
 
     func testNonNANPCountriesReturnNilDialCodes() {
         let nonNANP = ["BR", "GB", "DE", "FR", "IT", "ES", "PT", "ZZ"]
+        let numbers = ["+55 11 98765-4321", "+14155551234"]
         for country in nonNANP {
-            let codes = ForwardingDialCodes.codes(
-                countryCode: country,
-                instructions: brazilInstructions,
-                number: "+55 11 98765-4321",
-                isVerizon: false
-            )
-            XCTAssertNil(codes, "ForwardingDialCodes.codes must be nil for non-NANP country \(country)")
+            for number in numbers {
+                for isVerizon in [false, true] {
+                    let codes = ForwardingDialCodes.codes(
+                        countryCode: country,
+                        instructions: brazilInstructions,
+                        number: number,
+                        isVerizon: isVerizon
+                    )
+                    XCTAssertNil(codes, "ForwardingDialCodes.codes must be nil for non-NANP country \(country) number \(number) isVerizon \(isVerizon)")
+                }
+            }
         }
     }
 
@@ -225,6 +230,24 @@ final class ForwardingInstructionsTests: XCTestCase {
         XCTAssertNotNil(codes)
         XCTAssertEqual(codes?.activate, "*61*14165551234#")
         XCTAssertFalse(codes?.isServerDriven ?? true)
+    }
+
+    func testNANPCountriesRejectForeignAndMalformedDestinations() {
+        let nanpCountries = ["US", "CA"]
+        let badNumbers = ["+5511987654321", "+447700900123", "garbage", "", "1111111111"]
+        for country in nanpCountries {
+            for number in badNumbers {
+                for isVerizon in [false, true] {
+                    let codes = ForwardingDialCodes.codes(
+                        countryCode: country,
+                        instructions: gsmInstructions(for: country),
+                        number: number,
+                        isVerizon: isVerizon
+                    )
+                    XCTAssertNil(codes, "ForwardingDialCodes.codes must be nil for NANP country \(country) number \(number) isVerizon \(isVerizon)")
+                }
+            }
+        }
     }
 
     func testExtractNANPDigitsValidAndInvalid() {

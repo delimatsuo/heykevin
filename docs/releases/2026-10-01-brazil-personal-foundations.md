@@ -41,17 +41,17 @@ provider/physical acceptance work under the linked country plan.
 
 ## Verification evidence
 
-Behavior source: `b9edeb8fda9ef711ebe1def41064e7a5d98ff262`.
+Behavior source: `70fad9797b83f7407b126561dc2604611b9b7b10`.
 Content identities allow the checks from isolated worktrees to be compared with
 the integrated candidate without confusing branch history with source content:
 
 | Scope | Git tree |
 | --- | --- |
-| `app` | `3081f0890efa10f166b9a87c3af5ed062d8f0164` |
-| `tests` | `fce3b61e1bb746fba19e5dd3690f9c526e8c3b15` |
+| `app` | `e7d19567bfa4ecebd4166c666cb2784ddcfa0aa8` |
+| `tests` | `2d50ca59d660c9734d8f933eebceeda97689364c` |
 | `ios` | `fb9bc7508671397e5c40095ef7ef90a2fe8f3cb5` |
 
-- Focused integrated Python run: **833 passed**, 35 existing deprecation
+- Focused integrated Python run: **1131 passed**, 35 existing deprecation
   warnings. Outbound networking was denied and dotenv loading disabled.
 - Guarded Xcode Debug build and complete unit suite: **493 passed**, zero
   failures, iPhone 16 simulator on iOS 26.0. Tested iOS tree equals the integrated
@@ -63,18 +63,32 @@ the integrated candidate without confusing branch history with source content:
 - Catalog audit: 281 required scoped keys translated; no missing entries,
   placeholder mismatches or unintended existing English/Spanish value changes.
   SMS STOP/HELP keywords remain intact.
-- Eight deliberate guard faults were detected by actual tests: backend
+- Thirteen deliberate faults were detected by actual tests: backend
   admission, assigned-country lock, unknown capabilities, Portuguese hold
   negation, private push body, iOS admission, country dial guard and provisioning
-  identity. All mutations were restored; subsequent normal suites passed.
+  identity; two existing Apple identity rejection guards; committed question-tag
+  recognition, optional-offer rejection and neutral Portuguese wording. All
+  mutations were restored; subsequent normal suites passed.
 - Fatal Ruff selectors and `git diff --check` passed.
 
 The fresh independent review initially found two P2 defects: a stale identity
 could continue provisioning, and NANP rendering dropped the leading 1. Both were
-fixed; re-review of `6989115106c1786ed99574a427ec248eb824c933` found no remaining
-P1/P2 issue. Subsequent source changes are the unknown-country label correction
-and stronger forwarding guard tests. Final exact-candidate review and hosted
-checks are recorded on the associated pull request.
+fixed. Independent re-reviews of `6989115` and `fb52702` were clean. GitHub Codex
+review of `fb52702` then identified two additional P2 issues: question punctuation
+could suppress a committed hold announcement, and Portuguese no-hold copy assumed
+a masculine owner. These were fixed in `70fad97`, with optional offers and
+negated statements still rejected. Final exact-candidate review and hosted
+checks are recorded on [PR 281](https://github.com/delimatsuo/heykevin/pull/281).
+
+The first full hosted run found four historical test-contract failures. The
+reviewed market-router change required explicit updates to two `main.py` source
+fingerprints; structural prohibitions on experimental voice imports remain.
+Two UK anti-hijack fixtures now explicitly simulate an available market so they
+reach the identity guard, while separate admission tests retain the production
+closed-market rule. Their no-create, no-token and no-update assertions were
+strengthened, and deleting each identity guard made the corresponding test fail.
+The repaired security, source-seal and country-admission suites passed 289 tests;
+the final combined 1131-test run includes them.
 
 Visual screenshot inspection was not completed: simulator capture returned an
 OS permission error, the native app viewer was unavailable, and the successful
@@ -115,18 +129,18 @@ part of this source receipt.
 
 Three primary implementation outputs (backend, iOS, voice) were integrated and
 reduced in code: **3 expected, 3 returned**. Including bounded repairs and catalog
-work, **23 expected builder outputs, 23 returned**, with no partial synthesis.
+work, **26 expected builder outputs, 26 returned**, with no partial synthesis.
 The master independently ran checks and a separate reviewer audited the diff.
 
 Master model: GPT-6 Codex (exact runtime variant unavailable)
 Builder model/tier: headless agy gemini-3.7-flash-high; gemini-3.7-flash-low for pinned mechanical corrections
 Routing reason: strong builders for implementation; low tier for exact compiler, fixture and table edits; independent strongest-tier source review
 agy transport=headless: true
-Input tokens: 8349099
-Output tokens: 1043976
-Total tokens: 9393075
-Retries: 20 bounded repair/supplement nodes after the three primary outputs
-Audit defects found: 2 independent-review P2 findings, plus compiler, fixture and guard-coverage defects found by local verification
+Input tokens: 8744388
+Output tokens: 1100667
+Total tokens: 9845055
+Retries: 23 bounded repair/supplement nodes after the three primary outputs
+Audit defects found: 4 review P2 findings, plus compiler, fixture and guard-coverage defects found by local and hosted verification
 Audit disposition: remediated; hosted results bound to the final PR head
 
 Repository and billing owner: `delimatsuo`, public `delimatsuo/heykevin`.

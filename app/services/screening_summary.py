@@ -54,7 +54,10 @@ def _fallback_extraction(
     if caller_utterances:
         first_statement = caller_utterances[0]
         match = re.search(
-            r"(?:this is|it's|i'm|i am|aqui é(?:\s+o|\s+a)?|sou o|sou a|é o|é a)\s+([a-zA-ZÀ-ÿ.]+(?:\s+[a-zA-ZÀ-ÿ.]+)*(?:\s+(?:from|da|do)\s+[a-zA-ZÀ-ÿ.]+)?)" ,
+            r"(?:this is|it's|i'm|i am|aqui é(?:\s+o|\s+a)?|sou o|sou a|é o|é a)\s+"
+            r"((?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+)"
+            r"(?:\s+(?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+))*"
+            r"(?:\s+(?:from|da|do)\s+(?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+)(?:\s+(?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+))*)?)",
             first_statement,
             re.IGNORECASE,
         )

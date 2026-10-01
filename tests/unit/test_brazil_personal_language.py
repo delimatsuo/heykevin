@@ -45,6 +45,7 @@ from app.services.message_taking import (
     build_unavailable_speech_text,
     is_owner_availability_hold,
 )
+from app.services import screening_summary
 from app.services.screening_summary import (
     extract_screening_summary,
     _fallback_extraction,
@@ -494,7 +495,7 @@ def test_screening_summary_fallback_accents_and_raw_utterance():
     assert fb_joao["caller_name"] == "João da Silva"
     assert fb_joao["reason"] == "Aqui é João da Silva"
 
-    # 2. Accented name Márcia
+    # 2. Accented name Márcia before comma
     fb_marcia = _fallback_extraction(
         transcript="Kevin: Olá\nCaller: Sou a Márcia, preciso falar com o Deli",
         caller_phone="+5511988887777",
@@ -503,15 +504,65 @@ def test_screening_summary_fallback_accents_and_raw_utterance():
     assert fb_marcia["caller_name"] == "Márcia"
     assert fb_marcia["reason"] == "Sou a Márcia, preciso falar com o Deli"
 
-    # 3. Accented title Dr. João
+    # 3. Accented title Dr. João preserved
     fb_dr = _fallback_extraction(
         transcript="Kevin: Olá\nCaller: Aqui é o Dr. João Silva",
         caller_phone="+5511988887777",
         user_language="pt-BR",
     )
-    assert "João" in fb_dr["caller_name"]
+    assert fb_dr["caller_name"] == "Dr. João Silva"
 
-    # 4. Empty fallbacks
+    # 4. Fallback regression: Portuguese sentence after name stops at sentence punctuation
+    fb_pt_sentence = _fallback_extraction(
+        transcript="Kevin: Olá, quem está falando?\nCaller: Aqui é Carlos da Silva. Gostaria de falar sobre o contrato.",
+        caller_phone="+5511988887777",
+        user_language="pt-BR",
+    )
+    assert fb_pt_sentence["caller_name"] == "Carlos da Silva"
+    assert fb_pt_sentence["reason"] == "Aqui é Carlos da Silva. Gostaria de falar sobre o contrato."
+
+    # 5. Portuguese abbreviated titles with following sentence
+    fb_pt_titles = [
+        ("Aqui é o Dr. João Silva. Gostaria de agendar um horário.", "Dr. João Silva"),
+        ("Aqui é a Dra. Maria Santos. Queria tirar uma dúvida.", "Dra. Maria Santos"),
+        ("Sou o Sr. Antonio Pereira. Bom dia.", "Sr. Antonio Pereira"),
+        ("Sou a Sra. Ana Paula. Ligo mais tarde.", "Sra. Ana Paula"),
+    ]
+    for utterance, expected_name in fb_pt_titles:
+        res = _fallback_extraction(
+            transcript=f"Kevin: Olá\nCaller: {utterance}",
+            caller_phone="+5511988887777",
+            user_language="pt-BR",
+        )
+        assert res["caller_name"] == expected_name
+        assert res["reason"] == utterance
+
+    # 6. Fallback regression: English sentence after name stops at sentence punctuation
+    fb_en_sentence = _fallback_extraction(
+        transcript="Kevin: Hi, who is calling?\nCaller: This is John Smith. I'm calling about the quote.",
+        caller_phone="+15551234567",
+        user_language="en",
+    )
+    assert fb_en_sentence["caller_name"] == "John Smith"
+    assert fb_en_sentence["reason"] == "This is John Smith. I'm calling about the quote."
+
+    # 7. English titles and company names with following sentence
+    fb_en_titles = [
+        ("This is Dr. John Smith. Calling about the estimate.", "Dr. John Smith"),
+        ("This is Mr. Bob Jones from Acme Corp. Hello.", "Mr. Bob Jones from Acme Corp"),
+        ("This is Mrs. Jane Doe. Calling back.", "Mrs. Jane Doe"),
+        ("This is Ms. Alice Davis. Thank you.", "Ms. Alice Davis"),
+    ]
+    for utterance, expected_name in fb_en_titles:
+        res = _fallback_extraction(
+            transcript=f"Kevin: Hi\nCaller: {utterance}",
+            caller_phone="+15551234567",
+            user_language="en",
+        )
+        assert res["caller_name"] == expected_name
+        assert res["reason"] == utterance
+
+    # 8. Empty fallbacks
     fb_pt_empty = _fallback_extraction(
         transcript="",
         caller_phone="",
@@ -564,6 +615,7 @@ async def test_screening_summary_llm_extraction_prompt_pt(monkeypatch):
             sent_payload = json
             return FakeResponse()
 
+    monkeypatch.setattr(screening_summary.settings, "anthropic_api_key", "test-anthropic-key")
     monkeypatch.setattr("app.services.screening_summary.httpx.AsyncClient", FakeAsyncClient)
 
     summary = await extract_screening_summary(
@@ -578,6 +630,27 @@ async def test_screening_summary_llm_extraction_prompt_pt(monkeypatch):
     prompt_text = sent_payload["messages"][0]["content"]
     assert "Brazilian Portuguese" in prompt_text
     assert "Never translate personal names or callback phone digits" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_screening_summary_fallback_when_no_api_key(monkeypatch):
+    monkeypatch.setattr(screening_summary.settings, "anthropic_api_key", "")
+
+    summary_pt = await extract_screening_summary(
+        transcript="Kevin: Olá, quem está falando?\nCaller: Aqui é Carlos da Silva. Gostaria de falar sobre o contrato.",
+        caller_phone="+5511988887777",
+        user_language="pt-BR",
+    )
+    assert summary_pt["caller_name"] == "Carlos da Silva"
+    assert summary_pt["reason"] == "Aqui é Carlos da Silva. Gostaria de falar sobre o contrato."
+
+    summary_en = await extract_screening_summary(
+        transcript="Kevin: Hi, who is calling?\nCaller: This is John Smith. I'm calling about the quote.",
+        caller_phone="+15551234567",
+        user_language="en",
+    )
+    assert summary_en["caller_name"] == "John Smith"
+    assert summary_en["reason"] == "This is John Smith. I'm calling about the quote."
 
 
 # --- 10. Job Card Extraction Prompt PT ----------------------------------------

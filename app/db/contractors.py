@@ -142,6 +142,12 @@ PROTECTED_FIELDS = frozenset({
     # out. Absent values are false and clients cannot self-enable either one.
     "customer_memory_capture_enabled",
     "customer_memory_personalization_enabled",
+    # Telephony service binding — written only during provider provisioning
+    "provisioned_country_code",
+    "number_provider",
+    "number_type",
+    "number_capabilities",
+    "service_binding",
     # Identity bindings — written only at account creation / authenticated migration.
     # Allowing PATCH to overwrite these would let an attacker hijack another account
     # by claiming its phone number or Apple user ID. (Security audit F-04.)
@@ -158,24 +164,13 @@ PROTECTED_FIELDS = frozenset({
     "acquisition_measurement",
 })
 
-# Supported countries for Kevin AI
-SUPPORTED_COUNTRIES = {"US", "CA", "BR", "GB", "DE", "FR", "IT", "ES", "PT"}
-
-# Countries that require Twilio regulatory bundles for number provisioning
-REGULATORY_COUNTRIES = {"DE", "FR", "IT", "ES", "PT", "BR"}
-
-# Country code to full name mapping
-COUNTRY_NAMES = {
-    "US": "United States",
-    "CA": "Canada",
-    "BR": "Brazil",
-    "GB": "United Kingdom",
-    "DE": "Germany",
-    "FR": "France",
-    "IT": "Italy",
-    "ES": "Spain",
-    "PT": "Portugal",
-}
+from app.services.country_policy import (
+    RECOGNIZED_COUNTRIES,
+    AVAILABLE_COUNTRIES,
+    SUPPORTED_COUNTRIES,
+    REGULATORY_COUNTRIES,
+    COUNTRY_NAMES,
+)
 
 
 def detect_country_from_phone(phone: str) -> str:
@@ -184,7 +179,7 @@ def detect_country_from_phone(phone: str) -> str:
     try:
         parsed = phonenumbers.parse(phone, None)
         region = phonenumbers.region_code_for_number(parsed)
-        if region and region in SUPPORTED_COUNTRIES:
+        if region and region in RECOGNIZED_COUNTRIES:
             return region
     except phonenumbers.NumberParseException:
         pass
@@ -475,32 +470,49 @@ async def get_contractor_by_pin(pin: str) -> Optional[dict]:
 
 async def create_contractor(data: dict) -> str:
     """Create a new contractor profile. Returns the contractor_id."""
+    from app.services.country_policy import (
+        validate_phone_and_region,
+        is_country_available,
+        is_recognized_country,
+        CountryPhoneMismatchError,
+        InvalidPhoneError,
+    )
+
     raw_country_val = data.get("country_code")
     raw_country = (
         raw_country_val.strip().upper()
         if isinstance(raw_country_val, str)
         else ""
     )
-    country_code = raw_country if raw_country in SUPPORTED_COUNTRIES else "US"
-    data["country_code"] = country_code
 
-    # Store owner_phone canonically. Firestore matches strings exactly, so
-    # writing raw formats here is what broke dedupe on the next signup.
-    # Nonblank invalid owner_phone must be rejected before Firestore acquisition.
+    if raw_country_val is not None and str(raw_country_val).strip() != "" and not is_recognized_country(raw_country):
+        raise ValueError(f"Unsupported country code: {raw_country_val}")
+
     owner_phone_raw = str(data.get("owner_phone") or "").strip()
     if owner_phone_raw:
-        from app.utils.phone import normalize_phone
-        canonical = normalize_phone(owner_phone_raw, default_region=None)
-        if not canonical:
-            canonical = normalize_phone(owner_phone_raw, default_region=country_code)
-        if not canonical:
-            raise ValueError("Invalid owner phone number")
+        try:
+            canonical, derived_region = validate_phone_and_region(
+                owner_phone_raw, default_country=raw_country
+            )
+        except CountryPhoneMismatchError as e:
+            raise ValueError(f"Phone number does not match specified country: {e}")
+        except InvalidPhoneError as e:
+            raise ValueError(f"Invalid owner phone number: {e}")
+
+        effective_country = derived_region or raw_country or "UNKNOWN"
         data["owner_phone"] = canonical
         data["owner_phone_e164"] = canonical
     else:
+        effective_country = raw_country if raw_country else "US"
         if "owner_phone" in data:
             data["owner_phone"] = ""
         data["owner_phone_e164"] = ""
+
+    # Validate admitted country before get_firestore_client and trial defaults
+    if not is_country_available(effective_country):
+        raise ValueError(f"Country not available for new accounts: {effective_country}")
+
+    data["country_code"] = effective_country
 
     db = get_firestore_client()
     data["created_at"] = time.time()
@@ -527,6 +539,10 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("subscription_expires", trial_start + TRIAL_PERIOD_DAYS * 86400)
     data.setdefault("deleted_app_detected_at", None)
     data.setdefault("subscription_uuid", str(_uuid.uuid4()))
+    data.setdefault("provisioned_country_code", None)
+    data.setdefault("number_provider", None)
+    data.setdefault("number_type", None)
+    data.setdefault("number_capabilities", None)
     data.setdefault("owner_sms_enabled", True)
     data.setdefault("owner_sms_opted_out", False)
     data.setdefault("owner_sms_opt_out_revision", 0)
@@ -684,14 +700,45 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
         )
         return existing_number
 
+    from app.services.country_policy import (
+        is_country_available,
+        is_recognized_country,
+        validate_phone_and_region,
+        CountryPhoneMismatchError,
+        InvalidPhoneError,
+    )
+
+    # Derive effective country from stored profile and owner phone
+    req_country = (country_code or "").strip().upper()
+    if req_country and not is_recognized_country(req_country):
+        raise Exception(f"Unsupported country code: {country_code}")
+
+    stored_country = (contractor.get("country_code") or "").strip().upper()
+    if stored_country and not is_recognized_country(stored_country):
+        raise Exception(f"Unsupported stored country code: {stored_country}")
+
+    owner_phone = (contractor.get("owner_phone") or "").strip()
+
+    if owner_phone:
+        try:
+            _, derived_region = validate_phone_and_region(owner_phone, default_country=stored_country)
+        except (CountryPhoneMismatchError, InvalidPhoneError) as e:
+            raise Exception(f"Contractor phone validation failed: {e}")
+        effective_country = derived_region or stored_country or "UNKNOWN"
+    else:
+        effective_country = stored_country if stored_country else "US"
+
+    if req_country and req_country != effective_country:
+        raise Exception(f"Requested country {req_country} conflicts with contractor country {effective_country}")
+
+    if not is_country_available(effective_country):
+        raise Exception(f"Country {effective_country} is not available for number provisioning")
+
     from twilio.rest import Client
     from app.config import settings
 
-    if country_code not in COUNTRY_NAMES:
-        raise Exception(f"Unsupported country: {country_code}")
-
     business_address = business_city = business_name = ""
-    if country_code in REGULATORY_COUNTRIES:
+    if effective_country in REGULATORY_COUNTRIES:
         business_address = contractor.get("business_address", "")
         business_city = contractor.get("business_city", "")
         business_name = contractor.get("business_name", "")
@@ -702,22 +749,19 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
     loop = asyncio.get_event_loop()
 
     bundle_sid = None
-    if country_code in REGULATORY_COUNTRIES:
+    if effective_country in REGULATORY_COUNTRIES:
         bundle_sid = await _create_regulatory_bundle(
-            client, loop, country_code, business_name, business_address, business_city
+            client, loop, effective_country, business_name, business_address, business_city
         )
 
-    # Search for available numbers
-    # Note: sms_enabled only for US/CA — EU/BR local numbers often don't support SMS
-    search_params = {"voice_enabled": True}
-    if country_code in ("US", "CA"):
-        search_params["sms_enabled"] = True
+    # Search for available numbers (voice + SMS required for US/CA)
+    search_params = {"voice_enabled": True, "sms_enabled": True}
     if area_code:
         search_params["area_code"] = area_code
 
     numbers = await loop.run_in_executor(
         None,
-        lambda: client.available_phone_numbers(country_code).local.list(**search_params, limit=1)
+        lambda: client.available_phone_numbers(effective_country).local.list(**search_params, limit=1)
     )
 
     if not numbers and area_code:
@@ -725,11 +769,12 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
         search_params.pop("area_code", None)
         numbers = await loop.run_in_executor(
             None,
-            lambda: client.available_phone_numbers(country_code).local.list(**search_params, limit=1)
+            lambda: client.available_phone_numbers(effective_country).local.list(**search_params, limit=1)
         )
 
     if not numbers:
-        raise Exception(f"No phone numbers available in {COUNTRY_NAMES.get(country_code, country_code)}")
+        country_name = COUNTRY_NAMES.get(effective_country, effective_country)
+        raise Exception(f"No phone numbers available in {country_name}")
 
     # Buy the number (bundle_sid goes here, NOT in search)
     webhook_url = f"{settings.cloud_run_url}/webhooks/twilio/incoming"
@@ -752,10 +797,37 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
         lambda: client.incoming_phone_numbers.create(**purchase_params)
     )
 
-    # Update contractor profile with the number
-    await update_contractor(contractor_id, {"twilio_number": purchased.phone_number})
+    # Derive capabilities from actual provider response where available (only actual bools, no default True)
+    caps = None
+    raw_caps = getattr(purchased, "capabilities", None)
+    if isinstance(raw_caps, dict):
+        extracted = {}
+        for k in ("voice", "sms", "mms"):
+            v = raw_caps.get(k)
+            if isinstance(v, bool):
+                extracted[k] = v
+        caps = extracted if extracted else None
+    elif raw_caps is not None:
+        extracted = {}
+        for k in ("voice", "sms", "mms"):
+            v = getattr(raw_caps, k, None)
+            if isinstance(v, bool):
+                extracted[k] = v
+        caps = extracted if extracted else None
 
-    logger.info(f"Provisioned {redact_phone(purchased.phone_number)} ({country_code}) for contractor {contractor_id}")
+    # Update contractor profile with the number and protected service binding metadata
+    await update_contractor(
+        contractor_id,
+        {
+            "twilio_number": purchased.phone_number,
+            "provisioned_country_code": effective_country,
+            "number_provider": "twilio",
+            "number_type": "local",
+            "number_capabilities": caps,
+        },
+    )
+
+    logger.info(f"Provisioned {redact_phone(purchased.phone_number)} ({effective_country}) for contractor {contractor_id}")
     return purchased.phone_number
 
 
@@ -781,7 +853,14 @@ async def release_twilio_number(contractor_id: str) -> bool:
 
     from twilio.base.exceptions import TwilioRestException
 
-    updates = {"twilio_number": "", "number_released_at": int(time.time())}
+    updates = {
+        "twilio_number": "",
+        "number_released_at": int(time.time()),
+        "provisioned_country_code": None,
+        "number_provider": None,
+        "number_type": None,
+        "number_capabilities": None,
+    }
     if numbers:
         try:
             await loop.run_in_executor(

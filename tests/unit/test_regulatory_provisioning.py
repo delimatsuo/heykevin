@@ -1,12 +1,13 @@
 """Regulatory number provisioning: bundle edge cases and error sanitization.
 
-`provision_twilio_number` is exercised against a fake Twilio client so every
-branch is observable — which calls happen, in what order, with which
-parameters — and the endpoint's exception mapping is checked for the property
-that matters: raw Twilio text (account SIDs, tokens, street addresses,
+`_create_regulatory_bundle` and `provision_twilio_number` are exercised against
+a fake Twilio client so every branch is observable — which calls happen, in what
+order, with which parameters — and the endpoint's exception mapping is checked for
+the property that matters: raw Twilio text (account SIDs, tokens, street addresses,
 customer names) never reaches the client, only the canned messages do.
 """
 
+import asyncio
 import inspect
 import json
 import os
@@ -121,7 +122,13 @@ class FakeClient:
 
     def _purchase(self, **kwargs):
         self.calls.append(("purchase", kwargs))
-        return SimpleNamespace(sid="PN" + "4" * 32, phone_number=kwargs["phone_number"])
+        # Provide capabilities dict mimicking Twilio incoming number resource
+        capabilities = kwargs.get("capabilities", {"voice": True, "SMS": True, "mms": True})
+        return SimpleNamespace(
+            sid="PN" + "4" * 32,
+            phone_number=kwargs["phone_number"],
+            capabilities=capabilities,
+        )
 
 
 def _numbers(*values):
@@ -132,7 +139,7 @@ def _numbers(*values):
 def fake_twilio(monkeypatch):
     FakeClient.instances = []
     FakeClient.regulations = [SimpleNamespace(sid="RN" + "2" * 32)]
-    FakeClient.search_results = [_numbers("+4930123456")]
+    FakeClient.search_results = [_numbers("+14155551212")]
     FakeClient.bundle_statuses = ["twilio-approved"]
     monkeypatch.setattr(twilio.rest, "Client", FakeClient)
 
@@ -167,15 +174,15 @@ def contractor_store(monkeypatch):
     return store
 
 
-def _german_business(**overrides):
+def _contractor_doc(**overrides):
     doc = {
-        "contractor_id": "c-de",
+        "contractor_id": "c-us",
         "twilio_number": "",
-        "country_code": "DE",
-        "owner_phone": "+4915112345678",
-        "business_name": "Müller Sanitär GmbH",
-        "business_address": "Hauptstraße 1",
-        "business_city": "Berlin",
+        "country_code": "US",
+        "owner_phone": "+14155552671",
+        "business_name": "Acme Services LLC",
+        "business_address": "100 Main St",
+        "business_city": "San Francisco",
     }
     doc.update(overrides)
     return doc
@@ -191,75 +198,37 @@ def _only(calls, kind):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_country_raises_before_any_twilio_call(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business(country_code="JP")
+async def test_unsupported_stored_country_raises_before_any_twilio_call(fake_twilio, contractor_store):
+    """Unrecognized country code (e.g. JP) stored in profile raises Unsupported country code before Twilio."""
+    contractor_store["doc"] = _contractor_doc(country_code="JP", owner_phone="+14155552671")
 
-    with pytest.raises(Exception, match="Unsupported country: JP"):
-        await contractors_db.provision_twilio_number("c-de", country_code="JP")
+    with pytest.raises(Exception, match="Unsupported country code: JP"):
+        await contractors_db.provision_twilio_number("c-us", country_code="JP")
 
     assert fake_twilio.instances == []
     assert contractor_store["updates"] == []
 
 
+@pytest.mark.parametrize("unavailable_country", ["GB", "BR", "DE"])
 @pytest.mark.asyncio
-async def test_regulatory_country_without_address_raises_before_any_twilio_call(
-    fake_twilio, contractor_store
-):
-    contractor_store["doc"] = _german_business(business_address="")
+async def test_recognized_unavailable_country_raises_before_any_twilio_call(fake_twilio, contractor_store, unavailable_country):
+    """Recognized but unavailable country code (GB, BR, DE) raises not available for number provisioning before Twilio."""
+    contractor_store["doc"] = _contractor_doc(country_code=unavailable_country, owner_phone="")
 
-    with pytest.raises(Exception, match="Business address and city required"):
-        await contractors_db.provision_twilio_number("c-de", country_code="DE")
+    with pytest.raises(Exception, match="not available for number provisioning"):
+        await contractors_db.provision_twilio_number("c-unavail", country_code=unavailable_country)
 
-    # The address guard now runs before the Twilio client is even
-    # constructed, so no client exists and nothing was asked of Twilio.
     assert fake_twilio.instances == []
     assert contractor_store["updates"] == []
 
-
-@pytest.mark.asyncio
-async def test_regulatory_country_without_address_never_constructs_the_twilio_client(
-    contractor_store, monkeypatch
-):
-    class ClientConstructedBeforeGuard:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("Twilio client constructed before the address guard")
-
-    monkeypatch.setattr(twilio.rest, "Client", ClientConstructedBeforeGuard)
-    contractor_store["doc"] = _german_business(business_address="")
-
-    with pytest.raises(Exception, match="Business address and city required"):
-        await contractors_db.provision_twilio_number("c-de", country_code="DE")
-
-
-@pytest.mark.asyncio
-async def test_non_regulatory_country_skips_the_bundle_and_buys_without_bundle_sid(
-    fake_twilio, contractor_store
-):
-    contractor_store["doc"] = _german_business(
-        country_code="GB", business_address="", business_city=""
-    )
-    fake_twilio.search_results = [_numbers("+442071234567")]
-
-    number = await contractors_db.provision_twilio_number("c-gb", country_code="GB")
-
-    assert number == "+442071234567"
-    client = fake_twilio.instances[0]
-    assert _only(client.calls, "regulations") == []
-    assert _only(client.calls, "address_create") == []
-    assert _only(client.calls, "bundle_create") == []
-    (search,) = _only(client.calls, "search")
-    assert search[1] == "GB"
-    assert search[2] == {"voice_enabled": True, "limit": 1}  # no sms_enabled outside US/CA
-    (purchase,) = _only(client.calls, "purchase")
-    assert "bundle_sid" not in purchase[1]
-    assert contractor_store["updates"] == [("c-gb", {"twilio_number": "+442071234567"})]
 
 
 @pytest.mark.parametrize("country", ["US", "CA"])
 @pytest.mark.asyncio
 async def test_us_and_ca_searches_require_sms(fake_twilio, contractor_store, country):
-    contractor_store["doc"] = _german_business(
-        country_code=country, business_address="", business_city=""
+    phone = "+14155552671" if country == "US" else "+14165551234"
+    contractor_store["doc"] = _contractor_doc(
+        country_code=country, owner_phone=phone, business_address="", business_city=""
     )
     fake_twilio.search_results = [_numbers("+16505551212")]
 
@@ -271,7 +240,7 @@ async def test_us_and_ca_searches_require_sms(fake_twilio, contractor_store, cou
 
 @pytest.mark.asyncio
 async def test_area_code_is_retried_without_it_when_nothing_is_found(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business(
+    contractor_store["doc"] = _contractor_doc(
         country_code="US", business_address="", business_city=""
     )
     fake_twilio.search_results = [[], _numbers("+14155551212")]
@@ -287,26 +256,53 @@ async def test_area_code_is_retried_without_it_when_nothing_is_found(fake_twilio
 
 @pytest.mark.asyncio
 async def test_no_numbers_raises_with_the_country_name(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business()
+    contractor_store["doc"] = _contractor_doc()
     fake_twilio.search_results = [[], []]
 
-    with pytest.raises(Exception, match="No phone numbers available in Germany"):
-        await contractors_db.provision_twilio_number("c-de", country_code="DE", area_code="30")
+    with pytest.raises(Exception, match="No phone numbers available in United States"):
+        await contractors_db.provision_twilio_number("c-us", country_code="US", area_code="650")
 
     assert _only(fake_twilio.instances[0].calls, "purchase") == []
     assert contractor_store["updates"] == []
 
 
 @pytest.mark.asyncio
-async def test_regulatory_country_creates_the_bundle_and_buys_with_it(
-    fake_twilio, contractor_store
-):
-    contractor_store["doc"] = _german_business()
+async def test_purchase_wires_the_webhooks_from_cloud_run_url(fake_twilio, contractor_store):
+    contractor_store["doc"] = _contractor_doc(
+        country_code="US", business_address="", business_city=""
+    )
+    fake_twilio.search_results = [_numbers("+14155551212")]
 
-    number = await contractors_db.provision_twilio_number("c-de", country_code="DE")
+    await contractors_db.provision_twilio_number("c-us", country_code="US")
 
-    assert number == "+4930123456"
-    client = fake_twilio.instances[0]
+    (purchase,) = _only(fake_twilio.instances[0].calls, "purchase")
+    assert purchase[1] == {
+        "phone_number": "+14155551212",
+        "voice_url": "https://kevin.example.test/webhooks/twilio/incoming",
+        "voice_method": "POST",
+        "status_callback": "https://kevin.example.test/webhooks/twilio/status",
+        "status_callback_method": "POST",
+        "sms_url": "https://kevin.example.test/webhooks/twilio/mms-incoming",
+        "sms_method": "POST",
+    }
+    assert fake_twilio.instances[0].account_sid == app_settings.twilio_account_sid
+
+
+# ---------------------------------------------------------------------------
+# Isolated regulatory bundle tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_regulatory_bundle_creates_the_bundle_and_records_calls(fake_twilio):
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
+
+    bundle_sid = await contractors_db._create_regulatory_bundle(
+        client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+    )
+
+    assert bundle_sid == "BU" + "1" * 32
     kinds = [c[0] for c in client.calls]
     assert kinds == [
         "regulations",
@@ -315,8 +311,6 @@ async def test_regulatory_country_creates_the_bundle_and_buys_with_it(
         "item_assignment",
         "bundle_update",
         "bundle_fetch",
-        "search",
-        "purchase",
     ]
     (regs,) = _only(client.calls, "regulations")
     assert regs[1] == {"iso_country": "DE", "number_type": "local", "limit": 1}
@@ -342,96 +336,133 @@ async def test_regulatory_country_creates_the_bundle_and_buys_with_it(
     assert assignment[1:] == ("BU" + "1" * 32, {"object_sid": "AD" + "3" * 32})
     (update,) = _only(client.calls, "bundle_update")
     assert update[2] == {"status": "pending-review"}
-    (purchase,) = _only(client.calls, "purchase")
-    assert purchase[1]["bundle_sid"] == "BU" + "1" * 32
-    assert contractor_store["updates"] == [("c-de", {"twilio_number": "+4930123456"})]
 
 
 @pytest.mark.asyncio
-async def test_provisionally_approved_bundle_is_accepted(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business()
-    fake_twilio.bundle_statuses = ["pending-review", "provisionally-approved"]
+async def test_provisionally_approved_bundle_is_accepted(fake_twilio):
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
+    client.bundle_statuses = ["pending-review", "provisionally-approved"]
 
-    await contractors_db.provision_twilio_number("c-de", country_code="DE")
+    sid = await contractors_db._create_regulatory_bundle(
+        client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+    )
 
-    client = fake_twilio.instances[0]
+    assert sid == "BU" + "1" * 32
     assert len(_only(client.calls, "bundle_fetch")) == 2
     assert fake_twilio.sleeps == [2, 2]
-    assert _only(client.calls, "purchase")[0][1]["bundle_sid"] == "BU" + "1" * 32
 
 
 @pytest.mark.asyncio
-async def test_rejected_bundle_raises_an_address_error_and_never_buys(
-    fake_twilio, contractor_store
-):
-    contractor_store["doc"] = _german_business()
-    fake_twilio.bundle_statuses = ["pending-review", "twilio-rejected"]
+async def test_rejected_bundle_raises_an_address_error(fake_twilio):
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
+    client.bundle_statuses = ["pending-review", "twilio-rejected"]
 
     with pytest.raises(
         Exception, match="rejected for Germany. Please verify your business address"
     ):
-        await contractors_db.provision_twilio_number("c-de", country_code="DE")
-
-    client = fake_twilio.instances[0]
-    assert _only(client.calls, "search") == []
-    assert _only(client.calls, "purchase") == []
-    assert contractor_store["updates"] == []
+        await contractors_db._create_regulatory_bundle(
+            client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+        )
 
 
 @pytest.mark.asyncio
-async def test_bundle_still_pending_after_polling_is_used_anyway(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business()
-    fake_twilio.bundle_statuses = ["pending-review"] * 15
+async def test_bundle_still_pending_after_polling_is_used_anyway(fake_twilio):
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
+    client.bundle_statuses = ["pending-review"] * 15
 
-    number = await contractors_db.provision_twilio_number("c-de", country_code="DE")
+    sid = await contractors_db._create_regulatory_bundle(
+        client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+    )
 
-    client = fake_twilio.instances[0]
-    assert number == "+4930123456"
+    assert sid == "BU" + "1" * 32
     assert len(_only(client.calls, "bundle_fetch")) == 15
     assert fake_twilio.sleeps == [2] * 15
-    assert _only(client.calls, "purchase")[0][1]["bundle_sid"] == "BU" + "1" * 32
 
 
 @pytest.mark.asyncio
-async def test_missing_regulation_raises_before_creating_an_address(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business()
-    fake_twilio.regulations = []
+async def test_missing_regulation_raises_before_creating_an_address(fake_twilio):
+    FakeClient.regulations = []
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
 
     with pytest.raises(Exception, match="No Twilio regulations found for Germany local numbers"):
-        await contractors_db.provision_twilio_number("c-de", country_code="DE")
+        await contractors_db._create_regulatory_bundle(
+            client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+        )
 
-    client = fake_twilio.instances[0]
     assert _only(client.calls, "address_create") == []
     assert _only(client.calls, "bundle_create") == []
-    assert contractor_store["updates"] == []
 
 
 @pytest.mark.asyncio
-async def test_purchase_wires_the_webhooks_from_cloud_run_url(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business(
-        country_code="GB", business_address="", business_city=""
+async def test_bundle_is_created_with_the_configured_contact_email(
+    fake_twilio, monkeypatch
+):
+    monkeypatch.setattr(
+        app_settings, "twilio_regulatory_contact_email", "notices@example.test", raising=False
     )
-    fake_twilio.search_results = [_numbers("+442071234567")]
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
 
-    await contractors_db.provision_twilio_number("c-gb", country_code="GB")
+    await contractors_db._create_regulatory_bundle(
+        client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+    )
 
-    (purchase,) = _only(fake_twilio.instances[0].calls, "purchase")
-    assert purchase[1] == {
-        "phone_number": "+442071234567",
-        "voice_url": "https://kevin.example.test/webhooks/twilio/incoming",
-        "voice_method": "POST",
-        "status_callback": "https://kevin.example.test/webhooks/twilio/status",
-        "status_callback_method": "POST",
-        "sms_url": "https://kevin.example.test/webhooks/twilio/mms-incoming",
-        "sms_method": "POST",
-    }
-    # settings is frozen at first import, which another test module may have
-    # done with a different env value; compare against what it actually holds.
-    assert fake_twilio.instances[0].account_sid == app_settings.twilio_account_sid
+    (bundle,) = _only(client.calls, "bundle_create")
+    assert bundle[1]["email"] == "notices@example.test"
+
+
+@pytest.mark.asyncio
+async def test_missing_contact_email_refuses_before_any_twilio_call(
+    fake_twilio, monkeypatch
+):
+    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "")
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
+
+    with pytest.raises(Exception, match="Regulatory contact email not configured"):
+        await contractors_db._create_regulatory_bundle(
+            client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_contact_email_counts_as_unconfigured(
+    fake_twilio, monkeypatch
+):
+    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "   ")
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
+
+    with pytest.raises(Exception, match="Regulatory contact email not configured"):
+        await contractors_db._create_regulatory_bundle(
+            client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_contact_email_is_passed_stripped(fake_twilio, monkeypatch):
+    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "  ops@example.test  ")
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
+
+    await contractors_db._create_regulatory_bundle(
+        client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+    )
+
+    (bundle,) = _only(client.calls, "bundle_create")
+    assert bundle[1]["email"] == "ops@example.test"
 
 
 # ---------------------------------------------------------------------------
-# Endpoint: error sanitization
+# Endpoint: error sanitization & response format
 # ---------------------------------------------------------------------------
 
 _RAW_FRAGMENTS = (
@@ -480,7 +511,7 @@ _RAW_FRAGMENTS = (
 @pytest.mark.asyncio
 async def test_endpoint_returns_only_canned_messages(monkeypatch, raised, expected):
     async def fake_get_contractor(contractor_id):
-        return _german_business(business_address="Hauptstraße 1", business_city="Berlin")
+        return _contractor_doc(business_address="100 Main St", business_city="San Francisco")
 
     async def fake_update_contractor(contractor_id, updates):
         return True
@@ -493,44 +524,12 @@ async def test_endpoint_returns_only_canned_messages(monkeypatch, raised, expect
     monkeypatch.setattr(contractors_db, "provision_twilio_number", failing_provision)
     request = SimpleNamespace(state=SimpleNamespace(is_admin=True))
 
-    response = await contractors_api.api_provision_number("c-de", request)
+    response = await contractors_api.api_provision_number("c-us", request)
 
     assert response == {"status": "error", "message": expected}
     serialized = json.dumps(response, ensure_ascii=False)
     for fragment in _RAW_FRAGMENTS:
         assert fragment not in serialized, fragment
-
-
-@pytest.mark.asyncio
-async def test_endpoint_refuses_regulatory_country_without_address_before_calling_twilio(
-    monkeypatch,
-):
-    async def fake_get_contractor(contractor_id):
-        return _german_business(business_address="", business_city="Berlin")
-
-    async def fake_update_contractor(contractor_id, updates):
-        return True
-
-    calls = []
-
-    async def must_not_be_called(contractor_id, country_code="US"):
-        # The endpoint swallows exceptions, so a raise here would be masked;
-        # count instead and assert afterwards.
-        calls.append((contractor_id, country_code))
-        return "+4930000000"
-
-    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
-    monkeypatch.setattr(contractors_db, "provision_twilio_number", must_not_be_called)
-    request = SimpleNamespace(state=SimpleNamespace(is_admin=True))
-
-    response = await contractors_api.api_provision_number("c-de", request)
-
-    assert response == {
-        "status": "error",
-        "message": "Business address and city are required for number provisioning in your country.",
-    }
-    assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -542,11 +541,11 @@ async def test_endpoint_refuses_regulatory_country_without_address_before_callin
 async def test_existing_number_short_circuits_before_any_twilio_use(fake_twilio, contractor_store):
     # The double-purchase guard: an account that already has a number must
     # never reach Twilio again.
-    contractor_store["doc"] = _german_business(twilio_number="+4930999999")
+    contractor_store["doc"] = _contractor_doc(twilio_number="+14155559999")
 
-    number = await contractors_db.provision_twilio_number("c-de", country_code="DE")
+    number = await contractors_db.provision_twilio_number("c-us", country_code="US")
 
-    assert number == "+4930999999"
+    assert number == "+14155559999"
     assert fake_twilio.instances == []
     assert contractor_store["updates"] == []
 
@@ -556,20 +555,20 @@ async def test_missing_contractor_raises_before_any_twilio_use(fake_twilio, cont
     contractor_store["doc"] = {}
 
     with pytest.raises(Exception, match="Contractor not found"):
-        await contractors_db.provision_twilio_number("c-missing", country_code="DE")
+        await contractors_db.provision_twilio_number("c-missing", country_code="US")
 
     assert fake_twilio.instances == []
 
 
 @pytest.mark.asyncio
 async def test_empty_search_without_area_code_is_not_retried(fake_twilio, contractor_store):
-    contractor_store["doc"] = _german_business(
-        country_code="GB", business_address="", business_city=""
+    contractor_store["doc"] = _contractor_doc(
+        country_code="US", business_address="", business_city=""
     )
-    fake_twilio.search_results = [[], _numbers("+442071234567")]
+    fake_twilio.search_results = [[], _numbers("+14155551212")]
 
-    with pytest.raises(Exception, match="No phone numbers available in United Kingdom"):
-        await contractors_db.provision_twilio_number("c-gb", country_code="GB")
+    with pytest.raises(Exception, match="No phone numbers available in United States"):
+        await contractors_db.provision_twilio_number("c-us", country_code="US")
 
     # One search only: the retry exists for a failed area-code preference.
     assert len(_only(fake_twilio.instances[0].calls, "search")) == 1
@@ -578,10 +577,8 @@ async def test_empty_search_without_area_code_is_not_retried(fake_twilio, contra
 
 @pytest.mark.asyncio
 async def test_address_arm_takes_precedence_over_the_numbers_arm(monkeypatch):
-    # A message matching both predicates must resolve to the first arm, so
-    # the mapping order is pinned, not just the individual arms.
     async def fake_get_contractor(contractor_id):
-        return _german_business()
+        return _contractor_doc()
 
     async def fake_update_contractor(contractor_id, updates):
         return True
@@ -594,7 +591,7 @@ async def test_address_arm_takes_precedence_over_the_numbers_arm(monkeypatch):
     monkeypatch.setattr(contractors_db, "provision_twilio_number", failing_provision)
     request = SimpleNamespace(state=SimpleNamespace(is_admin=True))
 
-    response = await contractors_api.api_provision_number("c-de", request)
+    response = await contractors_api.api_provision_number("c-us", request)
 
     assert response == {
         "status": "error",
@@ -603,9 +600,7 @@ async def test_address_arm_takes_precedence_over_the_numbers_arm(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# SDK fidelity: the kwargs production actually passes must bind to the real
-# twilio client signatures. The fake above accepts anything; this is what
-# keeps it honest.
+# SDK fidelity
 # ---------------------------------------------------------------------------
 
 _SDK_METHODS = {
@@ -620,7 +615,6 @@ _SDK_METHODS = {
 
 
 def _kwargs_of(call):
-    # calls are ("kind", kwargs) or ("kind", sid, kwargs) or ("search", cc, kwargs, n)
     return next(part for part in call[1:] if isinstance(part, dict))
 
 
@@ -632,78 +626,29 @@ def _kwargs_of(call):
         "bundle_create",
         "item_assignment",
         "bundle_update",
-        "search",
-        "purchase",
     ],
 )
 @pytest.mark.asyncio
-async def test_production_kwargs_bind_to_the_real_sdk(fake_twilio, contractor_store, kind):
-    contractor_store["doc"] = _german_business()
+async def test_bundle_kwargs_bind_to_the_real_sdk(fake_twilio, kind):
+    client = FakeClient("ACtest", "tok")
+    loop = asyncio.get_event_loop()
 
-    await contractors_db.provision_twilio_number("c-de", country_code="DE")
+    await contractors_db._create_regulatory_bundle(
+        client, loop, "DE", "Müller Sanitär GmbH", "Hauptstraße 1", "Berlin"
+    )
+
+    (call,) = _only(client.calls, kind)
+    signature = inspect.signature(_SDK_METHODS[kind])
+    signature.bind(None, **_kwargs_of(call))
+
+
+@pytest.mark.parametrize("kind", ["search", "purchase"])
+@pytest.mark.asyncio
+async def test_provision_kwargs_bind_to_the_real_sdk(fake_twilio, contractor_store, kind):
+    contractor_store["doc"] = _contractor_doc()
+
+    await contractors_db.provision_twilio_number("c-us", country_code="US")
 
     (call,) = _only(fake_twilio.instances[0].calls, kind)
     signature = inspect.signature(_SDK_METHODS[kind])
-    signature.bind(None, **_kwargs_of(call))  # None stands in for self
-
-
-# ---------------------------------------------------------------------------
-# Regulatory contact email (twilio 9.x BundleList.create requires `email`)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_bundle_is_created_with_the_configured_contact_email(
-    fake_twilio, contractor_store, monkeypatch
-):
-    contractor_store["doc"] = _german_business()
-    monkeypatch.setattr(
-        app_settings, "twilio_regulatory_contact_email", "notices@example.test", raising=False
-    )
-
-    await contractors_db.provision_twilio_number("c-de", country_code="DE")
-
-    (bundle,) = _only(fake_twilio.instances[0].calls, "bundle_create")
-    assert bundle[1]["email"] == "notices@example.test"
-
-
-@pytest.mark.asyncio
-async def test_missing_contact_email_refuses_before_any_twilio_call(
-    fake_twilio, contractor_store, monkeypatch
-):
-    # An unconfigured server must fail clearly, not with a TypeError inside
-    # the executor, and must not create a regulation lookup, address or bundle.
-    contractor_store["doc"] = _german_business()
-    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "")
-
-    with pytest.raises(Exception, match="Regulatory contact email not configured"):
-        await contractors_db.provision_twilio_number("c-de", country_code="DE")
-
-    # One client was constructed (before the guard) and asked nothing.
-    assert len(fake_twilio.instances) == 1
-    assert fake_twilio.instances[0].calls == []
-    assert contractor_store["updates"] == []
-
-
-@pytest.mark.asyncio
-async def test_whitespace_only_contact_email_counts_as_unconfigured(
-    fake_twilio, contractor_store, monkeypatch
-):
-    contractor_store["doc"] = _german_business()
-    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "   ")
-
-    with pytest.raises(Exception, match="Regulatory contact email not configured"):
-        await contractors_db.provision_twilio_number("c-de", country_code="DE")
-
-    assert fake_twilio.instances[0].calls == []
-
-
-@pytest.mark.asyncio
-async def test_contact_email_is_passed_stripped(fake_twilio, contractor_store, monkeypatch):
-    contractor_store["doc"] = _german_business()
-    monkeypatch.setattr(app_settings, "twilio_regulatory_contact_email", "  ops@example.test  ")
-
-    await contractors_db.provision_twilio_number("c-de", country_code="DE")
-
-    (bundle,) = _only(fake_twilio.instances[0].calls, "bundle_create")
-    assert bundle[1]["email"] == "ops@example.test"
+    signature.bind(None, **_kwargs_of(call))

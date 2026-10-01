@@ -532,3 +532,172 @@ async def test_put_settings_preferences_persistence_failure_returns_error(monkey
     res = await api_update_settings(req, body, contractor_id="c1")
 
     assert res == {"error": "Failed to save settings"}
+
+
+@pytest.mark.asyncio
+async def test_get_settings_includes_service_binding(monkeypatch):
+    """Proves GET /api/settings returns service_binding and authoritative country when assigned."""
+    fake_db = _FakeFirestoreDB()
+    root_doc = fake_db.collection("contractors").document("c1")
+    root_doc.data = {
+        "country_code": "US",
+        "twilio_number": "+14155552671",
+        "provisioned_country_code": "US",
+        "number_provider": "twilio",
+        "number_type": "local",
+        "number_capabilities": {"voice": True, "SMS": True},
+    }
+    root_doc.exists = True
+
+    pref_doc = root_doc.collection("settings").document("preferences")
+    pref_doc.data = {"greeting_name": "Alice"}
+    pref_doc.exists = True
+
+    monkeypatch.setattr(settings_api, "get_firestore_client", lambda: fake_db)
+
+    req = _auth_request("c1")
+    res = await api_get_settings(req, contractor_id="c1")
+
+    assert res["country_code"] == "US"
+    assert res["service_binding"] == {
+        "country_code": "US",
+        "provider": "twilio",
+        "number_type": "local",
+        "capabilities": {"voice": True, "SMS": True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_put_settings_rejects_conflicting_country_when_number_assigned(monkeypatch):
+    """Proves PUT /api/settings raises 409 country_locked_to_number if updating country when number is assigned."""
+    fake_db = _FakeFirestoreDB()
+    root_doc = fake_db.collection("contractors").document("c1")
+    root_doc.data = {
+        "country_code": "US",
+        "twilio_number": "+14155552671",
+    }
+    root_doc.exists = True
+
+    pref_doc = root_doc.collection("settings").document("preferences")
+    pref_doc.data = {"greeting_name": "Alice"}
+    pref_doc.exists = True
+
+    monkeypatch.setattr(settings_api, "get_firestore_client", lambda: fake_db)
+
+    req = _auth_request("c1")
+    body = SettingsUpdate(country_code="CA", greeting_name="Bob")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api_update_settings(req, body, contractor_id="c1")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "country_locked_to_number"
+    assert exc_info.value.detail["country_code"] == "US"
+    # Verify no writes occurred
+    assert root_doc.updated == {}
+    assert pref_doc.set_data == {}
+
+
+@pytest.mark.asyncio
+async def test_put_settings_allows_same_country_when_number_assigned(monkeypatch):
+    """Proves PUT /api/settings allows same-country update as no-op when number is assigned."""
+    fake_db = _FakeFirestoreDB()
+    root_doc = fake_db.collection("contractors").document("c1")
+    root_doc.data = {
+        "country_code": "US",
+        "twilio_number": "+14155552671",
+    }
+    root_doc.exists = True
+
+    pref_doc = root_doc.collection("settings").document("preferences")
+    pref_doc.data = {"greeting_name": "Alice"}
+    pref_doc.exists = True
+
+    monkeypatch.setattr(settings_api, "get_firestore_client", lambda: fake_db)
+
+    req = _auth_request("c1")
+    body = SettingsUpdate(country_code="US", greeting_name="Bob")
+    res = await api_update_settings(req, body, contractor_id="c1")
+
+    assert res["greeting_name"] == "Bob"
+    assert res["country_code"] == "US"
+    assert pref_doc.set_data == {"greeting_name": "Bob"}
+
+
+@pytest.mark.asyncio
+async def test_put_settings_country_read_failure_returns_503(monkeypatch):
+    """Proves PUT /api/settings raises 503 if root doc read fails when updating country_code."""
+    fake_db = _FakeFirestoreDB()
+    root_doc = fake_db.collection("contractors").document("c1")
+    root_doc.raise_on_get = True
+
+    pref_doc = root_doc.collection("settings").document("preferences")
+    pref_doc.data = {"greeting_name": "Before"}
+    pref_doc.exists = True
+
+    monkeypatch.setattr(settings_api, "get_firestore_client", lambda: fake_db)
+
+    req = _auth_request("c1")
+    body = SettingsUpdate(country_code="CA", greeting_name="After")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api_update_settings(req, body, contractor_id="c1")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Failed to read contractor profile"
+    assert root_doc.updated == {}
+    assert pref_doc.set_data == {}
+
+
+@pytest.mark.asyncio
+async def test_put_settings_country_missing_profile_returns_404(monkeypatch):
+    """Proves PUT /api/settings raises 404 if root doc is absent when updating country_code."""
+    fake_db = _FakeFirestoreDB()
+    root_doc = fake_db.collection("contractors").document("c1")
+    root_doc.exists = False
+
+    pref_doc = root_doc.collection("settings").document("preferences")
+    pref_doc.data = {}
+
+    monkeypatch.setattr(settings_api, "get_firestore_client", lambda: fake_db)
+
+    req = _auth_request("c1")
+    body = SettingsUpdate(country_code="CA", quiet_hours_enabled=True)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api_update_settings(req, body, contractor_id="c1")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Contractor not found"
+    assert root_doc.updated == {}
+    assert pref_doc.set_data == {}
+
+
+@pytest.mark.asyncio
+async def test_put_settings_unassigned_invalid_stored_owner_phone_returns_400(monkeypatch):
+    """Proves PUT /api/settings raises structured 400 invalid_owner_phone when unassigned account has invalid stored phone."""
+    fake_db = _FakeFirestoreDB()
+    root_doc = fake_db.collection("contractors").document("c1")
+    root_doc.data = {
+        "country_code": "US",
+        "twilio_number": "",
+        "owner_phone": "invalid-raw-phone",
+    }
+    root_doc.exists = True
+
+    pref_doc = root_doc.collection("settings").document("preferences")
+    pref_doc.data = {"greeting_name": "Before"}
+    pref_doc.exists = True
+
+    monkeypatch.setattr(settings_api, "get_firestore_client", lambda: fake_db)
+
+    req = _auth_request("c1")
+    body = SettingsUpdate(country_code="CA", greeting_name="After")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api_update_settings(req, body, contractor_id="c1")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == "invalid_owner_phone"
+    assert root_doc.updated == {}
+    assert pref_doc.set_data == {}

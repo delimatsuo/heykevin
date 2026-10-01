@@ -156,3 +156,15 @@ not verified. Twilio account-specific inventory, approvals, geographic
 permissions, sender registration and invoices also remain unverified. These
 limits prevent a positive launch-readiness claim; the confirmed source and
 provider gaps already support keeping additional markets closed.
+
+### Later account-identity verification
+
+During implementation on October 1, the owner noted two possible Twilio
+accounts. An authenticated Cloud Run console read confirmed that the production
+revision above serves 100% of traffic and its actual `TWILIO_ACCOUNT_SID`
+matches `PRODUCTION_TWILIO_ACCOUNT_SID`, ending **0494**. The Twilio console was
+signed into **45a9**, whose number configuration referenced other applications;
+its account list exposed only that account. Kevin's live account selection is
+correct. The browser login must be switched to **0494** before its Brazil
+inventory, registration or pricing can be assessed. This read changed no
+configuration and does not establish country readiness.

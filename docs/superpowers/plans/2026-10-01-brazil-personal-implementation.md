@@ -83,7 +83,13 @@ A read of the repository's production environment variable
 in **0494**. These accounts do not match. No provider inventory decision may use
 the former account. Direct Cloud Run configuration readback could not complete
 because Google authentication required renewal; a deployment variable is not
-substituted for current runtime evidence.
+substituted for current runtime evidence. A later authenticated Google Cloud
+console read resolved that limitation: production revision `kevin-api-00277-neb`
+serves 100% of traffic and both its `TWILIO_ACCOUNT_SID` and
+`PRODUCTION_TWILIO_ACCOUNT_SID` end in **0494**, with deploy SHA
+`b62eea38d9ab5656fb8d809fb872f05d9c81147d`. Kevin is using the expected account.
+The Twilio console's account list exposes only **45a9** under the current login;
+access to **0494** is still needed for inventory and eligibility qualification.
 
 The owner was asked to switch to the Kevin account and to identify a Brazilian
 carrier/plan/DDD for qualification while implementation continued. No number,

@@ -37,6 +37,8 @@ final class SettingsCountryTests: XCTestCase {
     func testDisplayNameUsesTheLocale() {
         XCTAssertEqual(SettingsCountry.displayName("BR", locale: Locale(identifier: "pt_BR")), "Brasil")
         XCTAssertEqual(SettingsCountry.displayName("US", locale: Locale(identifier: "en_US")), "United States")
+        XCTAssertEqual(SettingsCountry.displayName("", locale: Locale(identifier: "en_US")), "Unknown Country")
+        XCTAssertEqual(SettingsCountry.displayName("ZZ", locale: Locale(identifier: "en_US")), "Unknown Country")
     }
 
     // MARK: - Parsing the PUT response
@@ -82,25 +84,59 @@ final class SettingsCountryTests: XCTestCase {
 // MARK: - Picker flow decisions
 
 extension SettingsCountryTests {
-    func testWritesOnlyWhenThePickDiffersFromTheAccount() {
-        XCTAssertTrue(SettingsCountryFlow.shouldWrite(picked: "GB", accountCountry: "BR"))
-        XCTAssertFalse(SettingsCountryFlow.shouldWrite(picked: "BR", accountCountry: "BR"))
+    func testWritesOnlyWhenThePickDiffersFromTheAccountAndUnassigned() {
+        XCTAssertTrue(SettingsCountryFlow.shouldWrite(picked: "GB", accountCountry: "BR", hasAssignedNumber: false))
+        XCTAssertFalse(SettingsCountryFlow.shouldWrite(picked: "BR", accountCountry: "BR", hasAssignedNumber: false))
         // Unknown account: an explicit pick is a real request.
-        XCTAssertTrue(SettingsCountryFlow.shouldWrite(picked: "US", accountCountry: ""))
+        XCTAssertTrue(SettingsCountryFlow.shouldWrite(picked: "US", accountCountry: "", hasAssignedNumber: false))
+        // When assigned, shouldWrite is always false
+        XCTAssertFalse(SettingsCountryFlow.shouldWrite(picked: "GB", accountCountry: "BR", hasAssignedNumber: true))
+        XCTAssertFalse(SettingsCountryFlow.shouldWrite(picked: "US", accountCountry: "", hasAssignedNumber: true))
     }
 
-    func testDisplayedSelectionPrefersTheAccountCountry() {
-        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "BR", locale: Locale(identifier: "en_US")), "BR")
+    func testDisplayedSelectionPrefersTheAccountCountryWhenUnassigned() {
+        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "BR", hasAssignedNumber: false, locale: Locale(identifier: "en_US")), "BR")
     }
 
-    func testDisplayedSelectionFallsBackToASupportedDeviceRegion() {
+    func testDisplayedSelectionFallsBackToASupportedDeviceRegionWhenUnassigned() {
         // Matches what the forwarding codes key on, so the two never disagree.
-        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "", locale: Locale(identifier: "pt_BR")), "BR")
+        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "", hasAssignedNumber: false, locale: Locale(identifier: "pt_BR")), "BR")
     }
 
-    func testDisplayedSelectionFallsBackToUSForAnUnsupportedRegion() {
-        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "", locale: Locale(identifier: "ja_JP")), "US")
-        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "", locale: Locale(identifier: "en")), "US")
+    func testDisplayedSelectionFallsBackToUSForAnUnsupportedRegionWhenUnassigned() {
+        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "", hasAssignedNumber: false, locale: Locale(identifier: "ja_JP")), "US")
+        XCTAssertEqual(SettingsCountryFlow.displayedSelection(accountCountry: "", hasAssignedNumber: false, locale: Locale(identifier: "en")), "US")
+    }
+
+    func testDisplayedSelectionUsesServiceBindingWhenAssigned() {
+        let binding = ServiceBinding(countryCode: "BR", provider: "twilio", numberType: "mobile")
+        XCTAssertEqual(
+            SettingsCountryFlow.displayedSelection(serviceBinding: binding, accountCountry: "US", hasAssignedNumber: true, locale: Locale(identifier: "en_US")),
+            "BR"
+        )
+    }
+
+    func testDisplayedSelectionUsesAccountCountryWhenAssignedWithoutBinding() {
+        XCTAssertEqual(
+            SettingsCountryFlow.displayedSelection(serviceBinding: nil, accountCountry: "CA", hasAssignedNumber: true, locale: Locale(identifier: "pt_BR")),
+            "CA"
+        )
+    }
+
+    func testDisplayedSelectionNeverUsesLocaleWhenAssignedWithMalformedBinding() {
+        let badBinding = ServiceBinding(countryCode: "ZZ", provider: "twilio")
+        XCTAssertEqual(
+            SettingsCountryFlow.displayedSelection(serviceBinding: badBinding, accountCountry: "", hasAssignedNumber: true, locale: Locale(identifier: "pt_BR")),
+            "",
+            "When assigned with malformed binding, displayedSelection must return empty string"
+        )
+    }
+
+    func testDisplayedSelectionReturnsEmptyWhenAssignedWithUnsupportedAccountCountry() {
+        XCTAssertEqual(
+            SettingsCountryFlow.displayedSelection(serviceBinding: nil, accountCountry: "ZZ", hasAssignedNumber: true),
+            ""
+        )
     }
 
     func testAdoptsOnlyTheRequestedCountry() {

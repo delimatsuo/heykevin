@@ -190,6 +190,7 @@ final class AccountRestoreCoordinator {
         state.appleUserId = appleUserId
         state.appleIdentityToken = ""
         state.kevinNumber = number
+        state.serviceBinding = ServiceBindingParser.parse(from: profile)
         state.readCallIds = []
         state.unreadCallCount = 0
         state.clearActiveCall()

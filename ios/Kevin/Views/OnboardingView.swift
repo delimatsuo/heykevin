@@ -1,5 +1,6 @@
 import SwiftUI
 import AuthenticationServices
+import StoreKit
 
 /// User-facing text for a failed `RegulatoryAddress.validate` result.
 private func regulatoryAddressErrorMessage(for result: RegulatoryAddress.ValidationResult) -> String {
@@ -19,6 +20,7 @@ private func regulatoryAddressErrorMessage(for result: RegulatoryAddress.Validat
 
 struct OnboardingView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var subscriptionManager = SubscriptionManager.shared
     var isRecoveryMode: Bool = false
     @State private var step: OnboardingStep
     @State private var businessName = ""
@@ -31,16 +33,41 @@ struct OnboardingView: View {
     @State private var kevinNumber = ""
     @State private var errorMessage = ""
 
+    #if DEBUG
+    init(
+        isRecoveryMode: Bool = false,
+        initialStep: OnboardingStep = .welcome,
+        initialCountryCode: String = SignupCountry.suggestedCountry(),
+        initialPhoneNumber: String = "",
+        initialErrorMessage: String = ""
+    ) {
+        self.isRecoveryMode = isRecoveryMode
+        _step = State(initialValue: isRecoveryMode ? .signIn : initialStep)
+        _selectedCountryCode = State(initialValue: initialCountryCode)
+        _phoneNumber = State(initialValue: initialPhoneNumber)
+        _errorMessage = State(initialValue: initialErrorMessage)
+    }
+    #else
     init(isRecoveryMode: Bool = false) {
         self.isRecoveryMode = isRecoveryMode
         _step = State(initialValue: isRecoveryMode ? .signIn : .welcome)
     }
+    #endif
     @State private var contactsSynced = 0
     @State private var acceptedTerms = false
     @State private var phoneNumber = ""
+    @State private var selectedCountryCode: String = SignupCountry.suggestedCountry()
     @State private var isVerizon = AppState.shared.isVerizonCarrier
     @State private var forwardingInstructions: ForwardingInstructions?
-    private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
+    private var forwardingCountry: String {
+        let assigned = !kevinNumber.isEmpty ? kevinNumber : appState.kevinNumber
+        return ForwardingCountry.resolve(
+            serviceBinding: appState.serviceBinding,
+            accountCountry: appState.countryCode,
+            assignedNumber: assigned,
+            hasAssignedNumber: !assigned.isEmpty
+        )
+    }
     @State private var showPaywall = false
     // Business street address and city: captured here only when a
     // provisioning attempt fails for an address reason (the server has
@@ -288,7 +315,7 @@ struct OnboardingView: View {
     // MARK: - Phone Entry
 
     private var phoneEntryStep: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Spacer()
 
             Text(String(localized: "Your Phone Number"))
@@ -298,13 +325,49 @@ struct OnboardingView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            TextField(String(localized: "(650) 555-1234"), text: $phoneNumber)
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(SignupCountry.supported) { country in
+                        Button {
+                            selectedCountryCode = country.code
+                            errorMessage = ""
+                        } label: {
+                            Text("\(country.flagEmoji) \(country.localizedName()) (\(country.dialingPrefix))")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        let currentCountry = SignupCountry.forCode(selectedCountryCode) ?? SignupCountry.supported[0]
+                        Text(currentCountry.flagEmoji)
+                            .font(.title3)
+                        Text(currentCountry.dialingPrefix)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(.primary)
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(.systemGray4), lineWidth: 1)
+                    )
+                }
+
+                TextField(
+                    SignupCountry.forCode(selectedCountryCode)?.placeholder ?? "(650) 555-1234",
+                    text: $phoneNumber
+                )
                 .textFieldStyle(.roundedBorder)
                 .textContentType(.telephoneNumber)
                 .keyboardType(.phonePad)
                 .font(.title3)
-                .multilineTextAlignment(.center)
-                .padding(.vertical)
+                .padding(.vertical, 4)
+            }
+            .padding(.horizontal)
 
             // Carrier-required SMS consent disclosure. US A2P 10DLC review needs a
             // verifiable opt-in: the recipient must be shown who is texting them,
@@ -350,18 +413,36 @@ struct OnboardingView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(phoneNumber.filter { $0.isNumber }.count < 10 || isLoading)
+            .disabled(!SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).isValid || isLoading)
             .clipShape(RoundedRectangle(cornerRadius: 14))
 
             if !errorMessage.isEmpty {
                 Text(errorMessage)
                     .foregroundStyle(.red)
                     .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
             }
         }
     }
 
     // MARK: - Mode Selection
+
+    private var personalProduct: Product? {
+        subscriptionManager.products.first(where: { $0.id == "com.kevin.callscreen.personal.monthly" })
+    }
+
+    private var businessProduct: Product? {
+        subscriptionManager.products.first(where: { $0.id == "com.kevin.callscreen.business.monthly" })
+    }
+
+    private var personalPriceDisplay: String {
+        personalProduct?.displayPrice ?? (subscriptionManager.isLoading ? "…" : String(localized: "Unavailable"))
+    }
+
+    private var businessPriceDisplay: String {
+        businessProduct?.displayPrice ?? (subscriptionManager.isLoading ? "…" : String(localized: "Unavailable"))
+    }
 
     private var modeSelectStep: some View {
         VStack(spacing: 0) {
@@ -389,10 +470,26 @@ struct OnboardingView: View {
             .padding(.bottom, HKSpace.lg)
 
             VStack(spacing: HKSpace.md) {
+                if subscriptionManager.isLoading {
+                    ProgressView(String(localized: "Loading plans..."))
+                        .padding(.vertical, 16)
+                } else if subscriptionManager.products.isEmpty {
+                    VStack(spacing: 6) {
+                        Text(String(localized: "Could not load plans."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button(String(localized: "Try Again")) {
+                            Task { await subscriptionManager.fetchProducts() }
+                        }
+                        .font(.caption.weight(.medium))
+                    }
+                    .padding(.vertical, 8)
+                }
+
                 modeCard(
                     mode: "personal",
                     title: String(localized: "Personal"),
-                    price: "$9.99",
+                    price: personalPriceDisplay,
                     desc: String(localized: "Screen unknown callers. Saved contacts ring through to you."),
                     tags: [
                         String(localized: "Block robocalls"),
@@ -404,7 +501,7 @@ struct OnboardingView: View {
                 modeCard(
                     mode: "business",
                     title: String(localized: "Business"),
-                    price: "$49.99",
+                    price: businessPriceDisplay,
                     desc: String(localized: "A full receptionist. Smart intake, business hours, and a knowledge base for FAQs."),
                     tags: [
                         String(localized: "Smart intake"),
@@ -413,6 +510,11 @@ struct OnboardingView: View {
                         String(localized: "Knowledge base"),
                     ]
                 )
+            }
+            .task {
+                if subscriptionManager.products.isEmpty {
+                    await subscriptionManager.fetchProducts()
+                }
             }
 
             Spacer()
@@ -456,9 +558,11 @@ struct OnboardingView: View {
                         Text(price)
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.primary)
-                        Text(String(localized: "/mo"))
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
+                        if price != String(localized: "Unavailable") && price != "…" {
+                            Text(String(localized: "/mo"))
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
@@ -742,7 +846,7 @@ struct OnboardingView: View {
         }
     }
 
-    private var forwardingCodes: ForwardingCodes {
+    private var forwardingCodes: ForwardingCodes? {
         ForwardingDialCodes.codes(
             countryCode: forwardingCountry,
             instructions: forwardingInstructions,
@@ -767,12 +871,7 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
 
             // Carrier choice comes FIRST: the dial buttons below derive their
-            // codes from it. When this sat below the buttons, a Verizon user
-            // following the screen top-to-bottom dialed GSM codes their network
-            // silently ignores before ever reaching the picker (review finding
-            // on PR #143). Outside North America the picker has no meaning —
-            // the codes come from the server for the device's country, or the
-            // standard GSM codes when the server is unreachable.
+            // codes from it. Outside North America the picker has no meaning.
             Group {
                 if !ForwardingCountry.isNANP(forwardingCountry) {
                     Text(String(localized: "Using the call forwarding codes for \(forwardingCountryName)"))
@@ -799,66 +898,72 @@ struct OnboardingView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .task(id: forwardingCountry) {
                 guard !ForwardingCountry.isNANP(forwardingCountry) else { return }
-                // Keep good instructions if a re-run is cancelled or fails;
-                // overwriting with nil would silently revert the dialed codes.
                 if let fetched = await APIClient.shared.getForwardingInstructions(countryCode: forwardingCountry) {
                     forwardingInstructions = fetched
                 }
             }
 
-            VStack(spacing: 12) {
-                // Step 1: Clear existing forwarding
-                Button {
-                    if let url = ForwardingDialCodes.telURL(forwardingCodes.clearExisting) {
-                        UIApplication.shared.open(url)
+            if let codes = forwardingCodes {
+                VStack(spacing: 12) {
+                    // Step 1: Clear existing forwarding
+                    Button {
+                        if let url = ForwardingDialCodes.telURL(codes.clearExisting) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        HStack {
+                            Text("1")
+                                .font(.caption.bold())
+                                .frame(width: 24, height: 24)
+                                .background(Circle().fill(.blue))
+                                .foregroundStyle(.white)
+                            Text(String(localized: "Clear existing forwarding"))
+                                .font(.subheadline)
+                            Spacer()
+                            Image(systemName: "phone.arrow.right")
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                } label: {
-                    HStack {
-                        Text("1")
-                            .font(.caption.bold())
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(.blue))
-                            .foregroundStyle(.white)
-                        Text(String(localized: "Clear existing forwarding"))
-                            .font(.subheadline)
-                        Spacer()
-                        Image(systemName: "phone.arrow.right")
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-                .buttonStyle(.plain)
+                    .buttonStyle(.plain)
 
-                // Step 2: Set Kevin forwarding
-                Button {
-                    if let url = ForwardingDialCodes.telURL(forwardingCodes.activate) {
-                        UIApplication.shared.open(url)
+                    // Step 2: Set Kevin forwarding
+                    Button {
+                        if let url = ForwardingDialCodes.telURL(codes.activate) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        HStack {
+                            Text("2")
+                                .font(.caption.bold())
+                                .frame(width: 24, height: 24)
+                                .background(Circle().fill(.blue))
+                                .foregroundStyle(.white)
+                            Text(String(localized: "Forward missed calls to Kevin"))
+                                .font(.subheadline)
+                            Spacer()
+                            Image(systemName: "phone.arrow.right")
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                } label: {
-                    HStack {
-                        Text("2")
-                            .font(.caption.bold())
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(.blue))
-                            .foregroundStyle(.white)
-                        Text(String(localized: "Forward missed calls to Kevin"))
-                            .font(.subheadline)
-                        Spacer()
-                        Image(systemName: "phone.arrow.right")
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-
-                // There is deliberately no "test" button here. The previous
-                // version dialed the Kevin number directly, which reaches Kevin
-                // whether or not forwarding is configured — so it confirmed
-                // success for users who had set nothing up. A real test requires
-                // someone calling the user's own number and the call diverting,
-                // which the device cannot stage for itself.
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.blue)
+                    Text(String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(Color.blue.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
 
             // iOS Live Voicemail answers calls on-device before the carrier's
@@ -1023,28 +1128,75 @@ struct OnboardingView: View {
 
     private func restoreOrContinue() async {
         guard !isRecoveryMode else { return }
-        let originAuth = appState.currentAuthContext()
-        let originApple = appState.appleUserId
-        // Try to find existing contractor via phone number. Auto-refreshes the
-        // Apple identity token and retries on 401 (token expired in flight).
-        let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber, ownerName] in
-            try await APIClient.shared.createContractor(
-                ownerName: ownerName,
-                businessName: "",
-                serviceType: "general",
-                ownerPhone: phoneNumber,
-                appleUserId: appState.appleUserId,
-                appleIdentityToken: appState.appleIdentityToken
-            )
+        let currentCountry = selectedCountryCode
+        let validation = SignupPhone.validate(phoneNumber, countryCode: currentCountry)
+        guard case .valid(let validPhone, _) = validation else {
+            errorMessage = validation.failureReason ?? String(localized: "Please enter a valid mobile phone number.")
+            return
         }
 
-        guard appState.currentAuthContext() == originAuth, appState.appleUserId == originApple else { return }
+        let originSnapshot = SignupAdmissionSnapshot(
+            countryCode: currentCountry,
+            phone: validPhone,
+            authContext: appState.currentAuthContext(),
+            appleUserId: appState.appleUserId
+        )
+
+        // Admission Gate: check GET /api/markets before creating contractor
+        let admission = await SignupAdmission.checkAvailability(countryCode: currentCountry)
+        guard originSnapshot.isCurrent(
+            countryCode: selectedCountryCode,
+            phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
+            authContext: appState.currentAuthContext(),
+            appleUserId: appState.appleUserId
+        ) else { return }
+
+        guard case .allowed = admission else {
+            errorMessage = admission.errorMessage ?? String(localized: "Kevin is not yet available in this country. We are preparing the service.")
+            return
+        }
+
+        let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, ownerName, currentCountry] in
+            try await SignupAdmission.runIfAllowed(
+                status: admission,
+                snapshot: originSnapshot,
+                current: {
+                    SignupAdmissionSnapshot(
+                        countryCode: self.selectedCountryCode,
+                        phone: SignupPhone.validate(self.phoneNumber, countryCode: self.selectedCountryCode).e164 ?? "",
+                        authContext: self.appState.currentAuthContext(),
+                        appleUserId: self.appState.appleUserId
+                    )
+                }
+            ) {
+                try await APIClient.shared.createContractor(
+                    ownerName: ownerName,
+                    businessName: "",
+                    serviceType: "general",
+                    ownerPhone: validPhone,
+                    countryCode: currentCountry,
+                    appleUserId: appState.appleUserId,
+                    appleIdentityToken: appState.appleIdentityToken
+                )
+            }
+        }
+
+        guard originSnapshot.isCurrent(
+            countryCode: selectedCountryCode,
+            phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
+            authContext: appState.currentAuthContext(),
+            appleUserId: appState.appleUserId
+        ) else { return }
 
         switch outcome {
         case .authFailed:
             await handleBootstrapAuthFailure()
             return
         case .success(let result):
+            if result?["status"] as? String == "error" {
+                errorMessage = result?["error"] as? String ?? String(localized: "Failed to create profile. Please try again.")
+                return
+            }
             await restoreBootstrapResponse(result)
         }
     }
@@ -1100,14 +1252,30 @@ struct OnboardingView: View {
         // number. Persist the selected mode before finishing onboarding, but avoid
         // overwriting restored profile fields with potentially-stale form values.
         if !contractorId.isEmpty {
-            if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId),
-               let existing = profile["twilio_number"] as? String,
+            let capturedAuth = appState.currentAuthContext()
+            let capturedAppleUserId = appState.appleUserId
+            guard let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) else {
+                errorMessage = String(localized: "Could not reconnect your account. Please try again.")
+                isLoading = false
+                return
+            }
+            guard appState.currentAuthContext() == capturedAuth,
+                  appState.appleUserId == capturedAppleUserId else {
+                isLoading = false
+                return
+            }
+            if let existing = profile["twilio_number"] as? String,
                !existing.isEmpty {
                 do {
                     let updated = try await APIClient.shared.patchContractor(
                         contractorId,
                         body: ["mode": mode]
                     )
+                    guard appState.currentAuthContext() == capturedAuth,
+                          appState.appleUserId == capturedAppleUserId else {
+                        isLoading = false
+                        return
+                    }
                     if !updated {
                         errorMessage = mode == "business"
                             ? String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
@@ -1131,32 +1299,104 @@ struct OnboardingView: View {
                 if let country = SettingsCountry.accountCountry(from: profile) {
                     appState.countryCode = country
                 }
+                appState.serviceBinding = ServiceBindingParser.parse(from: profile)
                 step = .forwarding
+                isLoading = false
+                return
+            }
+
+            // Restored profile without assigned number: gate before any mode write or provisioning!
+            let profileCountry = SettingsCountry.accountCountry(from: profile) ?? selectedCountryCode
+            let profilePhone = (profile["owner_phone"] as? String) ?? phoneNumber
+            let snapshot = SignupAdmissionSnapshot(
+                countryCode: profileCountry,
+                phone: profilePhone,
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            )
+            let admission = await SignupAdmission.checkAvailability(countryCode: profileCountry)
+            guard snapshot.isCurrent(
+                countryCode: profileCountry,
+                phone: profilePhone,
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            ) else {
+                isLoading = false
+                return
+            }
+            guard case .allowed = admission else {
+                errorMessage = admission.errorMessage ?? String(localized: "Kevin is not yet available in this country. We are preparing the service.")
                 isLoading = false
                 return
             }
         }
 
         if contractorId.isEmpty {
-            // No existing contractor — create one (with Apple User ID for dedup).
-            // Retries with a refreshed Apple identity token on 401.
-            let originAuth = appState.currentAuthContext()
-            let originApple = appState.appleUserId
-            let createOutcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber] in
-                try await APIClient.shared.createContractor(
-                    ownerName: resolvedOwnerName,
-                    businessName: bizName,
-                    serviceType: svcType,
-                    mode: mode,
-                    ownerPhone: phoneNumber,
-                    appleUserId: appState.appleUserId,
-                    appleIdentityToken: appState.appleIdentityToken,
-                    businessAddress: resolvedBusinessAddress,
-                    businessCity: resolvedBusinessCity,
-                    declaredOnboardingIntent: mode
-                )
+            // No existing contractor — validate phone and market gate before creation
+            let currentCountry = selectedCountryCode
+            let validation = SignupPhone.validate(phoneNumber, countryCode: currentCountry)
+            guard case .valid(let validPhone, _) = validation else {
+                errorMessage = validation.failureReason ?? String(localized: "Please enter a valid mobile phone number.")
+                isLoading = false
+                return
             }
-            guard appState.currentAuthContext() == originAuth, appState.appleUserId == originApple else {
+
+            let originSnapshot = SignupAdmissionSnapshot(
+                countryCode: currentCountry,
+                phone: validPhone,
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            )
+            let admission = await SignupAdmission.checkAvailability(countryCode: currentCountry)
+            guard originSnapshot.isCurrent(
+                countryCode: selectedCountryCode,
+                phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            ) else {
+                isLoading = false
+                return
+            }
+            guard case .allowed = admission else {
+                errorMessage = admission.errorMessage ?? String(localized: "Kevin is not yet available in this country. We are preparing the service.")
+                isLoading = false
+                return
+            }
+
+            let createOutcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, currentCountry, resolvedOwnerName, bizName, svcType, resolvedBusinessAddress, resolvedBusinessCity, mode] in
+                try await SignupAdmission.runIfAllowed(
+                    status: admission,
+                    snapshot: originSnapshot,
+                    current: {
+                        SignupAdmissionSnapshot(
+                            countryCode: self.selectedCountryCode,
+                            phone: SignupPhone.validate(self.phoneNumber, countryCode: self.selectedCountryCode).e164 ?? "",
+                            authContext: self.appState.currentAuthContext(),
+                            appleUserId: self.appState.appleUserId
+                        )
+                    }
+                ) {
+                    try await APIClient.shared.createContractor(
+                        ownerName: resolvedOwnerName,
+                        businessName: bizName,
+                        serviceType: svcType,
+                        mode: mode,
+                        ownerPhone: validPhone,
+                        countryCode: currentCountry,
+                        appleUserId: appState.appleUserId,
+                        appleIdentityToken: appState.appleIdentityToken,
+                        businessAddress: resolvedBusinessAddress,
+                        businessCity: resolvedBusinessCity,
+                        declaredOnboardingIntent: mode
+                    )
+                }
+            }
+            guard originSnapshot.isCurrent(
+                countryCode: selectedCountryCode,
+                phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            ) else {
                 isLoading = false
                 return
             }
@@ -1171,7 +1411,7 @@ struct OnboardingView: View {
             }
             contractorId = result?["contractor_id"] as? String ?? ""
             if contractorId.isEmpty {
-                errorMessage = String(localized: "Failed to create profile. Please try again.")
+                errorMessage = result?["error"] as? String ?? String(localized: "Failed to create profile. Please try again.")
                 isLoading = false
                 return
             }
@@ -1181,7 +1421,6 @@ struct OnboardingView: View {
                 return
             }
             appState.contractorId = contractorId
-            // Store per-contractor API token if returned
             if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
                 APIClient.shared.contractorToken = apiToken
             }
@@ -1223,6 +1462,7 @@ struct OnboardingView: View {
             if let country = SettingsCountry.accountCountry(from: profile) {
                 appState.countryCode = country
             }
+            appState.serviceBinding = ServiceBindingParser.parse(from: profile)
         } else if !appState.kevinNumber.isEmpty {
             kevinNumber = appState.kevinNumber
         } else {
@@ -1238,8 +1478,9 @@ struct OnboardingView: View {
                 if let country = SettingsCountry.accountCountry(from: provResult ?? [:]) {
                     appState.countryCode = country
                 }
+                appState.serviceBinding = ServiceBindingParser.parseBinding(provResult?["service_binding"])
             } else {
-                let message = provResult?["message"] as? String
+                let message = provResult?["error"] as? String ?? provResult?["message"] as? String
                 errorMessage = message ?? String(localized: "Failed to provision number. Please try again.")
                 isLoading = false
                 return
@@ -1265,10 +1506,7 @@ struct OnboardingView: View {
             }
         }
 
-        // Ask for push permission here, not at cold launch. The number now
-        // exists and the user has seen what Kevin does, so the system alert
-        // arrives with context. A denial is unrecoverable in-app and disables
-        // the live-call screen and call summaries entirely.
+        // Ask for push permission here, not at cold launch.
         AppDelegate.requestPushAuthorization()
         step = .forwarding
         isLoading = false
@@ -1329,17 +1567,66 @@ struct OnboardingView: View {
         defer { isLoading = false }
 
         if appState.contractorId.isEmpty {
-            let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, phoneNumber, ownerName, businessName, serviceType] in
-                try await APIClient.shared.createContractor(
-                    ownerName: ownerName,
-                    businessName: businessName,
-                    serviceType: serviceType,
-                    mode: "personal",
-                    ownerPhone: phoneNumber,
-                    appleUserId: appState.appleUserId,
-                    appleIdentityToken: appState.appleIdentityToken,
-                    declaredOnboardingIntent: "business"
-                )
+            let currentCountry = selectedCountryCode
+            let validation = SignupPhone.validate(phoneNumber, countryCode: currentCountry)
+            guard case .valid(let validPhone, _) = validation else {
+                errorMessage = validation.failureReason ?? String(localized: "Please enter a valid mobile phone number.")
+                return false
+            }
+
+            let originSnapshot = SignupAdmissionSnapshot(
+                countryCode: currentCountry,
+                phone: validPhone,
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            )
+            let admission = await SignupAdmission.checkAvailability(countryCode: currentCountry)
+            guard originSnapshot.isCurrent(
+                countryCode: selectedCountryCode,
+                phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            ) else {
+                return false
+            }
+            guard case .allowed = admission else {
+                errorMessage = admission.errorMessage ?? String(localized: "Kevin is not yet available in this country. We are preparing the service.")
+                return false
+            }
+
+            let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, ownerName, businessName, serviceType, currentCountry] in
+                try await SignupAdmission.runIfAllowed(
+                    status: admission,
+                    snapshot: originSnapshot,
+                    current: {
+                        SignupAdmissionSnapshot(
+                            countryCode: self.selectedCountryCode,
+                            phone: SignupPhone.validate(self.phoneNumber, countryCode: self.selectedCountryCode).e164 ?? "",
+                            authContext: self.appState.currentAuthContext(),
+                            appleUserId: self.appState.appleUserId
+                        )
+                    }
+                ) {
+                    try await APIClient.shared.createContractor(
+                        ownerName: ownerName,
+                        businessName: businessName,
+                        serviceType: serviceType,
+                        mode: "personal",
+                        ownerPhone: validPhone,
+                        countryCode: currentCountry,
+                        appleUserId: appState.appleUserId,
+                        appleIdentityToken: appState.appleIdentityToken,
+                        declaredOnboardingIntent: "business"
+                    )
+                }
+            }
+            guard originSnapshot.isCurrent(
+                countryCode: selectedCountryCode,
+                phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
+                authContext: appState.currentAuthContext(),
+                appleUserId: appState.appleUserId
+            ) else {
+                return false
             }
             let result: [String: Any]?
             switch outcome {
@@ -1350,7 +1637,7 @@ struct OnboardingView: View {
                 result = value
             }
             guard let contractorId = result?["contractor_id"] as? String, !contractorId.isEmpty else {
-                errorMessage = String(localized: "Failed to prepare your business profile. Please try again.")
+                errorMessage = result?["error"] as? String ?? String(localized: "Failed to prepare your business profile. Please try again.")
                 return false
             }
             appState.contractorId = contractorId
@@ -1397,6 +1684,7 @@ struct OnboardingView: View {
             if !subUUID.isEmpty {
                 appState.subscriptionUUID = subUUID
             }
+            appState.serviceBinding = ServiceBindingParser.parse(from: profile)
         }
 
         return true
@@ -1454,6 +1742,7 @@ struct OnboardingView: View {
     private func recordForwardingOutcome(didSetUp: Bool) {
         let contractorId = appState.contractorId
         guard !contractorId.isEmpty else { return }
+        guard forwardingCodes != nil else { return }
         let field = didSetUp ? "forwarding_self_reported_at" : "forwarding_skipped_at"
         let payload: [String: Any] = [
             field: Date().timeIntervalSince1970,

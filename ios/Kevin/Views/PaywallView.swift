@@ -292,7 +292,7 @@ struct PaywallView: View {
         // 75%-off-for-3-months promotional offer at purchase time.
         if canShowFoundingMemberPromo {
             let discounted = (product.price / 4).rounded(toPlaces: 2)
-            let discountedStr = "$\(String(format: "%.2f", NSDecimalNumber(decimal: discounted).doubleValue))"
+            let discountedStr = discounted.formatted(product.priceFormatStyle)
             return String(
                 format: String(localized: "Subscribe — %1$@/mo for 3 months, then %2$@/mo"),
                 discountedStr, price
@@ -311,45 +311,46 @@ struct PaywallView: View {
         return String(format: String(localized: "Subscribe — %@/mo"), price)
     }
 
+    @ViewBuilder
     private var cancelForwardingButton: some View {
-        Button {
-            // Deactivate — must cancel exactly what Settings/Onboarding set up.
-            // No fetch here: the built-in deactivate equals the server's
-            // disable_unanswered for every supported country, and NANP keeps
-            // its Verizon/GSM split. That equality is enforced server-side by
-            // tests/unit/test_forwarding_instructions.py
-            // (test_gsm_disable_unanswered_targets_service_code_61).
-            let codes = ForwardingDialCodes.codes(
-                countryCode: ForwardingCountry.resolve(accountCountry: appState.countryCode),
-                instructions: nil,
-                number: "",
-                isVerizon: appState.isVerizonCarrier
-            )
-            if let url = ForwardingDialCodes.telURL(codes.deactivate) {
+        let country = ForwardingCountry.resolve(
+            serviceBinding: appState.serviceBinding,
+            accountCountry: appState.countryCode,
+            assignedNumber: appState.kevinNumber,
+            hasAssignedNumber: !appState.kevinNumber.isEmpty
+        )
+        let codes = ForwardingDialCodes.codes(
+            countryCode: country,
+            instructions: nil,
+            number: appState.kevinNumber,
+            isVerizon: appState.isVerizonCarrier
+        )
+        if let codes, let url = ForwardingDialCodes.telURL(codes.deactivate) {
+            Button {
                 UIApplication.shared.open(url)
-            }
-        } label: {
-            HStack {
-                Image(systemName: "phone.slash")
-                    .foregroundStyle(.red)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Cancel Forwarding")
-                        .font(.subheadline.weight(.medium))
+            } label: {
+                HStack {
+                    Image(systemName: "phone.slash")
                         .foregroundStyle(.red)
-                    Text("Stop routing calls through Kevin")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Cancel Forwarding"))
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.red)
+                        Text(String(localized: "Stop routing calls through Kevin"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.tertiary)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .foregroundStyle(.tertiary)
-                    .font(.caption)
+                .padding()
+                .background(Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
-            .padding()
-            .background(Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Helpers
@@ -439,7 +440,7 @@ private struct TierCard: View {
     private var promoPrice: String {
         let price = product.price
         let discounted = (price / 4).rounded(toPlaces: 2)
-        return "$\(String(format: "%.2f", NSDecimalNumber(decimal: discounted).doubleValue))"
+        return discounted.formatted(product.priceFormatStyle)
     }
 
     var body: some View {

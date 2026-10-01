@@ -158,7 +158,10 @@ class AppState: ObservableObject {
         unreadCallCount = 0
         notificationCallSid = ""
         notificationCallMessage = ""
+        serviceBinding = nil
     }
+
+    @Published var serviceBinding: ServiceBinding? = nil
 
     // Session generation incremented on logout, contractor change, and credential change
     var sessionGeneration: Int {
@@ -207,6 +210,7 @@ class AppState: ObservableObject {
                 unreadCallCount = 0
                 notificationCallSid = ""
                 notificationCallMessage = ""
+                serviceBinding = nil
                 if !inMemory && !inScreenshotFixture {
                     CallSessionEpoch.shared.advance()
                 }

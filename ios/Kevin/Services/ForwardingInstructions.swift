@@ -65,20 +65,47 @@ struct ForwardingCodes: Equatable {
 
 enum ForwardingCountry {
     /// Countries where the app keeps its existing Verizon/GSM behaviour and
-    /// never consults the server. The two in-repo sources for US codes
-    /// disagree; resolving that is a product decision, not a client one.
+    /// never consults the server.
     static let nanp: Set<String> = ["US", "CA"]
 
     static func isNANP(_ countryCode: String) -> Bool {
-        nanp.contains(countryCode.uppercased())
+        nanp.contains(countryCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())
     }
 
-    /// The forwarding codes belong to the carrier of the phone being
-    /// forwarded — the user's own SIM. The account country is what the user
-    /// told us and wins when it is a well-formed two-letter code; otherwise
-    /// the device region is the best signal available. Defaults to US, which
-    /// preserves today's behaviour for a locale with no region.
-    static func resolve(accountCountry: String? = nil, locale: Locale = .current) -> String {
+    /// Resolves the country for forwarding logic.
+    /// When assigned (hasAssignedNumber is true):
+    /// - Uses serviceBinding.countryCode if valid and non-empty.
+    /// - If serviceBinding is present but unknown/invalid, fails closed and returns empty string.
+    /// - If serviceBinding is absent, uses confirmed accountCountry ONLY IF confirmed US/CA
+    ///   AND assignedNumber has valid NANP structure (+1 + 10 ASCII digits).
+    /// When unassigned (hasAssignedNumber is false):
+    /// - Uses explicit accountCountry if valid.
+    /// - Otherwise falls back to device region from locale.
+    static func resolve(
+        serviceBinding: ServiceBinding? = nil,
+        accountCountry: String? = nil,
+        assignedNumber: String? = nil,
+        hasAssignedNumber: Bool = false,
+        locale: Locale = .current
+    ) -> String {
+        if hasAssignedNumber {
+            if let binding = serviceBinding {
+                if let bindingCountry = binding.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+                   bindingCountry.count == 2,
+                   bindingCountry.allSatisfy({ $0.isASCII && $0.isLetter }) {
+                    return bindingCountry
+                }
+                return ""
+            }
+
+            if let account = accountCountry?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+               isNANP(account),
+               ForwardingDialCodes.extractNANPDigits(assignedNumber) != nil {
+                return account
+            }
+            return ""
+        }
+
         if let account = accountCountry?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
            account.count == 2,
            account.allSatisfy({ $0.isASCII && $0.isLetter }) {
@@ -90,35 +117,67 @@ enum ForwardingCountry {
 }
 
 enum ForwardingDialCodes {
-    static func codes(
-        countryCode: String,
-        instructions: ForwardingInstructions?,
-        number: String,
-        isVerizon: Bool
-    ) -> ForwardingCodes {
-        let digits = number.filter { $0.isNumber }
-        let country = countryCode.uppercased()
+    static func extractNANPDigits(_ number: String?) -> String? {
+        guard let number else { return nil }
+        let trimmed = number.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
 
-        if !ForwardingCountry.isNANP(country),
-           let instructions,
-           instructions.countryCode == country {
-            return ForwardingCodes(
-                activate: instructions.forwardUnansweredTemplate
-                    .replacingOccurrences(of: "{number}", with: digits),
-                deactivate: instructions.disableUnanswered,
-                clearExisting: instructions.disableAll,
-                clearAll: instructions.disableEverything,
-                isServerDriven: true
-            )
+        var hasPlus = false
+        for (index, char) in trimmed.enumerated() {
+            if char == "+" {
+                if index != 0 || hasPlus { return nil }
+                hasPlus = true
+            } else if char.isASCII && char.isNumber {
+                continue
+            } else if [" ", "-", "(", ")", ".", "/"].contains(char) {
+                continue
+            } else {
+                return nil
+            }
         }
 
-        // Built-in codes: exactly what the app dialed before server-driven
-        // instructions existed, so an offline device or a backend without the
-        // new shape behaves as it always has.
-        if ForwardingCountry.isNANP(country), isVerizon {
+        let digits = trimmed.filter { $0.isASCII && $0.isNumber }
+        if hasPlus {
+            guard digits.hasPrefix("1") else { return nil }
+        }
+
+        var national = digits
+        if national.count == 11 && national.hasPrefix("1") {
+            national = String(national.dropFirst())
+        }
+
+        guard national.count == 10 else { return nil }
+
+        let first = national.first!
+        if first == "0" || first == "1" { return nil }
+        let exchangeFirst = national[national.index(national.startIndex, offsetBy: 3)]
+        if exchangeFirst == "0" || exchangeFirst == "1" { return nil }
+
+        return national
+    }
+
+    static func codes(
+        countryCode: String,
+        instructions: ForwardingInstructions? = nil,
+        number: String,
+        isVerizon: Bool
+    ) -> ForwardingCodes? {
+        let country = countryCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+
+        // Explicitly unavailable for ALL non-US/CA until a later carrier contract exists
+        guard ForwardingCountry.isNANP(country) else {
+            return nil
+        }
+
+        guard let nationalDigits = extractNANPDigits(number) else {
+            return nil
+        }
+
+        // Built-in codes for NANP (US/CA)
+        if isVerizon {
             // Verizon: *71<number> forwards on no-answer; *73 cancels it.
             return ForwardingCodes(
-                activate: "*71\(digits)",
+                activate: "*71\(nationalDigits)",
                 deactivate: "*73",
                 clearExisting: "*73",
                 clearAll: nil,
@@ -128,7 +187,7 @@ enum ForwardingDialCodes {
         // GSM: *61*<number># forwards on no-answer; ##61# cancels it; ##21#
         // clears an unconditional forward; ##002# erases every type.
         return ForwardingCodes(
-            activate: "*61*\(digits)#",
+            activate: "*61*\(nationalDigits)#",
             deactivate: "##61#",
             clearExisting: "##21#",
             clearAll: "##002#",
@@ -138,7 +197,8 @@ enum ForwardingDialCodes {
 
     /// `#` would start a URL fragment, so it must be percent-encoded; `*` is
     /// legal in a `tel:` URL and the dialer needs it verbatim.
-    static func telURL(_ code: String) -> URL? {
-        URL(string: "tel:\(code.replacingOccurrences(of: "#", with: "%23"))")
+    static func telURL(_ code: String?) -> URL? {
+        guard let code, !code.isEmpty else { return nil }
+        return URL(string: "tel:\(code.replacingOccurrences(of: "#", with: "%23"))")
     }
 }

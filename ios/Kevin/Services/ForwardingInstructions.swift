@@ -169,15 +169,17 @@ enum ForwardingDialCodes {
             return nil
         }
 
-        guard let nationalDigits = extractNANPDigits(number) else {
+        guard extractNANPDigits(number) != nil else {
             return nil
         }
+
+        let destinationDigits = number.filter { $0.isASCII && $0.isNumber }
 
         // Built-in codes for NANP (US/CA)
         if isVerizon {
             // Verizon: *71<number> forwards on no-answer; *73 cancels it.
             return ForwardingCodes(
-                activate: "*71\(nationalDigits)",
+                activate: "*71\(destinationDigits)",
                 deactivate: "*73",
                 clearExisting: "*73",
                 clearAll: nil,
@@ -187,7 +189,7 @@ enum ForwardingDialCodes {
         // GSM: *61*<number># forwards on no-answer; ##61# cancels it; ##21#
         // clears an unconditional forward; ##002# erases every type.
         return ForwardingCodes(
-            activate: "*61*\(nationalDigits)#",
+            activate: "*61*\(destinationDigits)#",
             deactivate: "##61#",
             clearExisting: "##21#",
             clearAll: "##002#",

@@ -893,14 +893,17 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
-    func provisionNumber(contractorId: String) async -> [String: Any]? {
+    func provisionNumber(contractorId: String, bearerToken: String? = nil) async -> [String: Any]? {
+        guard !contractorId.isEmpty else { return nil }
+        let token = bearerToken ?? contractorToken
+        guard !token.isEmpty else { return nil }
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)/provision-number")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.timeoutInterval = 30  // Number provisioning can take time
-            authorize(&request)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse {

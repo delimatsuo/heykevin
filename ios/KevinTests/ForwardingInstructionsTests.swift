@@ -161,11 +161,27 @@ final class ForwardingInstructionsTests: XCTestCase {
             isVerizon: true
         )
         XCTAssertNotNil(codes)
-        XCTAssertEqual(codes?.activate, "*714155551234")
+        XCTAssertEqual(codes?.activate, "*7114155551234")
         XCTAssertEqual(codes?.deactivate, "*73")
         XCTAssertEqual(codes?.clearExisting, "*73")
         XCTAssertNil(codes?.clearAll)
         XCTAssertFalse(codes?.isServerDriven ?? true)
+
+        let e164Codes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "+14155551234",
+            isVerizon: true
+        )
+        XCTAssertEqual(e164Codes?.activate, "*7114155551234")
+
+        let tenDigitCodes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "4155551234",
+            isVerizon: true
+        )
+        XCTAssertEqual(tenDigitCodes?.activate, "*714155551234")
     }
 
     func testUSNonVerizonKeepsExistingGSMCodes() {
@@ -176,11 +192,27 @@ final class ForwardingInstructionsTests: XCTestCase {
             isVerizon: false
         )
         XCTAssertNotNil(codes)
-        XCTAssertEqual(codes?.activate, "*61*4155551234#")
+        XCTAssertEqual(codes?.activate, "*61*14155551234#")
         XCTAssertEqual(codes?.deactivate, "##61#")
         XCTAssertEqual(codes?.clearExisting, "##21#")
         XCTAssertEqual(codes?.clearAll, "##002#")
         XCTAssertFalse(codes?.isServerDriven ?? true)
+
+        let e164Codes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "+14155551234",
+            isVerizon: false
+        )
+        XCTAssertEqual(e164Codes?.activate, "*61*14155551234#")
+
+        let tenDigitCodes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "4155551234",
+            isVerizon: false
+        )
+        XCTAssertEqual(tenDigitCodes?.activate, "*61*4155551234#")
     }
 
     func testCanadaIsTreatedAsNANP() {
@@ -191,7 +223,7 @@ final class ForwardingInstructionsTests: XCTestCase {
             isVerizon: false
         )
         XCTAssertNotNil(codes)
-        XCTAssertEqual(codes?.activate, "*61*4165551234#")
+        XCTAssertEqual(codes?.activate, "*61*14165551234#")
         XCTAssertFalse(codes?.isServerDriven ?? true)
     }
 

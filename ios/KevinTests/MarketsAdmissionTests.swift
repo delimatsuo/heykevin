@@ -415,7 +415,7 @@ final class MarketsAdmissionTests: XCTestCase {
     // MARK: - Production Admission Effect Guard: runIfAllowed Tests
 
     @MainActor
-    func testRunIfAllowedStatusNotAllowedRejectsWithoutCallingOperation() async {
+    func testRunIfAllowedStatusNotAllowedRejectsWithoutCallingOperation() async throws {
         let auth = CallAuthContext(contractorId: "c_123", bearerToken: "tok_abc", generation: 1)
         let snapshot = SignupAdmissionSnapshot(
             countryCode: "BR",
@@ -431,7 +431,7 @@ final class MarketsAdmissionTests: XCTestCase {
         }
 
         // 1. Unavailable status
-        let unavailableResult = await SignupAdmission.runIfAllowed(
+        let unavailableResult = try await SignupAdmission.runIfAllowed(
             status: .unavailable(message: "Not available"),
             snapshot: snapshot,
             current: { snapshot },
@@ -441,7 +441,7 @@ final class MarketsAdmissionTests: XCTestCase {
         XCTAssertEqual(spyCallCount, 0, "Operation must not be called when admission status is unavailable")
 
         // 2. CheckFailed status
-        let checkFailedResult = await SignupAdmission.runIfAllowed(
+        let checkFailedResult = try await SignupAdmission.runIfAllowed(
             status: .checkFailed(message: "Check failed"),
             snapshot: snapshot,
             current: { snapshot },
@@ -452,7 +452,7 @@ final class MarketsAdmissionTests: XCTestCase {
     }
 
     @MainActor
-    func testRunIfAllowedStaleSnapshotBeforeOperationRejects() async {
+    func testRunIfAllowedStaleSnapshotBeforeOperationRejects() async throws {
         let auth = CallAuthContext(contractorId: "c_123", bearerToken: "tok_abc", generation: 1)
         let snapshot = SignupAdmissionSnapshot(
             countryCode: "US",
@@ -469,37 +469,37 @@ final class MarketsAdmissionTests: XCTestCase {
 
         // Stale country
         let staleCountry = SignupAdmissionSnapshot(countryCode: "BR", phone: "+16505551234", authContext: auth, appleUserId: "apple_user_1")
-        let res1 = await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleCountry }, operation: operation)
+        let res1 = try await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleCountry }, operation: operation)
         XCTAssertNil(res1)
         XCTAssertEqual(spyCallCount, 0)
 
         // Stale phone
         let stalePhone = SignupAdmissionSnapshot(countryCode: "US", phone: "+16505559999", authContext: auth, appleUserId: "apple_user_1")
-        let res2 = await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { stalePhone }, operation: operation)
+        let res2 = try await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { stalePhone }, operation: operation)
         XCTAssertNil(res2)
         XCTAssertEqual(spyCallCount, 0)
 
         // Stale contractor ID
         let staleContractor = SignupAdmissionSnapshot(countryCode: "US", phone: "+16505551234", authContext: CallAuthContext(contractorId: "c_diff", bearerToken: "tok_abc", generation: 1), appleUserId: "apple_user_1")
-        let res3 = await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleContractor }, operation: operation)
+        let res3 = try await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleContractor }, operation: operation)
         XCTAssertNil(res3)
         XCTAssertEqual(spyCallCount, 0)
 
         // Stale token
         let staleToken = SignupAdmissionSnapshot(countryCode: "US", phone: "+16505551234", authContext: CallAuthContext(contractorId: "c_123", bearerToken: "tok_diff", generation: 1), appleUserId: "apple_user_1")
-        let res4 = await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleToken }, operation: operation)
+        let res4 = try await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleToken }, operation: operation)
         XCTAssertNil(res4)
         XCTAssertEqual(spyCallCount, 0)
 
         // Stale generation
         let staleGen = SignupAdmissionSnapshot(countryCode: "US", phone: "+16505551234", authContext: CallAuthContext(contractorId: "c_123", bearerToken: "tok_abc", generation: 2), appleUserId: "apple_user_1")
-        let res5 = await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleGen }, operation: operation)
+        let res5 = try await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleGen }, operation: operation)
         XCTAssertNil(res5)
         XCTAssertEqual(spyCallCount, 0)
 
         // Stale Apple ID
         let staleApple = SignupAdmissionSnapshot(countryCode: "US", phone: "+16505551234", authContext: auth, appleUserId: "apple_user_2")
-        let res6 = await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleApple }, operation: operation)
+        let res6 = try await SignupAdmission.runIfAllowed(status: .allowed, snapshot: snapshot, current: { staleApple }, operation: operation)
         XCTAssertNil(res6)
         XCTAssertEqual(spyCallCount, 0)
     }

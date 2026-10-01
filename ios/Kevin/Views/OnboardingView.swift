@@ -1245,22 +1245,28 @@ struct OnboardingView: View {
         isLoading = true
         errorMessage = ""
 
+        let initialAuth = appState.currentAuthContext()
+        let initialAppleUserId = appState.appleUserId
+
         // Reuse existing contractor if we have one, otherwise create new
-        var contractorId = appState.contractorId
+        let existingContractorId = appState.contractorId
 
         // Fast-path: contractor already exists and the profile already has a Kevin
         // number. Persist the selected mode before finishing onboarding, but avoid
         // overwriting restored profile fields with potentially-stale form values.
-        if !contractorId.isEmpty {
-            let capturedAuth = appState.currentAuthContext()
-            let capturedAppleUserId = appState.appleUserId
-            guard let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) else {
-                errorMessage = String(localized: "Could not reconnect your account. Please try again.")
+        if !existingContractorId.isEmpty {
+            guard let profile = await APIClient.shared.getContractorProfile(
+                contractorId: initialAuth.contractorId,
+                bearerToken: initialAuth.bearerToken
+            ) else {
+                if appState.currentAuthContext() == initialAuth && appState.appleUserId == initialAppleUserId {
+                    errorMessage = String(localized: "Could not reconnect your account. Please try again.")
+                }
                 isLoading = false
                 return
             }
-            guard appState.currentAuthContext() == capturedAuth,
-                  appState.appleUserId == capturedAppleUserId else {
+            guard appState.currentAuthContext() == initialAuth,
+                  appState.appleUserId == initialAppleUserId else {
                 isLoading = false
                 return
             }
@@ -1268,11 +1274,12 @@ struct OnboardingView: View {
                !existing.isEmpty {
                 do {
                     let updated = try await APIClient.shared.patchContractor(
-                        contractorId,
-                        body: ["mode": mode]
+                        initialAuth.contractorId,
+                        body: ["mode": mode],
+                        bearerToken: initialAuth.bearerToken
                     )
-                    guard appState.currentAuthContext() == capturedAuth,
-                          appState.appleUserId == capturedAppleUserId else {
+                    guard appState.currentAuthContext() == initialAuth,
+                          appState.appleUserId == initialAppleUserId else {
                         isLoading = false
                         return
                     }
@@ -1284,6 +1291,11 @@ struct OnboardingView: View {
                         return
                     }
                 } catch {
+                    guard appState.currentAuthContext() == initialAuth,
+                          appState.appleUserId == initialAppleUserId else {
+                        isLoading = false
+                        return
+                    }
                     errorMessage = String(localized: "Failed to update profile. Please try again.")
                     isLoading = false
                     return
@@ -1311,8 +1323,8 @@ struct OnboardingView: View {
             let snapshot = SignupAdmissionSnapshot(
                 countryCode: profileCountry,
                 phone: profilePhone,
-                authContext: appState.currentAuthContext(),
-                appleUserId: appState.appleUserId
+                authContext: initialAuth,
+                appleUserId: initialAppleUserId
             )
             let admission = await SignupAdmission.checkAvailability(countryCode: profileCountry)
             guard snapshot.isCurrent(
@@ -1325,13 +1337,43 @@ struct OnboardingView: View {
                 return
             }
             guard case .allowed = admission else {
-                errorMessage = admission.errorMessage ?? String(localized: "Kevin is not yet available in this country. We are preparing the service.")
+                if appState.currentAuthContext() == initialAuth && appState.appleUserId == initialAppleUserId {
+                    errorMessage = admission.errorMessage ?? String(localized: "Kevin is not yet available in this country. We are preparing the service.")
+                }
+                isLoading = false
+                return
+            }
+            guard appState.currentAuthContext() == initialAuth,
+                  appState.appleUserId == initialAppleUserId else {
                 isLoading = false
                 return
             }
         }
 
-        if contractorId.isEmpty {
+        let opAuthContext: CallAuthContext
+        let opAppleUserId: String
+        let patchProfileClosure: (() async throws -> Bool)?
+        let patchFailureMessage: String
+
+        if !existingContractorId.isEmpty {
+            // Pre-existing unassigned account: construct optional patch closure using captured token
+            var updateBody: [String: Any] = ["mode": mode]
+            if !resolvedOwnerName.isEmpty { updateBody["owner_name"] = resolvedOwnerName }
+            if !bizName.isEmpty { updateBody["business_name"] = bizName }
+
+            opAuthContext = initialAuth
+            opAppleUserId = initialAppleUserId
+            patchProfileClosure = {
+                try await APIClient.shared.patchContractor(
+                    initialAuth.contractorId,
+                    body: updateBody,
+                    bearerToken: initialAuth.bearerToken
+                )
+            }
+            patchFailureMessage = mode == "business"
+                ? String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
+                : String(localized: "Failed to update profile. Please try again.")
+        } else {
             // No existing contractor — validate phone and market gate before creation
             let currentCountry = selectedCountryCode
             let validation = SignupPhone.validate(phoneNumber, countryCode: currentCountry)
@@ -1409,8 +1451,8 @@ struct OnboardingView: View {
             case .success(let value):
                 result = value
             }
-            contractorId = result?["contractor_id"] as? String ?? ""
-            if contractorId.isEmpty {
+            let newContractorId = result?["contractor_id"] as? String ?? ""
+            if newContractorId.isEmpty {
                 errorMessage = result?["error"] as? String ?? String(localized: "Failed to create profile. Please try again.")
                 isLoading = false
                 return
@@ -1420,96 +1462,84 @@ struct OnboardingView: View {
                 isLoading = false
                 return
             }
-            appState.contractorId = contractorId
+            appState.contractorId = newContractorId
             if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
                 APIClient.shared.contractorToken = apiToken
             }
-
-        } else {
-            // Existing contractor — update profile info. Only patch fields we have
-            // values for so we don't overwrite restored profile data with empties.
-            var updateBody: [String: Any] = ["mode": mode]
-            if !resolvedOwnerName.isEmpty { updateBody["owner_name"] = resolvedOwnerName }
-            if !bizName.isEmpty { updateBody["business_name"] = bizName }
-            do {
-                let updated = try await APIClient.shared.patchContractor(contractorId, body: updateBody)
-                if !updated {
-                    errorMessage = mode == "business"
-                        ? String(localized: "Business mode requires an active Business subscription. Restore purchases or choose Personal.")
-                        : String(localized: "Failed to update profile. Please try again.")
-                    isLoading = false
-                    return
-                }
-            } catch {
-                errorMessage = String(localized: "Failed to update profile. Please try again.")
-                isLoading = false
-                return
-            }
-            if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }
-            if !bizName.isEmpty { appState.businessName = bizName }
+            opAuthContext = appState.currentAuthContext()
+            opAppleUserId = appState.appleUserId
+            patchProfileClosure = nil
+            patchFailureMessage = ""
         }
 
-        appState.mode = mode
+        let isCurrentIdentity: () -> Bool = { [appState, opAuthContext, opAppleUserId] in
+            appState.currentAuthContext() == opAuthContext && appState.appleUserId == opAppleUserId
+        }
 
-        // Check if contractor already has a Twilio number. During mode changes,
-        // keep the current Kevin number even if the profile fetch is transiently stale.
-        if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId),
-           let existingNumber = profile["twilio_number"] as? String,
-           !existingNumber.isEmpty {
-            // Reuse existing number
-            kevinNumber = existingNumber
-            appState.kevinNumber = kevinNumber
-            if let country = SettingsCountry.accountCountry(from: profile) {
-                appState.countryCode = country
-            }
-            appState.serviceBinding = ServiceBindingParser.parse(from: profile)
-        } else if !appState.kevinNumber.isEmpty {
-            kevinNumber = appState.kevinNumber
-        } else {
-            // Provision new Twilio number
-            let provResult = await APIClient.shared.provisionNumber(contractorId: contractorId)
-            if provResult?["status"] as? String == "ok",
-               let phoneNumber = provResult?["phone_number"] as? String,
-               !phoneNumber.isEmpty {
-                kevinNumber = phoneNumber
-                appState.kevinNumber = kevinNumber
-                // Provisioning is where the server finally resolves the account
-                // country from the phone; adopt it before the forwarding step.
-                if let country = SettingsCountry.accountCountry(from: provResult ?? [:]) {
+        let opResult = await ProvisioningOperation.run(
+            capturedAuth: opAuthContext,
+            isCurrent: isCurrentIdentity,
+            cachedNumber: appState.kevinNumber,
+            cachedCountry: appState.countryCode,
+            cachedBinding: appState.serviceBinding,
+            patchProfile: patchProfileClosure,
+            patchFailureMessage: patchFailureMessage,
+            fetchProfile: {
+                await APIClient.shared.getContractorProfile(
+                    contractorId: opAuthContext.contractorId,
+                    bearerToken: opAuthContext.bearerToken
+                )
+            },
+            provisionNumber: {
+                await APIClient.shared.provisionNumber(
+                    contractorId: opAuthContext.contractorId,
+                    bearerToken: opAuthContext.bearerToken
+                )
+            },
+            syncContacts: appState.contactsUploadConsent ? {
+                let syncResult = await ContactSyncManager.shared.syncContacts(
+                    contractorId: opAuthContext.contractorId,
+                    force: true
+                )
+                if case .success(let synced, _) = syncResult {
+                    return synced
+                }
+                return nil
+            } : nil,
+            commit: { output in
+                if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }
+                if !resolvedBusinessName.isEmpty { appState.businessName = resolvedBusinessName }
+                appState.mode = mode
+                kevinNumber = output.number
+                appState.kevinNumber = output.number
+                if let country = output.country {
                     appState.countryCode = country
                 }
-                appState.serviceBinding = ServiceBindingParser.parseBinding(provResult?["service_binding"])
-            } else {
-                let message = provResult?["error"] as? String ?? provResult?["message"] as? String
-                errorMessage = message ?? String(localized: "Failed to provision number. Please try again.")
-                isLoading = false
-                return
+                appState.serviceBinding = output.binding
+                if let subUUID = output.subscriptionUUID {
+                    appState.subscriptionUUID = subUUID
+                }
+                if let synced = output.syncedContacts {
+                    contactsSynced = synced
+                }
+                appState.appleIdentityToken = ""
+                AppDelegate.requestPushAuthorization()
+                step = .forwarding
             }
-        }
+        )
 
-        // Sync contacts only if the user gave explicit upload consent
-        if appState.contactsUploadConsent {
-            let syncResult = await ContactSyncManager.shared.syncContacts(contractorId: contractorId, force: true)
-            if case .success(let synced, _) = syncResult {
-                contactsSynced = synced
-            }
-        }
-
-        // Clear identity token after successful provisioning
-        appState.appleIdentityToken = ""
-
-        // Load subscription_uuid from backend profile
-        if let profile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
-            let subUUID = profile["subscription_uuid"] as? String ?? ""
-            await MainActor.run {
-                if !subUUID.isEmpty { appState.subscriptionUUID = subUUID }
-            }
-        }
-
-        // Ask for push permission here, not at cold launch.
-        AppDelegate.requestPushAuthorization()
-        step = .forwarding
         isLoading = false
+
+        switch opResult {
+        case .completed:
+            break
+        case .superseded:
+            break
+        case .failed(let message):
+            if isCurrentIdentity() {
+                errorMessage = message
+            }
+        }
     }
 
     /// Validates the address captured on the provisioning-failure screen,

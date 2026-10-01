@@ -108,9 +108,10 @@ _BASELINE_HASHES = {
     # app/services/number_release.py (30-day lapsed-number release, owner
     # decision 2026-09-03). Still only a wiring change to main.py.
     # Re-pinned 2026-09-30 for reviewed acquisition router registration.
+    # Re-pinned 2026-10-01 for reviewed public market-availability router.
     # Voice bakeoff imports and activation remain prohibited.
     "app/main.py":
-        "01400ead214cfa38caf4c621b3ded62f377bf902d91639874c3a9ad212aadcb1",
+        "b309613be996ba570615ab2703020ab58982278482e24304588a7dead76d74f2",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

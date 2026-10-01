@@ -118,62 +118,106 @@ final class ForwardingInstructionsTests: XCTestCase {
     }
 
     // MARK: - Dial codes
+    // All non-US/CA countries return nil (unavailable) until a carrier contract exists.
 
-    func testServerCodesForBrazil() {
+    func testNonNANPCountriesReturnNilDialCodes() {
+        let nonNANP = ["BR", "GB", "DE", "FR", "IT", "ES", "PT", "ZZ"]
+        let numbers = ["+55 11 98765-4321", "+14155551234"]
+        for country in nonNANP {
+            for number in numbers {
+                for isVerizon in [false, true] {
+                    let codes = ForwardingDialCodes.codes(
+                        countryCode: country,
+                        instructions: brazilInstructions,
+                        number: number,
+                        isVerizon: isVerizon
+                    )
+                    XCTAssertNil(codes, "ForwardingDialCodes.codes must be nil for non-NANP country \(country) number \(number) isVerizon \(isVerizon)")
+                }
+            }
+        }
+    }
+
+    func testBrazilReturnsNilDialCodes() {
         let codes = ForwardingDialCodes.codes(
             countryCode: "BR",
             instructions: brazilInstructions,
             number: "+55 11 98765-4321",
             isVerizon: false
         )
-        XCTAssertEqual(codes.activate, "**61*5511987654321#")
-        XCTAssertEqual(codes.deactivate, "##61#")
-        XCTAssertEqual(codes.clearExisting, "##21#")
-        XCTAssertEqual(codes.clearAll, "##002#")
-        XCTAssertTrue(codes.isServerDriven)
+        XCTAssertNil(codes)
     }
 
-    func testVerizonToggleIsIgnoredOutsideNANP() {
+    func testUKReturnsNilDialCodes() {
         let codes = ForwardingDialCodes.codes(
-            countryCode: "BR",
-            instructions: brazilInstructions,
-            number: "5511987654321",
-            isVerizon: true
+            countryCode: "GB",
+            instructions: nil,
+            number: "447700900123",
+            isVerizon: false
         )
-        XCTAssertEqual(codes.activate, "**61*5511987654321#")
-        XCTAssertEqual(codes.deactivate, "##61#")
+        XCTAssertNil(codes)
     }
 
     func testUSVerizonKeepsExistingCodesAndIgnoresServer() {
-        // Server instructions for US must not change live US behaviour — even
-        // ones that would produce different codes if consulted.
         let codes = ForwardingDialCodes.codes(
             countryCode: "US",
             instructions: gsmInstructions(for: "US"),
             number: "14155551234",
             isVerizon: true
         )
-        XCTAssertEqual(codes.activate, "*7114155551234")
-        XCTAssertEqual(codes.deactivate, "*73")
-        XCTAssertEqual(codes.clearExisting, "*73")
-        XCTAssertNil(codes.clearAll)
-        XCTAssertFalse(codes.isServerDriven)
+        XCTAssertNotNil(codes)
+        XCTAssertEqual(codes?.activate, "*7114155551234")
+        XCTAssertEqual(codes?.deactivate, "*73")
+        XCTAssertEqual(codes?.clearExisting, "*73")
+        XCTAssertNil(codes?.clearAll)
+        XCTAssertFalse(codes?.isServerDriven ?? true)
+
+        let e164Codes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "+14155551234",
+            isVerizon: true
+        )
+        XCTAssertEqual(e164Codes?.activate, "*7114155551234")
+
+        let tenDigitCodes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "4155551234",
+            isVerizon: true
+        )
+        XCTAssertEqual(tenDigitCodes?.activate, "*714155551234")
     }
 
     func testUSNonVerizonKeepsExistingGSMCodes() {
-        // Matching-country server instructions with a different template:
-        // only the NANP guard can keep the built-in `*61*` here.
         let codes = ForwardingDialCodes.codes(
             countryCode: "US",
             instructions: gsmInstructions(for: "US"),
             number: "14155551234",
             isVerizon: false
         )
-        XCTAssertEqual(codes.activate, "*61*14155551234#")
-        XCTAssertEqual(codes.deactivate, "##61#")
-        XCTAssertEqual(codes.clearExisting, "##21#")
-        XCTAssertEqual(codes.clearAll, "##002#")
-        XCTAssertFalse(codes.isServerDriven)
+        XCTAssertNotNil(codes)
+        XCTAssertEqual(codes?.activate, "*61*14155551234#")
+        XCTAssertEqual(codes?.deactivate, "##61#")
+        XCTAssertEqual(codes?.clearExisting, "##21#")
+        XCTAssertEqual(codes?.clearAll, "##002#")
+        XCTAssertFalse(codes?.isServerDriven ?? true)
+
+        let e164Codes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "+14155551234",
+            isVerizon: false
+        )
+        XCTAssertEqual(e164Codes?.activate, "*61*14155551234#")
+
+        let tenDigitCodes = ForwardingDialCodes.codes(
+            countryCode: "US",
+            instructions: gsmInstructions(for: "US"),
+            number: "4155551234",
+            isVerizon: false
+        )
+        XCTAssertEqual(tenDigitCodes?.activate, "*61*4155551234#")
     }
 
     func testCanadaIsTreatedAsNANP() {
@@ -183,53 +227,45 @@ final class ForwardingInstructionsTests: XCTestCase {
             number: "14165551234",
             isVerizon: false
         )
-        XCTAssertEqual(codes.activate, "*61*14165551234#")
-        XCTAssertFalse(codes.isServerDriven)
+        XCTAssertNotNil(codes)
+        XCTAssertEqual(codes?.activate, "*61*14165551234#")
+        XCTAssertFalse(codes?.isServerDriven ?? true)
     }
 
-    func testVerizonToggleWithoutInstructionsOutsideNANPFallsBackToGSM() {
-        // A non-NANP user who once flipped the (US-only) Verizon toggle gets
-        // the standard GSM codes, not Verizon's — the toggle is hidden for
-        // them and must not steer the fallback.
-        let codes = ForwardingDialCodes.codes(
-            countryCode: "GB",
-            instructions: nil,
-            number: "447700900123",
-            isVerizon: true
-        )
-        XCTAssertEqual(codes.activate, "*61*447700900123#")
-        XCTAssertEqual(codes.deactivate, "##61#")
-        XCTAssertEqual(codes.clearExisting, "##21#")
-        XCTAssertEqual(codes.clearAll, "##002#")
-        XCTAssertFalse(codes.isServerDriven)
+    func testNANPCountriesRejectForeignAndMalformedDestinations() {
+        let nanpCountries = ["US", "CA"]
+        let badNumbers = ["+5511987654321", "+447700900123", "garbage", "", "1111111111"]
+        for country in nanpCountries {
+            for number in badNumbers {
+                for isVerizon in [false, true] {
+                    let codes = ForwardingDialCodes.codes(
+                        countryCode: country,
+                        instructions: gsmInstructions(for: country),
+                        number: number,
+                        isVerizon: isVerizon
+                    )
+                    XCTAssertNil(codes, "ForwardingDialCodes.codes must be nil for NANP country \(country) number \(number) isVerizon \(isVerizon)")
+                }
+            }
+        }
     }
 
-    func testMissingInstructionsFallBackToBuiltInGSM() {
-        // Offline, or the backend has not been deployed with the new shape:
-        // behave exactly as the app does today.
-        let codes = ForwardingDialCodes.codes(
-            countryCode: "GB",
-            instructions: nil,
-            number: "447700900123",
-            isVerizon: false
-        )
-        XCTAssertEqual(codes.activate, "*61*447700900123#")
-        XCTAssertEqual(codes.deactivate, "##61#")
-        XCTAssertEqual(codes.clearExisting, "##21#")
-        XCTAssertEqual(codes.clearAll, "##002#")
-        XCTAssertFalse(codes.isServerDriven)
-    }
+    func testExtractNANPDigitsValidAndInvalid() {
+        XCTAssertEqual(ForwardingDialCodes.extractNANPDigits("+1 (650) 555-1234"), "6505551234")
+        XCTAssertEqual(ForwardingDialCodes.extractNANPDigits("6505551234"), "6505551234")
+        XCTAssertEqual(ForwardingDialCodes.extractNANPDigits("16505551234"), "6505551234")
+        XCTAssertEqual(ForwardingDialCodes.extractNANPDigits("+16505551234"), "6505551234")
 
-    func testInstructionsForADifferentCountryAreNotApplied() {
-        // A stale fetch for another region must not leak across.
-        let codes = ForwardingDialCodes.codes(
-            countryCode: "GB",
-            instructions: brazilInstructions,
-            number: "447700900123",
-            isVerizon: false
-        )
-        XCTAssertFalse(codes.isServerDriven)
-        XCTAssertEqual(codes.activate, "*61*447700900123#")
+        // Reject invalid prefixes, characters, and structures
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits("+5511987654321"), "Must not strip +55 into a US dial code")
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits("1-800-CALL-KEV"), "Vanity numbers with letters must be rejected")
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits("650-555-123A"))
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits("0505551234"), "Area code starting with 0 is invalid")
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits("1505551234"), "Area code starting with 1 is invalid")
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits("6500551234"), "Exchange code starting with 0 is invalid")
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits("6501551234"), "Exchange code starting with 1 is invalid")
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits(""))
+        XCTAssertNil(ForwardingDialCodes.extractNANPDigits(nil))
     }
 
     // MARK: - tel: URL encoding
@@ -238,46 +274,89 @@ final class ForwardingInstructionsTests: XCTestCase {
         XCTAssertEqual(ForwardingDialCodes.telURL("**61*123#")?.absoluteString, "tel:**61*123%23")
         XCTAssertEqual(ForwardingDialCodes.telURL("*71123")?.absoluteString, "tel:*71123")
         XCTAssertEqual(ForwardingDialCodes.telURL("##002#")?.absoluteString, "tel:%23%23002%23")
+        XCTAssertNil(ForwardingDialCodes.telURL(nil))
+        XCTAssertNil(ForwardingDialCodes.telURL(""))
     }
 
     // MARK: - Country resolution
 
-    func testCountryComesFromLocaleRegion() {
-        XCTAssertEqual(ForwardingCountry.resolve(locale: Locale(identifier: "pt_BR")), "BR")
-        XCTAssertEqual(ForwardingCountry.resolve(locale: Locale(identifier: "en_GB")), "GB")
+    func testCountryComesFromLocaleRegionWhenUnassigned() {
+        XCTAssertEqual(ForwardingCountry.resolve(hasAssignedNumber: false, locale: Locale(identifier: "pt_BR")), "BR")
+        XCTAssertEqual(ForwardingCountry.resolve(hasAssignedNumber: false, locale: Locale(identifier: "en_GB")), "GB")
     }
 
     func testCountryDefaultsToUSWithoutRegion() {
-        XCTAssertEqual(ForwardingCountry.resolve(locale: Locale(identifier: "en")), "US")
+        XCTAssertEqual(ForwardingCountry.resolve(hasAssignedNumber: false, locale: Locale(identifier: "en")), "US")
     }
 
     func testNANPMembership() {
         XCTAssertTrue(ForwardingCountry.isNANP("US"))
         XCTAssertTrue(ForwardingCountry.isNANP("ca"))
         XCTAssertFalse(ForwardingCountry.isNANP("BR"))
+        XCTAssertFalse(ForwardingCountry.isNANP("GB"))
     }
 }
 
-// MARK: - Account country precedence
+// MARK: - Account country and ServiceBinding precedence
 
 extension ForwardingInstructionsTests {
-    func testAccountCountryOverridesDeviceRegion() {
-        // The codes belong to the user's own carrier; the account country is
-        // what they told us, the device region is a guess.
-        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "BR", locale: Locale(identifier: "en_US")), "BR")
+    func testAccountCountryOverridesDeviceRegionWhenUnassigned() {
+        XCTAssertEqual(
+            ForwardingCountry.resolve(accountCountry: "BR", hasAssignedNumber: false, locale: Locale(identifier: "en_US")),
+            "BR"
+        )
     }
 
-    func testEmptyAccountCountryFallsBackToDeviceRegion() {
-        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "", locale: Locale(identifier: "pt_BR")), "BR")
-        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: nil, locale: Locale(identifier: "en_GB")), "GB")
+    func testEmptyAccountCountryFallsBackToDeviceRegionWhenUnassigned() {
+        XCTAssertEqual(
+            ForwardingCountry.resolve(accountCountry: "", hasAssignedNumber: false, locale: Locale(identifier: "pt_BR")),
+            "BR"
+        )
+        XCTAssertEqual(
+            ForwardingCountry.resolve(accountCountry: nil, hasAssignedNumber: false, locale: Locale(identifier: "en_GB")),
+            "GB"
+        )
     }
 
-    func testMalformedAccountCountryIsIgnored() {
-        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "zz9", locale: Locale(identifier: "en_GB")), "GB")
-        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: "B", locale: Locale(identifier: "en_GB")), "GB")
+    func testMalformedAccountCountryIsIgnoredWhenUnassigned() {
+        XCTAssertEqual(
+            ForwardingCountry.resolve(accountCountry: "zz9", hasAssignedNumber: false, locale: Locale(identifier: "en_GB")),
+            "GB"
+        )
+        XCTAssertEqual(
+            ForwardingCountry.resolve(accountCountry: "B", hasAssignedNumber: false, locale: Locale(identifier: "en_GB")),
+            "GB"
+        )
     }
 
     func testAccountCountryIsTrimmedAndUppercased() {
-        XCTAssertEqual(ForwardingCountry.resolve(accountCountry: " gb ", locale: Locale(identifier: "en_US")), "GB")
+        XCTAssertEqual(
+            ForwardingCountry.resolve(accountCountry: " gb ", hasAssignedNumber: false, locale: Locale(identifier: "en_US")),
+            "GB"
+        )
+    }
+
+    func testServiceBindingOverridesAccountCountryWhenAssigned() {
+        let binding = ServiceBinding(countryCode: "BR", provider: "twilio", numberType: "mobile")
+        XCTAssertEqual(
+            ForwardingCountry.resolve(serviceBinding: binding, accountCountry: "US", assignedNumber: "+5511987654321", hasAssignedNumber: true, locale: Locale(identifier: "en_US")),
+            "BR"
+        )
+    }
+
+    func testAssignedAccountWithoutBindingUsesAccountCountryIfValidNANP() {
+        XCTAssertEqual(
+            ForwardingCountry.resolve(serviceBinding: nil, accountCountry: "CA", assignedNumber: "+14165551234", hasAssignedNumber: true, locale: Locale(identifier: "pt_BR")),
+            "CA"
+        )
+    }
+
+    func testAssignedAccountWithMalformedBindingFailsClosed() {
+        let badBinding = ServiceBinding(countryCode: "invalid_code", provider: "twilio")
+        XCTAssertEqual(
+            ForwardingCountry.resolve(serviceBinding: badBinding, accountCountry: "", assignedNumber: "+16505551234", hasAssignedNumber: true, locale: Locale(identifier: "pt_BR")),
+            "",
+            "Malformed binding when assigned must fail closed and return empty string"
+        )
     }
 }

@@ -469,4 +469,34 @@ final class FrontendUITests: XCTestCase {
         let follows = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: appended)
         wait(for: [follows], timeout: 5)
     }
+
+    // MARK: - 12. Brazil Phone Entry & Unavailable Qualification Review Scenario
+
+    func testBrazilPhoneUnavailableScenario() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["APP_STORE_SCREENSHOT_SCENARIO"] = "brazil-unavailable"
+        app.launchEnvironment["KEVIN_NATIVE_UI_REVIEW"] = "1"
+        app.launchEnvironment["KEVIN_UNIT_TESTS"] = "0"
+        app.launchArguments = ["-AppleLanguages", "(pt-BR)", "-AppleLocale", "pt_BR"]
+        app.launch()
+        self.currentApp = app
+
+        // 1. Verify country picker displays Brazil (+55)
+        let countryPrefix = app.staticTexts["+55"]
+        XCTAssertTrue(countryPrefix.waitForExistence(timeout: 5), "Brazil dialing prefix +55 must be visible")
+
+        // 2. Verify phone text field contains the fixture phone number (11987654321)
+        let phoneField = app.textFields.firstMatch
+        XCTAssertTrue(phoneField.waitForExistence(timeout: 5), "Phone text field must be visible")
+
+        // 3. Verify Portuguese unavailable message is displayed
+        let unavailableMessage = app.staticTexts["Kevin ainda não está disponível no Brasil. Estamos preparando o serviço."]
+        XCTAssertTrue(unavailableMessage.waitForExistence(timeout: 5), "Portuguese unavailable error message must be displayed")
+
+        // 4. Verify no purchase / setup buttons are present (e.g. Subscribe, Try Free, Setup)
+        XCTAssertFalse(app.buttons["Subscribe"].exists)
+        XCTAssertFalse(app.buttons["Assinar"].exists)
+        XCTAssertFalse(app.buttons["Try Free"].exists)
+        XCTAssertFalse(app.buttons["Experimente grátis"].exists)
+    }
 }

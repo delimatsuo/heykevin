@@ -144,8 +144,9 @@ class RelayPipeline:
             else build_greeting_text(self._contractor_config, self._after_hours)
         )
 
+        from app.services.personal_language import normalize_language
         self._history: list[dict] = []
-        self._language = "en"
+        self._language = normalize_language(self._contractor_config.get("user_language", "en"))
         self._active = True
         # Turn epoch gates every outbound token: superseding caller speech or
         # a barge-in bumps it, and any in-flight generation stops sending the
@@ -898,6 +899,7 @@ class RelayPipeline:
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                user_language=self._contractor_config.get("user_language", "en"),
                 ws_token=getattr(self, "_command_ws_token", "") or "",
                 is_active=lambda: (
                     self._active
@@ -1174,6 +1176,7 @@ class RelayPipeline:
         instruction = build_relay_instruction_text(
             owner,
             hold_offered=hold_offered,
+            language=self._language,
         )
 
         if self._hold_task and not self._hold_task.done() and self._hold_task is not asyncio.current_task():

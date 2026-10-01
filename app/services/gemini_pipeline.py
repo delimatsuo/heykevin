@@ -128,6 +128,7 @@ class GeminiPipeline:
     GOODBYE_PHRASES = [
         "have a great day", "have a good day", "have a nice day",
         "goodbye", "take care",
+        "até logo", "tchau", "tenha um ótimo dia", "tenha um bom dia",
     ]
 
     def __init__(
@@ -288,12 +289,14 @@ class GeminiPipeline:
                     self._live_intake = None
 
         # Voice selection — pick the best voice for the contractor's language
+        from app.services.personal_language import normalize_language, resolve_gemini_voice_key
         user_language = self._contractor_config.get("user_language", "en")
-        self._voice = GEMINI_VOICES.get(user_language, GEMINI_VOICE_DEFAULT)
+        voice_key = resolve_gemini_voice_key(user_language)
+        self._voice = GEMINI_VOICES.get(voice_key, GEMINI_VOICE_DEFAULT)
         self._model = settings.gemini_live_model or GEMINI_MODEL
 
         # Language for post-call processing
-        self._language = user_language or "en"
+        self._language = normalize_language(user_language)
 
     def _build_generation_config(self) -> dict:
         """Return Gemini Live generation config tuned for phone-call latency."""
@@ -1804,6 +1807,7 @@ class GeminiPipeline:
                 call_sid=self._call_sid,
                 caller_phone=self._caller_phone,
                 transcript=transcript,
+                user_language=self._contractor_config.get("user_language", "en"),
                 ws_token=getattr(self, "_command_ws_token", "") or "",
                 is_active=lambda: (
                     self._connected
@@ -1967,20 +1971,40 @@ class GeminiPipeline:
         ):
             return
         self._caller_silence_prompted_at = time.time()
-        await self._send_client_instruction(
-            "The caller has been silent. Ask exactly: 'Are you still there?' "
-            "Do not say anything else."
-        )
+        from app.services.personal_language import is_portuguese
+        user_lang = self._contractor_config.get("user_language", "en")
+        if is_portuguese(user_lang):
+            instruction = (
+                "The caller has been silent. Ask if they are still there in the caller's most recent language; "
+                "if no caller language is established use Brazilian Portuguese: 'Você ainda está aí?' "
+                "Do not say anything else."
+            )
+        else:
+            instruction = (
+                "The caller has been silent. Ask exactly: 'Are you still there?' "
+                "Do not say anything else."
+            )
+        await self._send_client_instruction(instruction)
         self._log_voice_timing("silence_prompt_injected")
 
     async def _hangup_for_caller_silence(self):
         if not self._ws or not self._connected or not self._waiting_on_caller():
             return
         self._log_voice_timing("caller_silence_timeout")
-        await self._send_client_instruction(
-            "The caller stayed silent. Say exactly: \"I'm going to hang up for now. "
-            "Please call back when you're ready. Goodbye.\""
-        )
+        from app.services.personal_language import is_portuguese
+        user_lang = self._contractor_config.get("user_language", "en")
+        if is_portuguese(user_lang):
+            instruction = (
+                "The caller stayed silent. Say you are hanging up and goodbye in the caller's most recent language; "
+                "if no caller language is established use Brazilian Portuguese: \"Vou desligar por enquanto. "
+                "Ligue novamente quando puder. Até logo.\""
+            )
+        else:
+            instruction = (
+                "The caller stayed silent. Say exactly: \"I'm going to hang up for now. "
+                "Please call back when you're ready. Goodbye.\""
+            )
+        await self._send_client_instruction(instruction)
         await asyncio.sleep(self.CALLER_SILENCE_GOODBYE_SECONDS)
         if self.on_call_complete:
             await self.on_call_complete()
@@ -2174,13 +2198,23 @@ class GeminiPipeline:
 
         owner = self._contractor_config.get("owner_name") or settings.user_name
         hold_offered = bool(getattr(self, "_hold_offered", False))
+        from app.services.personal_language import is_portuguese
+        user_lang = self._contractor_config.get("user_language", "en")
+        if is_portuguese(user_lang):
+            lang_suffix = (
+                " Continue in the caller's current language."
+                " If no caller language is established use Brazilian Portuguese (pt-BR)."
+            )
+        else:
+            lang_suffix = " Continue in the caller's current language."
+
         instruction = (
             build_gemini_instruction_text(
                 owner,
                 hold_offered=hold_offered,
                 language=None,
             )
-            + " Continue in the caller's current language."
+            + lang_suffix
         )
         self._current_turn_suppressed = False
 

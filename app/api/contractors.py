@@ -53,12 +53,14 @@ def _redact_contractor(data: dict) -> dict:
         resolve_owner_sms_opted_out,
         resolve_owner_sms_opt_out_revision,
     )
+    from app.services.country_policy import resolve_service_binding
     enriched = with_entitlement_flags(data)
     redacted = {k: v for k, v in enriched.items() if k not in _SENSITIVE_KEYS}
     redacted["owner_sms_enabled"] = resolve_owner_sms_enabled(data)
     redacted["owner_sms_opted_out"] = resolve_owner_sms_opted_out(data)
     redacted["owner_sms_opt_out_revision"] = resolve_owner_sms_opt_out_revision(data)
     redacted["owner_sms_settings_version"] = 1
+    redacted["service_binding"] = resolve_service_binding(data)
     return redacted
 
 
@@ -66,17 +68,6 @@ def _require_admin(request: Request):
     """Raise 403 if the caller is not using the global admin token."""
     if not getattr(request.state, "is_admin", False):
         raise HTTPException(status_code=403, detail="Admin access required")
-
-
-def _resolve_country_code(country_code: str = "", owner_phone: str = "") -> str:
-    """Return a provisioning-safe country code for contractor onboarding."""
-    from app.db.contractors import SUPPORTED_COUNTRIES, detect_country_from_phone
-    normalized = (country_code or "").strip().upper()
-    if normalized and normalized in SUPPORTED_COUNTRIES:
-        return normalized
-    if owner_phone and owner_phone.strip():
-        return detect_country_from_phone(owner_phone.strip())
-    return "US"
 
 
 async def _enforce_apple_identity(
@@ -146,10 +137,13 @@ class ContractorCreate(BaseModel):
     @field_validator("country_code")
     @classmethod
     def validate_country_code(cls, v):
-        from app.db.contractors import SUPPORTED_COUNTRIES
-        if v and v.upper() not in SUPPORTED_COUNTRIES and v != "":
-            raise ValueError(f"Unsupported country code: {v}")
-        return v.upper() if v else v
+        from app.services.country_policy import RECOGNIZED_COUNTRIES
+        if v is not None and v != "":
+            upper = v.strip().upper()
+            if upper not in RECOGNIZED_COUNTRIES:
+                raise ValueError(f"Unsupported country code: {v}")
+            return upper
+        return v
 
 
 class AppleIdLookupRequest(BaseModel):
@@ -197,10 +191,13 @@ class ContractorUpdate(BaseModel):
     @field_validator("country_code")
     @classmethod
     def validate_country_code(cls, v):
-        from app.db.contractors import SUPPORTED_COUNTRIES
-        if v is not None and v and v.upper() not in SUPPORTED_COUNTRIES:
-            raise ValueError(f"Unsupported country code: {v}")
-        return v.upper() if v else v
+        from app.services.country_policy import RECOGNIZED_COUNTRIES
+        if v is not None and v != "":
+            upper = v.strip().upper()
+            if upper not in RECOGNIZED_COUNTRIES:
+                raise ValueError(f"Unsupported country code: {v}")
+            return upper
+        return v
 
 
 class StructureKnowledgeRequest(BaseModel):
@@ -307,28 +304,7 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     # callers (global bearer token) bypass Apple verification.
     await _enforce_apple_identity(request, body.apple_user_id, body.apple_identity_token)
 
-    # Resolve effective supported country before owner-phone dedupe.
-    # Explicit supported country wins; E.164 detection from owner_phone;
-    # missing country preserves US default.
-    effective_country = _resolve_country_code(body.country_code, body.owner_phone)
-
-    # Validate nonblank owner_phone before any Firestore dedupe/create work.
-    # Blank owner_phone remains allowed.
-    owner_phone_raw = (body.owner_phone or "").strip()
-    if owner_phone_raw:
-        from app.utils.phone import normalize_phone
-        canonical_phone = normalize_phone(owner_phone_raw, default_region=None)
-        if not canonical_phone:
-            canonical_phone = normalize_phone(owner_phone_raw, default_region=effective_country)
-        if not canonical_phone:
-            raise HTTPException(status_code=400, detail="Invalid owner phone number")
-
-    # Deduplicate on apple_user_id first. It arrives on a verified Apple identity
-    # token, so it cannot be spoofed by the caller — unlike owner_phone, which
-    # needed the hijack guard below. It is also available earlier in onboarding
-    # than the phone, which is why dedupe used to miss entirely: 22 production
-    # records have no owner_phone, and 19 Apple IDs ended up owning more than one
-    # account because this check did not exist.
+    # Deduplicate on apple_user_id first (authenticated Apple restore before NEW admission).
     if body.apple_user_id and body.apple_user_id.strip():
         from app.db.contractors import get_contractor_by_apple_user_id
         try:
@@ -354,6 +330,59 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
                 "subscription_uuid": subscription_uuid,
             }
 
+    # Validate nonblank owner_phone and country binding before admission / dedupe.
+    owner_phone_raw = (body.owner_phone or "").strip()
+    explicit_country = (body.country_code or "").strip().upper()
+
+    if explicit_country:
+        from app.services.country_policy import is_recognized_country
+        if not is_recognized_country(explicit_country):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported country code: {explicit_country}",
+            )
+
+    if owner_phone_raw:
+        from app.services.country_policy import (
+            validate_phone_and_region,
+            InvalidPhoneError,
+            CountryPhoneMismatchError,
+        )
+        try:
+            canonical_phone, derived_region = validate_phone_and_region(
+                owner_phone_raw, default_country=explicit_country
+            )
+        except CountryPhoneMismatchError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "country_phone_mismatch",
+                    "message": "Phone number does not match specified country",
+                    "country_code": e.country_code,
+                    "phone_region": e.phone_region,
+                },
+            )
+        except InvalidPhoneError:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_owner_phone",
+                    "message": "Invalid owner phone number",
+                },
+            )
+        effective_country = derived_region or explicit_country or "UNKNOWN"
+    else:
+        effective_country = explicit_country or "US"
+        canonical_phone = ""
+
+    # Market availability gate for new account admission
+    from app.services.country_policy import is_country_available, country_not_available_detail
+    if not is_country_available(effective_country):
+        raise HTTPException(
+            status_code=409,
+            detail=country_not_available_detail(effective_country),
+        )
+
     # Deduplicate: if owner_phone is provided, check for existing contractor.
     #
     # Audit F-4: this lookup branch previously trusted owner_phone alone.
@@ -371,7 +400,7 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
         from app.db.contractors import get_contractor_by_owner_phone, PhoneDedupeAmbiguityError
         try:
             existing = await get_contractor_by_owner_phone(
-                owner_phone_raw,
+                canonical_phone,
                 country_code=effective_country,
             )
         except PhoneDedupeAmbiguityError:
@@ -440,6 +469,8 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
         data["mode"] = "personal"
     # Auto-detect country from phone if not explicitly provided
     data["country_code"] = effective_country
+    data["owner_phone"] = canonical_phone
+    data["owner_phone_e164"] = canonical_phone
     # Twilio number will be provisioned separately
     data["twilio_number"] = ""
     data["calendar_type"] = "none"
@@ -471,23 +502,24 @@ async def api_get_contractor(contractor_id: str, request: Request):
 async def api_provision_number(contractor_id: str, request: Request):
     """Provision a Twilio number for a contractor."""
     require_contractor_access(request, contractor_id)
-    from app.db.contractors import provision_twilio_number, REGULATORY_COUNTRIES, SUPPORTED_COUNTRIES
+    from app.db.contractors import provision_twilio_number
+    from app.services.country_policy import (
+        resolve_service_binding,
+        is_country_available,
+        country_not_available_detail,
+        is_recognized_country,
+        validate_phone_and_region,
+        CountryPhoneMismatchError,
+        InvalidPhoneError,
+    )
 
     contractor = await get_contractor(contractor_id)
     if not contractor:
         return {"status": "error", "message": "Contractor not found"}
     existing_number = contractor.get("twilio_number", "")
     if existing_number:
-        # Mirror GET /api/settings: report the stored country only when it is a
-        # supported string, else the same "US" default, so the two endpoints
-        # can never disagree about one field and corrupt data cannot 500.
-        stored_country = contractor.get("country_code")
-        reported_country = (
-            stored_country.strip().upper()
-            if isinstance(stored_country, str)
-            and stored_country.strip().upper() in SUPPORTED_COUNTRIES
-            else "US"
-        )
+        binding = resolve_service_binding(contractor)
+        reported_country = binding.get("country_code") if binding else None
         logger.info(
             "Provision-number request for %s reused existing number %s",
             contractor_id,
@@ -498,28 +530,76 @@ async def api_provision_number(contractor_id: str, request: Request):
             "phone_number": existing_number,
             "existing": True,
             "country_code": reported_country,
+            "service_binding": binding,
         }
 
-    country_code = _resolve_country_code(
-        contractor.get("country_code", ""),
-        contractor.get("owner_phone", ""),
-    )
-    if contractor.get("country_code") != country_code:
-        await update_contractor(contractor_id, {"country_code": country_code})
+    stored_country = (contractor.get("country_code") or "").strip().upper()
+    owner_phone = (contractor.get("owner_phone") or "").strip()
 
-    if country_code in REGULATORY_COUNTRIES:
-        if not contractor.get("business_address") or not contractor.get("business_city"):
-            return {"status": "error", "message": "Business address and city are required for number provisioning in your country."}
+    if stored_country and not is_recognized_country(stored_country):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported country code: {stored_country}",
+        )
+
+    if owner_phone:
+        try:
+            _, derived_region = validate_phone_and_region(owner_phone, default_country=stored_country)
+        except CountryPhoneMismatchError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "country_phone_mismatch",
+                    "message": "Phone number does not match specified country",
+                    "country_code": e.country_code,
+                    "phone_region": e.phone_region,
+                },
+            )
+        except InvalidPhoneError:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_owner_phone",
+                    "message": "Invalid owner phone number",
+                },
+            )
+        effective_country = derived_region or stored_country or "UNKNOWN"
+    else:
+        effective_country = stored_country if stored_country else "US"
+
+    if not is_country_available(effective_country):
+        raise HTTPException(
+            status_code=409,
+            detail=country_not_available_detail(effective_country),
+        )
+
+    if contractor.get("country_code") != effective_country:
+        await update_contractor(contractor_id, {"country_code": effective_country})
 
     try:
-        number = await provision_twilio_number(contractor_id, country_code=country_code)
-        return {"status": "ok", "phone_number": number, "country_code": country_code}
+        number = await provision_twilio_number(contractor_id, country_code=effective_country)
+        fresh_contractor = await get_contractor(contractor_id)
+        if fresh_contractor and fresh_contractor.get("twilio_number") == number:
+            binding = resolve_service_binding(fresh_contractor)
+        else:
+            binding = {
+                "country_code": effective_country,
+                "provider": None,
+                "number_type": None,
+                "capabilities": None,
+            }
+        return {
+            "status": "ok",
+            "phone_number": number,
+            "country_code": effective_country,
+            "service_binding": binding,
+        }
     except Exception as e:
         logger.error(f"Number provisioning failed for {contractor_id}: {e}", exc_info=True)
         error_msg = str(e)
         if "address" in error_msg.lower() or "rejected" in error_msg.lower():
             return {"status": "error", "message": "Address verification failed. Please check your business address."}
-        if "no twilio regulations" in error_msg.lower():
+        if "not available for number provisioning" in error_msg.lower() or "no twilio regulations" in error_msg.lower():
             return {"status": "error", "message": "Your country is not yet supported for number provisioning."}
         if "no phone numbers" in error_msg.lower() or "no twilio" in error_msg.lower():
             return {"status": "error", "message": "No phone numbers available in your area. Please try a different city."}
@@ -535,10 +615,80 @@ async def api_update_contractor(contractor_id: str, body: ContractorUpdate, requ
     if not updates:
         return {"status": "no changes"}
 
+    contractor = None
+    if "country_code" in updates:
+        contractor = await get_contractor(contractor_id)
+        if not contractor:
+            raise HTTPException(status_code=404, detail="Contractor not found")
+        req_cc = updates["country_code"]
+        existing_number = contractor.get("twilio_number", "")
+        if existing_number:
+            from app.services.country_policy import resolve_service_binding
+            binding = resolve_service_binding(contractor)
+            assigned_country = binding.get("country_code") if binding else None
+            locked_country = assigned_country or contractor.get("country_code")
+            if locked_country and req_cc != locked_country:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "country_locked_to_number",
+                        "message": "Cannot change country for an account with an assigned phone number",
+                        "country_code": locked_country,
+                    },
+                )
+            elif not locked_country and req_cc != contractor.get("country_code"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "country_locked_to_number",
+                        "message": "Cannot change country for an account with an assigned phone number",
+                        "country_code": contractor.get("country_code") or req_cc,
+                    },
+                )
+        else:
+            owner_phone = (contractor.get("owner_phone") or "").strip()
+            if owner_phone:
+                from app.services.country_policy import (
+                    validate_phone_and_region,
+                    CountryPhoneMismatchError,
+                    InvalidPhoneError,
+                )
+                try:
+                    _, derived_region = validate_phone_and_region(owner_phone, default_country=req_cc)
+                    if derived_region and derived_region != req_cc:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={
+                                "code": "country_phone_mismatch",
+                                "message": "Phone number does not match specified country",
+                                "country_code": req_cc,
+                                "phone_region": derived_region,
+                            },
+                        )
+                except CountryPhoneMismatchError as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "country_phone_mismatch",
+                            "message": "Phone number does not match specified country",
+                            "country_code": e.country_code,
+                            "phone_region": e.phone_region,
+                        },
+                    )
+                except InvalidPhoneError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "invalid_owner_phone",
+                            "message": "Invalid owner phone number",
+                        },
+                    )
+
     # Tier enforcement: Business mode is an entitlement, not just a profile mode.
     if updates.get("mode") in ("business", "businessPro"):
-        contractor = await get_contractor(contractor_id)
-        if not has_business_entitlement(contractor):
+        if contractor is None:
+            contractor = await get_contractor(contractor_id)
+        if not contractor or not has_business_entitlement(contractor):
             raise HTTPException(
                 status_code=403,
                 detail="Business mode requires an active Business subscription. Please upgrade your plan."

@@ -32,7 +32,7 @@ final class FixtureFetchProvider: @unchecked Sendable {
             return AppStoreScreenshotFixtures.businessCallsList
         case .history101:
             return AppStoreScreenshotFixtures.generate101CallsList()
-        case .historyEmpty:
+        case .historyEmpty, .brazilUnavailable:
             return []
         case .businessLive, .businessRecents, .businessDetail, .businessKevin, .accountSettings,
              .connectedWithTranscript, .connectedEmpty, .longTranscript:
@@ -66,12 +66,13 @@ enum AppStoreScreenshotFixtures {
         case connectedWithTranscript = "connected-with-transcript"
         case connectedEmpty = "connected-empty"
         case longTranscript = "long-transcript"
+        case brazilUnavailable = "brazil-unavailable"
 
         var isBusiness: Bool {
             switch self {
             case .businessLive, .businessRecents, .businessDetail, .businessKevin, .history101, .historyEmpty, .historyError, .historyRetainedError, .accountSettings, .connectedWithTranscript, .connectedEmpty, .longTranscript:
                 return true
-            case .personalLive, .personalRecents, .personalDetail, .personalKevin:
+            case .personalLive, .personalRecents, .personalDetail, .personalKevin, .brazilUnavailable:
                 return false
             }
         }
@@ -106,6 +107,8 @@ enum AppStoreScreenshotFixtures {
                 return "Connected live call"
             case .longTranscript:
                 return "Live screening transcript"
+            case .brazilUnavailable:
+                return "Kevin no Brasil"
             }
         }
 
@@ -139,6 +142,8 @@ enum AppStoreScreenshotFixtures {
                 return "Clear call controls with honest transcript state."
             case .longTranscript:
                 return "Review the full conversation while screening continues."
+            case .brazilUnavailable:
+                return "Estamos preparando o serviço para o Brasil."
             }
         }
     }
@@ -182,7 +187,7 @@ enum AppStoreScreenshotFixtures {
         switch scenario {
         case .history101:
             return generate101CallsList()
-        case .historyEmpty, .historyError:
+        case .historyEmpty, .historyError, .brazilUnavailable:
             return []
         case .historyRetainedError:
             return businessCallsList
@@ -231,6 +236,17 @@ enum AppStoreScreenshotFixtures {
 
         UIView.setAnimationsEnabled(false)
 
+        if scenario == .brazilUnavailable {
+            appState.isOnboarded = false
+            appState.contractorId = ""
+            appState.subscriptionStatus = "none"
+            appState.subscriptionTier = "none"
+            appState.kevinNumber = ""
+            appState.forwardingActivated = false
+            appState.clearActiveCall()
+            return
+        }
+
         appState.isOnboarded = true
         appState.contractorId = "app-store-screenshot-fixture"
         appState.subscriptionStatus = "trial"
@@ -246,6 +262,8 @@ enum AppStoreScreenshotFixtures {
         appState.unreadCallCount = seededCalls.filter { appState.isCallUnread($0) }.count
 
         switch scenario {
+        case .brazilUnavailable:
+            break
         case .businessLive, .personalLive:
             let fixtureAuth = appState.currentAuthContext()
             appState.selectedTab = .recents
@@ -632,8 +650,19 @@ struct AppStoreScreenshotRoot: View {
     var body: some View {
         #if DEBUG
         if AppStoreScreenshotFixtures.isNativeUIReview {
-            ContentView()
+            if scenario == .brazilUnavailable {
+                OnboardingView(
+                    isRecoveryMode: false,
+                    initialStep: .phoneEntry,
+                    initialCountryCode: "BR",
+                    initialPhoneNumber: "11987654321",
+                    initialErrorMessage: String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
+                )
                 .environmentObject(appState)
+            } else {
+                ContentView()
+                    .environmentObject(appState)
+            }
         } else {
             marketingBody
         }
@@ -672,6 +701,15 @@ struct AppStoreScreenshotRoot: View {
              .connectedWithTranscript, .connectedEmpty, .longTranscript:
             ContentView()
                 .environmentObject(appState)
+        case .brazilUnavailable:
+            OnboardingView(
+                isRecoveryMode: false,
+                initialStep: .phoneEntry,
+                initialCountryCode: "BR",
+                initialPhoneNumber: "11987654321",
+                initialErrorMessage: String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
+            )
+            .environmentObject(appState)
         case .businessDetail, .personalDetail:
             NavigationStack {
                 CallDetailView(

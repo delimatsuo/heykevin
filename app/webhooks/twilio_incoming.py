@@ -108,8 +108,11 @@ def _relay_screening_twiml(
     return str(response)
 
 
-def _safe_incoming_call_push_body(caller_name: str = "", caller_phone: str = "") -> str:
+def _safe_incoming_call_push_body(caller_name: str = "", caller_phone: str = "", user_language: str = "en") -> str:
     """Return lock-screen-safe incoming screening copy without caller identity."""
+    from app.services.personal_language import is_portuguese
+    if is_portuguese(user_language):
+        return "Chamada recebida. Abra o Kevin para detalhes."
     return "Kevin is screening a call. Open Kevin for details."
 
 
@@ -409,6 +412,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                     conference_name=conference_name,
                     access_token=access_token,
                     contractor_id=contractor_id,
+                    user_language=contractor.get("user_language", "en"),
                 )
 
             if push_succeeded:
@@ -569,6 +573,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             contractor_id=contractor_id,
             ws_token=ws_token,
             caller_name_trusted=caller_name_trusted,
+            user_language=contractor.get("user_language", "en"),
         ))
 
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -596,6 +601,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                 caller_name=caller_name or contact.get("name", ""),
                 conference_name=conference_name,
                 contractor_id=contractor_id,
+                user_language=contractor.get("user_language", "en"),
             ))
 
             return twiml_response(_conference_twiml(call_sid, conference_name))
@@ -651,7 +657,7 @@ async def _prepare_direct_call(call_sid, contractor_id, conference_name, caller_
             and committed.get('state') == 'pickup_ringing' and not committed.get('owner_action'))
 
 
-async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, conference_name: str, contractor_id: str = ""):
+async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, conference_name: str, contractor_id: str = "", user_language: str = "en"):
     """Send VoIP push to ring the contractor, with 20-second timeout to Kevin takeover."""
     try:
         from app.services.push_notification import send_voip_push, get_device_token
@@ -676,6 +682,7 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
             conference_name=conference_name,
             access_token=access_token,
             contractor_id=contractor_id,
+            user_language=user_language,
         )
 
         logger.info(f"VoIP push sent for known contact: {caller_name[:1] if caller_name else ''}*** ({redact_phone(caller_phone)})")
@@ -814,6 +821,7 @@ async def _post_routing_tasks(
     contractor_id: str = "",
     ws_token: str = "",
     caller_name_trusted: bool = False,
+    user_language: str = "en",
 ):
     """Background tasks after routing — save call record, send push, save RTDB state."""
     call_sid_var.set(call_sid)
@@ -866,12 +874,19 @@ async def _post_routing_tasks(
                 # Send push notification now that RTDB is saved and contractor_id is known
                 if contractor_id:
                     from app.services.push_notification import send_regular_push, get_device_token
+                    from app.services.personal_language import is_portuguese
                     _push_token = await get_device_token(contractor_id=contractor_id)
                     if _push_token:
+                        is_pt = is_portuguese(user_language)
+                        title = "Chamada recebida" if is_pt else "Incoming Call"
                         await send_regular_push(
                             device_token=_push_token,
-                            title="Incoming Call",
-                            body=_safe_incoming_call_push_body(caller_name=caller_name, caller_phone=caller_phone),
+                            title=title,
+                            body=_safe_incoming_call_push_body(
+                                caller_name=caller_name,
+                                caller_phone=caller_phone,
+                                user_language=user_language,
+                            ),
                             call_sid=call_sid,
                             caller_phone=caller_phone,
                             caller_name=caller_name,
@@ -1182,7 +1197,7 @@ async def _record_inbound_message(contractor_id: str, payload: dict) -> bool:
     return True
 
 
-async def _notify_owner_of_inbound_message(contractor_id: str) -> bool:
+async def _notify_owner_of_inbound_message(contractor_id: str, user_language: str = "en") -> bool:
     """Push the owner that a caller texted back. Never blocks the webhook.
 
     Body carries no caller identity and no message text, matching
@@ -1194,15 +1209,24 @@ async def _notify_owner_of_inbound_message(contractor_id: str) -> bool:
     """
     try:
         from app.services.push_notification import send_regular_push, get_device_token
+        from app.services.personal_language import is_portuguese
 
         token = await get_device_token(contractor_id=contractor_id)
         if not token:
             logger.warning("No push token for contractor — inbound message not surfaced")
             return False
+
+        if is_portuguese(user_language):
+            title = "Nova mensagem de texto"
+            body = "Alguém respondeu a uma mensagem. Abra o Kevin para detalhes."
+        else:
+            title = "New Text Message"
+            body = "Someone replied to a text. Open Kevin for details."
+
         return await send_regular_push(
             device_token=token,
-            title="New Text Message",
-            body="Someone replied to a text. Open Kevin for details.",
+            title=title,
+            body=body,
             contractor_id=contractor_id,
         )
     except Exception as e:
@@ -1335,7 +1359,10 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
             contractor_id,
             num_media,
         )
-        await _notify_owner_of_inbound_message(contractor_id)
+        await _notify_owner_of_inbound_message(
+            contractor_id,
+            user_language=contractor.get("user_language", "en"),
+        )
     except Exception as e:
         logger.error(f"Failed to record inbound message: {type(e).__name__}")
         return twiml_response("<Response></Response>", status_code=500)

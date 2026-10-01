@@ -351,12 +351,22 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
-    private lazy var session: URLSession = {
+    private let customSession: URLSession?
+
+    init(session: URLSession? = nil) {
+        self.customSession = session
+    }
+
+    private lazy var defaultSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = 15
         return URLSession(configuration: config)
     }()
+
+    private var session: URLSession {
+        customSession ?? defaultSession
+    }
 
     /// Add auth header using contractor token from Keychain
     func authorize(_ request: inout URLRequest) {
@@ -508,11 +518,23 @@ final class APIClient: @unchecked Sendable {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 10
+            let languageIdentifier: String = {
+                let current = Locale.current
+                if let langCode = current.language.languageCode?.identifier {
+                    if langCode == "pt" {
+                        if let region = current.region?.identifier.uppercased(), region == "BR" {
+                            return "pt-BR"
+                        }
+                    }
+                    return langCode
+                }
+                return "en"
+            }()
             var body: [String: Any] = [
                 "push_token": pushToken,
                 "platform": "ios",
                 "timezone": TimeZone.current.identifier,
-                "language": Locale.current.language.languageCode?.identifier ?? "en",
+                "language": languageIdentifier,
                 "urgent_handoff_v1": true,
                 "contractor_id": contractorId,
             ]
@@ -774,6 +796,21 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
+    // MARK: - Markets
+
+    func getMarkets() async -> MarketsResponse? {
+        do {
+            let url = URL(string: "\(baseURL)/api/markets")!
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 10
+            let (data, response) = try await session.data(for: request)
+            return MarketsParser.parse(data: data, response: response)
+        } catch {
+            debugLog("Markets fetch failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     // MARK: - Contractor Onboarding
 
     /// Create (or restore-by-phone) a contractor account during onboarding.
@@ -782,7 +819,19 @@ final class APIClient: @unchecked Sendable {
     /// ``BootstrapAuthError/unauthenticated`` on HTTP 401 so the caller can
     /// re-prompt for a fresh Sign-in with Apple credential and retry. Returns
     /// `nil` on any other non-2xx response or transport failure.
-    func createContractor(ownerName: String, businessName: String, serviceType: String, mode: String = "business", ownerPhone: String = "", appleUserId: String = "", appleIdentityToken: String = "", businessAddress: String = "", businessCity: String = "", declaredOnboardingIntent: String? = nil) async throws -> [String: Any]? {
+    func createContractor(
+        ownerName: String,
+        businessName: String,
+        serviceType: String,
+        mode: String = "business",
+        ownerPhone: String = "",
+        countryCode: String? = nil,
+        appleUserId: String = "",
+        appleIdentityToken: String = "",
+        businessAddress: String = "",
+        businessCity: String = "",
+        declaredOnboardingIntent: String? = nil
+    ) async throws -> [String: Any]? {
         do {
             let url = URL(string: "\(baseURL)/api/contractors")!
             var request = URLRequest(url: url)
@@ -796,6 +845,9 @@ final class APIClient: @unchecked Sendable {
                 "mode": mode,
                 "owner_phone": ownerPhone,
             ]
+            if let country = countryCode, !country.isEmpty {
+                body["country_code"] = country
+            }
             if let intent = declaredOnboardingIntent, !intent.isEmpty {
                 body["declared_onboarding_intent"] = intent
             }
@@ -824,6 +876,14 @@ final class APIClient: @unchecked Sendable {
                 if http.statusCode == 200 {
                     return try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 }
+                if let errorDetail = APIErrorParser.parse(data: data, response: http) {
+                    return [
+                        "status": "error",
+                        "error": errorDetail.localizedDescription,
+                        "code": errorDetail.code,
+                        "country_code": errorDetail.countryCode ?? "",
+                    ]
+                }
             }
         } catch let error as BootstrapAuthError {
             throw error
@@ -833,18 +893,31 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
-    func provisionNumber(contractorId: String) async -> [String: Any]? {
+    func provisionNumber(contractorId: String, bearerToken: String? = nil) async -> [String: Any]? {
+        guard !contractorId.isEmpty else { return nil }
+        let token = bearerToken ?? contractorToken
+        guard !token.isEmpty else { return nil }
         do {
             let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
             let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)/provision-number")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.timeoutInterval = 30  // Number provisioning can take time
-            authorize(&request)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
             let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 200 {
+                    return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                }
+                if let errorDetail = APIErrorParser.parse(data: data, response: http) {
+                    return [
+                        "status": "error",
+                        "error": errorDetail.localizedDescription,
+                        "code": errorDetail.code,
+                        "country_code": errorDetail.countryCode ?? "",
+                    ]
+                }
             }
         } catch {
             debugLog("Provision number failed: \(error.localizedDescription)")

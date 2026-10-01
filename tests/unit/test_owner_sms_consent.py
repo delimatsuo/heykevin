@@ -258,7 +258,8 @@ async def test_inbound_sms_webhook_owner_stop_and_start(monkeypatch):
         inbound_records.append((cid, payload))
         return True
 
-    async def mock_notify(cid):
+    async def mock_notify(cid, user_language="en"):
+        assert user_language == "en"
         return True
 
     monkeypatch.setattr("app.db.contractors.get_contractor_by_twilio_number", mock_get_by_number)

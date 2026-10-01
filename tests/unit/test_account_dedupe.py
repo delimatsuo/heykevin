@@ -421,8 +421,8 @@ async def test_api_create_contractor_overflow_fails_closed_with_409_and_no_mutat
     overflow_docs = [
         {
             "contractor_id": f"doc-{i}",
-            "owner_phone": "2079460958",
-            "country_code": "GB",
+            "owner_phone": "4155551234",
+            "country_code": "US",
             "active": True,
         }
         for i in range(6)
@@ -457,9 +457,9 @@ async def test_api_create_contractor_overflow_fails_closed_with_409_and_no_mutat
         await contractors_api.api_create_contractor(
             contractors_api.ContractorCreate(
                 owner_name="Alice",
-                business_name="UK Services",
-                owner_phone="020 7946 0958",
-                country_code="GB",
+                business_name="US Services",
+                owner_phone="(415) 555-1234",
+                country_code="US",
                 apple_user_id="apple-user-alice",
                 apple_identity_token="tok",
             ),
@@ -468,6 +468,7 @@ async def test_api_create_contractor_overflow_fails_closed_with_409_and_no_mutat
 
     assert exc_info.value.status_code == 409
     assert "already exists" in exc_info.value.detail
+
 
 
 @pytest.mark.asyncio
@@ -628,15 +629,15 @@ async def test_api_create_contractor_cross_representation_ambiguity_fails_closed
 
     fake_db = _FakeDB([
         {
-            "contractor_id": "gb-spaced",
-            "owner_phone": "020 7946 0958",
-            "country_code": "GB",
+            "contractor_id": "us-spaced",
+            "owner_phone": "(415) 555-1234",
+            "country_code": "US",
             "active": True,
         },
         {
-            "contractor_id": "gb-unspaced",
-            "owner_phone": "02079460958",
-            "country_code": "GB",
+            "contractor_id": "us-unspaced",
+            "owner_phone": "4155551234",
+            "country_code": "US",
             "active": True,
         },
     ])
@@ -669,9 +670,9 @@ async def test_api_create_contractor_cross_representation_ambiguity_fails_closed
         await contractors_api.api_create_contractor(
             contractors_api.ContractorCreate(
                 owner_name="Alice",
-                business_name="UK Services",
-                owner_phone="020 7946 0958",
-                country_code="GB",
+                business_name="US Services",
+                owner_phone="415-555-1234",
+                country_code="US",
                 apple_user_id="apple-user-alice",
                 apple_identity_token="tok",
             ),
@@ -693,10 +694,10 @@ async def test_api_create_contractor_hostile_persisted_apple_user_id_fails_close
     fake_db = _FakeDB([
         {
             "contractor_id": "hostile-apple-doc",
-            "owner_phone": "+442079460958",
-            "owner_phone_e164": "+442079460958",
+            "owner_phone": "+14155551234",
+            "owner_phone_e164": "+14155551234",
             "apple_user_id": hostile_apple_id,
-            "country_code": "GB",
+            "country_code": "US",
             "active": True,
         }
     ])
@@ -729,9 +730,9 @@ async def test_api_create_contractor_hostile_persisted_apple_user_id_fails_close
         await contractors_api.api_create_contractor(
             contractors_api.ContractorCreate(
                 owner_name="Alice",
-                business_name="UK Services",
-                owner_phone="020 7946 0958",
-                country_code="GB",
+                business_name="US Services",
+                owner_phone="(415) 555-1234",
+                country_code="US",
                 apple_user_id="apple-user-alice",
                 apple_identity_token="tok",
             ),
@@ -860,14 +861,16 @@ async def test_get_contractor_by_owner_phone_direct_db_hostile_country_arg(hosti
     assert res["contractor_id"] == "us-doc"
 
 
-@pytest.mark.parametrize("hostile_country", [123, ["US"], {"country": "US"}, None, 45.6])
+@pytest.mark.parametrize("hostile_country", [123, ["US"], {"country": "US"}, 45.6])
 @pytest.mark.asyncio
-async def test_create_contractor_direct_db_hostile_country_persists_us_fallback(hostile_country, monkeypatch):
-    """Direct DB call create_contractor with non-string country_code must not raise and deterministically persist US."""
+async def test_create_contractor_direct_db_hostile_country_raises_value_error(hostile_country, monkeypatch):
+    """Direct DB call create_contractor with non-string/hostile country_code must raise ValueError and make zero Firestore calls."""
     from app.db import contractors as contractors_db
 
-    fake_db = _FakeDB([])
-    monkeypatch.setattr(contractors_db, "get_firestore_client", lambda: fake_db)
+    def fail_firestore():
+        pytest.fail("get_firestore_client must not be called when country_code is hostile")
+
+    monkeypatch.setattr(contractors_db, "get_firestore_client", fail_firestore)
 
     data = {
         "business_name": "Test Co",
@@ -875,11 +878,44 @@ async def test_create_contractor_direct_db_hostile_country_persists_us_fallback(
         "owner_phone": "(415) 555-1234",
         "country_code": hostile_country,
     }
+    with pytest.raises(ValueError, match="Unsupported country code"):
+        await contractors_db.create_contractor(data)
+
+
+@pytest.mark.parametrize("legacy_blank_country", [None, "", "   "])
+@pytest.mark.asyncio
+async def test_create_contractor_direct_db_legacy_blank_country_persists_us(legacy_blank_country, monkeypatch):
+    """Direct DB call create_contractor with None or blank country_code allows legacy US default."""
+    from app.db import contractors as contractors_db
+
+    stored_docs = []
+
+    class FakeDocRef:
+        id = "new-contractor-id"
+
+    class FakeCollection:
+        def add(self, data):
+            stored_docs.append(dict(data))
+            return None, FakeDocRef()
+
+    class FakeDB:
+        def collection(self, name):
+            return FakeCollection()
+
+    monkeypatch.setattr(contractors_db, "get_firestore_client", lambda: FakeDB())
+
+    data = {
+        "business_name": "Test Co",
+        "owner_name": "Bob",
+        "owner_phone": "(415) 555-1234",
+        "country_code": legacy_blank_country,
+    }
     cid = await contractors_db.create_contractor(data)
     assert cid is not None
-    assert data["country_code"] == "US"
-    assert data["owner_phone"] == "+14155551234"
-    assert data["owner_phone_e164"] == "+14155551234"
+    assert stored_docs[0]["country_code"] == "US"
+    assert stored_docs[0]["owner_phone"] == "+14155551234"
+    assert stored_docs[0]["owner_phone_e164"] == "+14155551234"
+
 
 
 @pytest.mark.asyncio
@@ -1067,47 +1103,40 @@ async def test_create_contractor_persists_canonical_international_phone(monkeypa
 
     monkeypatch.setattr(contractors_db, "get_firestore_client", lambda: FakeDB())
 
-    # UK national
+    # CA national (Available market)
     stored_docs.clear()
     await contractors_db.create_contractor({
-        "business_name": "UK Plumber",
-        "owner_phone": "020 7946 0958",
-        "country_code": "GB",
+        "business_name": "CA Plumber",
+        "owner_phone": "(416) 555-1234",
+        "country_code": "CA",
     })
-    assert stored_docs[0]["owner_phone"] == "+442079460958"
-    assert stored_docs[0]["owner_phone_e164"] == "+442079460958"
-    assert stored_docs[0]["country_code"] == "GB"
+    assert stored_docs[0]["owner_phone"] == "+14165551234"
+    assert stored_docs[0]["owner_phone_e164"] == "+14165551234"
+    assert stored_docs[0]["country_code"] == "CA"
 
-    # BR national
+    # US national (Available market)
     stored_docs.clear()
     await contractors_db.create_contractor({
-        "business_name": "BR Eletricista",
-        "owner_phone": "(11) 98765-4321",
-        "country_code": "BR",
+        "business_name": "US Electrician",
+        "owner_phone": "(415) 555-1234",
+        "country_code": "US",
     })
-    assert stored_docs[0]["owner_phone"] == "+5511987654321"
-    assert stored_docs[0]["owner_phone_e164"] == "+5511987654321"
-    assert stored_docs[0]["country_code"] == "BR"
+    assert stored_docs[0]["owner_phone"] == "+14155551234"
+    assert stored_docs[0]["owner_phone_e164"] == "+14155551234"
+    assert stored_docs[0]["country_code"] == "US"
 
-    # DE national
-    stored_docs.clear()
-    await contractors_db.create_contractor({
-        "business_name": "DE Handwerker",
-        "owner_phone": "030 1234567",
-        "country_code": "DE",
-    })
-    assert stored_docs[0]["owner_phone"] == "+49301234567"
-    assert stored_docs[0]["owner_phone_e164"] == "+49301234567"
-    assert stored_docs[0]["country_code"] == "DE"
-
-    # Region-independent E.164 with missing/US country
-    stored_docs.clear()
-    await contractors_db.create_contractor({
-        "business_name": "E164 International",
-        "owner_phone": "+442079460958",
-    })
-    assert stored_docs[0]["owner_phone"] == "+442079460958"
-    assert stored_docs[0]["owner_phone_e164"] == "+442079460958"
+    # Unavailable countries (GB, BR, DE) must raise ValueError before Firestore writes
+    for unavailable_country, phone in [
+        ("GB", "020 7946 0958"),
+        ("BR", "(11) 98765-4321"),
+        ("DE", "030 1234567"),
+    ]:
+        with pytest.raises(ValueError, match="Country not available for new accounts"):
+            await contractors_db.create_contractor({
+                "business_name": f"{unavailable_country} Handwerker",
+                "owner_phone": phone,
+                "country_code": unavailable_country,
+            })
 
 
 @pytest.mark.asyncio
@@ -1139,7 +1168,7 @@ async def test_create_contractor_direct_helper_rejects_invalid_phone_before_fire
 
 @pytest.mark.asyncio
 async def test_create_contractor_direct_helper_sanitizes_lowercase_supported_country(monkeypatch):
-    """Direct helper must sanitize lowercase supported country (e.g. 'gb' -> 'GB')."""
+    """Direct helper must sanitize lowercase supported country (e.g. 'ca' -> 'CA') and enforce availability."""
     from app.db import contractors as contractors_db
 
     stored_docs = []
@@ -1158,82 +1187,83 @@ async def test_create_contractor_direct_helper_sanitizes_lowercase_supported_cou
 
     monkeypatch.setattr(contractors_db, "get_firestore_client", lambda: FakeDB())
 
-    # Lowercase 'gb'
+    # Lowercase 'ca' with matching +1 CA phone
     stored_docs.clear()
     await contractors_db.create_contractor({
-        "business_name": "UK Co",
-        "owner_phone": "020 7946 0958",
-        "country_code": "gb",
+        "business_name": "CA Co",
+        "owner_phone": "(416) 555-1234",
+        "country_code": "ca",
     })
-    assert stored_docs[0]["country_code"] == "GB"
-    assert stored_docs[0]["owner_phone"] == "+442079460958"
-    assert stored_docs[0]["owner_phone_e164"] == "+442079460958"
+    assert stored_docs[0]["country_code"] == "CA"
+    assert stored_docs[0]["owner_phone"] == "+14165551234"
+    assert stored_docs[0]["owner_phone_e164"] == "+14165551234"
 
-    # Lowercase 'br'
+    # Lowercase 'ca' with blank phone -> canonical CA
     stored_docs.clear()
     await contractors_db.create_contractor({
-        "business_name": "BR Co",
-        "owner_phone": "(11) 98765-4321",
-        "country_code": "br",
+        "business_name": "CA Blank Co",
+        "owner_phone": "",
+        "country_code": "ca",
     })
-    assert stored_docs[0]["country_code"] == "BR"
-    assert stored_docs[0]["owner_phone"] == "+5511987654321"
-    assert stored_docs[0]["owner_phone_e164"] == "+5511987654321"
+    assert stored_docs[0]["country_code"] == "CA"
 
-    # Lowercase 'de'
-    stored_docs.clear()
-    await contractors_db.create_contractor({
-        "business_name": "DE Co",
-        "owner_phone": "030 1234567",
-        "country_code": "de",
-    })
-    assert stored_docs[0]["country_code"] == "DE"
-    assert stored_docs[0]["owner_phone"] == "+49301234567"
-    assert stored_docs[0]["owner_phone_e164"] == "+49301234567"
-
-
-@pytest.mark.asyncio
-async def test_create_contractor_direct_helper_sanitizes_unsupported_country(monkeypatch):
-    """Direct helper must resolve unsupported country input to 'US' default."""
-    from app.db import contractors as contractors_db
-
-    stored_docs = []
-
-    class FakeDocRef:
-        id = "new-contractor-id"
-
-    class FakeCollection:
-        def add(self, data):
-            stored_docs.append(dict(data))
-            return None, FakeDocRef()
-
-    class FakeDB:
-        def collection(self, name):
-            return FakeCollection()
-
-    monkeypatch.setattr(contractors_db, "get_firestore_client", lambda: FakeDB())
-
-    # Unsupported country with E.164 phone
-    stored_docs.clear()
-    await contractors_db.create_contractor({
-        "business_name": "XX Co",
-        "owner_phone": "+442079460958",
-        "country_code": "XX",
-    })
-    assert stored_docs[0]["country_code"] == "US"
-    assert stored_docs[0]["owner_phone"] == "+442079460958"
-    assert stored_docs[0]["owner_phone_e164"] == "+442079460958"
-
-    # Unsupported country with US national phone
+    # Lowercase 'us' with matching +1 US phone
     stored_docs.clear()
     await contractors_db.create_contractor({
         "business_name": "US Co",
-        "owner_phone": "4155551234",
-        "country_code": "UNSUPPORTED",
+        "owner_phone": "(415) 555-1234",
+        "country_code": "us",
     })
     assert stored_docs[0]["country_code"] == "US"
     assert stored_docs[0]["owner_phone"] == "+14155551234"
     assert stored_docs[0]["owner_phone_e164"] == "+14155551234"
+
+
+@pytest.mark.asyncio
+async def test_create_contractor_direct_helper_lowercase_closed_country_raises(monkeypatch):
+    """Lowercase closed country (gb, br, de) with blank phone asserts closed country without DB calls."""
+    from app.db import contractors as contractors_db
+
+    def fail_firestore():
+        pytest.fail("get_firestore_client must not be called for unavailable country")
+
+    monkeypatch.setattr(contractors_db, "get_firestore_client", fail_firestore)
+
+    for unavail in ["gb", "br", "de"]:
+        with pytest.raises(ValueError, match="Country not available for new accounts"):
+            await contractors_db.create_contractor({
+                "business_name": "Unavail Co",
+                "owner_phone": "",
+                "country_code": unavail,
+            })
+
+
+@pytest.mark.parametrize("unsupported_cc", ["XX", "UNSUPPORTED", "ZZ"])
+@pytest.mark.asyncio
+async def test_create_contractor_direct_helper_rejects_unsupported_country_before_db(unsupported_cc, monkeypatch):
+    """Direct helper must raise ValueError for unsupported country code before any Firestore interaction."""
+    from app.db import contractors as contractors_db
+
+    def fail_firestore():
+        pytest.fail("get_firestore_client must not be called when country_code is unsupported")
+
+    monkeypatch.setattr(contractors_db, "get_firestore_client", fail_firestore)
+
+    # Unsupported country with E.164 phone
+    with pytest.raises(ValueError, match="Unsupported country code"):
+        await contractors_db.create_contractor({
+            "business_name": "XX Co",
+            "owner_phone": "+14155551234",
+            "country_code": unsupported_cc,
+        })
+
+    # Unsupported country with blank phone
+    with pytest.raises(ValueError, match="Unsupported country code"):
+        await contractors_db.create_contractor({
+            "business_name": "XX Blank Co",
+            "owner_phone": "",
+            "country_code": unsupported_cc,
+        })
 
 
 @pytest.mark.asyncio
@@ -1322,18 +1352,18 @@ async def test_effective_country_forwarded_to_phone_dedupe(monkeypatch):
     monkeypatch.setattr("app.db.contractors.get_contractor_by_owner_phone", fake_by_phone)
 
     body = contractors_api.ContractorCreate(
-        owner_name="UK User",
-        business_name="UK Services",
-        owner_phone="020 7946 0958",
-        country_code="GB",
-        apple_user_id="apple-uk-new",
+        owner_name="CA User",
+        business_name="CA Services",
+        owner_phone="(416) 555-1234",
+        country_code="CA",
+        apple_user_id="apple-ca-new",
         apple_identity_token="tok",
     )
     await contractors_api.api_create_contractor(body, request=None)
 
     assert len(dedupe_calls) == 1
-    assert dedupe_calls[0]["country_code"] == "GB"
-    assert dedupe_calls[0]["phone"] == "020 7946 0958"
+    assert dedupe_calls[0]["country_code"] == "CA"
+    assert dedupe_calls[0]["phone"] == "+14165551234"
 
 
 @pytest.mark.asyncio
@@ -1350,14 +1380,14 @@ async def test_canonical_international_matches_return_existing_contractor_not_du
         return "new-id"
 
     async def fake_by_phone(phone, *, country_code="US"):
-        if phone == "020 7946 0958" and country_code == "GB":
+        if phone == "+14165551234" and country_code == "CA":
             return {
-                "contractor_id": "existing-uk-id",
-                "apple_user_id": "apple-uk-user",
-                "owner_phone": "+442079460958",
-                "owner_phone_e164": "+442079460958",
-                "country_code": "GB",
-                "subscription_uuid": "uuid-uk",
+                "contractor_id": "existing-ca-id",
+                "apple_user_id": "apple-ca-user",
+                "owner_phone": "+14165551234",
+                "owner_phone_e164": "+14165551234",
+                "country_code": "CA",
+                "subscription_uuid": "uuid-ca",
             }
         return None
 
@@ -1365,7 +1395,7 @@ async def test_canonical_international_matches_return_existing_contractor_not_du
         return True
 
     async def fake_uuid(cid, existing):
-        return "uuid-uk"
+        return "uuid-ca"
 
     async def fake_enforce(request, apple_user_id, token):
         return None
@@ -1380,17 +1410,17 @@ async def test_canonical_international_matches_return_existing_contractor_not_du
     monkeypatch.setattr("app.db.contractors.get_contractor_by_owner_phone", fake_by_phone)
 
     body = contractors_api.ContractorCreate(
-        owner_name="UK User",
-        business_name="UK Services",
-        owner_phone="020 7946 0958",
-        country_code="GB",
-        apple_user_id="apple-uk-user",
+        owner_name="CA User",
+        business_name="CA Services",
+        owner_phone="(416) 555-1234",
+        country_code="CA",
+        apple_user_id="apple-ca-user",
         apple_identity_token="tok",
     )
     res = await contractors_api.api_create_contractor(body, request=None)
 
     assert res["status"] == "ok"
-    assert res["contractor_id"] == "existing-uk-id"
+    assert res["contractor_id"] == "existing-ca-id"
     assert res["existing"] is True
     assert created == [], "must not create duplicate account for canonical international match"
 
@@ -1402,7 +1432,7 @@ async def test_invalid_nonblank_phone_rejected_before_firestore(monkeypatch):
 
     firestore_accessed = []
 
-    async def fail_apple_lookup(apple_user_id):
+    async def fake_apple_lookup(apple_user_id):
         firestore_accessed.append("apple_lookup")
         return None
 
@@ -1414,22 +1444,27 @@ async def test_invalid_nonblank_phone_rejected_before_firestore(monkeypatch):
         firestore_accessed.append("create")
         return "id"
 
+    async def fail_update(cid, updates):
+        firestore_accessed.append("update")
+        return True
+
     async def fake_enforce(request, apple_user_id, token):
         return None
 
     monkeypatch.setattr(contractors_api, "_enforce_apple_identity", fake_enforce)
-    monkeypatch.setattr("app.db.contractors.get_contractor_by_apple_user_id", fail_apple_lookup)
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_apple_user_id", fake_apple_lookup)
     monkeypatch.setattr("app.db.contractors.get_contractor_by_owner_phone", fail_phone_lookup)
     monkeypatch.setattr(contractors_api, "create_contractor", fail_create)
+    monkeypatch.setattr(contractors_api, "update_contractor", fail_update)
 
-    # Invalid UK phone (wrong national format)
+    # Invalid CA phone (wrong national format)
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_create_contractor(
             contractors_api.ContractorCreate(
                 owner_name="Invalid",
                 business_name="Bad Co",
                 owner_phone="12345",
-                country_code="GB",
+                country_code="CA",
                 apple_user_id="apple-user-1",
                 apple_identity_token="tok",
             ),
@@ -1437,8 +1472,11 @@ async def test_invalid_nonblank_phone_rejected_before_firestore(monkeypatch):
         )
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Invalid owner phone number"
-    assert firestore_accessed == [], "no Firestore operation must occur when phone is invalid"
+    assert exc_info.value.detail["code"] == "invalid_owner_phone"
+    assert firestore_accessed == ["apple_lookup"], "only verified Apple lookup may occur before phone rejection"
+    assert "phone_lookup" not in firestore_accessed
+    assert "create" not in firestore_accessed
+    assert "update" not in firestore_accessed
 
     # Invalid text phone
     firestore_accessed.clear()
@@ -1456,8 +1494,66 @@ async def test_invalid_nonblank_phone_rejected_before_firestore(monkeypatch):
         )
 
     assert exc_info2.value.status_code == 400
-    assert exc_info2.value.detail == "Invalid owner phone number"
-    assert firestore_accessed == []
+    assert exc_info2.value.detail["code"] == "invalid_owner_phone"
+    assert firestore_accessed == ["apple_lookup"], "only verified Apple lookup may occur before phone rejection"
+    assert "phone_lookup" not in firestore_accessed
+    assert "create" not in firestore_accessed
+    assert "update" not in firestore_accessed
+
+
+@pytest.mark.asyncio
+async def test_returning_known_apple_account_with_malformed_phone_gets_restore(monkeypatch):
+    """A returning user with a verified Apple ID gets their account restored even if the signup request body carries a malformed phone."""
+    from app.api import contractors as contractors_api
+
+    async def fake_enforce(request, apple_user_id, token):
+        return None
+
+    async def fake_by_apple(apple_user_id):
+        if apple_user_id == "apple-user-returning":
+            return {
+                "contractor_id": "restored-cid",
+                "apple_user_id": apple_user_id,
+                "owner_phone": "+14155551234",
+                "country_code": "US",
+            }
+        return None
+
+    async def fake_uuid(cid, existing):
+        return "uuid-restored"
+
+    async def fake_update(cid, updates):
+        return True
+
+    async def fail_phone_lookup(*args, **kwargs):
+        pytest.fail("phone lookup must not run when Apple match restores account")
+
+    async def fail_create(data):
+        pytest.fail("create_contractor must not run when Apple match restores account")
+
+    monkeypatch.setattr(contractors_api, "_enforce_apple_identity", fake_enforce)
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_apple_user_id", fake_by_apple)
+    monkeypatch.setattr("app.db.contractors.get_contractor_by_owner_phone", fail_phone_lookup)
+    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_uuid)
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update)
+    monkeypatch.setattr(contractors_api, "create_contractor", fail_create)
+
+    body = contractors_api.ContractorCreate(
+        owner_name="Returning User",
+        business_name="Restored Co",
+        owner_phone="not-a-number",
+        country_code="US",
+        apple_user_id="apple-user-returning",
+        apple_identity_token="tok",
+    )
+    res = await contractors_api.api_create_contractor(body, request=None)
+
+    assert res["status"] == "ok"
+    assert res["contractor_id"] == "restored-cid"
+    assert res["existing"] is True
+    assert res["subscription_uuid"] == "uuid-restored"
+
+
 
 
 @pytest.mark.asyncio

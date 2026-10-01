@@ -1,6 +1,6 @@
 # Hey Kevin — Current Roadmap and Release Status
 
-**Reconciled:** 2026-09-28
+**Expansion priority updated:** 2026-10-01; historical release inventory reconciled 2026-09-28.
 **Backend implementation baseline:** `f45fa6295cfcd290f4c6df2532318f1eb79dfa57` (registration repair; production approval pending)
 **Repository:** `delimatsuo/heykevin`
 
@@ -11,6 +11,20 @@ security evidence and approved safety constraints remain applicable.
 
 Dates below use America/New_York unless a timestamp explicitly ends in `Z`.
 External observations are dated snapshots, not a standing claim about production.
+
+## Current expansion priority — October 1
+
+The owner's order is **Brazil Personal first, Canada second, United Kingdom
+third**. The [Brazil qualification plan](superpowers/plans/2026-10-01-brazil-personal-first.md)
+is the active expansion queue and supersedes the August Business-first memo.
+The first milestone is an eligible consumer-number route and a qualified
+carrier/plan; pt-BR setup, BRL pricing and a small Personal pilot follow.
+
+The newer [country audit](audits/2026-10-01-country-readiness.md) records
+App Store Connect 1.3.4 (45) as `READY_FOR_SALE`, US/Canada-only availability and
+the owner's bounded build 45 phone acceptance. The dated inventory below is
+historical context; it does not override that newer snapshot or establish
+international call acceptance. Current US/Canada support continues.
 
 ## Observed release baseline
 
@@ -70,7 +84,7 @@ Public availability and physical-phone acceptance remain separate:
 
 ## Notification release and remaining device acceptance
 
-**Active priority:** Complete the remaining physical call and frontend checks for N1/N3
+**Historical September 28 priority:** Complete the remaining physical call and frontend checks for N1/N3
 in the [current PRD](../kevin-prd.md). The notification backend, urgent handoff and
 rolling-call compatibility repair are deployed to production, and the native frontend
 in 1.3.0 (39) is published to the App Store. Physical-device acceptance on the owner's

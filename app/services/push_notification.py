@@ -34,10 +34,16 @@ def _get_apns_url() -> str:
     return APNS_PRODUCTION
 
 
-def _safe_voip_push_body(reason: str = "") -> str:
+def _safe_voip_push_body(reason: str = "", user_language: str = "en") -> str:
     """Return lock-screen-safe VoIP alert copy without caller identity."""
+    from app.services.personal_language import is_portuguese
     normalized_reason = "_".join((reason or "").strip().lower().replace("-", " ").split())
-    if normalized_reason in URGENT_VOIP_REASONS:
+    is_urgent = normalized_reason in URGENT_VOIP_REASONS
+    if is_portuguese(user_language):
+        if is_urgent:
+            return "Chamada urgente precisa de atenção. Abra o Kevin para detalhes."
+        return "Chamada recebida. Abra o Kevin para detalhes."
+    if is_urgent:
         return "Urgent call needs review. Open Kevin for details."
     return "Incoming call. Open Kevin for details."
 
@@ -154,6 +160,7 @@ async def send_voip_push(
     access_token: str = "",
     contractor_id: str = "",
     expires_at: Optional[int] = None,
+    user_language: str = "en",
 ) -> bool:
     """Send a VoIP push notification to trigger CallKit on the iOS app.
 
@@ -167,14 +174,23 @@ async def send_voip_push(
         logger.warning("APNs key not configured — falling back to Telegram")
         return False
 
+    from app.services.personal_language import is_portuguese
+    is_pt = is_portuguese(user_language)
+    normalized_reason = "_".join((reason or "").strip().lower().replace("-", " ").split())
+    is_urgent = normalized_reason in URGENT_VOIP_REASONS
+    if is_pt:
+        title = "CHAMADA URGENTE" if is_urgent else "Chamada recebida"
+    else:
+        title = "URGENT CALL" if is_urgent else "Incoming Call"
+
     apns_url = _get_apns_url()
     topic = f"{settings.apns_bundle_id}.voip"
 
     payload = {
         "aps": {
             "alert": {
-                "title": "Incoming Call",
-                "body": _safe_voip_push_body(reason=reason),
+                "title": title,
+                "body": _safe_voip_push_body(reason=reason, user_language=user_language),
             },
         },
         "call_sid": call_sid,
@@ -322,6 +338,7 @@ async def send_screening_summary_push(
     caller_name: str = "",
     reason: str = "",
     collapse_id: Optional[str] = None,
+    user_language: str = "en",
 ) -> bool:
     """Send an in-place screening summary push replacing the incoming call banner.
 
@@ -336,11 +353,15 @@ async def send_screening_summary_push(
         logger.warning(f"No push token for contractor {contractor_id} — screening summary not sent")
         return False
 
-    title = caller_name or caller_phone or "Incoming Call"
+    from app.services.personal_language import is_portuguese
+    is_pt = is_portuguese(user_language)
+    default_title = "Chamada recebida" if is_pt else "Incoming Call"
+    title = caller_name or caller_phone or default_title
     if reason:
-        body = f"{reason} — Tap to view live"
+        body_suffix = " — Toque para ver ao vivo" if is_pt else " — Tap to view live"
+        body = f"{reason}{body_suffix}"
     else:
-        body = "Kevin is screening this call. Tap to view live."
+        body = "Kevin está filtrando esta chamada. Toque para ver ao vivo." if is_pt else "Kevin is screening this call. Tap to view live."
 
     cid = collapse_id or (f"call_{call_sid}" if call_sid else None)
 

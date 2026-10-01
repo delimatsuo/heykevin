@@ -10,7 +10,14 @@ enum SettingsCountry {
     }
 
     static func displayName(_ code: String, locale: Locale = .current) -> String {
-        locale.localizedString(forRegionCode: code) ?? code
+        let clean = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard isSupported(clean) else {
+            return String(localized: "Unknown Country")
+        }
+        if let name = locale.localizedString(forRegionCode: clean), !name.isEmpty {
+            return name
+        }
+        return clean
     }
 
     /// The account country carried by a contractor profile or provisioning
@@ -45,19 +52,57 @@ enum SettingsCountryParser {
 enum SettingsCountryFlow {
     /// A pick writes only when it differs from what the account already
     /// holds; with the account unknown (""), any explicit pick is a request.
-    static func shouldWrite(picked: String, accountCountry: String) -> Bool {
-        picked != accountCountry
+    /// When a number is assigned, the country is locked and should never write.
+    static func shouldWrite(picked: String, accountCountry: String, hasAssignedNumber: Bool = false) -> Bool {
+        if hasAssignedNumber { return false }
+        return picked != accountCountry
     }
 
-    /// What the picker shows: the account country when known, else the
-    /// device-region country the forwarding codes fall back to (so the two
-    /// never disagree), else US.
-    static func displayedSelection(accountCountry: String, locale: Locale = .current) -> String {
-        if SettingsCountry.isSupported(accountCountry) {
-            return accountCountry.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    /// Overload for backwards compatibility.
+    static func shouldWrite(picked: String, accountCountry: String) -> Bool {
+        shouldWrite(picked: picked, accountCountry: accountCountry, hasAssignedNumber: false)
+    }
+
+    /// What the picker shows:
+    /// - When assigned (hasAssignedNumber is true):
+    ///   - serviceBinding.countryCode if present and supported.
+    ///   - accountCountry if binding is absent and accountCountry is supported.
+    ///   - else "" (empty string, displayed as localized "Unknown Country").
+    /// - When unassigned (hasAssignedNumber is false):
+    ///   - accountCountry if supported.
+    ///   - device-region country from locale if supported.
+    ///   - else "US".
+    static func displayedSelection(
+        serviceBinding: ServiceBinding? = nil,
+        accountCountry: String,
+        hasAssignedNumber: Bool = false,
+        locale: Locale = .current
+    ) -> String {
+        if hasAssignedNumber {
+            if let binding = serviceBinding {
+                if let bindingCountry = binding.countryCode?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+                   SettingsCountry.isSupported(bindingCountry) {
+                    return bindingCountry
+                }
+                return ""
+            }
+            let trimmedAccount = accountCountry.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if SettingsCountry.isSupported(trimmedAccount) {
+                return trimmedAccount
+            }
+            return ""
         }
-        let region = ForwardingCountry.resolve(accountCountry: nil, locale: locale)
+        let trimmedAccount = accountCountry.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if SettingsCountry.isSupported(trimmedAccount) {
+            return trimmedAccount
+        }
+        let region = ForwardingCountry.resolve(serviceBinding: nil, accountCountry: nil, hasAssignedNumber: false, locale: locale)
         return SettingsCountry.isSupported(region) ? region : "US"
+    }
+
+    /// Overload for backwards compatibility with existing callers.
+    static func displayedSelection(accountCountry: String, locale: Locale = .current) -> String {
+        displayedSelection(serviceBinding: nil, accountCountry: accountCountry, hasAssignedNumber: false, locale: locale)
     }
 
     /// A write is confirmed only when the server returns exactly what was

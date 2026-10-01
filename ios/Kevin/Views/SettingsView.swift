@@ -84,7 +84,11 @@ struct SettingsHost<Root: View>: View {
     @State private var isSavingBusinessHours = false
     @State private var businessHoursSaveError = ""
     @State private var forwardingInstructions: ForwardingInstructions?
-    @State private var countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: "")
+    @State private var countrySelection = SettingsCountryFlow.displayedSelection(
+        serviceBinding: AppState.shared.serviceBinding,
+        accountCountry: AppState.shared.countryCode,
+        hasAssignedNumber: !AppState.shared.kevinNumber.isEmpty
+    )
     @State private var isSavingCountry = false
     @State private var countrySaveError = ""
     @State private var smartInterruptionSelection = AppState.shared.smartInterruption
@@ -114,7 +118,14 @@ struct SettingsHost<Root: View>: View {
 
     @State private var pendingCallLeaseToOpen: CallPresentationLease? = nil
 
-    private var forwardingCountry: String { ForwardingCountry.resolve(accountCountry: appState.countryCode) }
+    private var forwardingCountry: String {
+        ForwardingCountry.resolve(
+            serviceBinding: appState.serviceBinding,
+            accountCountry: appState.countryCode,
+            assignedNumber: appState.kevinNumber,
+            hasAssignedNumber: !appState.kevinNumber.isEmpty
+        )
+    }
     private var kevinNumber: String { appState.kevinNumber }
 
     private var isFixtureMode: Bool {
@@ -205,7 +216,18 @@ struct SettingsHost<Root: View>: View {
                 }
             }
             .onChange(of: appState.countryCode) { _, newCode in
-                countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: newCode)
+                countrySelection = SettingsCountryFlow.displayedSelection(
+                    serviceBinding: appState.serviceBinding,
+                    accountCountry: newCode,
+                    hasAssignedNumber: !appState.kevinNumber.isEmpty
+                )
+            }
+            .onChange(of: appState.serviceBinding) { _, newBinding in
+                countrySelection = SettingsCountryFlow.displayedSelection(
+                    serviceBinding: newBinding,
+                    accountCountry: appState.countryCode,
+                    hasAssignedNumber: !appState.kevinNumber.isEmpty
+                )
             }
             .onChange(of: appState.currentAuthContext()) { _, newAuth in
                 handleAuthChange(newAuth: newAuth)
@@ -515,8 +537,8 @@ struct SettingsHost<Root: View>: View {
                         #if DEBUG
                         if isFixtureMode { return }
                         #endif
-                        if !appState.kevinNumber.isEmpty {
-                            dialCode(forwardingCodes.activate)
+                        if let codes = forwardingCodes {
+                            dialCode(codes.activate)
                             #if !DEBUG
                             UserDefaults.standard.set(appState.kevinNumber, forKey: "forwardingActivatedFor")
                             #endif
@@ -525,14 +547,14 @@ struct SettingsHost<Root: View>: View {
                     } label: {
                         Text(appState.forwardingActivated ? String(localized: "Re-activate") : String(localized: "Set up forwarding"))
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(appState.kevinNumber.isEmpty ? Color.secondary : (appState.forwardingActivated ? Color.blue : Color.orange))
+                            .foregroundStyle(forwardingCodes == nil ? Color.secondary : (appState.forwardingActivated ? Color.blue : Color.orange))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background((appState.forwardingActivated ? Color.blue : Color.orange).opacity(appState.kevinNumber.isEmpty ? 0.05 : 0.15))
+                            .background((appState.forwardingActivated ? Color.blue : Color.orange).opacity(forwardingCodes == nil ? 0.05 : 0.15))
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.borderless)
-                    .disabled(appState.kevinNumber.isEmpty)
+                    .disabled(forwardingCodes == nil || isFixtureMode)
                 }
 
                 SetupRow(
@@ -1027,69 +1049,81 @@ struct SettingsHost<Root: View>: View {
                 }
             }
 
-            Button {
-                dialCode(forwardingCodes.activate)
-            } label: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(String(localized: "Activate Kevin"))
-                            .font(.subheadline.weight(.medium))
-                        Text(String(localized: "Forward missed calls to Kevin"))
-                            .font(.caption)
-                            .foregroundStyle(Color.secondary)
+            if let codes = forwardingCodes {
+                Button {
+                    dialCode(codes.activate)
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "Activate Kevin"))
+                                .font(.subheadline.weight(.medium))
+                            Text(String(localized: "Forward missed calls to Kevin"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "phone.arrow.right")
+                            .foregroundStyle(.green)
                     }
-                    Spacer()
-                    Image(systemName: "phone.arrow.right")
-                        .foregroundStyle(.green)
                 }
-            }
-            .disabled(isFixtureMode)
+                .disabled(isFixtureMode)
 
-            Button(role: .destructive) {
-                dialCode(forwardingCodes.deactivate)
-            } label: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(String(localized: "Deactivate Kevin"))
-                            .font(.subheadline.weight(.medium))
-                        Text(String(localized: "Stop forwarding, calls ring normally"))
-                            .font(.caption)
-                            .foregroundStyle(Color.secondary)
+                Button(role: .destructive) {
+                    dialCode(codes.deactivate)
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "Deactivate Kevin"))
+                                .font(.subheadline.weight(.medium))
+                            Text(String(localized: "Stop forwarding, calls ring normally"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "xmark.circle")
+                            .foregroundStyle(.red)
                     }
-                    Spacer()
-                    Image(systemName: "xmark.circle")
-                        .foregroundStyle(.red)
                 }
-            }
-            .disabled(isFixtureMode)
+                .disabled(isFixtureMode)
 
-            Button(role: .destructive) {
-                if let code = forwardingCodes.clearAll { dialCode(code) }
-            } label: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(String(localized: "Clear All Forwarding"))
-                            .font(.subheadline.weight(.medium))
-                        Text(String(localized: "Nuclear option — clears every forwarding type at once"))
-                            .font(.caption)
-                            .foregroundStyle(Color.secondary)
+                Button(role: .destructive) {
+                    if let code = codes.clearAll { dialCode(code) }
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "Clear All Forwarding"))
+                                .font(.subheadline.weight(.medium))
+                            Text(String(localized: "Nuclear option — clears every forwarding type at once"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "exclamationmark.octagon")
+                            .foregroundStyle(.red)
                     }
-                    Spacer()
-                    Image(systemName: "exclamationmark.octagon")
-                        .foregroundStyle(.red)
                 }
+                .disabled(codes.clearAll == nil || isFixtureMode)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.blue)
+                    Text(String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                }
+                .padding(.vertical, 4)
             }
-            .disabled(forwardingCodes.clearAll == nil || isFixtureMode)
         } header: {
             Text(String(localized: "Call Forwarding"))
         } footer: {
             if appState.kevinNumber.isEmpty {
                 Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
                     .foregroundStyle(.orange)
+            } else if ForwardingCountry.isNANP(forwardingCountry) {
+                Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used."))
             } else {
-                Text(ForwardingCountry.isNANP(forwardingCountry)
-                    ? String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used.")
-                    : String(localized: "Tapping opens your phone dialer. Tap Call to confirm."))
+                Text(String(localized: "Call forwarding in your country does not use carrier dialing codes yet."))
             }
         }
         .disabled(appState.kevinNumber.isEmpty)
@@ -1120,12 +1154,18 @@ struct SettingsHost<Root: View>: View {
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "Country"))
-                    Text(String(localized: "Sets the call forwarding codes Kevin shows you."))
-                        .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                    if !appState.kevinNumber.isEmpty {
+                        Text(String(localized: "Your account country is locked to your assigned Kevin number."))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    } else {
+                        Text(String(localized: "Sets the call forwarding codes Kevin shows you."))
+                            .font(.caption)
+                            .foregroundStyle(Color.secondary)
+                    }
                 }
             }
-            .disabled(isSavingCountry || isFixtureMode)
+            .disabled(!appState.kevinNumber.isEmpty || isSavingCountry || isFixtureMode)
 
             if !countrySaveError.isEmpty {
                 Text(countrySaveError)
@@ -1563,6 +1603,7 @@ struct SettingsHost<Root: View>: View {
         Binding(
             get: { countrySelection },
             set: { picked in
+                if !appState.kevinNumber.isEmpty { return }
                 countrySelection = picked
                 if SettingsCountryFlow.shouldWrite(picked: picked, accountCountry: appState.countryCode) {
                     saveCountry(picked)
@@ -1573,7 +1614,7 @@ struct SettingsHost<Root: View>: View {
 
     private func saveCountry(_ code: String) {
         let auth = appState.currentAuthContext()
-        guard auth.isValid, !isSavingCountry else { return }
+        guard auth.isValid, !isSavingCountry, appState.kevinNumber.isEmpty else { return }
         loadCoordinator.recordMutation(field: .country)
         countrySaveError = ""
         isSavingCountry = true
@@ -1597,7 +1638,11 @@ struct SettingsHost<Root: View>: View {
                     appState.countryCode = code
                     confirmedBaseline.countryCode = code
                 } else {
-                    countrySelection = SettingsCountryFlow.displayedSelection(accountCountry: appState.countryCode)
+                    countrySelection = SettingsCountryFlow.displayedSelection(
+                        serviceBinding: appState.serviceBinding,
+                        accountCountry: appState.countryCode,
+                        hasAssignedNumber: !appState.kevinNumber.isEmpty
+                    )
                     countrySaveError = String(localized: "Failed to save setting. Please try again.")
                 }
             }
@@ -1756,9 +1801,11 @@ struct SettingsHost<Root: View>: View {
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let number = json["phone_number"] as? String, !number.isEmpty {
                 let country = SettingsCountry.accountCountry(from: json)
+                let binding = ServiceBindingParser.parseBinding(json["service_binding"])
                 await MainActor.run {
                     guard appState.currentAuthContext() == auth else { return }
                     appState.kevinNumber = number
+                    appState.serviceBinding = binding
                     if let country {
                         appState.countryCode = country
                         countrySelection = country
@@ -1856,6 +1903,7 @@ struct SettingsHost<Root: View>: View {
 
         let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
         appState.autoReplySms = autoReply
+        appState.serviceBinding = ServiceBindingParser.parse(from: contractor)
 
         if let token = capturedSMSToken, let auth = capturedAuth {
             ownerSMSPreference.applyHydration(dict: contractor, token: token, auth: auth)
@@ -2126,11 +2174,11 @@ struct SettingsHost<Root: View>: View {
 
     // MARK: - Forwarding Helpers
 
-    private var forwardingCodes: ForwardingCodes {
+    private var forwardingCodes: ForwardingCodes? {
         ForwardingDialCodes.codes(
             countryCode: forwardingCountry,
             instructions: forwardingInstructions,
-            number: dialNumber,
+            number: kevinNumber,
             isVerizon: appState.isVerizonCarrier
         )
     }

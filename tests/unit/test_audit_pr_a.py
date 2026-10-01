@@ -376,6 +376,13 @@ async def test_international_phone_hijack_rejection(stub_apple_identity, monkeyp
     Attacker signs in with different Apple ID and national-format phone 020 7946 0958
     and country_code=GB. Must be rejected with 409 Conflict.
     """
+    # Synthetic qualified-market setup exercises identity rejection;
+    # production GB admission remains closed and separately covered by country_admission tests.
+    monkeypatch.setattr(
+        "app.services.country_policy.is_country_available",
+        lambda code: code in {"US", "CA", "GB"},
+    )
+
     victim_contractor = {
         "contractor_id": "victim-uk-1",
         "apple_user_id": "apple-user-victim",
@@ -395,11 +402,26 @@ async def test_international_phone_hijack_rejection(stub_apple_identity, monkeyp
         pytest.fail("update_contractor must not run on rejected hijack")
         return False
 
+    async def fake_create(data):
+        pytest.fail("create_contractor must not run on rejected hijack")
+
+    async def fake_ensure_uuid(contractor_id, existing):
+        pytest.fail("ensure_subscription_uuid must not run on rejected hijack")
+        return ""
+
+    def fake_generate_token(contractor_id):
+        pytest.fail("generate_contractor_token must not run on rejected hijack")
+
     monkeypatch.setattr(
         "app.db.contractors.get_contractor_by_owner_phone", fake_get_by_phone
     )
     monkeypatch.setattr(contractors_api, "update_contractor", fake_update)
+    monkeypatch.setattr(contractors_api, "create_contractor", fake_create)
+    monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fake_ensure_uuid)
     monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", _fake_no_apple_id_match)
+    monkeypatch.setattr(
+        "app.middleware.auth.generate_contractor_token", fake_generate_token
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_create_contractor(
@@ -415,6 +437,8 @@ async def test_international_phone_hijack_rejection(stub_apple_identity, monkeyp
         )
 
     assert exc_info.value.status_code == 409
+    assert "different Apple ID" in exc_info.value.detail
+    assert seen_dedupe_args["phone"] == "+442079460958"
     assert seen_dedupe_args["country_code"] == "GB"
 
 
@@ -425,6 +449,13 @@ async def test_international_phone_rejects_legacy_record_with_blank_apple_id(
     """Legacy UK record with no apple_user_id must fail closed when looked up
     by national-format phone 020 7946 0958. Zero updates, zero token issuance.
     """
+    # Synthetic qualified-market setup exercises identity rejection;
+    # production GB admission remains closed and separately covered by country_admission tests.
+    monkeypatch.setattr(
+        "app.services.country_policy.is_country_available",
+        lambda code: code in {"US", "CA", "GB"},
+    )
+
     legacy = {
         "contractor_id": "legacy-uk-1",
         "apple_user_id": "",
@@ -433,7 +464,11 @@ async def test_international_phone_rejects_legacy_record_with_blank_apple_id(
         "subscription_uuid": "uuid-legacy-uk",
     }
 
+    seen_dedupe_args: dict = {}
+
     async def fake_get_by_phone(phone, *, country_code="US"):
+        seen_dedupe_args["phone"] = phone
+        seen_dedupe_args["country_code"] = country_code
         return legacy
 
     async def fail_update(contractor_id, updates):
@@ -445,6 +480,9 @@ async def test_international_phone_rejects_legacy_record_with_blank_apple_id(
     async def fail_ensure_uuid(contractor_id, existing):
         pytest.fail("ensure_subscription_uuid must not run on legacy fail-closed rejection")
 
+    def fail_generate_token(contractor_id):
+        pytest.fail("generate_contractor_token must not run on legacy fail-closed rejection")
+
     monkeypatch.setattr(
         "app.db.contractors.get_contractor_by_owner_phone", fake_get_by_phone
     )
@@ -452,6 +490,9 @@ async def test_international_phone_rejects_legacy_record_with_blank_apple_id(
     monkeypatch.setattr(contractors_api, "create_contractor", fail_create)
     monkeypatch.setattr(contractors_api, "ensure_subscription_uuid", fail_ensure_uuid)
     monkeypatch.setattr(contractors_db, "get_contractor_by_apple_user_id", _fake_no_apple_id_match)
+    monkeypatch.setattr(
+        "app.middleware.auth.generate_contractor_token", fail_generate_token
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await contractors_api.api_create_contractor(
@@ -468,3 +509,5 @@ async def test_international_phone_rejects_legacy_record_with_blank_apple_id(
 
     assert exc_info.value.status_code == 409
     assert "already exists" in exc_info.value.detail
+    assert seen_dedupe_args["phone"] == "+442079460958"
+    assert seen_dedupe_args["country_code"] == "GB"

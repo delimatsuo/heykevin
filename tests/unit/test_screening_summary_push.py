@@ -180,6 +180,7 @@ async def test_extract_and_send_screening_summary_feeds_both_push_and_publish(mo
         caller_name="Jonathan from Geico",
         reason="Insurance renewal",
         collapse_id="call_CA12345",
+        user_language="en",
     )
 
 
@@ -310,7 +311,62 @@ async def test_extract_and_send_screening_summary_without_ws_token_skips_publish
 
     assert sent is True
     publish_mock.assert_not_awaited()
-    push_mock.assert_awaited_once()
+    push_mock.assert_awaited_once_with(
+        contractor_id="c1",
+        call_sid="CA12345",
+        caller_phone="",
+        caller_name="Jonathan from Geico",
+        reason="Insurance renewal",
+        collapse_id=None,
+        user_language="en",
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_and_send_screening_summary_pt_wires_language(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import owner_call_actions
+
+    extract_mock = AsyncMock(return_value={"caller_name": "Carlos Silva", "reason": "Orçamento de reforma"})
+    publish_mock = AsyncMock(return_value=True)
+    push_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(screening_summary, "extract_screening_summary", extract_mock)
+    monkeypatch.setattr(owner_call_actions, "publish_screening_reason", publish_mock)
+    monkeypatch.setattr(push_notification, "send_screening_summary_push", push_mock)
+
+    sent = await screening_summary.extract_and_send_screening_summary(
+        contractor_id="c_pt_1",
+        call_sid="CA_PT_99",
+        caller_phone="+5511988887777",
+        transcript="transcript in pt",
+        ws_token="ws_pt_token",
+        collapse_id="call_CA_PT_99",
+        user_language="pt-BR",
+    )
+
+    assert sent is True
+    extract_mock.assert_awaited_once_with(
+        transcript="transcript in pt",
+        caller_phone="+5511988887777",
+        known_caller_name="",
+        user_language="pt-BR",
+    )
+    publish_mock.assert_awaited_once_with(
+        call_sid="CA_PT_99",
+        contractor_id="c_pt_1",
+        ws_token="ws_pt_token",
+        reason="Orçamento de reforma",
+    )
+    push_mock.assert_awaited_once_with(
+        contractor_id="c_pt_1",
+        call_sid="CA_PT_99",
+        caller_phone="+5511988887777",
+        caller_name="Carlos Silva",
+        reason="Orçamento de reforma",
+        collapse_id="call_CA_PT_99",
+        user_language="pt-BR",
+    )
 
 
 @pytest.mark.asyncio

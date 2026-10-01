@@ -213,3 +213,54 @@ async def test_patch_contractor_only_owner_phone_returns_no_changes(monkeypatch)
     )
     assert resp == {"status": "no changes"}
     assert not update_called
+
+
+def test_telephony_service_binding_fields_in_protected_fields():
+    """Proves telephony service binding fields are in PROTECTED_FIELDS."""
+    telephony_fields = {
+        "provisioned_country_code",
+        "number_provider",
+        "number_type",
+        "number_capabilities",
+        "service_binding",
+    }
+    missing = telephony_fields - PROTECTED_FIELDS
+    assert not missing, f"Missing telephony fields in PROTECTED_FIELDS: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_patch_contractor_strips_telephony_service_binding_fields(monkeypatch):
+    """Proves that PATCH /api/contractors/{id} strips telephony service binding fields."""
+    captured_updates = {}
+
+    async def fake_update_contractor(contractor_id, updates):
+        captured_updates.update(updates)
+        return True
+
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+
+    class PermissiveUpdate(contractors_api.ContractorUpdate):
+        class Config:
+            extra = "allow"
+
+    payload = PermissiveUpdate(
+        business_name="Acme Telephony",
+        provisioned_country_code="BR",
+        number_provider="twilio",
+        number_type="local",
+        number_capabilities={"voice": True, "SMS": True},
+        service_binding={"country_code": "BR", "provider": "twilio"},
+    )
+
+    resp = await contractors_api.api_update_contractor(
+        "contractor-1",
+        payload,
+        _admin_request(),
+    )
+    assert resp == {"status": "ok"}
+    assert captured_updates == {"business_name": "Acme Telephony"}
+    assert "provisioned_country_code" not in captured_updates
+    assert "number_provider" not in captured_updates
+    assert "number_type" not in captured_updates
+    assert "number_capabilities" not in captured_updates
+    assert "service_binding" not in captured_updates

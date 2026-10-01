@@ -16,6 +16,21 @@ def test_normalize_invalid():
     assert normalize_phone("") is None
 
 
+def test_normalize_international_with_region():
+    # Brazil
+    assert normalize_phone("(11) 98765-4321", default_region="BR") == "+5511987654321"
+    assert normalize_phone("+5511987654321") == "+5511987654321"
+
+    # Canada
+    assert normalize_phone("(416) 555-1234", default_region="CA") == "+14165551234"
+    assert normalize_phone("+14165551234") == "+14165551234"
+
+    # United Kingdom
+    assert normalize_phone("020 7946 0958", default_region="GB") == "+442079460958"
+    assert normalize_phone("+442079460958") == "+442079460958"
+
+
+
 def test_phone_hash_consistent():
     h1 = phone_hash("+16504222677")
     h2 = phone_hash("+16504222677")

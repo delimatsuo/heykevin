@@ -28,8 +28,15 @@ def _sanitize_transcript(transcript: str, max_chars: int = 1500) -> str:
     return clean[:max_chars]
 
 
-def _fallback_extraction(transcript: str, caller_phone: str = "", known_caller_name: str = "") -> dict:
+def _fallback_extraction(
+    transcript: str,
+    caller_phone: str = "",
+    known_caller_name: str = "",
+    user_language: str = "en",
+) -> dict:
     """Fast deterministic extraction when LLM is slow or unavailable."""
+    from app.services.personal_language import is_portuguese
+    is_pt = is_portuguese(user_language)
     caller_name = known_caller_name.strip()
     reason = ""
 
@@ -46,19 +53,29 @@ def _fallback_extraction(transcript: str, caller_phone: str = "", known_caller_n
 
     if caller_utterances:
         first_statement = caller_utterances[0]
-        match = re.search(r"(?:this is|it's|i'm|i am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+from\s+[A-Z][a-z]+)?)", first_statement, re.IGNORECASE)
+        match = re.search(
+            r"(?:this is|it's|i'm|i am|aqui é(?:\s+o|\s+a)?|sou o|sou a|é o|é a)\s+"
+            r"((?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+)"
+            r"(?:\s+(?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+))*"
+            r"(?:\s+(?:from|da|do)\s+(?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+)(?:\s+(?:(?:Dr|Dra|Sr|Sra|Mr|Ms|Mrs)\.|[a-zA-ZÀ-ÿ]+))*)?)",
+            first_statement,
+            re.IGNORECASE,
+        )
         if match and not caller_name:
-            caller_name = match.group(1)
+            caller_name = match.group(1).strip()
 
         cleaned = first_statement.strip()
         if len(cleaned) > 80:
             cleaned = cleaned[:77].rstrip() + "..."
         reason = cleaned
 
+    default_name = "Chamada em triagem" if is_pt else "Screening Call"
+    default_reason = "Conversando com Kevin" if is_pt else "Speaking with Kevin"
+
     if not caller_name:
-        caller_name = known_caller_name or (caller_phone if caller_phone else "Screening Call")
+        caller_name = known_caller_name or (caller_phone if caller_phone else default_name)
     if not reason:
-        reason = "Speaking with Kevin"
+        reason = default_reason
 
     return {
         "caller_name": caller_name,
@@ -71,19 +88,40 @@ async def extract_screening_summary(
     caller_phone: str = "",
     known_caller_name: str = "",
     timeout_seconds: float = 3.0,
+    user_language: str = "en",
 ) -> dict:
     """Extract who is calling and why from the early screening conversation.
 
     Returns dict with `caller_name` and `reason`.
     """
+    from app.services.personal_language import is_portuguese
+    is_pt = is_portuguese(user_language)
+
     cleaned_transcript = _sanitize_transcript(transcript)
     if not cleaned_transcript:
-        return _fallback_extraction(transcript, caller_phone, known_caller_name)
+        return _fallback_extraction(transcript, caller_phone, known_caller_name, user_language=user_language)
 
     if not settings.anthropic_api_key:
-        return _fallback_extraction(cleaned_transcript, caller_phone, known_caller_name)
+        return _fallback_extraction(cleaned_transcript, caller_phone, known_caller_name, user_language=user_language)
 
-    prompt = f"""A phone call is being screened live. Analyze the conversation so far and extract who is calling and what they want.
+    if is_pt:
+        prompt = f"""A phone call is being screened live. Analyze the conversation so far and extract who is calling and what they want.
+Return ONLY valid JSON with two fields:
+- caller_name: string (caller name, and business/company if mentioned, e.g. "Jonathan from Geico" or "Jonathan" or "Dr. Smith's Office")
+- reason: string (brief one-line summary under 60 chars in Brazilian Portuguese of why they are calling, e.g. "Quer falar sobre renovação do seguro")
+
+Never translate personal names or callback phone digits.
+
+Known caller ID (may be empty): {known_caller_name or caller_phone}
+
+<transcript>
+{cleaned_transcript}
+</transcript>"""
+        system_instruction = "Extract who is calling and why from this call transcript in Brazilian Portuguese. Return ONLY valid JSON."
+        default_name = known_caller_name or caller_phone or "Chamada em triagem"
+        default_reason = "Conversando com Kevin"
+    else:
+        prompt = f"""A phone call is being screened live. Analyze the conversation so far and extract who is calling and what they want.
 Return ONLY valid JSON with two fields:
 - caller_name: string (caller name, and business/company if mentioned, e.g. "Jonathan from Geico" or "Jonathan" or "Dr. Smith's Office")
 - reason: string (brief one-line summary under 60 chars of why they are calling, e.g. "Wants to talk about insurance renewal")
@@ -93,6 +131,9 @@ Known caller ID (may be empty): {known_caller_name or caller_phone}
 <transcript>
 {cleaned_transcript}
 </transcript>"""
+        system_instruction = "Extract who is calling and why from this call transcript. Return ONLY valid JSON."
+        default_name = known_caller_name or caller_phone or "Screening Call"
+        default_reason = "Speaking with Kevin"
 
     try:
         async with httpx.AsyncClient() as client:
@@ -107,7 +148,7 @@ Known caller ID (may be empty): {known_caller_name or caller_phone}
                     "model": settings.anthropic_model,
                     "max_tokens": 80,
                     "thinking": {"type": "disabled"},
-                    "system": "Extract who is calling and why from this call transcript. Return ONLY valid JSON.",
+                    "system": system_instruction,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=timeout_seconds,
@@ -129,13 +170,13 @@ Known caller ID (may be empty): {known_caller_name or caller_phone}
                         if text.startswith("json"):
                             text = text[4:]
                     result = json.loads(text.strip())
-                    name = result.get("caller_name", "").strip() or known_caller_name or caller_phone or "Screening Call"
-                    reason = result.get("reason", "").strip() or "Speaking with Kevin"
+                    name = result.get("caller_name", "").strip() or default_name
+                    reason = result.get("reason", "").strip() or default_reason
                     return {"caller_name": name, "reason": reason}
     except Exception as e:
         logger.warning(f"Screening summary extraction failed or timed out: {e}")
 
-    return _fallback_extraction(cleaned_transcript, caller_phone, known_caller_name)
+    return _fallback_extraction(cleaned_transcript, caller_phone, known_caller_name, user_language=user_language)
 
 
 async def extract_and_send_screening_summary(
@@ -148,6 +189,7 @@ async def extract_and_send_screening_summary(
     collapse_id: Optional[str] = None,
     is_active: Optional[Callable[[], bool]] = None,
     ws_token: str = "",
+    user_language: str = "en",
 ) -> bool:
     """Extract screening details and dispatch the in-place APNs notification update."""
     if not contractor_id or not call_sid:
@@ -160,6 +202,7 @@ async def extract_and_send_screening_summary(
         transcript=transcript,
         caller_phone=caller_phone,
         known_caller_name=known_caller_name,
+        user_language=user_language,
     )
 
     if is_active is not None and not is_active():
@@ -194,4 +237,5 @@ async def extract_and_send_screening_summary(
         caller_name=summary.get("caller_name", "") if isinstance(summary, dict) else "",
         reason=reason,
         collapse_id=collapse_id,
+        user_language=user_language,
     )

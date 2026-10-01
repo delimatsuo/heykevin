@@ -1,14 +1,20 @@
 # Hey Kevin — Current Product Requirements
 
-**Updated:** 2026-09-28
+**Expansion priority updated:** 2026-10-01; release fields below preserve their dated observations.
 **Owner:** Deli Matsuo
+**Current expansion scope:** Brazil **Personal** first, Canada second, United
+Kingdom third. The owner set this order October 1. Follow the
+[Brazil Personal qualification plan](docs/superpowers/plans/2026-10-01-brazil-personal-first.md)
+and [1.3.4 country audit](docs/audits/2026-10-01-country-readiness.md) for the newer
+release snapshot and country readiness. Published support is not established by
+a country picker. Provider/carrier qualification precedes launch.
 **Backend release baseline:** `2b402796d1cbffaf59bcb6ecb63d661d9dd0ef12`, revision `kevin-api-00273-f7g`, verified `2026-09-17T17:36:33Z`. See the [SMS identity and screening-reason rollout](docs/releases/2026-09-17-owner-sms-identity-backend.md).
 **Public iOS release baseline:** `1.3.2 (42)`. Public US lookup at `2026-09-25T12:49:41Z` confirms version 1.3.2, released `2026-09-18T14:56:03Z`; see the [dated public-release update](docs/releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026). The lookup identifies the version; the Apple version/build binding is recorded separately.
 **Latest authenticated public App Store observation:** at `2026-09-25T13:45:15Z`, App Store Connect displays **1.3.2 Ready for Distribution**, selected build **42**, six screenshots, automatic release after App Review, and **Review Completed** for the exact submission. This supersedes the September 17 `WAITING_FOR_REVIEW` snapshot preserved in the [submission record](docs/releases/2026-09-17-app-store-ios-42.md#public-release-update--september-25-2026). Public availability and phone acceptance remain separate.
 **September 28 recovery release:** [PR #269](https://github.com/delimatsuo/heykevin/pull/269) is merged and its backend passed staging. Corrected **1.3.3 (43)** is `VALID / IN_BETA_TESTING` in the existing QA group, verified `2026-09-28T17:42:07Z`; production deployment still awaits Deli's environment approval. See the [release record](docs/releases/2026-09-28-notification-recovery-ios-43.md). Physical acceptance targets this corrected build.
 **Build 42 internal delivery (September 17):** `1.3.2 (42)`, `VALID / IN_BETA_TESTING` in the existing QA group, verified at `15:33:58Z`. See [delivery and phone checks](docs/releases/2026-09-17-transcript-first-ios-42.md). The backend screening-reason field is deployed; phone acceptance remains open.
 **Prior notification candidate:** `1.2.12 (38)`, source `813e0e3b72e90c709832d72129b82f5e6622775b`
-**Scope decision:** Owner acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep valuable later features in this PRD rather than starting them automatically.
+**Scope decision:** Brazil Personal qualification is the current expansion focus. Preserve acceptance for delivered notification and native Calls + Kevin frontend work plus confirmed regressions. Keep unrelated later features in this PRD rather than starting them automatically.
 
 This is the current product scope. It replaces the original Telegram-first,
 single-user PRD and the broader unapproved Business Dispatch v2 plan as the guide
@@ -33,6 +39,16 @@ Firestore/RTDB, Twilio and the configured voice providers. This PRD does not cha
 provider selection, pricing, subscriptions, or existing account boundaries.
 
 ## Necessary work now
+
+### International qualification — Brazil Personal first
+
+The October 1 owner decision promotes country qualification into active work:
+Brazil Personal, then Canada, then UK. The
+[bounded plan](docs/superpowers/plans/2026-10-01-brazil-personal-first.md) defines
+consumer eligibility, carrier testing, pt-BR, pricing and pilot acceptance.
+It supersedes the August Brazil Business-first recommendation. The owner passed
+the requested build 45 phone check; this does not qualify Brazilian carriers or
+close every historical scenario below.
 
 ### N1 — Finish the screening notification enhancement
 
@@ -245,7 +261,6 @@ former v2 program.
 | Later | Returning-customer continuity | Avoid asking a repeat caller for information already safely known. | Reuse the existing memory and request contracts; distinguish trusted identity from caller ID; verify retention, deletion, recovery, and provider prerequisites before activation. | Establish value with an owner-approved qualification plan; source defaults are not evidence of current runtime configuration. |
 | Later | Photo/video diagnosis and estimates | May help a tradesperson assess a job before visiting. | Reuse the existing video-first design; complete caller upload/watch experience, bounded media processing and recovery, retention/deletion, and owner/caller result delivery. | Confirm demand and qualify infrastructure, media handling and delivery before enabling the feature. |
 | Later | Secure account-phone change | Customers who change phone numbers need a safe way to retain their account. | Verify possession, prevent ownership collisions, and atomically update the protected phone pair with honest failure recovery. | Resolve the open product/provider choices in the existing [phone-rebind spec](docs/specs/phone-rebind-possession-verified.md); do not reopen generic PATCH access. |
-| Later | Broader international qualification | Existing forwarding UI is only useful where the carrier and number setup work. | Qualify the supported country/carrier combinations, regional numbers, regulatory address requirements, forwarding target format, and physical-device flow. | Prioritize countries with actual demand and obtain a bounded owner-run test envelope. Do not equate store release notes with carrier qualification. |
 
 ## Deferred ideas and superseded plans
 

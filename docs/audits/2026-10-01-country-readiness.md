@@ -11,12 +11,13 @@ qualified for a dependable Personal launch by the evidence reviewed here.
 Listing a country in source is not evidence of successful local provisioning,
 carrier forwarding, SMS, billing or customer acceptance.
 
-Prioritize Canadian carrier qualification within the existing market, then a
-bounded UK Personal qualification project. This ordering is an engineering and
-operational recommendation, not proof of market demand. Brazil requires a
-separate decision on a consumer-eligible number/provider model and economics;
-the current local-number path is not ready for Personal customers. No country
-settings or provider resources were changed by this audit.
+**Owner direction after the audit, October 1: Brazil Personal first, Canada
+second, United Kingdom third.** This replaces the audit's initial Canada-first
+recommendation. Brazil's current local-number path remains unqualified, but
+published individual-registration routes warrant investigation. The
+[Brazil Personal qualification plan](../superpowers/plans/2026-10-01-brazil-personal-first.md)
+records the provider comparison, carrier evidence and acceptance sequence.
+No country settings or provider resources were changed by this audit.
 
 ## Release and live availability
 
@@ -42,9 +43,9 @@ test carrier/country was supplied, so it is not evidence for additional markets.
 | Market | Readiness | What stands between current service and expansion |
 | --- | --- | --- |
 | United States | Existing market | Preserve the established release and activation checks; one owner test does not qualify every carrier/plan |
-| Canada | Existing market; closest qualification priority | Country-aware voice/SMS number provisioning exists, but setup still names US carriers; qualify Rogers/Bell/Telus forwarding, cancellation, charges and summaries; French UI is absent |
-| United Kingdom | Candidate for a controlled qualification project | English reduces localization work, but current provisioning skips UK regulatory registration; identity/address handling, SMS sender capability and actual carrier tests are needed |
-| Brazil | Current Personal route not ready | Twilio local-number guidelines exclude individuals and require registered Brazilian business/CNPJ evidence; existing signup does not enforce that distinction; a consumer-eligible model, forwarding and margins need qualification |
+| Brazil | First qualification priority; current Personal route not ready | Twilio's local-number route excludes individuals. Qualify its separate individual mobile route alongside Telnyx's published individual local/mobile route; inventory, Kevin's eligibility, carrier forwarding and margins remain open. See the linked Brazil plan. |
+| Canada | Existing market; second qualification priority | Country-aware voice/SMS number provisioning exists, but setup still names US carriers; qualify Rogers/Bell/Telus forwarding, cancellation, charges and summaries; French UI is absent |
+| United Kingdom | Third qualification priority | English reduces localization work, but current provisioning skips UK regulatory registration; identity/address handling, SMS sender capability and actual carrier tests are needed |
 | Germany, France, Italy, Spain, Portugal | Partial implementation; not ready to launch | Generic address/bundle code does not implement complete country-specific identity/document review; carrier, SMS and language acceptance remain open |
 | Australia and other countries | Outside the explicit supported-country list | Add deliberate admission and provisioning support; Australian provider eligibility also needs checking for the intended Personal model |
 
@@ -122,23 +123,19 @@ is needed before assuming eligibility for a consumer Personal offering.
 
 ## Recommended next work
 
-1. Complete Personal activation evidence in the existing US/Canada market and
-   qualify Canadian carrier setup with consenting testers before increasing
-   acquisition. This remains consistent with the Personal audience hypothesis.
-2. Prepare one UK Personal qualification path: explicit country/phone entry,
-   provider-approved individual registration, usable local number, correct SMS
-   sender, carrier instructions, localized prices, and an affordable usage limit.
-   Confirm the exact provider model and applicable recording/privacy/data-transfer
-   requirements before accepting local customers.
-3. Run owner-controlled tests for signup, purchase cancellation/restore, forwarding
-   to the user's usual number, caller ID, screening, live takeover, locked-phone
-   push, summary text, forwarding cancellation and account deletion. Record only
-   anonymous outcomes, build and carrier/plan context.
-4. Only after qualification enable that country's app **and** subscriptions,
-   publish accurate local copy and run a bounded acquisition experiment.
-5. Treat Brazil Personal as separate feasibility work. The older Business-first
-   memo is historical context; it does not replace the owner's current Personal
-   direction or authorize a Brazilian Business rollout.
+1. Execute the [Brazil Personal qualification plan](../superpowers/plans/2026-10-01-brazil-personal-first.md):
+   first establish an individual-eligible number/provider route and a compatible
+   consumer carrier/plan, then complete country entry, verification, pt-BR,
+   localized prices, notifications and sustainable usage limits.
+2. Run a bounded owner-controlled Brazilian Personal pilot covering the usual
+   number's forwarding, caller ID, screening, live takeover, locked-phone push,
+   promised summaries, purchase/restore, cancellation and account deletion.
+   Record anonymous outcomes and build/carrier/plan context.
+3. Enable Brazil's app **and** Personal subscription only after qualification,
+   with accurate local copy and the applicable release/spend decisions.
+4. Qualify Canada second within the existing market, then the UK third. Preserve
+   current US/Canada service and outstanding activation checks throughout.
+   The old Brazil Business-first memo is superseded strategy, not an active queue.
 
 ## Verification limits
 
@@ -146,8 +143,10 @@ Two independent source audits covered backend and iOS at the packaged commit;
 the master checked live Apple state, production health and current primary
 provider sources. Synthetic country-function checks used no customer data.
 All three evidence nodes were returned and reduced in code. A separate fresh
-review found no material corrections after inspecting the report and cited
-source. All ten immutable source references were checked and resolved.
+review found no material corrections to the original audit after inspecting its
+report and cited source. All ten immutable source references were checked and
+resolved. The later owner-priority update and additional Brazil research are
+recorded separately in the linked qualification plan.
 No number was purchased, call placed, customer contacted, country enabled,
 subscription changed, ad activated, deployment performed or hosted CI triggered.
 

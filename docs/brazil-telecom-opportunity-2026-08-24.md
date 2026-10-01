@@ -1,5 +1,12 @@
 # Brazil Telecom and Market Opportunity Decision Memo
 
+> **Strategy superseded October 1, 2026:** The owner now prioritizes **Brazil
+> Personal first, Canada second, UK third**. Follow the
+> [current qualification plan](superpowers/plans/2026-10-01-brazil-personal-first.md).
+> This August memo's Business-first recommendation, Personal deferral and DDD 11
+> scope are historical research, not the active expansion queue. Its dated
+> provider and pricing observations require current verification.
+
 | Field | Value |
 | --- | --- |
 | Status | **Parked — conditional go for qualification only** |

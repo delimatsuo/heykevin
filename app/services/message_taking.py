@@ -99,6 +99,23 @@ def is_owner_availability_hold(text: str) -> bool:
     ):
         return False
 
+    # Trailing or explicit consent and conditional clauses reject even with committed hold prefix
+    if re.search(
+        r"\b(?:"
+        r"(?:would|will|is|does)\s+(?:that|this|it)\s+(?:be\s+)?(?:okay|ok|all\s*right|alright)"
+        r"|(?:would|will|does|is)\s+(?:that|this|it)\s+work\s+for\s+you"
+        r"|if\s+(?:that|this|it)(?:['’]s|\s+is)\s+(?:okay|ok|fine|all\s*right|alright)"
+        r"|if\s+you\s+(?:agree|don['’]t\s+mind|do\s+not\s+mind)"
+        r"|se\s+(?:isso\s+)?estiver\s+tudo\s+bem"
+        r"|se\s+voc[eê]\s+(?:concordar|(?:n[aã]o\s+)?se\s+importar)"
+        r"|seria\s+tudo\s+bem(?:\s+para\s+voc[eê])?"
+        r"|(?:isso\s+)?funciona\s+para\s+voc[eê]"
+        r")\b",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return False
+
     hold_markers = (
         "let me see if",
         "let me check if",

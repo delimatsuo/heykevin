@@ -191,10 +191,67 @@ class TestPortugueseHoldRecognition:
             "Aguarde um instante, vou checar se Deli está livre, ok?",
             "One moment, let me check if I can reach him, okay?",
             "Let me see if he's available, alright?",
+            # Comma, dash, and whitespace variants for recognized short tags
+            "One moment while I check if Deli is available - okay?",
+            "Let me check if Deli is available -- all right?",
+            "Vou verificar se Ana está disponível - tudo bem?",
+            "Vou verificar se Ana está disponível -- tá bom?",
+            "One moment while I check if Deli is available   okay?",
+            "Let me see if he's available,    alright?",
+            "Aguarde um momento, vou checar se Deli está livre - ok?",
         ],
     )
     def test_positive_hold_recognition_with_question_tags(self, text):
         assert is_owner_availability_hold(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Six root-proven examples
+            "One moment while I check if Deli is available, would that be okay?",
+            "One moment while I check if Deli is available, would that work for you?",
+            "Let me check if Deli is available, if that is okay.",
+            "Let me check if Deli is available, if that's okay with you.",
+            "Vou verificar se Ana está disponível, se estiver tudo bem para você.",
+            "Vou verificar se Ana está disponível, se você concordar.",
+            # Curly apostrophe variants
+            "Let me check if Deli is available, if that’s okay with you.",
+            "Let me check if Deli is available, if that’s ok.",
+            "One moment while I check if Deli is available, if you don’t mind.",
+            "Let me check if Deli is available, if it’s okay.",
+            # Uppercase and repeated whitespace variants
+            "ONE MOMENT WHILE I CHECK IF DELI IS AVAILABLE, WOULD THAT BE OKAY?",
+            "One moment   while I check if Deli is available,   would that work for you?",
+            "LET ME CHECK IF DELI IS AVAILABLE, IF THAT IS OKAY.",
+            "VOU VERIFICAR SE ANA ESTÁ DISPONÍVEL, SE ESTIVER TUDO BEM PARA VOCÊ.",
+            "Vou verificar   se Ana está disponível,   se você concordar.",
+            # Missing final question mark / punctuation variants
+            "One moment while I check if Deli is available, would that be okay",
+            "One moment while I check if Deli is available, would that work for you",
+            "Vou verificar se Ana está disponível, seria tudo bem para você",
+            "Vou verificar se Ana está disponível, isso funciona para você",
+            # Accented and unaccented Portuguese variants
+            "Vou verificar se Ana está disponível, se voce concordar.",
+            "Vou verificar se Ana está disponível, se você não se importar.",
+            "Vou verificar se Ana está disponível, se voce nao se importar.",
+            "Vou verificar se Ana está disponível, se isso estiver tudo bem.",
+            "Vou verificar se Ana está disponível, seria tudo bem para você?",
+            "Vou verificar se Ana está disponível, seria tudo bem para voce?",
+            "Vou verificar se Ana está disponível, isso funciona para você?",
+            "Vou verificar se Ana está disponível, isso funciona para voce?",
+            # Additional English conditional and consent variants
+            "One moment while I check if Deli is available, will that be okay?",
+            "One moment while I check if Deli is available, is that okay?",
+            "One moment while I check if Deli is available, does that work for you?",
+            "Let me check if Deli is available, if that is fine.",
+            "Let me check if Deli is available, if it is okay.",
+            "Let me check if Deli is available, if that is all right.",
+            "Let me check if Deli is available, if you agree.",
+            "Let me check if Deli is available, if you don't mind.",
+        ],
+    )
+    def test_trailing_consent_clauses_return_false(self, text):
+        assert is_owner_availability_hold(text) is False
 
     @pytest.mark.parametrize(
         "text",

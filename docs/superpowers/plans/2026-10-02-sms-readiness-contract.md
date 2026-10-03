@@ -67,6 +67,21 @@ blocks all candidates and overall completeness: a rejected value could conceal
 a duplicate of a valid assignment. Preserve diagnostic aggregate counts; do not
 normalize malformed values or treat legitimate unassigned sentinels as malformed.
 
+Provider number SIDs must be nonempty strings without surrounding whitespace in
+both collection and reduction. Never strip an authoritative join key. A known
+source `binding_mismatch` must invalidate the report's bindings, including when
+a later read failure discards that source's rows. Duplicate unowned tenant
+assignments count as both unowned and ambiguous; their membership cohort is
+ambiguous, while a unique unowned assignment remains unowned.
+
+An absent join proves unowned or unassigned only when sources are complete and
+bindings valid. Suppress those confirmed-absence totals on uncertain sources,
+and classify uncertain ownership as unknown. Malformed contractor numbers also
+prevent a confirmed unassigned-inventory count. Observed duplicate assignments
+remain ambiguous even when ownership is unknown. These diagnostic totals are
+not estimates of missing data. Sanitize argument-parsing errors as well as
+snapshot/summary failures; never echo unexpected command-line values.
+
 The report contains only schema/version/time, completeness, fixed limitations,
 allowlisted aggregate counters and cohort rows. Never print phones, contractor
 IDs, provider number IDs, raw unexpected keys/values or exception text. Unknown

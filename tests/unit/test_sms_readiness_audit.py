@@ -1743,3 +1743,1074 @@ def test_clean_unassigned_sentinels_allow_candidates_and_yield_none_cohort(
     assert none_cohort_count == 1
     assert missing_cohort_count == 1
     assert malformed_cohort_count == 0
+
+
+class ExplodingTwilioResource:
+    """Fake Twilio resource that raises during field/attribute access."""
+
+    def __init__(self, err_msg: str = "Simulated late exception during field access"):
+        self._err_msg = err_msg
+
+    @property
+    def sid(self):
+        raise RuntimeError(self._err_msg)
+
+
+@pytest.mark.parametrize("source_name", ["firestore", "twilio_incoming", "twilio_service"])
+def test_source_error_binding_mismatch_fails_closed_and_sets_bindings_invalid(source_name: str):
+    """Recognized source error binding_mismatch marks bindings_valid False and produces 0 review candidates across all fixed sources."""
+    as_of = "2026-10-02T20:05:00Z"
+    # Valid snapshot with 1 missing-membership control (PN0002 owned and assigned, missing from registered pool)
+    snapshot = _make_sample_snapshot(owned_count=2, registered_count=1, contractor_count=2)
+
+    # Inject binding_mismatch error while leaving raw complete True
+    snapshot["sources"][source_name]["complete"] = True
+    snapshot["sources"][source_name]["error"] = "binding_mismatch"
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project="test-project",
+        expected_account_sid="ACtestaccount0000000000000000000000",
+        messaging_service_sid="MGtestservice0000000000000000000000",
+    )
+
+    assert report["completeness"]["bindings_valid"] is False
+    assert report["completeness"]["is_complete"] is False
+    assert report["completeness"]["sources"][source_name]["complete"] is False
+    assert report["completeness"]["sources"][source_name]["error"] == "binding_mismatch"
+    assert report["totals"]["review_candidates"] == 0
+    assert report["totals"]["assignments"]["missing_owned_unique"] == 0
+    assert any("Binding mismatch detected; reconciliation failed closed." in l for l in report["limitations"])
+
+
+def test_collector_firestore_project_binding_mismatch_e2e():
+    """Collector records binding_mismatch on wrong Firestore project and summary fails closed."""
+    as_of = "2026-10-02T20:05:00Z"
+    fake_fs = FakeFirestoreClient(project="wrong-project-id", docs=[])
+
+    fake_service = FakeTwilioService(
+        sid="MGtestservice0000000000000000000000",
+        account_sid="ACtestaccount0000000000000000000000",
+        phone_numbers=[{
+            "sid": "PN0001",
+            "phone_number": "+14155550001",
+            "account_sid": "ACtestaccount0000000000000000000000",
+            "service_sid": "MGtestservice0000000000000000000000",
+            "capabilities": {"sms": True},
+        }],
+    )
+    fake_tw = FakeTwilioClient(
+        account_sid="ACtestaccount0000000000000000000000",
+        services={"MGtestservice0000000000000000000000": fake_service},
+        incoming_numbers=[{
+            "sid": "PN0001",
+            "phone_number": "+14155550001",
+            "account_sid": "ACtestaccount0000000000000000000000",
+            "capabilities": {"sms": True},
+        }],
+    )
+
+    snapshot = collect_snapshot(
+        fake_fs,
+        fake_tw,
+        expected_project="test-project",
+        expected_account_sid="ACtestaccount0000000000000000000000",
+        messaging_service_sid="MGtestservice0000000000000000000000",
+        observed_at="2026-10-02T20:00:00Z",
+    )
+
+    assert snapshot["sources"]["firestore"]["complete"] is False
+    assert snapshot["sources"]["firestore"]["error"] == "binding_mismatch"
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project="test-project",
+        expected_account_sid="ACtestaccount0000000000000000000000",
+        messaging_service_sid="MGtestservice0000000000000000000000",
+    )
+
+    assert report["completeness"]["bindings_valid"] is False
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["review_candidates"] == 0
+    assert any("Binding mismatch detected; reconciliation failed closed." in l for l in report["limitations"])
+
+
+@pytest.mark.parametrize("target_source", ["twilio_service", "twilio_incoming"])
+def test_collector_late_exception_preserves_binding_mismatch(target_source: str):
+    """Collector preserves binding_mismatch enum when late exception occurs during resource iteration."""
+    as_of = "2026-10-02T20:05:00Z"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    fake_fs = FakeFirestoreClient(project="test-project", docs=[])
+
+    if target_source == "twilio_service":
+        wrong_account_item = {
+            "sid": "PN0001",
+            "phone_number": "+14155550001",
+            "account_sid": "AC_FOREIGN_ACCOUNT_SID",
+            "service_sid": service_sid,
+            "capabilities": {"sms": True},
+        }
+        fake_service = FakeTwilioService(
+            sid=service_sid,
+            account_sid=account_sid,
+            phone_numbers=[],
+        )
+        fake_service.phone_numbers.list = lambda limit=None: [
+            FakeTwilioResource(wrong_account_item),
+            ExplodingTwilioResource(),
+        ]
+        fake_tw = FakeTwilioClient(
+            account_sid=account_sid,
+            services={service_sid: fake_service},
+            incoming_numbers=[],
+        )
+    else:
+        wrong_account_item = {
+            "sid": "PN0001",
+            "phone_number": "+14155550001",
+            "account_sid": "AC_FOREIGN_ACCOUNT_SID",
+            "capabilities": {"sms": True},
+        }
+        fake_service = FakeTwilioService(
+            sid=service_sid,
+            account_sid=account_sid,
+            phone_numbers=[],
+        )
+        fake_tw = FakeTwilioClient(
+            account_sid=account_sid,
+            services={service_sid: fake_service},
+            incoming_numbers=[],
+        )
+        fake_tw.incoming_phone_numbers.list = lambda limit=None: [
+            FakeTwilioResource(wrong_account_item),
+            ExplodingTwilioResource(),
+        ]
+
+    snapshot = collect_snapshot(
+        fake_fs,
+        fake_tw,
+        expected_project="test-project",
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+        observed_at="2026-10-02T20:00:00Z",
+    )
+
+    assert snapshot["sources"][target_source]["complete"] is False
+    assert snapshot["sources"][target_source]["error"] == "binding_mismatch"
+    if target_source == "twilio_service":
+        assert snapshot["service_numbers"] == []
+    else:
+        assert snapshot["owned_numbers"] == []
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project="test-project",
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    assert report["completeness"]["bindings_valid"] is False
+    assert report["completeness"]["is_complete"] is False
+    assert report["completeness"]["sources"][target_source]["error"] == "binding_mismatch"
+    assert report["totals"]["review_candidates"] == 0
+
+
+@pytest.mark.parametrize(
+    "target_source,padded_sid",
+    [
+        ("twilio_incoming", "  PN0002"),
+        ("twilio_incoming", "PN0002  "),
+        ("twilio_service", "  PN0002"),
+        ("twilio_service", "PN0002  "),
+    ],
+)
+def test_padded_sid_collector_and_reducer_rejection(target_source: str, padded_sid: str):
+    """Padded SID is rejected by collector and reducer, failing source closed with 0 candidates and no leaked SID or silent normalization."""
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+
+    clean_contractor_1 = {
+        "twilio_number": "+14155550001",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+    clean_contractor_2 = {
+        "twilio_number": "+14155550002",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+    contractors = [clean_contractor_1, clean_contractor_2]
+    fake_fs = FakeFirestoreClient(project=project, docs=contractors)
+
+    if target_source == "twilio_incoming":
+        owned_items = [
+            {"sid": "PN0001", "phone_number": "+14155550001", "account_sid": account_sid, "capabilities": {"sms": True}},
+            {"sid": padded_sid, "phone_number": "+14155550002", "account_sid": account_sid, "capabilities": {"sms": True}},
+        ]
+        service_items: list[dict[str, Any]] = []
+    else:
+        owned_items = [
+            {"sid": "PN0001", "phone_number": "+14155550001", "account_sid": account_sid, "capabilities": {"sms": True}},
+            {"sid": "PN0002", "phone_number": "+14155550002", "account_sid": account_sid, "capabilities": {"sms": True}},
+        ]
+        service_items = [
+            {"sid": padded_sid, "phone_number": "+14155550002", "account_sid": account_sid, "service_sid": service_sid, "capabilities": {"sms": True}},
+        ]
+
+    fake_service = FakeTwilioService(
+        sid=service_sid,
+        account_sid=account_sid,
+        phone_numbers=service_items,
+    )
+    fake_tw = FakeTwilioClient(
+        account_sid=account_sid,
+        services={service_sid: fake_service},
+        incoming_numbers=owned_items,
+    )
+
+    # 1. Collector assertion: marks affected source incomplete BEFORE reducer
+    snapshot = collect_snapshot(
+        fake_fs,
+        fake_tw,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+        observed_at=observed_at,
+    )
+    assert snapshot["sources"][target_source]["complete"] is False
+    assert snapshot["sources"][target_source]["error"] == "read_error"
+
+    # 2. Reducer assertion
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    assert report["completeness"]["sources"][target_source]["complete"] is False
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["review_candidates"] == 0
+
+    report_json = json.dumps(report)
+    assert padded_sid not in report_json
+    assert padded_sid.strip() not in report_json
+
+
+def test_duplicate_unowned_phone_reconciliation_and_cohort_priority():
+    """Duplicate canonical unowned assignments are counted in unowned and ambiguous assignments and prioritized in ambiguous cohort."""
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+
+    # Clean missing-owned control: PN0001 -> +14155550001 owned, not in pool
+    clean_owned_number = {
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+    contractor_clean = {
+        "twilio_number": "+14155550001",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+    # Two contractors sharing an unowned phone number (+14155559999)
+    contractor_unowned_dup1 = {
+        "twilio_number": "+14155559999",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+    contractor_unowned_dup2 = {
+        "twilio_number": "+14155559999",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+
+    contractors = [contractor_clean, contractor_unowned_dup1, contractor_unowned_dup2]
+    owned_numbers = [clean_owned_number]
+    service_numbers: list[dict[str, Any]] = []
+
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": len(contractors), "error": None},
+            "twilio_incoming": {"complete": True, "records_read": len(owned_numbers), "error": None},
+            "twilio_service": {"complete": True, "records_read": len(service_numbers), "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": service_numbers,
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    totals = report["totals"]["assignments"]
+    assert totals["assigned_owned"] == 1
+    assert totals["unowned_assignments"] == 2
+    assert totals["ambiguous_assignments"] == 2
+    assert totals["missing_owned_unique"] == 1
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["review_candidates"] == 0
+
+    cohorts = report["cohorts"]
+    ambiguous_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "ambiguous")
+    missing_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "missing")
+    unowned_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "unowned")
+
+    assert ambiguous_cohort_count == 2
+    assert missing_cohort_count == 1
+    assert unowned_cohort_count == 0
+
+    # Clean unique unowned control: 1 missing owned contractor + 1 unique unowned contractor
+    contractor_unowned_unique = {
+        "twilio_number": "+14155558888",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+    unique_unowned_contractors = [contractor_clean, contractor_unowned_unique]
+    snapshot_unique = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": len(unique_unowned_contractors), "error": None},
+            "twilio_incoming": {"complete": True, "records_read": len(owned_numbers), "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": [],
+        "contractors": unique_unowned_contractors,
+    }
+    report_unique = summarize_sms_readiness(
+        snapshot_unique,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+    totals_u = report_unique["totals"]["assignments"]
+    assert totals_u["assigned_owned"] == 1
+    assert totals_u["unowned_assignments"] == 1
+    assert totals_u["ambiguous_assignments"] == 0
+    assert totals_u["missing_owned_unique"] == 1
+
+    cohorts_u = report_unique["cohorts"]
+    assert sum(c["count"] for c in cohorts_u if c["membership"] == "unowned") == 1
+    assert sum(c["count"] for c in cohorts_u if c["membership"] == "ambiguous") == 0
+    assert sum(c["count"] for c in cohorts_u if c["membership"] == "missing") == 1
+
+    # Owned-duplicate existing counts unchanged: 2 contractors sharing +14155550001
+    contractor_owned_dup2 = {
+        "twilio_number": "+14155550001",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+    owned_dup_contractors = [contractor_clean, contractor_owned_dup2]
+    snapshot_owned_dup = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": len(owned_dup_contractors), "error": None},
+            "twilio_incoming": {"complete": True, "records_read": len(owned_numbers), "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": [],
+        "contractors": owned_dup_contractors,
+    }
+    report_owned_dup = summarize_sms_readiness(
+        snapshot_owned_dup,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+    totals_od = report_owned_dup["totals"]["assignments"]
+    assert totals_od["assigned_owned"] == 2
+    assert totals_od["unowned_assignments"] == 0
+    assert totals_od["ambiguous_assignments"] == 2
+    assert totals_od["missing_owned_unique"] == 0
+
+    cohorts_od = report_owned_dup["cohorts"]
+    assert sum(c["count"] for c in cohorts_od if c["membership"] == "ambiguous") == 2
+    assert sum(c["count"] for c in cohorts_od if c["membership"] == "missing") == 0
+    assert sum(c["count"] for c in cohorts_od if c["membership"] == "unowned") == 0
+
+
+def test_absence_diagnostics_suppressed_when_sources_incomplete_or_error():
+    """Absence diagnostics must not claim definite unowned assignment when provider source is incomplete or error."""
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    contractors = [{
+        "twilio_number": "+14155550001",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }]
+
+    # 1. Incomplete/error twilio_incoming source with empty owned inventory and known contractor
+    incomplete_snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 1, "error": None},
+            "twilio_incoming": {"complete": False, "records_read": 0, "error": "read_error"},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": [],
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        incomplete_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    totals = report["totals"]["assignments"]
+    assert totals["unowned_assignments"] == 0
+    assert totals["unassigned_owned"] == 0
+    assert totals["assigned_owned"] == 0
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["review_candidates"] == 0
+
+    cohorts = report["cohorts"]
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unknown") == 1
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unowned") == 0
+
+    # 2. Clean complete control: empty owned inventory with complete sources
+    clean_snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 1, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 0, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": [],
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    clean_report = summarize_sms_readiness(
+        clean_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    clean_totals = clean_report["totals"]["assignments"]
+    assert clean_totals["unowned_assignments"] == 1
+    assert clean_totals["unassigned_owned"] == 0
+
+    clean_cohorts = clean_report["cohorts"]
+    assert sum(c["count"] for c in clean_cohorts if c["membership"] == "unowned") == 1
+    assert sum(c["count"] for c in clean_cohorts if c["membership"] == "unknown") == 0
+
+
+def test_unassigned_owned_suppressed_when_contractor_source_incomplete():
+    """Unassigned owned numbers must not be claimed when contractor source is incomplete."""
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    owned_numbers = [{
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }]
+
+    # 1. Incomplete Firestore source with 1 owned number and empty contractor data
+    incomplete_snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": False, "records_read": 0, "error": "read_error"},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": [],
+        "contractors": [],
+    }
+
+    report = summarize_sms_readiness(
+        incomplete_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    totals = report["totals"]["assignments"]
+    assert totals["unassigned_owned"] == 0
+    assert totals["assigned_owned"] == 0
+    assert totals["unowned_assignments"] == 0
+    assert report["completeness"]["is_complete"] is False
+
+    # 2. Clean complete control: 1 owned number, empty contractor list, complete Firestore
+    clean_snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 0, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": [],
+        "contractors": [],
+    }
+
+    clean_report = summarize_sms_readiness(
+        clean_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    clean_totals = clean_report["totals"]["assignments"]
+    assert clean_totals["unassigned_owned"] == 1
+    assert clean_totals["assigned_owned"] == 0
+
+
+def test_wrong_bindings_suppress_unassigned_and_unowned_totals():
+    """Binding mismatch suppresses confirmed unassigned_owned and unowned_assignments totals and sets cohort unknown."""
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    owned_numbers = [{
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }]
+    contractors = [{
+        "twilio_number": "+14155559999",  # unowned
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }]
+
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": "test-project",
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 1, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    # 1. Run with wrong expected project
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project="mismatched-project-id",
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    assert report["completeness"]["bindings_valid"] is False
+    totals = report["totals"]["assignments"]
+    assert totals["unassigned_owned"] == 0
+    assert totals["unowned_assignments"] == 0
+
+    cohorts = report["cohorts"]
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unknown") == 1
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unowned") == 0
+
+    # 2. Clean binding control
+    clean_report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project="test-project",
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    assert clean_report["completeness"]["bindings_valid"] is True
+    clean_totals = clean_report["totals"]["assignments"]
+    assert clean_totals["unassigned_owned"] == 1
+    assert clean_totals["unowned_assignments"] == 1
+
+    clean_cohorts = clean_report["cohorts"]
+    assert sum(c["count"] for c in clean_cohorts if c["membership"] == "unowned") == 1
+    assert sum(c["count"] for c in clean_cohorts if c["membership"] == "unknown") == 0
+
+
+def test_malformed_contractor_assignment_prevents_unassigned_owned_claim():
+    """A contractor with a malformed number assignment prevents claiming owned numbers are unassigned."""
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    owned_numbers = [{
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }]
+
+    # Contractor with malformed number that could refer to owned inventory
+    contractors = [{
+        "twilio_number": "4155550001",  # missing leading +
+        "active": True,
+    }]
+
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 1, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    totals = report["totals"]["assignments"]
+    assert totals["malformed_assignments"] == 1
+    # Cannot claim unassigned when malformed contractor assignment exists
+    assert totals["unassigned_owned"] == 0
+    assert report["completeness"]["is_complete"] is False
+
+    # Clean control with unassigned sentinel contractor
+    clean_contractors = [{"twilio_number": None, "active": True}]
+    clean_snapshot = dict(snapshot, contractors=clean_contractors)
+    clean_snapshot["sources"] = {
+        "firestore": {"complete": True, "records_read": 1, "error": None},
+        "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+        "twilio_service": {"complete": True, "records_read": 0, "error": None},
+    }
+
+    clean_report = summarize_sms_readiness(
+        clean_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    clean_totals = clean_report["totals"]["assignments"]
+    assert clean_totals["malformed_assignments"] == 0
+    assert clean_totals["unassigned_owned"] == 1
+
+
+def test_duplicate_unowned_in_incomplete_source_preserves_ambiguous_priority():
+    """Duplicate unowned tenant assignments preserve ambiguous priority and count as ambiguous even with incomplete source."""
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    contractors = [
+        {"twilio_number": "+14155559999", "active": True},
+        {"twilio_number": "+14155559999", "active": True},
+    ]
+
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 2, "error": None},
+            "twilio_incoming": {"complete": False, "records_read": 0, "error": "read_error"},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": [],
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    totals = report["totals"]["assignments"]
+    assert totals["ambiguous_assignments"] == 2
+    assert totals["unowned_assignments"] == 0
+
+    cohorts = report["cohorts"]
+    assert sum(c["count"] for c in cohorts if c["membership"] == "ambiguous") == 2
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unowned") == 0
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unknown") == 0
+
+
+def test_cli_argparse_privacy_on_invalid_arguments_and_canary_secrets(capsys):
+    """CLI ArgumentParser privacy: invalid arguments, unknown options, missing values, and secrets emit fixed stderr and exit 2 without echoing tokens or reading snapshot."""
+    canary_secret_1 = "CANARY_SECRET_ARGV_999999999"
+    canary_secret_2 = "CANARY_SECRET_VALUE_888888888"
+    canary_secret_3 = "CANARY_SECRET_VALUE_777777777"
+
+    # 1. Unknown option with CANARY_SECRET alongside all required known arguments
+    argv_1 = [
+        "--expected-project", "test-project",
+        "--expected-account-sid", "ACtestaccount0000000000000000000000",
+        "--messaging-service-sid", "MGtestservice0000000000000000000000",
+        "--as-of", "2026-10-02T20:00:00Z",
+        "--unknown-canary-option", canary_secret_1,
+    ]
+    ret_1 = main(argv_1)
+    captured_1 = capsys.readouterr()
+    assert ret_1 == 2
+    assert captured_1.err == "Error: Invalid command-line arguments\n"
+    assert captured_1.out == ""
+    assert canary_secret_1 not in captured_1.err
+    assert canary_secret_1 not in captured_1.out
+    assert "--unknown-canary-option" not in captured_1.err
+
+    # 2. Missing required argument values with canary secret
+    argv_2 = [
+        "--expected-project",
+        "--as-of", "2026-10-02T20:00:00Z",
+        canary_secret_2,
+    ]
+    ret_2 = main(argv_2)
+    captured_2 = capsys.readouterr()
+    assert ret_2 == 2
+    assert captured_2.err == "Error: Invalid command-line arguments\n"
+    assert captured_2.out == ""
+    assert canary_secret_2 not in captured_2.err
+    assert canary_secret_2 not in captured_2.out
+
+    # 3. Standalone unknown option without required args
+    argv_3 = ["--bogus-option", canary_secret_3]
+    ret_3 = main(argv_3)
+    captured_3 = capsys.readouterr()
+    assert ret_3 == 2
+    assert captured_3.err == "Error: Invalid command-line arguments\n"
+    assert captured_3.out == ""
+    assert canary_secret_3 not in captured_3.err
+    assert canary_secret_3 not in captured_3.out
+
+
+def test_cli_help_returns_zero_with_expected_usage_and_no_snapshot_read(capsys):
+    """CLI --help returns 0 with expected usage text and never attempts snapshot reading."""
+    ret = main(["--help"])
+    captured = capsys.readouterr()
+    assert ret == 0
+    assert captured.err == ""
+    assert "usage:" in captured.out.lower() or "offline sms readiness audit tool" in captured.out.lower()
+
+
+@pytest.mark.parametrize("case_name,padded_sid", [
+    ("left_padded", "  PN0002"),
+    ("right_padded", "PN0002  "),
+])
+def test_padded_sid_direct_offline_reducer_both_sources(case_name: str, padded_sid: str):
+    """Direct offline reducer marks both twilio_incoming and twilio_service incomplete when same SID is padded on both sides of join."""
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+
+    # Clean control: PN0001 owned, missing from pool, assigned to contractor 1
+    clean_owned = {
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+    # Second entry: PN0002 padded on both sides of join
+    padded_owned = {
+        "sid": padded_sid,
+        "phone_number": "+14155550002",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+    padded_pool = {
+        "sid": padded_sid,
+        "phone_number": "+14155550002",
+        "account_sid": account_sid,
+        "service_sid": service_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+
+    contractors = [
+        {
+            "twilio_number": "+14155550001",
+            "active": True,
+            "subscription_status": "active",
+            "subscription_tier": "personal",
+            "subscription_expires": 1790000000,
+            "trial_start": 1780000000,
+            "last_inbound_call_at": 1790000000,
+            "forwarding_last_seen_at": 1790000000,
+            "owner_sms_enabled": True,
+            "owner_sms_opted_out": False,
+        },
+        {
+            "twilio_number": "+14155550002",
+            "active": True,
+            "subscription_status": "active",
+            "subscription_tier": "personal",
+            "subscription_expires": 1790000000,
+            "trial_start": 1780000000,
+            "last_inbound_call_at": 1790000000,
+            "forwarding_last_seen_at": 1790000000,
+            "owner_sms_enabled": True,
+            "owner_sms_opted_out": False,
+        },
+    ]
+
+    # Snapshot with sources reporting complete=True, error=None (valid metadata)
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 2, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 2, "error": None},
+            "twilio_service": {"complete": True, "records_read": 1, "error": None},
+        },
+        "owned_numbers": [clean_owned, padded_owned],
+        "service_numbers": [padded_pool],
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    # Reducer must independently reject padded SID on BOTH sources without relying on collector
+    assert report["completeness"]["sources"]["twilio_incoming"]["complete"] is False
+    assert report["completeness"]["sources"]["twilio_service"]["complete"] is False
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["review_candidates"] == 0
+
+    report_json = json.dumps(report)
+    assert padded_sid not in report_json
+    assert padded_sid.strip() not in report_json
+
+
+@pytest.mark.parametrize("case_name,padded_sid", [
+    ("left_padded", "  PN0002"),
+    ("right_padded", "PN0002  "),
+])
+def test_padded_sid_direct_offline_reducer_single_source(case_name: str, padded_sid: str):
+    """Direct offline reducer marks the specific affected source incomplete when only owned or only pool SID is padded."""
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+
+    clean_owned_1 = {
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+    clean_contractor_1 = {
+        "twilio_number": "+14155550001",
+        "active": True,
+    }
+
+    # 1. Owned-padded only variant
+    owned_padded_snap = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 1, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 2, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": [
+            clean_owned_1,
+            {"sid": padded_sid, "phone_number": "+14155550002", "account_sid": account_sid, "capabilities": {"sms": True}},
+        ],
+        "service_numbers": [],
+        "contractors": [clean_contractor_1],
+    }
+    report_owned = summarize_sms_readiness(
+        owned_padded_snap,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+    assert report_owned["completeness"]["sources"]["twilio_incoming"]["complete"] is False
+    assert report_owned["completeness"]["is_complete"] is False
+    assert report_owned["totals"]["review_candidates"] == 0
+
+    # 2. Pool-padded only variant
+    pool_padded_snap = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 1, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 1, "error": None},
+        },
+        "owned_numbers": [clean_owned_1],
+        "service_numbers": [
+            {"sid": padded_sid, "phone_number": "+14155550001", "account_sid": account_sid, "service_sid": service_sid, "capabilities": {"sms": True}},
+        ],
+        "contractors": [clean_contractor_1],
+    }
+    report_pool = summarize_sms_readiness(
+        pool_padded_snap,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+    assert report_pool["completeness"]["sources"]["twilio_service"]["complete"] is False
+    assert report_pool["completeness"]["is_complete"] is False
+    assert report_pool["totals"]["review_candidates"] == 0

@@ -224,7 +224,8 @@ def collect_snapshot(
                 contractors.append(projected)
         except Exception:
             firestore_complete = False
-            firestore_error = "read_error"
+            if firestore_error != "binding_mismatch":
+                firestore_error = "read_error"
             contractors = []
 
     # Check Twilio client binding
@@ -269,7 +270,12 @@ def collect_snapshot(
                     pn_cap = getattr(pn, "capabilities", None) if not isinstance(pn, dict) else pn.get("capabilities")
 
                     canonical_phone = parse_and_validate_e164(pn_num)
-                    if not isinstance(pn_sid, str) or not pn_sid.strip() or canonical_phone is None:
+                    if (
+                        not isinstance(pn_sid, str)
+                        or not pn_sid.strip()
+                        or pn_sid != pn_sid.strip()
+                        or canonical_phone is None
+                    ):
                         twilio_service_complete = False
                         if twilio_service_error is None:
                             twilio_service_error = "read_error"
@@ -287,7 +293,8 @@ def collect_snapshot(
                     })
         except Exception:
             twilio_service_complete = False
-            twilio_service_error = "read_error"
+            if twilio_service_error != "binding_mismatch":
+                twilio_service_error = "read_error"
             service_numbers = []
 
         # Read owned incoming phone numbers
@@ -305,7 +312,12 @@ def collect_snapshot(
                 pn_cap = getattr(pn, "capabilities", None) if not isinstance(pn, dict) else pn.get("capabilities")
 
                 canonical_phone = parse_and_validate_e164(pn_num)
-                if not isinstance(pn_sid, str) or not pn_sid.strip() or canonical_phone is None:
+                if (
+                    not isinstance(pn_sid, str)
+                    or not pn_sid.strip()
+                    or pn_sid != pn_sid.strip()
+                    or canonical_phone is None
+                ):
                     twilio_incoming_complete = False
                     if twilio_incoming_error is None:
                         twilio_incoming_error = "read_error"
@@ -322,7 +334,8 @@ def collect_snapshot(
                 })
         except Exception:
             twilio_incoming_complete = False
-            twilio_incoming_error = "read_error"
+            if twilio_incoming_error != "binding_mismatch":
+                twilio_incoming_error = "read_error"
             owned_numbers = []
 
     return {
@@ -503,6 +516,8 @@ def summarize_sms_readiness(
                 err_clean = err
                 src_valid = False
                 sources_complete = False
+                if err_clean == "binding_mismatch":
+                    binding_valid = False
             else:
                 err_clean = "unknown_error"
                 src_valid = False
@@ -544,11 +559,10 @@ def summarize_sms_readiness(
             sanitized_sources["twilio_incoming"]["complete"] = False
             sources_complete = False
 
-        if not isinstance(sid, str) or not sid.strip():
+        if not isinstance(sid, str) or not sid.strip() or sid != sid.strip():
             sanitized_sources["twilio_incoming"]["complete"] = False
             sources_complete = False
             continue
-        sid = sid.strip()
         if sid in owned_sids_seen:
             duplicate_owned_sids.add(sid)
         owned_sids_seen.add(sid)
@@ -587,11 +601,10 @@ def summarize_sms_readiness(
             sanitized_sources["twilio_service"]["complete"] = False
             sources_complete = False
 
-        if not isinstance(sid, str) or not sid.strip():
+        if not isinstance(sid, str) or not sid.strip() or sid != sid.strip():
             sanitized_sources["twilio_service"]["complete"] = False
             sources_complete = False
             continue
-        sid = sid.strip()
         if sid in pool_sids_seen:
             duplicate_pool_sids.add(sid)
         pool_sids_seen.add(sid)
@@ -682,16 +695,20 @@ def summarize_sms_readiness(
     missing_owned_unique_count = 0
 
     # Unassigned owned numbers
-    for e164 in owned_phone_to_sid:
-        if e164 not in assigned_contractors_by_phone:
-            unassigned_owned_count += 1
+    if sources_complete and binding_valid and malformed_assignments_count == 0:
+        for e164 in owned_phone_to_sid:
+            if e164 not in assigned_contractors_by_phone:
+                unassigned_owned_count += 1
 
     for e164, c_list in assigned_contractors_by_phone.items():
         num_c = len(c_list)
         is_in_owned = e164 in owned_phone_to_sid
 
         if not is_in_owned:
-            unowned_assignments_count += num_c
+            if sources_complete and binding_valid:
+                unowned_assignments_count += num_c
+            if num_c > 1:
+                ambiguous_assignments_count += num_c
         else:
             assigned_owned_count += num_c
             sid = owned_phone_to_sid[e164]
@@ -759,30 +776,36 @@ def summarize_sms_readiness(
             e164 = parse_and_validate_e164(raw_num)
             if e164 is None or e164 != raw_num:
                 membership = "malformed"
-            elif e164 not in owned_phone_to_sid:
-                membership = "unowned"
             else:
-                sid = owned_phone_to_sid[e164]
                 is_duplicate_assign = len(assigned_contractors_by_phone.get(e164, [])) > 1
-                is_duplicate_owned = (
-                    e164 in duplicate_owned_phones
-                    or sid in duplicate_owned_sids
-                )
-                is_pool_anomaly = (
-                    sid in duplicate_pool_sids
-                    or e164 in duplicate_pool_phones
-                    or sid in pool_sid_phone_conflicts
-                )
-
-                if is_duplicate_assign or is_duplicate_owned or is_pool_anomaly:
+                if is_duplicate_assign:
                     membership = "ambiguous"
-                elif not sources_complete or not binding_valid or len(pool_sids_absent_from_inventory) > 0:
-                    membership = "unknown"
-                else:
-                    if sid in pool_sids_seen:
-                        membership = "present"
+                elif e164 not in owned_phone_to_sid:
+                    if sources_complete and binding_valid:
+                        membership = "unowned"
                     else:
-                        membership = "missing"
+                        membership = "unknown"
+                else:
+                    sid = owned_phone_to_sid[e164]
+                    is_duplicate_owned = (
+                        e164 in duplicate_owned_phones
+                        or sid in duplicate_owned_sids
+                    )
+                    is_pool_anomaly = (
+                        sid in duplicate_pool_sids
+                        or e164 in duplicate_pool_phones
+                        or sid in pool_sid_phone_conflicts
+                    )
+
+                    if is_duplicate_owned or is_pool_anomaly:
+                        membership = "ambiguous"
+                    elif not sources_complete or not binding_valid or len(pool_sids_absent_from_inventory) > 0:
+                        membership = "unknown"
+                    else:
+                        if sid in pool_sids_seen:
+                            membership = "present"
+                        else:
+                            membership = "missing"
 
         # active dimension
         act = contractor.get("active")
@@ -1028,9 +1051,16 @@ def summarize_sms_readiness(
     }
 
 
+class _PrivateArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser subclass that raises ValueError on parse errors without printing raw tokens."""
+
+    def error(self, message: str) -> None:
+        raise ValueError("Invalid command-line arguments")
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for offline SMS readiness audit tool."""
-    parser = argparse.ArgumentParser(
+    parser = _PrivateArgumentParser(
         description="Offline SMS readiness audit tool (read-only aggregate reporting)"
     )
     parser.add_argument("--snapshot", default="-", help="Path to snapshot JSON file or '-' for stdin")
@@ -1041,7 +1071,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         args = parser.parse_args(argv)
-    except SystemExit:
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 0
+    except Exception:
+        sys.stderr.write("Error: Invalid command-line arguments\n")
         return 2
 
     # Read snapshot

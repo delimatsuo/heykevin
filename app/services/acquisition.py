@@ -34,7 +34,11 @@ MAX_TIMESTAMP_S = 4102444800.0    # 2100-01-01T00:00:00Z in s
 
 VALID_CONVERSION_TYPES = frozenset({"Download", "Redownload", "PreOrder"})
 VALID_CLAIM_TYPES = frozenset({"Click", "Impression"})
+VALID_SIGNUP_COUNTRIES = frozenset({"US", "CA", "BR", "GB", "DE", "FR", "IT", "ES", "PT"})
 KNOWN_PLACEHOLDER_IDS = frozenset({1234567890})
+MAX_TRANSCRIPT_BYTES = 64 * 1024  # 64 KiB
+MAX_PENDING_SCREENING_TASKS = 32
+_pending_screening_tasks: set[asyncio.Task] = set()
 
 
 def get_expected_apple_ads_org_id() -> int:
@@ -145,6 +149,25 @@ def validate_acquisition_measurement_map(
         lease_expires_ts = float(lease_expires)
     else:
         lease_expires_ts = None
+
+    conv_at = acq.get("first_screening_conversation_observed_at")
+    if conv_at is not None:
+        if (
+            isinstance(conv_at, bool)
+            or not isinstance(conv_at, (int, float))
+            or not math.isfinite(conv_at)
+            or not (created_ts <= float(conv_at) <= MAX_TIMESTAMP_S)
+        ):
+            return False, 0, None, None, None, 0.0
+
+    country = acq.get("account_country_at_signup")
+    if country is not None:
+        if (
+            not isinstance(country, str)
+            or isinstance(country, bool)
+            or country not in VALID_SIGNUP_COUNTRIES
+        ):
+            return False, 0, None, None, None, 0.0
 
     return True, attempts, last_attempt_ts, lease_attempt, lease_expires_ts, created_ts
 
@@ -857,3 +880,239 @@ async def record_payment_measurement(
         await loop.run_in_executor(None, lambda: _txn(transaction))
     except Exception as e:
         logger.warning(f"Payment measurement failed: {type(e).__name__}")
+
+
+def parse_qualifying_screening_conversation(transcript: Any) -> bool:
+    """Parse durable decrypted transcript to check for Caller line followed by Kevin line.
+
+    Parse exact case-sensitive line prefixes 'Caller:' and 'Kevin:'; each must
+    have non-whitespace text, with a Kevin line after a Caller line.
+    """
+    if not isinstance(transcript, str):
+        return False
+    if not transcript.strip():
+        return False
+    try:
+        transcript_bytes = transcript.encode("utf-8")
+    except Exception:
+        return False
+    if len(transcript_bytes) > MAX_TRANSCRIPT_BYTES:
+        return False
+
+    caller_seen = False
+    for line in transcript.splitlines():
+        if line.startswith("Caller:"):
+            caller_text = line[7:].strip()
+            if caller_text:
+                caller_seen = True
+        elif line.startswith("Kevin:"):
+            kevin_text = line[6:].strip()
+            if kevin_text and caller_seen:
+                return True
+    return False
+
+
+def qualify_screening_conversation(
+    call_record: Any,
+    observed_at: Optional[float] = None,
+) -> tuple[bool, Optional[float], Optional[float]]:
+    """Strictly qualify durable call record for screening conversation observation.
+
+    Returns (is_qualified, call_start_ts, observed_at_ts).
+    """
+    if not is_acquisition_measurement_enabled():
+        return False, None, None
+
+    if not isinstance(call_record, dict):
+        return False, None, None
+
+    # Exact call_status == "completed" and route_taken == "ai_screening"
+    call_status = call_record.get("call_status")
+    if call_status != "completed":
+        return False, None, None
+
+    route_taken = call_record.get("route_taken")
+    if route_taken != "ai_screening":
+        return False, None, None
+
+    # Durable decrypted transcript parsing
+    transcript = call_record.get("transcript")
+    if not parse_qualifying_screening_conversation(transcript):
+        return False, None, None
+
+    now = time.time()
+    obs = now if observed_at is None else observed_at
+    if (
+        isinstance(obs, bool)
+        or not isinstance(obs, (int, float))
+        or not math.isfinite(obs)
+        or not (MIN_TIMESTAMP_S <= obs <= MAX_TIMESTAMP_S)
+        or obs > now
+    ):
+        return False, None, None
+
+    call_start = call_record.get("timestamp")
+    if (
+        isinstance(call_start, bool)
+        or not isinstance(call_start, (int, float))
+        or not math.isfinite(call_start)
+        or not (MIN_TIMESTAMP_S <= call_start <= MAX_TIMESTAMP_S)
+    ):
+        return False, None, None
+
+    ended_at = call_record.get("ended_at")
+    if (
+        isinstance(ended_at, bool)
+        or not isinstance(ended_at, (int, float))
+        or not math.isfinite(ended_at)
+        or not (MIN_TIMESTAMP_S <= ended_at <= MAX_TIMESTAMP_S)
+    ):
+        return False, None, None
+
+    start_ts = float(call_start)
+    ended_ts = float(ended_at)
+    obs_ts = float(obs)
+
+    if not (start_ts <= ended_ts <= obs_ts):
+        return False, None, None
+
+    return True, start_ts, obs_ts
+
+
+def schedule_screening_conversation_measurement(
+    contractor_id: str,
+    call_record: dict,
+    observed_at: Optional[float] = None,
+) -> None:
+    """Synchronously enqueue screening conversation measurement task without awaiting or blocking."""
+    if not is_acquisition_measurement_enabled():
+        return
+    if (
+        not isinstance(contractor_id, str)
+        or not contractor_id
+        or contractor_id.strip() != contractor_id
+    ):
+        return
+    if not isinstance(call_record, dict):
+        return
+    call_cid = call_record.get("contractor_id")
+    if (
+        not isinstance(call_cid, str)
+        or not call_cid
+        or call_cid != contractor_id
+    ):
+        return
+    if len(_pending_screening_tasks) >= MAX_PENDING_SCREENING_TASKS:
+        return
+
+    is_qualified, start_ts, obs_ts = qualify_screening_conversation(
+        call_record, observed_at=observed_at
+    )
+    if not is_qualified or start_ts is None or obs_ts is None:
+        return
+
+    coro = record_screening_conversation_measurement(
+        contractor_id=contractor_id,
+        call_start=start_ts,
+        observed_at=obs_ts,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        coro.close()
+        return
+
+    try:
+        task = loop.create_task(coro)
+    except Exception:
+        coro.close()
+        return
+
+    _pending_screening_tasks.add(task)
+
+    def _done_cb(t: asyncio.Task) -> None:
+        _pending_screening_tasks.discard(t)
+        if t.cancelled():
+            return
+        try:
+            exc = t.exception()
+            if exc:
+                logger.warning(f"Screening conversation measurement task failed: {type(exc).__name__}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Screening conversation measurement task error: {type(e).__name__}")
+
+    task.add_done_callback(_done_cb)
+
+
+async def record_screening_conversation_measurement(
+    contractor_id: str,
+    call_start: float,
+    observed_at: float,
+) -> None:
+    """Record first_screening_conversation_observed_at once in acquisition_measurement if eligible."""
+    if not is_acquisition_measurement_enabled():
+        return
+    if (
+        not isinstance(contractor_id, str)
+        or not contractor_id
+        or contractor_id.strip() != contractor_id
+    ):
+        return
+    if (
+        isinstance(call_start, bool)
+        or not isinstance(call_start, (int, float))
+        or not math.isfinite(call_start)
+        or not (MIN_TIMESTAMP_S <= call_start <= MAX_TIMESTAMP_S)
+    ):
+        return
+    if (
+        isinstance(observed_at, bool)
+        or not isinstance(observed_at, (int, float))
+        or not math.isfinite(observed_at)
+        or not (MIN_TIMESTAMP_S <= observed_at <= MAX_TIMESTAMP_S)
+    ):
+        return
+    now = time.time()
+    if float(observed_at) > now:
+        return
+    if float(call_start) > float(observed_at):
+        return
+
+    db = get_firestore_client()
+    doc_ref = db.collection("contractors").document(contractor_id)
+    loop = asyncio.get_event_loop()
+
+    @firestore.transactional
+    def _txn(transaction):
+        if not is_acquisition_measurement_enabled():
+            return
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return
+        data = snapshot.to_dict() or {}
+        if data.get("active") is not True:
+            return
+        acq = data.get("acquisition_measurement")
+        is_valid, _, _, _, _, created_ts = validate_acquisition_measurement_map(acq)
+        if not is_valid:
+            return
+        if acq.get("first_screening_conversation_observed_at") is not None:
+            return
+        if float(call_start) < created_ts:
+            return
+        if float(observed_at) < created_ts:
+            return
+        current_now = time.time()
+        if float(observed_at) > current_now:
+            return
+        transaction.update(doc_ref, {
+            "acquisition_measurement.first_screening_conversation_observed_at": float(observed_at)
+        })
+
+    transaction = db.transaction()
+    try:
+        await loop.run_in_executor(None, lambda: _txn(transaction))
+    except Exception as e:
+        logger.warning(f"Screening conversation measurement failed: {type(e).__name__}")

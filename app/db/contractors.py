@@ -561,6 +561,7 @@ async def create_contractor(data: dict) -> str:
             "schema_version": 1,
             "cohort": created_ts,
             "created_at": created_ts,
+            "account_country_at_signup": effective_country,
             "declared_onboarding_intent": intent,
             "attempts": 0,
             "last_attempt_at": None,

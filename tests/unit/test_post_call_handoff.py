@@ -21,6 +21,29 @@ import app.main as app_main
 
 
 @pytest.fixture(autouse=True)
+def outbound_tripwire(monkeypatch):
+    """Prevent real network and Firestore client construction during unit tests."""
+    def _block_httpx(*args, **kwargs):
+        raise RuntimeError("Real httpx network transport is forbidden in unit tests")
+
+    def _block_requests(*args, **kwargs):
+        raise RuntimeError("Real requests network call is forbidden in unit tests")
+
+    def _block_firestore(*args, **kwargs):
+        raise RuntimeError("Real google.cloud.firestore.Client construction is forbidden in unit tests")
+
+    def _block_get_client(*args, **kwargs):
+        raise RuntimeError("Real get_firestore_client is forbidden in unit tests")
+
+    monkeypatch.setattr("httpx.AsyncHTTPTransport.handle_async_request", _block_httpx)
+    import requests.sessions
+    monkeypatch.setattr(requests.sessions.Session, "request", _block_requests)
+    import google.cloud.firestore
+    monkeypatch.setattr(google.cloud.firestore.Client, "__init__", _block_firestore)
+    monkeypatch.setattr("app.db.firestore_client.get_firestore_client", _block_get_client)
+
+
+@pytest.fixture(autouse=True)
 def _default_handoff_seams(monkeypatch):
     import time
     now = time.time()
@@ -605,3 +628,302 @@ async def test_shutdown_cancels_post_call_worker(monkeypatch):
 
     assert task.cancelled()
     assert app_main._post_call_worker_task is None
+
+
+@pytest.mark.asyncio
+async def test_run_post_call_handoff_schedules_screening_measurement(monkeypatch):
+    """Verify successful finish_handoff with completed call_record schedules screening measurement."""
+    scheduled_calls = []
+
+    def fake_schedule(contractor_id, call_record):
+        scheduled_calls.append((contractor_id, call_record))
+
+    monkeypatch.setattr(
+        "app.services.acquisition.schedule_screening_conversation_measurement",
+        fake_schedule,
+    )
+
+    async def fake_process_post_call(*args, **kwargs):
+        return post_call.PostCallResult(
+            status="complete",
+            completed_effects=("summary", "call_record", "owner_sms"),
+            failed_effects=(),
+        )
+
+    monkeypatch.setattr(post_call_handoff, "process_post_call", fake_process_post_call)
+
+    async def fake_get_handoff(call_sid):
+        import time
+        return {
+            "call_sid": call_sid,
+            "status": "pending",
+            "contractor_id": "contractor-test",
+            "caller_language": "en",
+            "created_at": time.time(),
+        }
+
+    async def fake_get_call(call_sid):
+        return {
+            "call_sid": call_sid,
+            "contractor_id": "contractor-test",
+            "call_status": "completed",
+            "route_taken": "ai_screening",
+            "transcript": "Caller: Hello\nKevin: Hi",
+            "caller_phone": "test-caller-number",
+            "timestamp": 1788960000.0,
+            "ended_at": 1788960050.0,
+        }
+
+    async def fake_claim_handoff(call_sid):
+        return True
+
+    async def fake_finish_handoff(call_sid, result):
+        return True
+
+    async def fake_save_call(call_sid, updates):
+        return True
+
+    monkeypatch.setattr(post_call_handoff.handoff_db, "get_handoff", fake_get_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "get_call", fake_get_call)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "claim_handoff", fake_claim_handoff)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "finish_handoff", fake_finish_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "save_call", fake_save_call)
+
+    status = await post_call_handoff.run_post_call_handoff(
+        "CA_test_success",
+        transcript_lines=["Caller: Hello", "Kevin: Hi"],
+        caller_phone="+15555550100",
+        contractor_phone="+15555550101",
+        twilio_number="+15555550102",
+        contractor={"contractor_id": "contractor-test"},
+    )
+    assert status == "completed"
+    assert len(scheduled_calls) == 1
+    assert scheduled_calls[0][0] == "contractor-test"
+    assert scheduled_calls[0][1]["call_sid"] == "CA_test_success"
+
+
+@pytest.mark.asyncio
+async def test_run_post_call_handoff_screening_measurement_isolated_on_error(monkeypatch):
+    """Verify scheduler exception does not change successful post-call handoff outcome."""
+    def fake_schedule_error(contractor_id, call_record):
+        raise RuntimeError("Scheduler queue unavailable")
+
+    monkeypatch.setattr(
+        "app.services.acquisition.schedule_screening_conversation_measurement",
+        fake_schedule_error,
+    )
+
+    async def fake_process_post_call(*args, **kwargs):
+        return post_call.PostCallResult(
+            status="complete",
+            completed_effects=("summary", "call_record"),
+            failed_effects=(),
+        )
+
+    monkeypatch.setattr(post_call_handoff, "process_post_call", fake_process_post_call)
+
+    async def fake_get_handoff(call_sid):
+        import time
+        return {
+            "call_sid": call_sid,
+            "status": "pending",
+            "contractor_id": "contractor-test",
+            "caller_language": "en",
+            "created_at": time.time(),
+        }
+
+    async def fake_get_call(call_sid):
+        return {
+            "call_sid": call_sid,
+            "contractor_id": "contractor-test",
+            "call_status": "completed",
+            "route_taken": "ai_screening",
+            "transcript": "Caller: Hello\nKevin: Hi",
+            "caller_phone": "test-caller-number",
+            "timestamp": 1788960000.0,
+            "ended_at": 1788960050.0,
+        }
+
+    async def fake_claim_handoff(call_sid):
+        return True
+
+    async def fake_finish_handoff(call_sid, result):
+        return True
+
+    async def fake_save_call(call_sid, updates):
+        return True
+
+    monkeypatch.setattr(post_call_handoff.handoff_db, "get_handoff", fake_get_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "get_call", fake_get_call)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "claim_handoff", fake_claim_handoff)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "finish_handoff", fake_finish_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "save_call", fake_save_call)
+
+    status = await post_call_handoff.run_post_call_handoff(
+        "CA_test_sched_err",
+        transcript_lines=["Caller: Hello", "Kevin: Hi"],
+        caller_phone="+15555550100",
+        contractor_phone="+15555550101",
+        twilio_number="+15555550102",
+        contractor={"contractor_id": "contractor-test"},
+    )
+    assert status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_post_call_handoff_screening_measurement_not_scheduled_on_finish_failure(monkeypatch):
+    """Verify failed finish_handoff does not schedule screening measurement and marks needs_attention."""
+    scheduled_calls = []
+
+    def fake_schedule(contractor_id, call_record):
+        scheduled_calls.append((contractor_id, call_record))
+
+    monkeypatch.setattr(
+        "app.services.acquisition.schedule_screening_conversation_measurement",
+        fake_schedule,
+    )
+
+    async def fake_process_post_call(*args, **kwargs):
+        return post_call.PostCallResult(
+            status="complete",
+            completed_effects=("summary", "call_record"),
+            failed_effects=(),
+        )
+
+    monkeypatch.setattr(post_call_handoff, "process_post_call", fake_process_post_call)
+
+    async def fake_get_handoff(call_sid):
+        import time
+        return {
+            "call_sid": call_sid,
+            "status": "pending",
+            "contractor_id": "contractor-test",
+            "caller_language": "en",
+            "created_at": time.time(),
+        }
+
+    async def fake_get_call(call_sid):
+        return {
+            "call_sid": call_sid,
+            "contractor_id": "contractor-test",
+            "call_status": "completed",
+            "route_taken": "ai_screening",
+            "transcript": "Caller: Hello\nKevin: Hi",
+            "caller_phone": "test-caller-number",
+            "timestamp": 1788960000.0,
+            "ended_at": 1788960050.0,
+        }
+
+    async def fake_claim_handoff(call_sid):
+        return True
+
+    async def fake_finish_fail(call_sid, result):
+        return False
+
+    async def fake_mark_needs_attention(call_sid, failure_code):
+        return True
+
+    async def fake_save_call(call_sid, updates):
+        return True
+
+    monkeypatch.setattr(post_call_handoff.handoff_db, "get_handoff", fake_get_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "get_call", fake_get_call)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "claim_handoff", fake_claim_handoff)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "finish_handoff", fake_finish_fail)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "mark_needs_attention", fake_mark_needs_attention)
+    monkeypatch.setattr(post_call_handoff.call_db, "save_call", fake_save_call)
+
+    status = await post_call_handoff.run_post_call_handoff(
+        "CA_test_finish_fail",
+        transcript_lines=["Caller: Hello", "Kevin: Hi"],
+        caller_phone="+15555550100",
+        contractor_phone="+15555550101",
+        twilio_number="+15555550102",
+        contractor={"contractor_id": "contractor-test"},
+    )
+    assert status == "needs_attention"
+    assert len(scheduled_calls) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_handoff_cid, bad_call_cid", [
+    (" contractor-test", "contractor-test"),  # leading whitespace on handoff
+    ("contractor-test", "contractor-test "),  # trailing whitespace on call
+    (12345, "contractor-test"),              # non-string handoff ID
+    ("contractor-test", 12345),              # non-string call ID
+    ("contractor-a", "contractor-a"),        # mismatch with inline contractor-test handled below
+])
+async def test_run_post_call_handoff_screening_measurement_skipped_on_malformed_tenant_ids(
+    monkeypatch, bad_handoff_cid, bad_call_cid
+):
+    """Verify screening measurement is safely skipped without affecting call flow when tenant IDs are malformed/whitespace."""
+    scheduled_calls = []
+
+    def fake_schedule(contractor_id, call_record):
+        scheduled_calls.append((contractor_id, call_record))
+
+    monkeypatch.setattr(
+        "app.services.acquisition.schedule_screening_conversation_measurement",
+        fake_schedule,
+    )
+
+    async def fake_process_post_call(*args, **kwargs):
+        return post_call.PostCallResult(
+            status="complete",
+            completed_effects=("summary", "call_record"),
+            failed_effects=(),
+        )
+
+    monkeypatch.setattr(post_call_handoff, "process_post_call", fake_process_post_call)
+
+    async def fake_get_handoff(call_sid):
+        import time
+        return {
+            "call_sid": call_sid,
+            "status": "pending",
+            "contractor_id": bad_handoff_cid,
+            "caller_language": "en",
+            "created_at": time.time(),
+        }
+
+    async def fake_get_call(call_sid):
+        return {
+            "call_sid": call_sid,
+            "contractor_id": bad_call_cid,
+            "call_status": "completed",
+            "route_taken": "ai_screening",
+            "transcript": "Caller: Hello\nKevin: Hi",
+            "caller_phone": "test-caller-number",
+            "timestamp": 1788960000.0,
+            "ended_at": 1788960050.0,
+        }
+
+    async def fake_claim_handoff(call_sid):
+        return True
+
+    async def fake_finish_handoff(call_sid, result):
+        return True
+
+    async def fake_save_call(call_sid, updates):
+        return True
+
+    async def fake_quarantine(call_sid, code):
+        return True
+
+    monkeypatch.setattr(post_call_handoff.handoff_db, "get_handoff", fake_get_handoff)
+    monkeypatch.setattr(post_call_handoff.call_db, "get_call", fake_get_call)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "claim_handoff", fake_claim_handoff)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "finish_handoff", fake_finish_handoff)
+    monkeypatch.setattr(post_call_handoff.handoff_db, "quarantine_pending_handoff", fake_quarantine)
+    monkeypatch.setattr(post_call_handoff.call_db, "save_call", fake_save_call)
+
+    await post_call_handoff.run_post_call_handoff(
+        "CA_test_bad_tenants",
+        transcript_lines=["Caller: Hello", "Kevin: Hi"],
+        caller_phone="+15555550100",
+        contractor_phone="+15555550101",
+        twilio_number="+15555550102",
+        contractor={"contractor_id": "contractor-test"},
+    )
+    assert len(scheduled_calls) == 0

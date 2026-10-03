@@ -26,6 +26,7 @@ VALID_INTENTS = frozenset({"personal", "business", "unknown"})
 VALID_TIERS = frozenset({"personal", "business", "businessPro"})
 VALID_ATTRIBUTION_STATUSES = frozenset({"recorded", "unattributed", "exhausted", "ineligible", "disabled", "retryable"})
 VALID_SOURCES = frozenset({"apple_ads", "unattributed"})
+VALID_SIGNUP_COUNTRIES = frozenset({"US", "CA", "BR", "GB", "DE", "FR", "IT", "ES", "PT"})
 VALID_CONVERSION_TYPES = frozenset({"Download", "Redownload", "PreOrder"})
 VALID_CLAIM_TYPES = frozenset({"Click", "Impression"})
 
@@ -33,6 +34,7 @@ ALLOWLISTED_KEYS = frozenset({
     "schema_version",
     "cohort",
     "created_at",
+    "account_country_at_signup",
     "declared_onboarding_intent",
     "attempts",
     "last_attempt_at",
@@ -50,6 +52,7 @@ ALLOWLISTED_KEYS = frozenset({
     "lease_expires_at",
     "first_inbound_observed_at",
     "first_forwarded_observed_at",
+    "first_screening_conversation_observed_at",
     "first_verified_entitlement_observed_at",
     "first_verified_entitlement_tier",
     "first_positive_price_purchase_observed_at",
@@ -117,6 +120,13 @@ def validate_measurement_record(record: Any) -> dict:
         raise ValueError("Invalid record: cohort must equal created_at")
 
     created_ts = float(created_at)
+
+    # 2b. account_country_at_signup (OPTIONAL, exact enum)
+    if "account_country_at_signup" in record:
+        country_val = record.get("account_country_at_signup")
+        if country_val is not None:
+            if not isinstance(country_val, str) or isinstance(country_val, bool) or country_val not in VALID_SIGNUP_COUNTRIES:
+                raise ValueError("Invalid record: account_country_at_signup must be valid enum")
 
     # 3. declared_onboarding_intent (REQUIRED, exact enum)
     if "declared_onboarding_intent" not in record:
@@ -212,6 +222,12 @@ def validate_measurement_record(record: Any) -> dict:
         if not _is_valid_timestamp(fwd_at) or float(fwd_at) < created_ts:
             raise ValueError("Invalid record: first_forwarded_observed_at must be >= created_at")
 
+    # 7b. Screening conversation observation
+    conv_at = record.get("first_screening_conversation_observed_at")
+    if conv_at is not None:
+        if not _is_valid_timestamp(conv_at) or float(conv_at) < created_ts:
+            raise ValueError("Invalid record: first_screening_conversation_observed_at must be >= created_at")
+
     # 8. Verified entitlement pairing
     ent_at = record.get("first_verified_entitlement_observed_at")
     ent_tier = record.get("first_verified_entitlement_tier")
@@ -293,20 +309,23 @@ def summarize_acquisition_funnel(
 
     def get_group(group_key: tuple) -> dict[str, Any]:
         if group_key not in groups:
-            intent, source, camp_id, adg_id = group_key[:4]
+            country, intent, source, camp_id, adg_id, conv_type = group_key[:6]
             g: dict[str, Any] = {
+                "account_country_at_signup": country,
                 "declared_onboarding_intent": intent,
                 "source": source,
                 "campaign_id": camp_id,
                 "ad_group_id": adg_id,
+                "conversion_type": conv_type,
             }
             if by_keyword:
-                g["keyword_id"] = group_key[4]
+                g["keyword_id"] = group_key[6]
             g.update({
                 "accounts_created": 0,
                 "attribution_recorded": 0,
                 "inbound_observed": 0,
                 "forwarding_confirmed": 0,
+                "screening_conversation_observed": 0,
                 "verified_entitlement_observed": 0,
                 "storekit_trial_observed": 0,
                 "positive_price_purchase_observed": 0,
@@ -328,6 +347,10 @@ def summarize_acquisition_funnel(
 
         total_accounts_processed += 1
 
+        country = rec.get("account_country_at_signup")
+        if not isinstance(country, str) or country not in VALID_SIGNUP_COUNTRIES:
+            country = "unknown"
+
         intent = rec.get("declared_onboarding_intent")
         if intent not in ("personal", "business"):
             intent = "unknown"
@@ -340,25 +363,29 @@ def summarize_acquisition_funnel(
             source = "apple_ads"
             camp_id = rec.get("campaign_id")
             adg_id = rec.get("ad_group_id")
+            raw_conv = rec.get("conversion_type")
+            conv_type = raw_conv if (raw_conv in VALID_CONVERSION_TYPES) else "unknown"
             kw_id = rec.get("keyword_id") if by_keyword else None
             is_attr_recorded = True
         elif status == "unattributed" and attr_rec_at is not None and float(attr_rec_at) <= as_of_ts:
             source = "unattributed"
             camp_id = None
             adg_id = None
+            conv_type = "unknown"
             kw_id = None
             is_attr_recorded = False
         else:
             source = "unknown"
             camp_id = None
             adg_id = None
+            conv_type = "unknown"
             kw_id = None
             is_attr_recorded = False
 
         if by_keyword:
-            group_key = (intent, source, camp_id, adg_id, kw_id)
+            group_key = (country, intent, source, camp_id, adg_id, conv_type, kw_id)
         else:
-            group_key = (intent, source, camp_id, adg_id)
+            group_key = (country, intent, source, camp_id, adg_id, conv_type)
 
         g = get_group(group_key)
         g["accounts_created"] += 1
@@ -375,6 +402,11 @@ def summarize_acquisition_funnel(
         fwd_ts = rec.get("first_forwarded_observed_at")
         if fwd_ts is not None and float(fwd_ts) <= as_of_ts:
             g["forwarding_confirmed"] += 1
+
+        # Screening conversation observed (<= as_of)
+        conv_ts = rec.get("first_screening_conversation_observed_at")
+        if conv_ts is not None and float(conv_ts) <= as_of_ts:
+            g["screening_conversation_observed"] += 1
 
         # Verified entitlement observed (<= as_of)
         ent_ts = rec.get("first_verified_entitlement_observed_at")
@@ -401,10 +433,12 @@ def summarize_acquisition_funnel(
     group_list = sorted(
         groups.values(),
         key=lambda item: (
+            item["account_country_at_signup"],
             item["declared_onboarding_intent"],
             item["source"],
             str(item.get("campaign_id") or ""),
             str(item.get("ad_group_id") or ""),
+            item["conversion_type"],
             str(item.get("keyword_id") or ""),
         )
     )
@@ -414,6 +448,7 @@ def summarize_acquisition_funnel(
         "attribution_recorded": sum(g["attribution_recorded"] for g in group_list),
         "inbound_observed": sum(g["inbound_observed"] for g in group_list),
         "forwarding_confirmed": sum(g["forwarding_confirmed"] for g in group_list),
+        "screening_conversation_observed": sum(g["screening_conversation_observed"] for g in group_list),
         "verified_entitlement_observed": sum(g["verified_entitlement_observed"] for g in group_list),
         "storekit_trial_observed": sum(g["storekit_trial_observed"] for g in group_list),
         "positive_price_purchase_observed": sum(g["positive_price_purchase_observed"] for g in group_list),
@@ -430,10 +465,14 @@ def summarize_acquisition_funnel(
         "cohort_end": cohort_end_utc.isoformat(),
         "as_of": as_of_utc.isoformat(),
         "complete": True,
+        "input_validation_complete": True,
+        "source_population_complete": None,
+        "input_uniqueness_verified": False,
+        "input_record_count": len(records),
         "totals": totals,
         "groups": group_list,
         "deletion_notice": "Account deletion erases the measurement map and can reduce historical cohort counts.",
-        "limitations": "This report contains aggregate counts only. No ROAS or causal attribution claims are made.",
+        "limitations": "This report contains independent milestone record counts of supplied records only, not an ordered funnel, conversion rates, or sequential pipeline. complete means all supplied records were validated and processed; the offline reducer cannot certify export completeness or unique accounts. Deletions, missing records, or unmigrated builds affect counts. Observed positive-price purchase is not current paid subscribers, renewals, net revenue, or profitability, and positive-price observations may reflect historical restored purchases. Account country snapshot is account setup country, not residence, number location, storefront, or ad targeting geography. Milestone timestamps represent observation/processing time. No ROAS or causal attribution claims are made.",
     }
 
 

@@ -258,6 +258,28 @@ async def run_post_call_handoff(
             )
         else:
             terminal_persisted = True
+            raw_handoff_cid = handoff.get("contractor_id") if isinstance(handoff, dict) else None
+            raw_call_cid = call_record.get("contractor_id") if isinstance(call_record, dict) else None
+            raw_inline_cid = contractor.get("contractor_id") if isinstance(contractor, dict) else None
+            if (
+                "call_record" in result.completed_effects
+                and "call_record" not in result.failed_effects
+                and isinstance(call_record, dict)
+                and isinstance(raw_call_cid, str)
+                and bool(raw_call_cid.strip())
+                and raw_call_cid.strip() == raw_call_cid
+                and isinstance(raw_handoff_cid, str)
+                and raw_handoff_cid == raw_call_cid
+                and (raw_inline_cid is None or raw_inline_cid == raw_call_cid)
+            ):
+                try:
+                    from app.services.acquisition import schedule_screening_conversation_measurement
+                    schedule_screening_conversation_measurement(
+                        contractor_id=raw_call_cid,
+                        call_record=call_record,
+                    )
+                except Exception as sched_err:
+                    logger.warning(f"Screening conversation measurement schedule error: {type(sched_err).__name__}")
         await _mirror_status(
             call_sid,
             status,

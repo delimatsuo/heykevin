@@ -44,11 +44,15 @@ def outbound_tripwire(monkeypatch):
     def _block_firestore(*args, **kwargs):
         raise RuntimeError("Real google.cloud.firestore.Client construction is forbidden in unit tests")
 
+    def _block_get_client(*args, **kwargs):
+        raise RuntimeError("Real get_firestore_client is forbidden in unit tests")
+
     monkeypatch.setattr("httpx.AsyncHTTPTransport.handle_async_request", _block_httpx)
     import requests.sessions
     monkeypatch.setattr(requests.sessions.Session, "request", _block_requests)
     import google.cloud.firestore
     monkeypatch.setattr(google.cloud.firestore.Client, "__init__", _block_firestore)
+    monkeypatch.setattr("app.db.firestore_client.get_firestore_client", _block_get_client)
 
 
 def _unsigned_jws(payload: dict) -> str:
@@ -198,10 +202,15 @@ def test_summarize_acquisition_funnel_aggregates_synthetic_cohort():
     )
 
     assert result["complete"] is True
+    assert result["input_validation_complete"] is True
+    assert result["source_population_complete"] is None
+    assert result["input_uniqueness_verified"] is False
+    assert result["input_record_count"] == len(records)
     assert result["totals"]["accounts_created"] == 2
     assert result["totals"]["attribution_recorded"] == 1
     assert result["totals"]["inbound_observed"] == 1
     assert result["totals"]["forwarding_confirmed"] == 2
+    assert result["totals"]["screening_conversation_observed"] == 0
     assert result["totals"]["verified_entitlement_observed"] == 1
     assert result["totals"]["positive_price_purchase_observed"] == 1
     assert result["totals"]["paid_tiers"]["personal"] == 1
@@ -286,12 +295,14 @@ async def test_create_contractor_initializes_unknown_intent_and_roundtrips_reduc
 
     acq = captured_doc.get("acquisition_measurement")
     assert acq is not None
+    assert acq["account_country_at_signup"] == "US"
     assert acq["declared_onboarding_intent"] == "unknown"
     assert acq["attempts"] == 0
     assert acq["attribution_status"] is None
 
     # Validate with reducer
     validated = validate_measurement_record(acq)
+    assert validated["account_country_at_signup"] == "US"
     assert validated["declared_onboarding_intent"] == "unknown"
 
 

@@ -32,11 +32,15 @@ def outbound_tripwire(monkeypatch):
     def _block_firestore(*args, **kwargs):
         raise RuntimeError("Real google.cloud.firestore.Client construction is forbidden in unit tests")
 
+    def _block_get_client(*args, **kwargs):
+        raise RuntimeError("Real get_firestore_client is forbidden in unit tests")
+
     monkeypatch.setattr("httpx.AsyncHTTPTransport.handle_async_request", _block_httpx)
     import requests.sessions
     monkeypatch.setattr(requests.sessions.Session, "request", _block_requests)
     import google.cloud.firestore
     monkeypatch.setattr(google.cloud.firestore.Client, "__init__", _block_firestore)
+    monkeypatch.setattr("app.db.firestore_client.get_firestore_client", _block_get_client)
 
 
 class _InMemoryFirestore:
@@ -713,3 +717,180 @@ async def test_schedule_payment_measurement_cleanup_on_completion_error_and_canc
     release_event.set()
     await asyncio.gather(*list(acquisition._pending_payment_tasks), return_exceptions=True)
     assert len(acquisition._pending_payment_tasks) == 0
+
+
+def test_parse_qualifying_screening_conversation_cases():
+    """Verify screening conversation parsing enforces exact prefixes, non-whitespace, and Caller-then-Kevin sequence."""
+    # Valid: Caller then Kevin
+    valid_transcript = "Kevin: Hello, this is Kevin.\nCaller: Hi, I need plumbing work done.\nKevin: Great, what is your address?"
+    assert acquisition.parse_qualifying_screening_conversation(valid_transcript) is True
+
+    # Valid: Caller first, then Kevin
+    caller_first = "Caller: Are you available?\nKevin: Yes I am."
+    assert acquisition.parse_qualifying_screening_conversation(caller_first) is True
+
+    # Invalid: Greeting only (Kevin only)
+    kevin_only = "Kevin: Hello, this is Kevin answering for Acme."
+    assert acquisition.parse_qualifying_screening_conversation(kevin_only) is False
+
+    # Invalid: Kevin greeting then Caller line only (no subsequent Kevin response)
+    greeting_and_caller_only = "Kevin: Hello, thanks for calling.\nCaller: I need help."
+    assert acquisition.parse_qualifying_screening_conversation(greeting_and_caller_only) is False
+
+    # Invalid: Case sensitivity mismatch (caller: vs Caller:)
+    wrong_case = "caller: hello\nkevin: hi"
+    assert acquisition.parse_qualifying_screening_conversation(wrong_case) is False
+
+    # Invalid: Whitespace only text
+    whitespace_caller = "Kevin: Hello\nCaller:    \nKevin: Still there?"
+    assert acquisition.parse_qualifying_screening_conversation(whitespace_caller) is False
+
+    # Invalid: Empty / non-string
+    assert acquisition.parse_qualifying_screening_conversation("") is False
+    assert acquisition.parse_qualifying_screening_conversation(None) is False
+    assert acquisition.parse_qualifying_screening_conversation(12345) is False
+
+    # Invalid: Overlong transcript (> 64 KiB)
+    large_prefix = "A" * (65 * 1024)
+    overlong_transcript = f"Caller: Hi\nKevin: Hello\n{large_prefix}"
+    assert acquisition.parse_qualifying_screening_conversation(overlong_transcript) is False
+
+
+def test_qualify_screening_conversation_strict_rules(monkeypatch):
+    """Verify qualifier checks exact status, exact route, timestamps ordering and bounds."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    now = 1788960500.0
+    valid_call = {
+        "call_status": "completed",
+        "route_taken": "ai_screening",
+        "transcript": "Caller: Hi\nKevin: Hello",
+        "timestamp": 1788960000.0,
+        "ended_at": 1788960100.0,
+    }
+
+    is_ok, start_ts, obs_ts = acquisition.qualify_screening_conversation(valid_call, observed_at=now)
+    assert is_ok is True
+    assert start_ts == 1788960000.0
+    assert obs_ts == now
+
+    # 1. Non-completed status rejected
+    bad_status = dict(valid_call, call_status="busy")
+    assert acquisition.qualify_screening_conversation(bad_status, observed_at=now) == (False, None, None)
+
+    # 2. Non-ai_screening route rejected
+    bad_route = dict(valid_call, route_taken="voip_direct")
+    assert acquisition.qualify_screening_conversation(bad_route, observed_at=now) == (False, None, None)
+
+    # 3. Invalid timestamp ordering (ended_at < start)
+    bad_times = dict(valid_call, timestamp=1788960200.0, ended_at=1788960100.0)
+    assert acquisition.qualify_screening_conversation(bad_times, observed_at=now) == (False, None, None)
+
+    # 4. Ended in future relative to observed_at
+    future_ended = dict(valid_call, ended_at=now + 10.0)
+    assert acquisition.qualify_screening_conversation(future_ended, observed_at=now) == (False, None, None)
+
+    # 5. Non-boolean / finite checks
+    bool_time = dict(valid_call, timestamp=True)
+    assert acquisition.qualify_screening_conversation(bool_time, observed_at=now) == (False, None, None)
+
+    nan_time = dict(valid_call, timestamp=float("nan"))
+    assert acquisition.qualify_screening_conversation(nan_time, observed_at=now) == (False, None, None)
+
+
+@pytest.mark.asyncio
+async def test_schedule_screening_conversation_measurement_bounded_and_isolated(monkeypatch):
+    """Verify screening measurement scheduler bounds pending tasks to 32 and isolates caller data."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    captured = []
+    release_event = asyncio.Event()
+
+    async def fake_held_writer(contractor_id, call_start, observed_at):
+        captured.append((contractor_id, call_start, observed_at))
+        await release_event.wait()
+
+    monkeypatch.setattr(acquisition, "record_screening_conversation_measurement", fake_held_writer)
+
+    valid_call = {
+        "call_status": "completed",
+        "route_taken": "ai_screening",
+        "transcript": "Caller: Hello\nKevin: Hi",
+        "timestamp": 1788960000.0,
+        "ended_at": 1788960050.0,
+        "call_sid": "CA_SENSITIVE_123",  # Must NOT be passed to task
+    }
+
+    try:
+        # Fill queue to 32 tasks
+        for i in range(32):
+            call_per_task = dict(valid_call, contractor_id=f"cnt_{i}")
+            acquisition.schedule_screening_conversation_measurement(f"cnt_{i}", call_per_task, observed_at=1788960100.0)
+        assert len(acquisition._pending_screening_tasks) == 32
+
+        # 33rd task must be dropped
+        call_overflow = dict(valid_call, contractor_id="cnt_overflow")
+        acquisition.schedule_screening_conversation_measurement("cnt_overflow", call_overflow, observed_at=1788960100.0)
+        assert len(acquisition._pending_screening_tasks) == 32
+
+        # Mutate caller dictionary
+        valid_call.clear()
+
+        # Release tasks
+        release_event.set()
+        await asyncio.gather(*list(acquisition._pending_screening_tasks), return_exceptions=True)
+
+        assert len(captured) == 32
+        # Verify task only received contractor ID, start time, and observed_at time
+        assert captured[0] == ("cnt_0", 1788960000.0, 1788960100.0)
+        assert len(acquisition._pending_screening_tasks) == 0
+    finally:
+        release_event.set()
+        if acquisition._pending_screening_tasks:
+            await asyncio.gather(*list(acquisition._pending_screening_tasks), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_record_screening_conversation_measurement_transactional_first_write(fake_db, monkeypatch):
+    """Verify screening conversation measurement writes once transactionally and rejects prior-cohort calls."""
+    monkeypatch.setattr(acquisition.settings, "acquisition_measurement_enabled", True)
+    monkeypatch.setattr(acquisition.settings, "apple_ads_expected_org_id", 987654)
+
+    created_ts = 1788960000.0
+    doc_path = "contractors/cnt_screening_test"
+    fake_db._docs[doc_path] = {
+        "active": True,
+        "acquisition_measurement": {
+            "schema_version": 1,
+            "cohort": created_ts,
+            "created_at": created_ts,
+            "attempts": 0,
+            "first_screening_conversation_observed_at": None,
+        },
+    }
+
+    # 1. Prior-cohort call (call_start < created_ts) -> rejected
+    await acquisition.record_screening_conversation_measurement(
+        "cnt_screening_test",
+        call_start=created_ts - 100.0,
+        observed_at=created_ts + 50.0,
+    )
+    assert fake_db._docs[doc_path]["acquisition_measurement"]["first_screening_conversation_observed_at"] is None
+
+    # 2. Eligible post-signup call -> writes milestone timestamp
+    await acquisition.record_screening_conversation_measurement(
+        "cnt_screening_test",
+        call_start=created_ts + 10.0,
+        observed_at=created_ts + 50.0,
+    )
+    assert fake_db._docs[doc_path]["acquisition_measurement"]["first_screening_conversation_observed_at"] == created_ts + 50.0
+
+    # 3. Subsequent call -> immutable first-write (does not overwrite)
+    await acquisition.record_screening_conversation_measurement(
+        "cnt_screening_test",
+        call_start=created_ts + 200.0,
+        observed_at=created_ts + 300.0,
+    )
+    assert fake_db._docs[doc_path]["acquisition_measurement"]["first_screening_conversation_observed_at"] == created_ts + 50.0

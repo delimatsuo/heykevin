@@ -82,6 +82,11 @@ remain ambiguous even when ownership is unknown. These diagnostic totals are
 not estimates of missing data. Sanitize argument-parsing errors as well as
 snapshot/summary failures; never echo unexpected command-line values.
 
+Positive assigned-owned totals also require valid bindings: coincidentally
+matching phone values across wrong sources do not prove ownership. Validly
+bound partial reads can retain observed positive matches while suppressing
+absence claims and review candidates.
+
 The report contains only schema/version/time, completeness, fixed limitations,
 allowlisted aggregate counters and cohort rows. Never print phones, contractor
 IDs, provider number IDs, raw unexpected keys/values or exception text. Unknown

@@ -2814,3 +2814,142 @@ def test_padded_sid_direct_offline_reducer_single_source(case_name: str, padded_
     assert report_pool["completeness"]["sources"]["twilio_service"]["complete"] is False
     assert report_pool["completeness"]["is_complete"] is False
     assert report_pool["totals"]["review_candidates"] == 0
+
+
+@pytest.mark.parametrize(
+    "mismatch_case",
+    [
+        "expected_project_mismatch",
+        "expected_account_mismatch",
+        "expected_service_mismatch",
+        "firestore_source_binding_mismatch",
+        "incoming_source_binding_mismatch",
+        "provider_row_wrong_account",
+    ],
+)
+def test_assigned_owned_requires_valid_bindings(mismatch_case: str):
+    """Assigned-owned count requires valid bindings; invalid bindings fail closed to assigned_owned=0 and cohort unknown."""
+    as_of = "2026-10-02T20:05:00Z"
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    # 1. Clean bound control demonstrating phone matches and assigned_owned=2
+    clean_snapshot = _make_sample_snapshot(
+        owned_count=2,
+        registered_count=1,
+        contractor_count=2,
+        project=project,
+        account_sid=account_sid,
+        service_sid=service_sid,
+    )
+    clean_report = summarize_sms_readiness(
+        clean_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+    assert clean_report["completeness"]["bindings_valid"] is True
+    assert clean_report["completeness"]["is_complete"] is True
+    assert clean_report["totals"]["assignments"]["assigned_owned"] == 2
+    assert clean_report["totals"]["review_candidates"] == 1
+
+    # 2. Mismatch setup keeping phone matches
+    snapshot = _make_sample_snapshot(
+        owned_count=2,
+        registered_count=1,
+        contractor_count=2,
+        project=project,
+        account_sid=account_sid,
+        service_sid=service_sid,
+    )
+    req_project = project
+    req_account_sid = account_sid
+    req_service_sid = service_sid
+
+    if mismatch_case == "expected_project_mismatch":
+        req_project = "mismatched-project-id"
+    elif mismatch_case == "expected_account_mismatch":
+        req_account_sid = "ACmismatchedaccount0000000000000000"
+    elif mismatch_case == "expected_service_mismatch":
+        req_service_sid = "MGmismatchedservice0000000000000000"
+    elif mismatch_case == "firestore_source_binding_mismatch":
+        snapshot["sources"]["firestore"]["complete"] = False
+        snapshot["sources"]["firestore"]["error"] = "binding_mismatch"
+    elif mismatch_case == "incoming_source_binding_mismatch":
+        snapshot["sources"]["twilio_incoming"]["complete"] = False
+        snapshot["sources"]["twilio_incoming"]["error"] = "binding_mismatch"
+    elif mismatch_case == "provider_row_wrong_account":
+        snapshot["owned_numbers"][0]["account_sid"] = "ACforeignaccount00000000000000000"
+    else:
+        raise ValueError(f"Unknown mismatch_case: {mismatch_case}")
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=req_project,
+        expected_account_sid=req_account_sid,
+        messaging_service_sid=req_service_sid,
+    )
+
+    # Every mismatch must produce bindings_valid False, assigned_owned 0, is_complete False, candidates 0
+    assert report["completeness"]["bindings_valid"] is False
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["assignments"]["assigned_owned"] == 0
+    assert report["totals"]["review_candidates"] == 0
+
+    # Keep raw total_contractors 2 and owned_inventory 2 diagnostics
+    assert report["totals"]["assignments"]["total_contractors"] == 2
+    assert report["totals"]["owned_inventory"] == 2
+
+    # Both matching tenant cohort memberships unknown (no duplicates)
+    cohorts = report["cohorts"]
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unknown") == 2
+    assert sum(c["count"] for c in cohorts if c["membership"] == "ambiguous") == 0
+    assert sum(c["count"] for c in cohorts if c["membership"] == "present") == 0
+    assert sum(c["count"] for c in cohorts if c["membership"] == "missing") == 0
+    assert sum(c["count"] for c in cohorts if c["membership"] == "unowned") == 0
+
+    # Assert no identifiers/raw sentinels in serialized report
+    report_json = json.dumps(report)
+    assert "+14155550001" not in report_json
+    assert "+14155550002" not in report_json
+    assert "PN0001" not in report_json
+    assert "PN0002" not in report_json
+    if mismatch_case == "expected_project_mismatch":
+        assert "mismatched-project-id" not in report_json
+    elif mismatch_case == "expected_account_mismatch":
+        assert "ACmismatchedaccount0000000000000000" not in report_json
+    elif mismatch_case == "expected_service_mismatch":
+        assert "MGmismatchedservice0000000000000000" not in report_json
+    elif mismatch_case == "provider_row_wrong_account":
+        assert "ACforeignaccount00000000000000000" not in report_json
+
+    # 3. Validly bound partial-read control: firestore complete=False, error="read_error", observed rows retained
+    partial_snapshot = _make_sample_snapshot(
+        owned_count=2,
+        registered_count=1,
+        contractor_count=2,
+        project=project,
+        account_sid=account_sid,
+        service_sid=service_sid,
+    )
+    partial_snapshot["sources"]["firestore"]["complete"] = False
+    partial_snapshot["sources"]["firestore"]["error"] = "read_error"
+
+    partial_report = summarize_sms_readiness(
+        partial_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+    assert partial_report["completeness"]["bindings_valid"] is True
+    assert partial_report["completeness"]["is_complete"] is False
+    assert partial_report["totals"]["assignments"]["assigned_owned"] == 2
+    assert partial_report["totals"]["review_candidates"] == 0
+    # Do not infer absence
+    assert partial_report["totals"]["assignments"]["missing_owned_unique"] == 0
+    assert partial_report["totals"]["assignments"]["unassigned_owned"] == 0
+    assert partial_report["totals"]["assignments"]["unowned_assignments"] == 0

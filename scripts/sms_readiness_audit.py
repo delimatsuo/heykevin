@@ -710,7 +710,8 @@ def summarize_sms_readiness(
             if num_c > 1:
                 ambiguous_assignments_count += num_c
         else:
-            assigned_owned_count += num_c
+            if binding_valid:
+                assigned_owned_count += num_c
             sid = owned_phone_to_sid[e164]
             is_duplicate_assign = num_c > 1
             is_duplicate_owned = (

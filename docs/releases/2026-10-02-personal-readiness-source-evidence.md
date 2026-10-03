@@ -24,7 +24,7 @@ local qualification and does not assert deployment or provider repair.
 
 ## Executed verification
 
-Final integrated focused command: **214 passed** across
+Final integrated focused command: **220 passed** across
 `test_sms_readiness_audit`, `test_acquisition_measurement`,
 `test_acquisition_wiring`, `test_screening_measurement`,
 `test_post_call_handoff`, `test_acquisition_api` and
@@ -32,7 +32,7 @@ Final integrated focused command: **214 passed** across
 clone's existing virtual environment. Existing dependency deprecation warnings
 remain. Fatal Ruff selectors, Python compilation and diff whitespace checks pass.
 
-Twenty-one deliberate mutations were detected by the intended behavioral tests:
+Twenty-two deliberate mutations were detected by the intended behavioral tests:
 
 | Removed or weakened guard | Observed result |
 | --- | --- |
@@ -57,6 +57,7 @@ Twenty-one deliberate mutations were detected by the intended behavioral tests:
 | Unowned absence requires complete valid evidence | 2 tests failed |
 | Uncertain ownership remains an unknown cohort | 1 test failed |
 | CLI argument errors do not echo raw input | 1 test failed |
+| Assigned-owned positive matches require valid bindings | 6 mismatch cases failed |
 
 Mutations ran in isolated builder checkouts and originals were restored with
 byte/hash checks. The integration candidate was never published in a mutated
@@ -65,7 +66,8 @@ finding was repaired. Hosted review then identified global ambiguity and the
 empty-string unassigned sentinel, then malformed contractor assignments hiding
 duplicates. Further hosted and full-flow review identified binding-error
 diagnostics, canonical provider SIDs, duplicate unowned diagnostics, uncertainty
-in absence counts and CLI argument privacy. All were corrected and mutation-tested;
+in absence counts, CLI argument privacy and positive ownership binding. All were
+corrected and mutation-tested;
 direct reducer tests separately exercise SID rejection without an incomplete
 collector masking the behavior. Final independent full-flow re-review found no
 remaining issues. The earlier focused run with incomplete test
@@ -80,6 +82,9 @@ quality and required `Test` in
 Commit `1bfc78ad8cedfc419f838f052443cd5d46d91bd4` passed 8,483 tests, quality
 and required `Test` in
 [run 37087031895](https://github.com/delimatsuo/heykevin/actions/runs/37087031895).
+Commit `4062f35025a6a46ff32e35c6fa05f6da3dd2b800` passed 8,505 tests, quality
+and required `Test` in
+[run 37088196110](https://github.com/delimatsuo/heykevin/actions/runs/37088196110).
 Those results apply to their respective commits. The PR must record new
 exact-HEAD CI and hosted review after the remaining audit corrections;
 they are not inferred from the earlier runs.
@@ -94,15 +99,15 @@ Routing reason: isolated pinned implementations, independently audited and teste
 
 agy transport=headless: true
 
-Input tokens: 2227596
+Input tokens: 2408340
 
-Output tokens: 456323
+Output tokens: 475740
 
-Total tokens: 2683919
+Total tokens: 2884080
 
-Retries: 9 bounded repair invocations after 2 initial builder invocations
+Retries: 10 bounded repair invocations after 2 initial builder invocations
 
-Audit defects found: 23 grouped source/test issues: source-metadata privacy;
+Audit defects found: 24 grouped source/test issues: source-metadata privacy;
 schema/row/cap validation; read deadline; pool conflicts/orphans; source counts;
 capability coercion; canonical numbers; incomplete candidate counts; scheduler
 tenant binding; handoff raw-identity binding; future observations; test
@@ -110,7 +115,8 @@ isolation/signatures; missing test import; partial-result fixture; global
 ambiguity across mixed snapshots; empty-string unassigned sentinel; malformed
 contractor assignments concealing duplicates; source binding-error diagnostics;
 canonical provider SIDs; duplicate unowned diagnostics; uncertainty in absence
-counts; CLI argument privacy; independent reducer SID regression coverage.
+counts; CLI argument privacy; independent reducer SID regression coverage;
+positive ownership counts under invalid bindings.
 
 Audit disposition: remediated; focused tests, mutation probes and final
 independent full-flow re-review pass

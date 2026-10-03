@@ -662,8 +662,8 @@ def summarize_sms_readiness(
             raise ValueError("Invalid row structure in contractors")
         total_contractors_count += 1
         raw_num = contractor.get("twilio_number")
-        if raw_num is None:
-            # Unassigned contractor
+        if raw_num is None or raw_num == "":
+            # Unassigned contractor sentinel (None or exact empty string)
             continue
         if not isinstance(raw_num, str):
             malformed_assignments_count += 1
@@ -713,6 +713,23 @@ def summarize_sms_readiness(
                     if sid not in pool_sids_seen:
                         missing_owned_unique_count += num_c
 
+    # Check for ambiguity anomalies across inventory, pool, and contractor assignments
+    has_tenant_duplicates = any(len(c_list) > 1 for c_list in assigned_contractors_by_phone.values())
+    has_duplicate_owned_sids = len(duplicate_owned_sids) > 0
+    has_duplicate_owned_phones = len(duplicate_owned_phones) > 0
+    has_duplicate_pool_sids = len(duplicate_pool_sids) > 0
+    has_duplicate_pool_phones = len(duplicate_pool_phones) > 0
+    has_pool_sid_phone_conflicts = len(pool_sid_phone_conflicts) > 0
+
+    has_ambiguity = (
+        has_duplicate_owned_sids
+        or has_duplicate_owned_phones
+        or has_duplicate_pool_sids
+        or has_duplicate_pool_phones
+        or has_pool_sid_phone_conflicts
+        or has_tenant_duplicates
+    )
+
     # Review candidates: ONLY complete unambiguous missing-membership join
     is_complete_overall = (
         binding_valid
@@ -720,6 +737,7 @@ def summarize_sms_readiness(
         and not is_stale
         and not is_future
         and len(pool_sids_absent_from_inventory) == 0
+        and not has_ambiguity
     )
 
     if is_complete_overall:
@@ -732,7 +750,7 @@ def summarize_sms_readiness(
 
     for contractor in raw_contractors:
         raw_num = contractor.get("twilio_number")
-        if raw_num is None:
+        if raw_num is None or raw_num == "":
             membership = "none"
         elif not isinstance(raw_num, str):
             membership = "malformed"
@@ -961,6 +979,8 @@ def summarize_sms_readiness(
         limitations.append("Snapshot observation timestamp is in the future relative to as_of timestamp.")
     if not sources_complete or len(pool_sids_absent_from_inventory) > 0:
         limitations.append("One or more snapshot sources are incomplete or encountered read errors.")
+    if has_ambiguity:
+        limitations.append("Ambiguity in provider inventory, pool membership, or tenant assignments blocks candidate selection.")
 
     return {
         "schema_version": SCHEMA_VERSION,

@@ -24,7 +24,7 @@ local qualification and does not assert deployment or provider repair.
 
 ## Executed verification
 
-Final integrated focused command: **175 passed** across
+Final integrated focused command: **183 passed** across
 `test_sms_readiness_audit`, `test_acquisition_measurement`,
 `test_acquisition_wiring`, `test_screening_measurement`,
 `test_post_call_handoff`, `test_acquisition_api` and
@@ -32,7 +32,7 @@ Final integrated focused command: **175 passed** across
 clone's existing virtual environment. Existing dependency deprecation warnings
 remain. Fatal Ruff selectors, Python compilation and diff whitespace checks pass.
 
-Nine deliberate mutations were detected by the intended behavioral tests:
+Eleven deliberate mutations were detected by the intended behavioral tests:
 
 | Removed or weakened guard | Observed result |
 | --- | --- |
@@ -45,12 +45,22 @@ Nine deliberate mutations were detected by the intended behavioral tests:
 | Screening durable tenant match | 1 test failed |
 | Call predating cohort creation | 1 test failed |
 | Attribution as-of cutoff | 1 test failed |
+| Global ambiguity blocks all SMS candidates | 7 mixed-snapshot cases failed |
+| Exact empty-string unassigned sentinel | 1 test failed |
 
 Mutations ran in isolated builder checkouts and originals were restored with
 byte/hash checks. The integration candidate was never published in a mutated
 state. Fresh independent combined review passed after its canonical-number
-finding was repaired. The earlier focused run with incomplete test isolation
-was stopped; it is not counted as passing evidence.
+finding was repaired. Hosted review then identified global ambiguity and the
+empty-string unassigned sentinel; both were corrected, mutation-tested and
+passed independent re-review. The earlier focused run with incomplete test
+isolation was stopped; it is not counted as passing evidence.
+
+The initial published commit `f2c22d8484b8ac2d374da38e5835c81976d5f753`
+passed all seven hosted Python shards (8,466 tests), quality and required `Test`
+in [run 37085105654](https://github.com/delimatsuo/heykevin/actions/runs/37085105654).
+Those results apply to that commit. The PR must record new exact-HEAD CI and
+hosted review after the two corrections; they are not inferred from this run.
 
 ## Routing and audit accounting
 
@@ -62,19 +72,20 @@ Routing reason: isolated pinned implementations, independently audited and teste
 
 agy transport=headless: true
 
-Input tokens: 1548959
+Input tokens: 1742264
 
-Output tokens: 306325
+Output tokens: 347128
 
-Total tokens: 1855284
+Total tokens: 2089392
 
-Retries: 5 bounded repair invocations after 2 initial builder invocations
+Retries: 6 bounded repair invocations after 2 initial builder invocations
 
-Audit defects found: 14 grouped source/test issues: source-metadata privacy;
+Audit defects found: 16 grouped source/test issues: source-metadata privacy;
 schema/row/cap validation; read deadline; pool conflicts/orphans; source counts;
 capability coercion; canonical numbers; incomplete candidate counts; scheduler
 tenant binding; handoff raw-identity binding; future observations; test
-isolation/signatures; missing test import; partial-result fixture.
+isolation/signatures; missing test import; partial-result fixture; global
+ambiguity across mixed snapshots; empty-string unassigned sentinel.
 
 Audit disposition: remediated; focused tests and independent review pass
 
@@ -82,8 +93,10 @@ Audit disposition: remediated; focused tests and independent review pass
 
 Cloud authentication was rechecked and still requires owner sign-in. No active
 user/SMS-gap intersection has been read live, no registration changed, and no
-delivery test passed. The support email for Twilio case 29797359 still contains
-only its acknowledgement. Brazil consumer eligibility, inventory quote, exact
+delivery test passed. The only incoming response for Twilio case 29797359 is its
+acknowledgement. A follow-up was sent through the existing case's reply address
+on October 2 at 21:12 Eastern; Gmail readback confirmed it in Sent.
+Brazil consumer eligibility, inventory quote, exact
 carrier plan/DDD, pilot budget, provider registration and device acceptance
 remain unresolved. No deployment, flag, ads, App Store, account, number purchase,
-outreach or real-call action was performed in this source slice.
+customer outreach or real-call action was performed in this source slice.

@@ -57,6 +57,13 @@ owned numbers, duplicate tenant assignments, malformed assignments, assignments
 absent from owned inventory, unassigned owned inventory, and pool entries absent
 from inventory. No ambiguous or incomplete join is a review candidate.
 
+Treat a contractor's exact empty-string number as the existing unassigned
+sentinel, like missing/null; whitespace-only and other malformed strings remain
+malformed. Any duplicate tenant assignment (including an unowned number),
+duplicate provider SID/number, or pool-to-inventory conflict makes the entire
+snapshot incomplete and yields zero review candidates, even when a separate
+clean missing-membership assignment exists. Preserve diagnostic aggregate counts.
+
 The report contains only schema/version/time, completeness, fixed limitations,
 allowlisted aggregate counters and cohort rows. Never print phones, contractor
 IDs, provider number IDs, raw unexpected keys/values or exception text. Unknown

@@ -1231,3 +1231,310 @@ def test_padded_phone_number_collector_to_reducer_regression(target_source: str,
     report_json = json.dumps(report)
     assert padded_number not in report_json
     assert "+14155550001" not in report_json
+
+
+@pytest.mark.parametrize(
+    "anomaly_type",
+    [
+        "duplicate_tenant_owned",
+        "duplicate_tenant_unowned",
+        "duplicate_owned_sid",
+        "duplicate_owned_number",
+        "duplicate_pool_sid",
+        "duplicate_pool_number",
+        "pool_sid_phone_conflict",
+    ],
+)
+def test_mixed_snapshot_ambiguity_blocks_all_candidates_and_marks_incomplete(anomaly_type: str):
+    """Mixed snapshots with any inventory/pool/tenant ambiguity mark snapshot incomplete with 0 candidates.
+
+    Always includes a separate uniquely owned/assigned clean missing number and verifies that
+    source record counts remain valid so only ambiguity explains the failure.
+    """
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+
+    # Always present: clean uniquely owned/assigned missing number (PN_CLEAN -> +14155550001)
+    clean_owned_number = {
+        "sid": "PN_CLEAN",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+    clean_contractor = {
+        "twilio_number": "+14155550001",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+
+    owned_numbers: list[dict[str, Any]] = [clean_owned_number]
+    service_numbers: list[dict[str, Any]] = []
+    contractors: list[dict[str, Any]] = [clean_contractor]
+
+    if anomaly_type == "duplicate_tenant_owned":
+        # Second owned number assigned to two distinct contractors
+        owned_numbers.append({
+            "sid": "PN0002",
+            "phone_number": "+14155550002",
+            "account_sid": account_sid,
+            "capabilities": {"sms": True, "voice": True, "mms": False},
+        })
+        service_numbers.append({
+            "sid": "PN0002",
+            "phone_number": "+14155550002",
+            "account_sid": account_sid,
+            "service_sid": service_sid,
+            "capabilities": {"sms": True, "voice": True, "mms": False},
+        })
+        contractors.extend([
+            {"twilio_number": "+14155550002", "active": True},
+            {"twilio_number": "+14155550002", "active": True},
+        ])
+    elif anomaly_type == "duplicate_tenant_unowned":
+        # Unowned number assigned to two distinct contractors
+        contractors.extend([
+            {"twilio_number": "+14155559999", "active": True},
+            {"twilio_number": "+14155559999", "active": True},
+        ])
+    elif anomaly_type == "duplicate_owned_sid":
+        # Two owned numbers share the same SID
+        owned_numbers.extend([
+            {
+                "sid": "PN_DUP_SID",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+            {
+                "sid": "PN_DUP_SID",
+                "phone_number": "+14155550003",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+        ])
+        contractors.append({"twilio_number": "+14155550002", "active": True})
+    elif anomaly_type == "duplicate_owned_number":
+        # Two owned numbers share the same E.164 phone number
+        owned_numbers.extend([
+            {
+                "sid": "PN0002",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+            {
+                "sid": "PN0003",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+        ])
+        contractors.append({"twilio_number": "+14155550002", "active": True})
+    elif anomaly_type == "duplicate_pool_sid":
+        # Pool contains duplicate SID
+        owned_numbers.append({
+            "sid": "PN0002",
+            "phone_number": "+14155550002",
+            "account_sid": account_sid,
+            "capabilities": {"sms": True, "voice": True, "mms": False},
+        })
+        service_numbers.extend([
+            {
+                "sid": "PN0002",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "service_sid": service_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+            {
+                "sid": "PN0002",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "service_sid": service_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+        ])
+        contractors.append({"twilio_number": "+14155550002", "active": True})
+    elif anomaly_type == "duplicate_pool_number":
+        # Pool contains duplicate phone numbers under different SIDs
+        owned_numbers.extend([
+            {
+                "sid": "PN0002",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+            {
+                "sid": "PN0003",
+                "phone_number": "+14155550003",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+        ])
+        service_numbers.extend([
+            {
+                "sid": "PN0002",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "service_sid": service_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+            {
+                "sid": "PN0003",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "service_sid": service_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+        ])
+        contractors.append({"twilio_number": "+14155550002", "active": True})
+    elif anomaly_type == "pool_sid_phone_conflict":
+        # Pool SID is paired with a conflicting phone number
+        owned_numbers.extend([
+            {
+                "sid": "PN0002",
+                "phone_number": "+14155550002",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+            {
+                "sid": "PN0003",
+                "phone_number": "+14155550003",
+                "account_sid": account_sid,
+                "capabilities": {"sms": True, "voice": True, "mms": False},
+            },
+        ])
+        service_numbers.append({
+            "sid": "PN0002",
+            "phone_number": "+14155550003",
+            "account_sid": account_sid,
+            "service_sid": service_sid,
+            "capabilities": {"sms": True, "voice": True, "mms": False},
+        })
+        contractors.append({"twilio_number": "+14155550002", "active": True})
+    else:
+        raise ValueError(f"Unknown anomaly_type: {anomaly_type}")
+
+    # Build snapshot with valid matching records_read counts so only ambiguity explains failure
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": len(contractors), "error": None},
+            "twilio_incoming": {"complete": True, "records_read": len(owned_numbers), "error": None},
+            "twilio_service": {"complete": True, "records_read": len(service_numbers), "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": service_numbers,
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    # Global completeness must be False and review candidates must be 0
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["review_candidates"] == 0
+
+    # Diagnostic missing_owned_unique count for the separate clean missing number is retained
+    assert report["totals"]["assignments"]["missing_owned_unique"] == 1
+
+    # Fixed limitation explaining that ambiguity blocks candidate selection
+    assert any("Ambiguity" in l for l in report["limitations"])
+
+    # Sensitive identifiers must never appear in report output
+    report_json = json.dumps(report)
+    assert "+14155550001" not in report_json
+    assert "PN_CLEAN" not in report_json
+
+
+def test_unassigned_contractor_sentinels_and_malformed_values():
+    """Missing, None, or exact empty string twilio_number are unassigned sentinels with cohort none; whitespace and invalid are malformed."""
+    as_of = "2026-10-02T20:05:00Z"
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+
+    contractors = [
+        # 1-3. Unassigned sentinels: explicit None, exact empty string, omitted key
+        {"twilio_number": None, "active": True},
+        {"twilio_number": "", "active": True},
+        {"active": True},
+        # 4-8. Malformed values: whitespace-only, whitespace tab/newline, padded E.164, integer, boolean
+        {"twilio_number": "   ", "active": True},
+        {"twilio_number": "\t\n", "active": True},
+        {"twilio_number": " +14155550001 ", "active": True},
+        {"twilio_number": 14155550001, "active": True},
+        {"twilio_number": False, "active": True},
+        # 9. Clean valid assigned missing number
+        {"twilio_number": "+14155550001", "active": True},
+    ]
+
+    owned_numbers = [{
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }]
+
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": "2026-10-02T20:00:00Z",
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": len(contractors), "error": None},
+            "twilio_incoming": {"complete": True, "records_read": len(owned_numbers), "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": owned_numbers,
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    totals_assignments = report["totals"]["assignments"]
+    assert totals_assignments["total_contractors"] == 9
+    # Sentinels (None, "", missing) do NOT increment malformed_assignments
+    assert totals_assignments["malformed_assignments"] == 5
+    assert totals_assignments["assigned_owned"] == 1
+    assert totals_assignments["unassigned_owned"] == 0
+    assert totals_assignments["missing_owned_unique"] == 1
+    assert totals_assignments["ambiguous_assignments"] == 0
+    assert totals_assignments["unowned_assignments"] == 0
+
+    # Cohort breakdown verification
+    cohorts = report["cohorts"]
+    none_count = sum(c["count"] for c in cohorts if c["membership"] == "none")
+    malformed_count = sum(c["count"] for c in cohorts if c["membership"] == "malformed")
+    missing_count = sum(c["count"] for c in cohorts if c["membership"] == "missing")
+
+    assert none_count == 3
+    assert malformed_count == 5
+    assert missing_count == 1

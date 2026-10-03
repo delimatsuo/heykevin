@@ -62,7 +62,10 @@ sentinel, like missing/null; whitespace-only and other malformed strings remain
 malformed. Any duplicate tenant assignment (including an unowned number),
 duplicate provider SID/number, or pool-to-inventory conflict makes the entire
 snapshot incomplete and yields zero review candidates, even when a separate
-clean missing-membership assignment exists. Preserve diagnostic aggregate counts.
+clean missing-membership assignment exists. Any malformed contractor number also
+blocks all candidates and overall completeness: a rejected value could conceal
+a duplicate of a valid assignment. Preserve diagnostic aggregate counts; do not
+normalize malformed values or treat legitimate unassigned sentinels as malformed.
 
 The report contains only schema/version/time, completeness, fixed limitations,
 allowlisted aggregate counters and cohort rows. Never print phones, contractor

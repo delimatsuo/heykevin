@@ -31,9 +31,10 @@ explicit assigned number and configured service. Preserve that tenant identity.
    deletion/app-deletion, recent inbound/forwarding activity and SMS preferences
    separate. Missing data means unknown. Expired accounts may still use voicemail
    texts. A stored expiry alone does not prove nonpayment.
-5. Any wrong binding, partial read, duplicate assignment or stale snapshot blocks
-   candidate selection. The offline CLI verifies supplied structure, not the
-   authenticity or completeness of an independently provided export.
+5. Any wrong binding, partial read, duplicate assignment, malformed contractor
+   number or stale snapshot blocks candidate selection. The offline CLI verifies
+   supplied structure, not the authenticity or completeness of an independently
+   provided export.
 
 The CLI takes a JSON snapshot, explicit expected project/account/service and
 UTC as-of time. It does not authenticate, apply repairs or send messages. Raw

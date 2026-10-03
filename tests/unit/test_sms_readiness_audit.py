@@ -1538,3 +1538,208 @@ def test_unassigned_contractor_sentinels_and_malformed_values():
     assert none_count == 3
     assert malformed_count == 5
     assert missing_count == 1
+
+
+@pytest.mark.parametrize(
+    "case_name,malformed_val",
+    [
+        ("padded_left", "  +14155550001"),
+        ("padded_right", "+14155550001  "),
+        ("whitespace_only", "   "),
+        ("invalid_nonnumber", "not_a_phone_number"),
+        ("integer", 14155550001),
+        ("boolean", True),
+    ],
+)
+def test_malformed_contractor_assignment_blocks_all_candidates(case_name: str, malformed_val: Any):
+    """Malformed contractor twilio_number assignments globally block candidate selection and fail closed.
+
+    Shows a clean control snapshot yields is_complete=True and 1 review candidate, whereas adding
+    a second contractor with a malformed assignment yields is_complete=False, 0 review candidates,
+    1 malformed_assignment, a malformed cohort count of 1, preserves the missing_owned_unique diagnostic,
+    and appends a fixed privacy-safe limitation with no leaked sentinels or raw values.
+    """
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+
+    clean_owned_number = {
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+    clean_contractor = {
+        "twilio_number": "+14155550001",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+
+    # 1. Clean control snapshot with 1 valid uniquely assigned owned SMS-capable number missing from pool
+    clean_snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": 1, "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": [clean_owned_number],
+        "service_numbers": [],
+        "contractors": [clean_contractor],
+    }
+
+    control_report = summarize_sms_readiness(
+        clean_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+    assert control_report["completeness"]["is_complete"] is True
+    assert control_report["totals"]["review_candidates"] == 1
+    assert control_report["totals"]["assignments"]["missing_owned_unique"] == 1
+    assert control_report["totals"]["assignments"]["malformed_assignments"] == 0
+
+    # 2. Add second contractor with malformed twilio_number variant; maintain exact source row counts
+    second_contractor = {
+        "twilio_number": malformed_val,
+        "active": True,
+    }
+    contractors = [clean_contractor, second_contractor]
+
+    malformed_snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": len(contractors), "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": [clean_owned_number],
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        malformed_snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    # Every variant must yield is_complete false, zero review_candidates, one malformed_assignment
+    assert report["completeness"]["is_complete"] is False
+    assert report["totals"]["review_candidates"] == 0
+    assert report["totals"]["assignments"]["malformed_assignments"] == 1
+
+    # Preserve clean missing membership diagnostic count
+    assert report["totals"]["assignments"]["missing_owned_unique"] == 1
+
+    # Cohort checks: malformed count == 1, missing count == 1
+    cohorts = report["cohorts"]
+    malformed_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "malformed")
+    missing_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "missing")
+    assert malformed_cohort_count == 1
+    assert missing_cohort_count == 1
+
+    # Fixed limitation is appended and contains no sentinel/raw value
+    assert any("Malformed contractor number assignments block candidate selection." in l for l in report["limitations"])
+    report_json = json.dumps(report)
+    if isinstance(malformed_val, str) and malformed_val.strip() and malformed_val != "+14155550001":
+        assert malformed_val not in report_json
+
+
+@pytest.mark.parametrize(
+    "sentinel_case,sentinel_contractor",
+    [
+        ("omitted_key", {"active": True}),
+        ("none_value", {"twilio_number": None, "active": True}),
+        ("empty_string", {"twilio_number": "", "active": True}),
+    ],
+)
+def test_clean_unassigned_sentinels_allow_candidates_and_yield_none_cohort(
+    sentinel_case: str,
+    sentinel_contractor: dict[str, Any],
+):
+    """Clean unassigned sentinels (omitted key, None, empty string) keep is_complete=True and yield membership 'none'."""
+    project = "test-project"
+    account_sid = "ACtestaccount0000000000000000000000"
+    service_sid = "MGtestservice0000000000000000000000"
+    as_of = "2026-10-02T20:05:00Z"
+    observed_at = "2026-10-02T20:00:00Z"
+
+    clean_owned_number = {
+        "sid": "PN0001",
+        "phone_number": "+14155550001",
+        "account_sid": account_sid,
+        "capabilities": {"sms": True, "voice": True, "mms": False},
+    }
+    clean_contractor = {
+        "twilio_number": "+14155550001",
+        "active": True,
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 1790000000,
+        "trial_start": 1780000000,
+        "last_inbound_call_at": 1790000000,
+        "forwarding_last_seen_at": 1790000000,
+        "owner_sms_enabled": True,
+        "owner_sms_opted_out": False,
+    }
+
+    contractors = [clean_contractor, sentinel_contractor]
+
+    snapshot = {
+        "schema_version": SCHEMA_VERSION,
+        "observed_at": observed_at,
+        "expected_project": project,
+        "expected_account_sid": account_sid,
+        "messaging_service_sid": service_sid,
+        "sources": {
+            "firestore": {"complete": True, "records_read": len(contractors), "error": None},
+            "twilio_incoming": {"complete": True, "records_read": 1, "error": None},
+            "twilio_service": {"complete": True, "records_read": 0, "error": None},
+        },
+        "owned_numbers": [clean_owned_number],
+        "service_numbers": [],
+        "contractors": contractors,
+    }
+
+    report = summarize_sms_readiness(
+        snapshot,
+        as_of=as_of,
+        expected_project=project,
+        expected_account_sid=account_sid,
+        messaging_service_sid=service_sid,
+    )
+
+    assert report["completeness"]["is_complete"] is True
+    assert report["totals"]["review_candidates"] == 1
+    assert report["totals"]["assignments"]["malformed_assignments"] == 0
+    assert report["totals"]["assignments"]["missing_owned_unique"] == 1
+
+    cohorts = report["cohorts"]
+    none_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "none")
+    missing_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "missing")
+    malformed_cohort_count = sum(c["count"] for c in cohorts if c["membership"] == "malformed")
+
+    assert none_cohort_count == 1
+    assert missing_cohort_count == 1
+    assert malformed_cohort_count == 0

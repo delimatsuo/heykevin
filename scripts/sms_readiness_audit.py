@@ -738,6 +738,7 @@ def summarize_sms_readiness(
         and not is_future
         and len(pool_sids_absent_from_inventory) == 0
         and not has_ambiguity
+        and malformed_assignments_count == 0
     )
 
     if is_complete_overall:
@@ -981,6 +982,8 @@ def summarize_sms_readiness(
         limitations.append("One or more snapshot sources are incomplete or encountered read errors.")
     if has_ambiguity:
         limitations.append("Ambiguity in provider inventory, pool membership, or tenant assignments blocks candidate selection.")
+    if malformed_assignments_count > 0:
+        limitations.append("Malformed contractor number assignments block candidate selection.")
 
     return {
         "schema_version": SCHEMA_VERSION,

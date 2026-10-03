@@ -24,7 +24,7 @@ local qualification and does not assert deployment or provider repair.
 
 ## Executed verification
 
-Final integrated focused command: **183 passed** across
+Final integrated focused command: **192 passed** across
 `test_sms_readiness_audit`, `test_acquisition_measurement`,
 `test_acquisition_wiring`, `test_screening_measurement`,
 `test_post_call_handoff`, `test_acquisition_api` and
@@ -32,7 +32,7 @@ Final integrated focused command: **183 passed** across
 clone's existing virtual environment. Existing dependency deprecation warnings
 remain. Fatal Ruff selectors, Python compilation and diff whitespace checks pass.
 
-Eleven deliberate mutations were detected by the intended behavioral tests:
+Twelve deliberate mutations were detected by the intended behavioral tests:
 
 | Removed or weakened guard | Observed result |
 | --- | --- |
@@ -47,20 +47,26 @@ Eleven deliberate mutations were detected by the intended behavioral tests:
 | Attribution as-of cutoff | 1 test failed |
 | Global ambiguity blocks all SMS candidates | 7 mixed-snapshot cases failed |
 | Exact empty-string unassigned sentinel | 1 test failed |
+| Malformed contractor assignment blocks all candidates | 6 malformed-input cases failed |
 
 Mutations ran in isolated builder checkouts and originals were restored with
 byte/hash checks. The integration candidate was never published in a mutated
 state. Fresh independent combined review passed after its canonical-number
 finding was repaired. Hosted review then identified global ambiguity and the
-empty-string unassigned sentinel; both were corrected, mutation-tested and
-passed independent re-review. The earlier focused run with incomplete test
+empty-string unassigned sentinel, then malformed contractor assignments hiding
+duplicates; all three were corrected, mutation-tested and passed independent
+re-review. The earlier focused run with incomplete test
 isolation was stopped; it is not counted as passing evidence.
 
 The initial published commit `f2c22d8484b8ac2d374da38e5835c81976d5f753`
 passed all seven hosted Python shards (8,466 tests), quality and required `Test`
 in [run 37085105654](https://github.com/delimatsuo/heykevin/actions/runs/37085105654).
-Those results apply to that commit. The PR must record new exact-HEAD CI and
-hosted review after the two corrections; they are not inferred from this run.
+The next commit `77ad3da758e4d9815f41990aca0ba73fbf3bb85c` passed 8,474 tests,
+quality and required `Test` in
+[run 37086254851](https://github.com/delimatsuo/heykevin/actions/runs/37086254851).
+Those results apply to their respective commits. The PR must record new
+exact-HEAD CI and hosted review after the malformed-assignment correction;
+they are not inferred from the earlier runs.
 
 ## Routing and audit accounting
 
@@ -72,20 +78,21 @@ Routing reason: isolated pinned implementations, independently audited and teste
 
 agy transport=headless: true
 
-Input tokens: 1742264
+Input tokens: 1867048
 
-Output tokens: 347128
+Output tokens: 367867
 
-Total tokens: 2089392
+Total tokens: 2234915
 
-Retries: 6 bounded repair invocations after 2 initial builder invocations
+Retries: 7 bounded repair invocations after 2 initial builder invocations
 
-Audit defects found: 16 grouped source/test issues: source-metadata privacy;
+Audit defects found: 17 grouped source/test issues: source-metadata privacy;
 schema/row/cap validation; read deadline; pool conflicts/orphans; source counts;
 capability coercion; canonical numbers; incomplete candidate counts; scheduler
 tenant binding; handoff raw-identity binding; future observations; test
 isolation/signatures; missing test import; partial-result fixture; global
-ambiguity across mixed snapshots; empty-string unassigned sentinel.
+ambiguity across mixed snapshots; empty-string unassigned sentinel; malformed
+contractor assignments concealing duplicates.
 
 Audit disposition: remediated; focused tests and independent review pass
 

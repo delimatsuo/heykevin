@@ -525,6 +525,11 @@ async def api_provision_number(contractor_id: str, request: Request):
             contractor_id,
             redact_phone(existing_number),
         )
+        try:
+            from app.services.sms_sender_enrollment import ensure_sms_sender_membership
+            await ensure_sms_sender_membership(contractor_id, existing_number)
+        except Exception:
+            logger.warning("SMS sender enrollment check failed on API existing number return")
         return {
             "status": "ok",
             "phone_number": existing_number,

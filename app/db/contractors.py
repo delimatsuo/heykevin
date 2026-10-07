@@ -699,6 +699,11 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
             contractor_id,
             redact_phone(existing_number),
         )
+        try:
+            from app.services.sms_sender_enrollment import ensure_sms_sender_membership
+            await ensure_sms_sender_membership(contractor_id, existing_number)
+        except Exception:
+            logger.warning("SMS sender enrollment check failed on existing number return")
         return existing_number
 
     from app.services.country_policy import (
@@ -778,8 +783,9 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
         raise Exception(f"No phone numbers available in {country_name}")
 
     # Buy the number (bundle_sid goes here, NOT in search)
-    webhook_url = f"{settings.cloud_run_url}/webhooks/twilio/incoming"
-    status_url = f"{settings.cloud_run_url}/webhooks/twilio/status"
+    callback_base_url = settings.cloud_run_url.rstrip('/')
+    webhook_url = f"{callback_base_url}/webhooks/twilio/incoming"
+    status_url = f"{callback_base_url}/webhooks/twilio/status"
 
     purchase_params = {
         "phone_number": numbers[0].phone_number,
@@ -787,7 +793,7 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
         "voice_method": "POST",
         "status_callback": status_url,
         "status_callback_method": "POST",
-        "sms_url": f"{settings.cloud_run_url}/webhooks/twilio/mms-incoming",
+        "sms_url": f"{callback_base_url}/webhooks/twilio/mms-incoming",
         "sms_method": "POST",
     }
     if bundle_sid:
@@ -827,6 +833,12 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
             "number_capabilities": caps,
         },
     )
+
+    try:
+        from app.services.sms_sender_enrollment import ensure_sms_sender_membership
+        await ensure_sms_sender_membership(contractor_id, purchased.phone_number)
+    except Exception:
+        logger.warning("SMS sender enrollment failed on new number provisioning")
 
     logger.info(f"Provisioned {redact_phone(purchased.phone_number)} ({effective_country}) for contractor {contractor_id}")
     return purchased.phone_number

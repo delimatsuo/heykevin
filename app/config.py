@@ -25,6 +25,10 @@ class Settings(DotenvProtectedBaseSettings):
     # Optional A2P Messaging Service. Empty keeps the legacy From-only payload.
     twilio_messaging_service_sid: str = ""
     twilio_sms_status_callback_url: str = ""
+    # Guarded SMS sender enrollment and recovery (default OFF)
+    sms_sender_enrollment_enabled: bool = False
+    sms_sender_enrollment_campaign_sid: str = ""
+    sms_sender_enrollment_campaign_sha256: str = ""
     # Contact email Twilio holds on regulatory bundles (required by BundleList.create
     # in twilio 9.x). Empty means regulatory-country provisioning refuses clearly.
     twilio_regulatory_contact_email: str = ""
@@ -431,6 +435,49 @@ def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
             errors.append("PRODUCTION_TWILIO_ACCOUNT_SID is required outside production")
         elif settings.twilio_account_sid == settings.production_twilio_account_sid:
             errors.append("TWILIO_ACCOUNT_SID must not be the production account outside production")
+
+    if settings.sms_sender_enrollment_enabled:
+        if env != "production":
+            errors.append("SMS_SENDER_ENROLLMENT_ENABLED=true is allowed only in production")
+        if settings.firestore_project_id != PRODUCTION_GCP_PROJECT_ID:
+            errors.append(
+                f"FIRESTORE_PROJECT_ID must be {PRODUCTION_GCP_PROJECT_ID} when "
+                "SMS_SENDER_ENROLLMENT_ENABLED=true"
+            )
+        if (
+            not settings.production_twilio_account_sid
+            or settings.twilio_account_sid != settings.production_twilio_account_sid
+        ):
+            errors.append(
+                "TWILIO_ACCOUNT_SID must equal PRODUCTION_TWILIO_ACCOUNT_SID when "
+                "SMS_SENDER_ENROLLMENT_ENABLED=true"
+            )
+        if not _re.compile(r"^AC[0-9a-fA-F]{32}\Z").fullmatch(settings.twilio_account_sid.strip()):
+            errors.append(
+                "TWILIO_ACCOUNT_SID must be a valid account SID when "
+                "SMS_SENDER_ENROLLMENT_ENABLED=true"
+            )
+        if not _re.compile(r"^MG[0-9a-fA-F]{32}\Z").fullmatch(
+            settings.twilio_messaging_service_sid.strip()
+        ):
+            errors.append(
+                "TWILIO_MESSAGING_SERVICE_SID must be a valid messaging service SID when "
+                "SMS_SENDER_ENROLLMENT_ENABLED=true"
+            )
+        if not _re.compile(r"^QE[0-9a-fA-F]{32}\Z").fullmatch(
+            settings.sms_sender_enrollment_campaign_sid.strip()
+        ):
+            errors.append(
+                "SMS_SENDER_ENROLLMENT_CAMPAIGN_SID must be a valid campaign SID when "
+                "SMS_SENDER_ENROLLMENT_ENABLED=true"
+            )
+        if not _re.compile(r"^[0-9a-f]{64}\Z").fullmatch(
+            settings.sms_sender_enrollment_campaign_sha256.strip()
+        ):
+            errors.append(
+                "SMS_SENDER_ENROLLMENT_CAMPAIGN_SHA256 must be a lowercase 64-char hex string when "
+                "SMS_SENDER_ENROLLMENT_ENABLED=true"
+            )
 
     if errors:
         raise RuntimeError("Unsafe runtime configuration: " + "; ".join(errors))

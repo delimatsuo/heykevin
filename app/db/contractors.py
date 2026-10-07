@@ -699,6 +699,11 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
             contractor_id,
             redact_phone(existing_number),
         )
+        try:
+            from app.services.sms_sender_enrollment import ensure_sms_sender_membership
+            await ensure_sms_sender_membership(contractor_id, existing_number)
+        except Exception:
+            logger.warning("SMS sender enrollment check failed on existing number return")
         return existing_number
 
     from app.services.country_policy import (
@@ -827,6 +832,12 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
             "number_capabilities": caps,
         },
     )
+
+    try:
+        from app.services.sms_sender_enrollment import ensure_sms_sender_membership
+        await ensure_sms_sender_membership(contractor_id, purchased.phone_number)
+    except Exception:
+        logger.warning("SMS sender enrollment failed on new number provisioning")
 
     logger.info(f"Provisioned {redact_phone(purchased.phone_number)} ({effective_country}) for contractor {contractor_id}")
     return purchased.phone_number

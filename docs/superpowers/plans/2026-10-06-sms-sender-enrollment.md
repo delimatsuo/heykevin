@@ -68,6 +68,10 @@ follows without its corresponding admission.
   actual boolean Voice/SMS capabilities true. The intended callbacks must match the
   configured Kevin production URL, with no voice/SMS application or trunk SID.
   Freeze its voice/status/SMS callbacks, fallback URLs/methods and app/trunk bindings.
+- Both new-number provisioning and enrollment validation use
+  `cloud_run_url.rstrip('/')` as the callback base. A trailing slash in
+  configuration must not create doubled callback separators. Existing provider
+  callbacks are never repaired by this helper; mismatches still fail closed.
 - Fetch membership by exact service/PN SID. Only TwilioRestException HTTP 404
   with code 20404 means absent. All other errors are uncertainty. A present
   membership must match PN/account/service/number, US and Voice/SMS capabilities

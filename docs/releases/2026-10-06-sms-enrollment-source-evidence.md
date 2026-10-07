@@ -28,11 +28,11 @@ Master model: Codex master (precise session model identifier unavailable)
 Builder model/tier: gemini-3.7-flash-high
 Routing reason: bounded implementation of master-pinned invariants; master owns design, audit and Git
 agy transport=headless: true
-Input tokens: 692574
-Output tokens: 140122
-Total tokens: 832696
-Retries: 4 bounded repair passes; no transport reruns
-Audit defects found: 13 implementation/test groups and two pilot documentation findings
+Input tokens: 767031
+Output tokens: 154301
+Total tokens: 921332
+Retries: 5 bounded repair passes; no transport reruns
+Audit defects found: 14 implementation/test groups and two pilot documentation findings
 Audit disposition: remediated; final review and mutation evidence recorded below
 
 Builder owns only the five allowlisted Python paths in its isolated worktree.
@@ -55,20 +55,28 @@ captures state at helper entry and asserts it outside the catch. The original
 order passes, while the reversed-order scratch mutation now fails. Production
 ordering was already correct and its source did not change.
 
+PR #283's configured Codex review of the first candidate then found a valid
+callback-base mismatch when CLOUD_RUN_URL ends in `/`. The new trailing-slash
+test reproduced doubled callbacks against that source. A fifth scoped repair
+normalizes the base for all three provisioning callbacks, matching enrollment
+validation. It changes no existing provider callbacks. Tests cover both URL
+forms and a removed-normalization mutation. The first candidate's full CI was
+green; the repaired candidate requires its own exact-head CI and Codex re-review.
+
 The two separate pilot findings covered consent
 from callers at both ends/private retention and counting every attempt plus
 reserving all rounded provider and carrier legs. Both are incorporated.
 
 Observed local verification:
 
-- 192 focused tests passed across the enrollment, independent SDK-shape audit,
-  provisioning, regulatory, country admission and owner SMS preference/gate files.
-- 18 existing runtime safety tests passed separately; 210 focused passes total.
-- The two new enrollment test files contribute 77 cases, including 45 independent
+- 212 focused tests passed across enrollment, the independent SDK-shape audit,
+  provisioning, regulatory, country admission, owner SMS preference/gate and
+  existing runtime safety files.
+- The two new enrollment test files contribute 79 cases, including 46 independent
   sealed-client probes. They do not authenticate or invoke live providers.
 - Fatal Ruff (`E9,F63,F7,F82`) passed for all six changed Python files. All six
   compiled, and whitespace checks passed.
-- All 31 deliberate guard/order mutations were caught by assertion failures. The
+- All 32 deliberate guard/order mutations were caught by assertion failures. The
   mutation harness loaded scratch copies; the integration source retained
   SHA-256 `50e9a6d6c8f2a194849f9b1704d832d5853032a119a3a5d747862c6bfbd8ebd6`.
   The unmutated scratch control passed all 77 new cases; the final ordering-only
@@ -77,11 +85,15 @@ Observed local verification:
   default-off gate, US region, assignment/consent/lifecycle/type/capabilities,
   campaign pins, fresh service/campaign/ownership/routing, postwrite freshness,
   membership absence/capabilities, executor budget/cancellation, transport
-  privacy, no retries, transport timeout and persistence ordering. No integration
-  file was mutated.
+  privacy, no retries, transport timeout, persistence ordering and callback base
+  normalization. The callback fix's control passed both URL forms and its removed
+  normalization mutation failed the trailing-slash case. No integration file
+  was mutated.
 - Fresh staff re-review approved the integrated source, tests and pilot package
   with no remaining source findings after the external snapshot assertion fix.
   The reviewer inspected artifacts and observed evidence, and ran no tests.
+  A further staff review approved the narrow callback correction and regression
+  evidence with no findings before republishing.
 
 ## Read-only CI admission findings
 
@@ -129,7 +141,10 @@ monitoring workflow, rerun stale checks or change billing/branch protection.
 
 ## Separate acceptance still required
 
-Hosted CI and configured Codex review apply to the exact published HEAD.
+Hosted CI and configured Codex review apply to the exact published HEAD. The
+optional Cursor Security Agent check on the first candidate returned neutral
+with `Security Review run failed` and no annotations; it is not required and
+is not evidence of a completed security review. No rerun was triggered.
 Source verification does not establish deployment, live enrollment, A2P carrier
 activation, handset delivery, Brazil qualification or paid subscribers.
 The last serving source remains historical; this continuation has not refreshed

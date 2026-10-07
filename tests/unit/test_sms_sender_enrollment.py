@@ -1021,9 +1021,13 @@ async def test_transport_logger_and_no_pii_in_logs(monkeypatch, caplog):
     assert "test-token" not in log_text
 
 
+@pytest.mark.parametrize("trailing_slash", [False, True])
 @pytest.mark.asyncio
-async def test_three_wiring_points_and_failure_preservation(monkeypatch):
+async def test_three_wiring_points_and_failure_preservation(monkeypatch, trailing_slash: bool):
     """Test all three wiring points: new number purchase (persist-before-enroll), existing DB return, and existing API return."""
+    base_url = f"{PRODUCTION_CLOUD_RUN_URL}/" if trailing_slash else PRODUCTION_CLOUD_RUN_URL
+    monkeypatch.setattr(settings, "cloud_run_url", base_url)
+
     from app.api.contractors import api_provision_number
     from app.db.contractors import get_contractor, provision_twilio_number
 
@@ -1082,6 +1086,13 @@ async def test_three_wiring_points_and_failure_preservation(monkeypatch):
     # Assert exactly 1 purchase call was made and assigned number is returned
     assert purchased_result == TEST_PHONE_NUMBER
     assert mock_db_client.incoming_phone_numbers.create.call_count == 1
+    purchase_kwargs = mock_db_client.incoming_phone_numbers.create.call_args.kwargs
+    assert purchase_kwargs["voice_url"] == f"{PRODUCTION_CLOUD_RUN_URL}/webhooks/twilio/incoming"
+    assert purchase_kwargs["voice_method"] == "POST"
+    assert purchase_kwargs["status_callback"] == f"{PRODUCTION_CLOUD_RUN_URL}/webhooks/twilio/status"
+    assert purchase_kwargs["status_callback_method"] == "POST"
+    assert purchase_kwargs["sms_url"] == f"{PRODUCTION_CLOUD_RUN_URL}/webhooks/twilio/mms-incoming"
+    assert purchase_kwargs["sms_method"] == "POST"
     # Assert number was persisted to DB before enrollment failure
     assert len(persisted_updates) == 1
     assert persisted_updates[0]["twilio_number"] == TEST_PHONE_NUMBER

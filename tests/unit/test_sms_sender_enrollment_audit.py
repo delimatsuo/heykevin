@@ -215,8 +215,10 @@ def fx(monkeypatch):
     return fixture
 
 
+@pytest.mark.parametrize("trailing_slash", [False, True])
 @pytest.mark.asyncio
-async def test_real_sdk_membership_create_then_idempotent(fx):
+async def test_real_sdk_membership_create_then_idempotent(fx, monkeypatch, trailing_slash):
+    monkeypatch.setattr(settings, "cloud_run_url", PRODUCTION_CLOUD_RUN_URL + ("/" if trailing_slash else ""))
     result = await enrollment.ensure_sms_sender_membership(TENANT, NUMBER)
     assert result.status == enrollment.EnrollmentStatus.ENROLLED
     assert result.enrolled and result.mutated is True

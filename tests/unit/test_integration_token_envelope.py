@@ -1517,6 +1517,8 @@ async def test_oauth_state_one_time_consumption(monkeypatch):
         "credentials_fingerprint": fp,
         "created_at": now,
         "expires_at": now + 600.0,
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     })
     contractor_doc = _FakeDocRef({
         "contractor_id": "c-oauth-1",
@@ -2489,6 +2491,8 @@ async def test_consume_oauth_state_strict_validations(monkeypatch):
             "credentials_fingerprint": fp,
             "created_at": now,
             "expires_at": now + 300.0,
+            "pkce_method": "S256",
+            "pkce_code_verifier": "a" * 43,
         }),
         "expired-state-1234567890": _StateFakeDocRef({
             "contractor_id": "c-expired",
@@ -2498,6 +2502,8 @@ async def test_consume_oauth_state_strict_validations(monkeypatch):
             "credentials_fingerprint": fp,
             "created_at": now - 400.0,
             "expires_at": now - 10.0,
+            "pkce_method": "S256",
+            "pkce_code_verifier": "a" * 43,
         }),
         "no-cid-state-1234567890": _StateFakeDocRef({
             "expires_at": now + 300.0,
@@ -3165,6 +3171,8 @@ async def test_callback_contractor_inactive_aborts_before_provider_exchange(monk
         "credentials_fingerprint": fp,
         "created_at": now,
         "expires_at": now + 300.0,
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     }, doc_id="state-inactive-12345")
     contractor_doc = _FakeDocRef({"contractor_id": cid, "active": False, "jobber_generation": 0, "jobber_lifecycle_epoch": 0}, doc_id=cid)
 
@@ -3667,6 +3675,8 @@ async def test_oauth_state_invalid_contractor_id_rejected(monkeypatch):
                 "credentials_fingerprint": fp,
                 "created_at": now,
                 "expires_at": now + 300.0,
+                "pkce_method": "S256",
+                "pkce_code_verifier": "a" * 43,
             }, doc_id=state)
         },
         "contractors": {},
@@ -4346,6 +4356,8 @@ async def test_oauth_preflight_generation_validation(monkeypatch):
                 "credentials_fingerprint": fp,
                 "created_at": now,
                 "expires_at": now + 300.0,
+                "pkce_method": "S256",
+                "pkce_code_verifier": "a" * 43,
             }, doc_id=state_token)
         }
 
@@ -4389,16 +4401,21 @@ async def test_oauth_preflight_generation_adversarial_value_free_logging(monkeyp
     fake_db.collections["contractors"] = {cid: doc_ref}
 
     state_col = "jobber_oauth_states" if provider == "jobber" else "google_oauth_states"
+    state_payload_dict = {
+        "contractor_id": cid,
+        "provider": provider,
+        "lifecycle_epoch": 0,
+        "generation": 0,
+        "credentials_fingerprint": fp,
+        "created_at": now,
+        "expires_at": now + 300.0,
+    }
+    if provider == "jobber":
+        state_payload_dict["pkce_method"] = "S256"
+        state_payload_dict["pkce_code_verifier"] = "a" * 43
+
     fake_db.collections[state_col] = {
-        state_token: _FakeDocRef({
-            "contractor_id": cid,
-            "provider": provider,
-            "lifecycle_epoch": 0,
-            "generation": 0,
-            "credentials_fingerprint": fp,
-            "created_at": now,
-            "expires_at": now + 300.0,
-        }, doc_id=state_token)
+        state_token: _FakeDocRef(state_payload_dict, doc_id=state_token)
     }
 
     with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc_info:
@@ -6814,6 +6831,8 @@ async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
         "credentials_fingerprint": fp,
         "created_at": 1000,  # INT
         "expires_at": 1600,  # INT
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     })
     with pytest.raises(HTTPException) as exc:
         await it_mutations.consume_oauth_state(
@@ -6833,6 +6852,8 @@ async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
         "credentials_fingerprint": fp,
         "created_at": 1600.0,
         "expires_at": 1000.0,
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     })
     with pytest.raises(HTTPException) as exc:
         await it_mutations.consume_oauth_state(
@@ -6851,6 +6872,8 @@ async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
         "credentials_fingerprint": fp,
         "created_at": 1000.0,
         "expires_at": 2000.0,  # 1000s > 605s
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     })
     with pytest.raises(HTTPException) as exc:
         await it_mutations.consume_oauth_state(
@@ -11159,18 +11182,19 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
         # 2. consume_oauth_state on quarantined contractor
         state_id = "s" * 32
         col_name = "jobber_oauth_states" if provider == "jobber" else "google_oauth_states"
-        state_doc = _FakeDocRef(
-            {
-                "contractor_id": cid,
-                "provider": provider,
-                "lifecycle_epoch": 1,
-                "generation": 1,
-                "credentials_fingerprint": it_mutations.compute_raw_credentials_fingerprint(enc_acc_stored, enc_ref_stored),
-                "created_at": time.time(),
-                "expires_at": time.time() + 300.0,
-            },
-            doc_id=state_id,
-        )
+        state_doc_data = {
+            "contractor_id": cid,
+            "provider": provider,
+            "lifecycle_epoch": 1,
+            "generation": 1,
+            "credentials_fingerprint": it_mutations.compute_raw_credentials_fingerprint(enc_acc_stored, enc_ref_stored),
+            "created_at": time.time(),
+            "expires_at": time.time() + 300.0,
+        }
+        if provider == "jobber":
+            state_doc_data["pkce_method"] = "S256"
+            state_doc_data["pkce_code_verifier"] = "a" * 43
+        state_doc = _FakeDocRef(state_doc_data, doc_id=state_id)
         db.collections[col_name][state_id] = state_doc
 
         st_data, c_obs = await it_mutations.consume_oauth_state(db=db, collection_name=col_name, state=state_id)
@@ -11479,6 +11503,8 @@ async def test_repair_18p_quarantine_oauth_attempt_flow(monkeypatch):
         "credentials_fingerprint": fp,
         "created_at": now_ts,
         "expires_at": now_ts + 600.0,
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     }
     c_doc = _FakeDocRef(doc_data, doc_id=cid)
     s_doc = _FakeDocRef(state_data, doc_id=state_id)

@@ -100,6 +100,12 @@ class DisconnectProviderResult:
     expected_floor: Any = None
 
 
+from app.services.oauth_pkce import (
+    PKCE_METHOD_S256,
+    generate_pkce_code_verifier,
+    validate_pkce_code_verifier,
+)
+
 OAUTH_PROVIDER_COLLECTIONS = {
     "jobber": "jobber_oauth_states",
     "google_calendar": "google_oauth_states",
@@ -115,6 +121,20 @@ OAUTH_STATE_KEYS = frozenset({
     "created_at",
     "expires_at",
 })
+
+JOBBER_OAUTH_STATE_KEYS = frozenset({
+    "contractor_id",
+    "provider",
+    "lifecycle_epoch",
+    "generation",
+    "credentials_fingerprint",
+    "created_at",
+    "expires_at",
+    "pkce_method",
+    "pkce_code_verifier",
+})
+
+JOBBER_PKCE_METHOD = PKCE_METHOD_S256
 
 ALLOWED_EXTRA_UPDATES = {
     "jobber": frozenset({"jobber_lead_capture_enabled"}),
@@ -4343,6 +4363,10 @@ async def create_oauth_state(
     if db is None:
         raise HTTPException(status_code=500, detail="Database unavailable")
 
+    pkce_code_verifier: str | None = None
+    if provider == "jobber":
+        pkce_code_verifier = generate_pkce_code_verifier()
+
     contractor_ref = db.collection("contractors").document(valid_cid)
     state_ref = db.collection(collection_name).document(state)
     state_payload_box: list[dict[str, Any]] = [{}]
@@ -4387,6 +4411,11 @@ async def create_oauth_state(
             "created_at": now_f,
             "expires_at": exp_f,
         }
+        if provider == "jobber":
+            assert pkce_code_verifier is not None
+            payload["pkce_method"] = JOBBER_PKCE_METHOD
+            payload["pkce_code_verifier"] = pkce_code_verifier
+
         state_payload_box[0] = payload
         transaction.create(state_ref, payload)
 
@@ -4464,7 +4493,7 @@ async def consume_oauth_state(
         # ALL READS ARE NOW COMPLETED FOR THIS TRANSACTION.
 
         # VALIDATION AND STAGED WRITE PHASE
-        if type(data) is not dict or not all(type(k) is str for k in data.keys()) or set(data.keys()) != OAUTH_STATE_KEYS:
+        if type(data) is not dict or not all(type(k) is str for k in data.keys()):
             transaction.delete(state_ref)
             outcome_box[0] = ("malformed", {}, {})
             return
@@ -4478,6 +4507,29 @@ async def consume_oauth_state(
             transaction.delete(state_ref)
             outcome_box[0] = ("malformed", {}, {})
             return
+
+        if provider == "jobber":
+            if set(data.keys()) != JOBBER_OAUTH_STATE_KEYS:
+                transaction.delete(state_ref)
+                outcome_box[0] = ("malformed", {}, {})
+                return
+            pkce_method = data.get("pkce_method")
+            if type(pkce_method) is not str or pkce_method != JOBBER_PKCE_METHOD:
+                transaction.delete(state_ref)
+                outcome_box[0] = ("malformed", {}, {})
+                return
+            pkce_verifier = data.get("pkce_code_verifier")
+            try:
+                validate_pkce_code_verifier(pkce_verifier)
+            except Exception:
+                transaction.delete(state_ref)
+                outcome_box[0] = ("malformed", {}, {})
+                return
+        else:
+            if set(data.keys()) != OAUTH_STATE_KEYS:
+                transaction.delete(state_ref)
+                outcome_box[0] = ("malformed", {}, {})
+                return
 
         epoch = data.get("lifecycle_epoch")
         if type(epoch) is not int or type(epoch) is bool or not (0 <= epoch <= MAX_KEY_VERSION):

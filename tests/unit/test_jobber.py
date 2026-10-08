@@ -1011,6 +1011,8 @@ async def test_jobber_callback_rejects_malformed_access_token(monkeypatch, bad_a
         "lifecycle_epoch": 0,
         "generation": 0,
         "credentials_fingerprint": compute_raw_credentials_fingerprint(None, None),
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     }
     state = _FakeDocRef(state_data, doc_id="opaque-jobber-state")
     contractor = _FakeDocRef({"contractor_id": "c-jobber-cb", "active": True, "jobber_connected": False, "jobber_generation": 0, "jobber_lifecycle_epoch": 0}, doc_id="c-jobber-cb")
@@ -1506,6 +1508,8 @@ async def test_18qc_jobber_quarantined_callback_retry_zero_http(monkeypatch):
         "credentials_fingerprint": fp,
         "created_at": time.time(),
         "expires_at": time.time() + 600.0,
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     }, doc_id=state_id)
     db = _FakeFirestore({"contractors": {cid: c_doc}, "jobber_oauth_states": {state_id: s_doc}})
     monkeypatch.setattr(integrations, "_get_firestore", lambda: db)
@@ -1893,6 +1897,8 @@ async def test_jobber_callback_identity_failure_retains_claim_and_commits_zero_t
         "credentials_fingerprint": mutations_module.compute_raw_credentials_fingerprint(None, None),
         "created_at": time.time(),
         "expires_at": time.time() + 600.0,
+        "pkce_method": "S256",
+        "pkce_code_verifier": "a" * 43,
     }, doc_id=state_id)
 
     db = _FakeFirestore({

@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import settings
@@ -20,6 +20,10 @@ from app.services.integration_tokens import (
     validate_token_expires_at,
     validate_token_expires_in,
     validate_token_string,
+)
+from app.services.oauth_pkce import (
+    PKCE_METHOD_S256,
+    derive_pkce_code_challenge,
 )
 from app.utils.logging import get_logger
 
@@ -37,6 +41,112 @@ GOOGLE_CALENDAR_REDIRECT_URI = f"{settings.cloud_run_url}/api/integrations/googl
 GOOGLE_REDIRECT_URI = GOOGLE_CALENDAR_REDIRECT_URI
 GOOGLE_CALENDAR_SCOPE = CANONICAL_GOOGLE_CALENDAR_SCOPE
 GOOGLE_CALENDAR_SCOPES = GOOGLE_CALENDAR_SCOPE.split(" ")
+
+
+def _setup_page_html() -> str:
+    """Return static HTML setup guide for Jobber integration."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Jobber Setup - Hey Kevin</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #f8fafc;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+        }
+        .container {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 20px;
+            max-width: 440px;
+            width: 100%;
+            padding: 36px 28px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+        }
+        .icon {
+            width: 56px;
+            height: 56px;
+            background: #3b82f6;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 28px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            text-align: center;
+            margin-bottom: 8px;
+            color: #ffffff;
+        }
+        p.subtitle {
+            font-size: 14px;
+            color: #94a3b8;
+            text-align: center;
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+        ol {
+            margin: 0 0 24px 20px;
+            padding: 0;
+            color: #cbd5e1;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+        li { margin-bottom: 6px; }
+        .appstore-btn {
+            display: block;
+            text-align: center;
+            background: #2563eb;
+            color: #ffffff;
+            text-decoration: none;
+            font-size: 15px;
+            font-weight: 600;
+            padding: 12px 20px;
+            border-radius: 12px;
+            transition: background 0.15s ease;
+        }
+        .appstore-btn:hover {
+            background: #1d4ed8;
+        }
+        .note {
+            margin-top: 18px;
+            font-size: 12px;
+            color: #94a3b8;
+            text-align: center;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">K</div>
+        <h1>Connect Jobber to Hey Kevin</h1>
+        <p class="subtitle">To link your Jobber account with Hey Kevin, follow these steps in the mobile app:</p>
+        <ol>
+            <li>Open <strong>Hey Kevin</strong> on your iPhone and sign in.</li>
+            <li>Go to <strong>Settings</strong> &rarr; <strong>Integrations</strong> &rarr; <strong>Jobber</strong> &rarr; <strong>Connect</strong>.</li>
+            <li>Approve Jobber access in your browser.</li>
+            <li>Return to the Kevin app to complete connection.</li>
+        </ol>
+        <a href="https://apps.apple.com/app/id6761427495" class="appstore-btn" rel="noopener noreferrer">Download Hey Kevin on the App Store</a>
+        <p class="note">Existing connections can be managed anytime in Kevin Settings.</p>
+    </div>
+</body>
+</html>"""
 
 
 def _success_page(service_name: str) -> str:
@@ -121,11 +231,30 @@ class JobberLeadCaptureUpdate(BaseModel):
         return v
 
 
+# ── Setup (static instructions for Marketplace handoff) ─────────────
+
+@router.get("/jobber/setup", response_class=HTMLResponse)
+async def jobber_setup():
+    """Public setup page providing static instructions for linking Jobber via Hey Kevin on iOS."""
+    headers = {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": (
+            "default-src 'none'; "
+            "style-src 'unsafe-inline'; "
+            "frame-ancestors 'none'; "
+            "form-action 'none';"
+        ),
+    }
+    return HTMLResponse(content=_setup_page_html(), headers=headers)
+
+
 # ── Connect (start OAuth flow) ──────────────────────────────────────
 
 @router.get("/jobber/connect", dependencies=[Depends(verify_api_token)])
 async def jobber_connect(contractor_id: str = Query(...), request: Request = None):
-    """Generate a Jobber OAuth authorize URL for the contractor."""
+    """Generate a Jobber OAuth authorize URL with PKCE challenge for the contractor."""
     from app.services.integration_token_mutations import create_oauth_state
 
     require_contractor_access(request, contractor_id)
@@ -136,7 +265,7 @@ async def jobber_connect(contractor_id: str = Query(...), request: Request = Non
 
     # Store state → contractor mapping bound to lifecycle epoch, generation, and credentials fingerprint
     db = _get_firestore()
-    await create_oauth_state(
+    state_payload = await create_oauth_state(
         db=db,
         collection_name="jobber_oauth_states",
         state=state,
@@ -145,11 +274,16 @@ async def jobber_connect(contractor_id: str = Query(...), request: Request = Non
         ttl_seconds=600.0,
     )
 
+    verifier = state_payload["pkce_code_verifier"]
+    challenge = derive_pkce_code_challenge(verifier)
+
     authorize_url = JOBBER_AUTH_URL + "?" + urlencode({
         "client_id": settings.jobber_client_id,
         "redirect_uri": JOBBER_REDIRECT_URI,
         "response_type": "code",
         "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": PKCE_METHOD_S256,
     })
 
     return {"authorize_url": authorize_url}
@@ -158,8 +292,12 @@ async def jobber_connect(contractor_id: str = Query(...), request: Request = Non
 # ── Callback (exchange code for tokens) ─────────────────────────────
 
 @router.get("/jobber/callback")
-async def jobber_callback(code: str = Query(...), state: str = Query(...), request: Request = None):
-    """Exchange authorization code for access + refresh tokens."""
+async def jobber_callback(
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    request: Request = None,
+):
+    """Exchange authorization code for access + refresh tokens or redirect stateless entries to setup."""
     from app.services.integration_token_mutations import (
         connect_provider_cas,
         consume_oauth_state,
@@ -175,6 +313,37 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
         is_encryption_configured,
     )
 
+    # 1. Reject duplicate query parameters before any effects when Request is available
+    if request is not None:
+        query_params = request.query_params
+        if len(query_params.getlist("state")) > 1 or len(query_params.getlist("code")) > 1:
+            raise HTTPException(status_code=400, detail="Duplicate query parameters")
+
+    # 2. Safe stateless entry: actually absent state returns hard-coded 303 to setup BEFORE DB/crypto
+    has_state_param = False
+    if request is not None:
+        has_state_param = "state" in request.query_params
+    elif state is not None:
+        has_state_param = True
+
+    if not has_state_param:
+        return RedirectResponse(
+            url="/api/integrations/jobber/setup",
+            status_code=303,
+            headers={
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
+    # 3. Supplied blank or whitespace state fails closed
+    if not isinstance(state, str) or not state.strip():
+        raise HTTPException(status_code=400, detail="Invalid OAuth state identifier")
+
+    if not code or not isinstance(code, str) or not code.strip():
+        raise HTTPException(status_code=400, detail="Authorization code required")
+
+    # 4. Encryption configuration check
     if settings.integration_token_encrypted_writes_enabled and not is_encryption_configured():
         logger.error("Jobber OAuth callback aborted: provider=jobber operation=encryption_check result=unconfigured")
         raise HTTPException(
@@ -197,6 +366,7 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
     observed_refresh_raw = contractor_obs["observed_refresh_raw"]
     claim_id = contractor_obs.get("claim_id")
     is_quarantined = contractor_obs.get("is_quarantined", False)
+    pkce_code_verifier = state_data["pkce_code_verifier"]
 
     # Validate that eventual write format is possible BEFORE exchanging the authorization code
     try:
@@ -254,7 +424,7 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
             logger.error("Jobber OAuth callback aborted: provider=jobber operation=transition_started result=lock_failed")
             raise HTTPException(status_code=409, detail="Failed to acquire live connect lock") from None
 
-    # Exchange code for tokens
+    # Exchange code for tokens (with PKCE code_verifier, timeout=10.0, follow_redirects=False)
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -265,8 +435,10 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
                     "client_id": settings.jobber_client_id,
                     "client_secret": settings.jobber_client_secret,
                     "redirect_uri": JOBBER_REDIRECT_URI,
+                    "code_verifier": pkce_code_verifier,
                 },
                 timeout=10.0,
+                follow_redirects=False,
             )
     except Exception:
         # Provider ambiguity (timeout / connection / network failure): do NOT terminalize intent; retain claim-bound started intent
@@ -375,7 +547,14 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
 
     logger.info("Jobber connected successfully: provider=jobber operation=connect result=success generation=%s", new_gen)
 
-    return HTMLResponse(_success_page("Jobber"))
+    return HTMLResponse(
+        _success_page("Jobber"),
+        headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 # ── Status ───────────────────────────────────────────────────────────

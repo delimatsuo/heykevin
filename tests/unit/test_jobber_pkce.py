@@ -375,7 +375,7 @@ async def test_jobber_connect_persists_pkce_and_matches_authorize_url_challenge(
     caplog,
 ):
     """Prove authenticated ASGI connect persists verifier atomically and builds matching S256 challenge in URL.
-    
+
     Excludes raw verifier, client secret, and contractor ID from response body, headers, and logs.
     Also verifies unauthenticated (no-bearer) returns 401/403 and other-contractor returns 403 before storage.
     """
@@ -1192,7 +1192,7 @@ async def test_jobber_callback_absent_state_returns_hardcoded_303_to_setup_befor
     caplog,
 ):
     """Prove unsolicited Marketplace entry missing state returns hard-coded 303 to /jobber/setup with zero DB/crypto effects.
-    
+
     Validates static setup route HTML/CSP and ensures hostile sentinels are not reflected in headers, body, or application logs.
     """
     _setup_test_env(monkeypatch)

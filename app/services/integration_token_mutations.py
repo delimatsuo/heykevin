@@ -3719,6 +3719,7 @@ async def disconnect_and_revoke_provider_orchestration(
                         headers=jobber_headers,
                         json=jobber_payload,
                         timeout=5.0,
+                        follow_redirects=False,
                     )
                 else:
                     async with httpx.AsyncClient() as client:
@@ -3727,6 +3728,7 @@ async def disconnect_and_revoke_provider_orchestration(
                             headers=jobber_headers,
                             json=jobber_payload,
                             timeout=5.0,
+                            follow_redirects=False,
                         )
                 outcome_status = _classify_jobber_disconnect_response(resp)
 

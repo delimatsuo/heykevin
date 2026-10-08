@@ -14565,6 +14565,7 @@ async def test_jobber_disconnect_request_pinning_injected_and_owned_clients(monk
     assert req1["url"] == JOBBER_GRAPHQL_URL
     assert req1["url"] == "https://api.getjobber.com/api/graphql"
     assert req1["kwargs"].get("timeout") == 5.0
+    assert req1["kwargs"].get("follow_redirects") is False
     assert req1["kwargs"].get("json") == {"query": expected_query}
     headers1 = req1["kwargs"].get("headers", {})
     assert headers1.get("Authorization") == "Bearer plain-token-injected-999"
@@ -14623,6 +14624,7 @@ async def test_jobber_disconnect_request_pinning_injected_and_owned_clients(monk
     assert req2["url"] == JOBBER_GRAPHQL_URL
     assert req2["url"] == "https://api.getjobber.com/api/graphql"
     assert req2["kwargs"].get("timeout") == 5.0
+    assert req2["kwargs"].get("follow_redirects") is False
     assert req2["kwargs"].get("json") == {"query": expected_query}
     headers2 = req2["kwargs"].get("headers", {})
     assert headers2.get("Authorization") == "Bearer plain-token-owned-888"
@@ -14822,3 +14824,104 @@ async def test_google_calendar_disconnect_remains_unchanged(monkeypatch):
         assert req["kwargs"].get("timeout") == 5.0
         assert "headers" not in req["kwargs"] or req["kwargs"]["headers"] is None
         assert "json" not in req["kwargs"] or req["kwargs"]["json"] is None
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_transport_mock_redirect_blocked(monkeypatch):
+    """Verify httpx.AsyncClient(follow_redirects=True, transport=MockTransport) does not follow 302 redirects when Jobber disconnect is orchestrated."""
+    import httpx
+    from app.services import integration_token_mutations as it_mutations
+    from app.services.jobber import JOBBER_GRAPHQL_URL
+    from app.db.integration_lifecycle_audit import (
+        AUDIT_COLLECTION,
+        REVOCATION_OUTBOX_COLLECTION,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+    _setup_keyring(monkeypatch)
+
+    cid = "c-mock-transport-redirect"
+    enc_acc = it_mutations.encrypt_integration_token("fictional-jobber-access-tok-123", contractor_id=cid, provider="jobber", token_kind="access")
+    enc_ref = it_mutations.encrypt_integration_token("fictional-jobber-refresh-tok-456", contractor_id=cid, provider="jobber", token_kind="refresh")
+
+    doc = _FakeDocRef({
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_token_envelope_required": True,
+        "jobber_lead_capture_enabled": True,
+        "jobber_access_token": enc_acc,
+        "jobber_refresh_token": enc_ref,
+        "jobber_connected_at": 100.0,
+    }, doc_id=cid)
+
+    outbox_store = {}
+    audit_store = {}
+    db = _FakeFirestore({
+        "contractors": {cid: doc},
+        REVOCATION_OUTBOX_COLLECTION: outbox_store,
+        AUDIT_COLLECTION: audit_store,
+    })
+
+    traced_requests: list[httpx.Request] = []
+
+    def _mock_handler(request: httpx.Request) -> httpx.Response:
+        traced_requests.append(request)
+        if str(request.url) == JOBBER_GRAPHQL_URL or str(request.url) == "https://api.getjobber.com/api/graphql":
+            return httpx.Response(
+                status_code=302,
+                headers={"Location": "https://api.getjobber.com/fictional/second-route"},
+            )
+        return httpx.Response(
+            status_code=200,
+            json={"unexpected": "redirect_followed"},
+        )
+
+    transport = httpx.MockTransport(_mock_handler)
+    injected_client = httpx.AsyncClient(follow_redirects=True, transport=transport)
+
+    try:
+        res = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=injected_client,
+        )
+    finally:
+        await injected_client.aclose()
+
+    # Actual orchestration must produce exactly one transport request
+    assert len(traced_requests) == 1
+    req = traced_requests[0]
+    assert str(req.url) == JOBBER_GRAPHQL_URL
+    assert str(req.url) == "https://api.getjobber.com/api/graphql"
+
+    # Classify transport_error_unknown
+    assert res["status"] == "disconnected"
+    assert res["provider_revocation"]["status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert res["provider_revocation"]["status"] == "transport_error_unknown"
+    assert res["revocation_status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert res["revocation_status"] == "transport_error_unknown"
+    assert res["credential_deletion"]["status"] == "executed"
+
+    # Remain locally disconnected with tokens removed and lead capture false
+    c_data = doc.data
+    assert c_data["jobber_connected"] is False
+    assert "jobber_access_token" not in c_data or c_data["jobber_access_token"] is it_mutations.DELETE_FIELD
+    assert "jobber_refresh_token" not in c_data or c_data["jobber_refresh_token"] is it_mutations.DELETE_FIELD
+    assert c_data["jobber_lead_capture_enabled"] is False
+    assert c_data["jobber_generation"] == 2
+    assert c_data["jobber_lifecycle_epoch"] == 2
+    assert type(c_data.get("jobber_disconnected_at")) is float and c_data["jobber_disconnected_at"] > 0.0
+
+    # Verify durable outbox & audit persistence
+    outbox_doc = outbox_store[res["outbox_id"]]
+    assert outbox_doc.data["status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert outbox_doc.data["status"] == "transport_error_unknown"
+    assert outbox_doc.data["contractor_id"] == cid
+
+    audit_doc = audit_store[res["audit_id"]]
+    assert audit_doc.data["revocation_status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert audit_doc.data["revocation_status"] == "transport_error_unknown"
+    assert audit_doc.data["contractor_id"] == cid

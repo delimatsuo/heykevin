@@ -1180,7 +1180,6 @@
         }
       }
     },
-    "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar to check availability and book appointments." : {},
     "Connected" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -3298,18 +3297,18 @@
         }
       }
     },
-    "Schedule checking, job creation, customer lookup" : {
+    "Customer lookup and optional Request capture" : {
       "localizations" : {
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Verificación de agenda, creación de trabajos, búsqueda de clientes"
+            "value" : "Búsqueda de clientes y registro opcional de solicitudes"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Verificação de agenda, criação de trabalhos, busca de clientes"
+            "value" : "Consulta de clientes e registro opcional de solicitações"
           }
         }
       }
@@ -6569,12 +6568,18 @@
         }
       }
     },
-    "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm." : {
+    "Connect Jobber so Kevin can recognize existing customers. When lead capture is enabled, calls can create Clients and Requests for follow-up. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm." : {
       "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conecta Jobber para que Kevin pueda reconocer a los clientes existentes. Cuando la captura de oportunidades está habilitada, las llamadas pueden crear clientes y solicitudes para su seguimiento. Conecta Google Calendar para que Kevin ofrezca tus horarios disponibles y te envíe solicitudes de cita para confirmar."
+          }
+        },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Conecte o Jobber para que o Kevin consulte clientes e crie serviços automaticamente. Conecte o Google Agenda para que o Kevin ofereça seus horários disponíveis e envie solicitações de agendamento para confirmação."
+            "value" : "Conecte o Jobber para que o Kevin reconheça clientes existentes. Quando a captura de oportunidades estiver ativada, as chamadas podem criar clientes e solicitações para acompanhamento. Conecte o Google Agenda para que o Kevin ofereça seus horários disponíveis e envie solicitações de agendamento para confirmação."
           }
         }
       }

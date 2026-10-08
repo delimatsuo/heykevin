@@ -340,11 +340,24 @@ async def jobber_callback(code: str = Query(...), state: str = Query(...), reque
         raise HTTPException(status_code=502, detail="Invalid token expiry in Jobber response") from None
 
     try:
+        from app.services.jobber import lookup_jobber_account_id
+        jobber_account_id = await lookup_jobber_account_id(access_token)
+    except Exception:
+        logger.error(
+            "Jobber account identity verification failed: provider=jobber operation=callback"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to verify Jobber account",
+        ) from None
+
+    try:
         updates, new_gen, audit_id = await connect_provider_cas(
             contractor_id=contractor_id,
             provider="jobber",
             access_token=access_token,
             refresh_token=refresh_token,
+            jobber_account_id=jobber_account_id,
             claim_id=claim_id,
             expires_in=expires_in,
             expires_at=expires_at,

@@ -941,7 +941,7 @@ async def test_persist_refreshed_tokens_cas_rejects_non_string_raw_payloads(monk
 async def test_refresh_persistence_failure_leaves_contractor_dict_unchanged(monkeypatch):
     _setup_keyring(monkeypatch)
     fake_db = _FakeFirestore()
-    monkeypatch.setattr(firestore_module, "get_firestore_client", lambda: fake_db)
+    _patch_firestore(monkeypatch, fake_db)
 
     contractor_id = "c-fail-1"
     enc_access = encrypt_integration_token("old-access", contractor_id=contractor_id, provider="jobber", token_kind="access")
@@ -1835,6 +1835,7 @@ async def test_no_database_fails_closed_across_all_cas_helpers(monkeypatch):
             provider="jobber",
             access_token="acc",
             refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             db=None,
         )
 
@@ -2022,6 +2023,7 @@ async def test_ambiguous_commit_connect_and_disconnect(monkeypatch):
         provider="jobber",
         access_token="acc-1",
         refresh_token="ref-1",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert next_gen == 1
@@ -2374,6 +2376,7 @@ async def test_durable_integration_lifecycle_audit_connect_and_disconnect(monkey
         provider="jobber",
         access_token=secret_access,
         refresh_token=secret_refresh,
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
 
@@ -3121,6 +3124,7 @@ async def test_connect_cas_with_observed_precondition_concurrency_race(monkeypat
             provider="jobber",
             access_token="new-acc",
             refresh_token="new-ref",
+            jobber_account_id="jobber-acc-1",
             observed_generation=1,
             observed_access_raw="acc-gen1",
             observed_refresh_raw="ref-gen1",
@@ -3133,6 +3137,7 @@ async def test_connect_cas_with_observed_precondition_concurrency_race(monkeypat
         provider="jobber",
         access_token="new-acc",
         refresh_token="new-ref",
+        jobber_account_id="jobber-acc-1",
         observed_generation=2,
         observed_access_raw="acc-gen2",
         observed_refresh_raw="ref-gen2",
@@ -3603,6 +3608,7 @@ async def test_connect_deletes_stale_disconnected_at_and_token_refreshed_at(monk
         provider="jobber",
         access_token="new-access",
         refresh_token="new-refresh",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
 
@@ -3627,6 +3633,7 @@ async def test_connect_requires_refresh_token(monkeypatch):
             provider="jobber",
             access_token="new-access",
             refresh_token=None,  # type: ignore
+            jobber_account_id="jobber-acc-1",
             db=db,
         )
 
@@ -3636,6 +3643,7 @@ async def test_connect_requires_refresh_token(monkeypatch):
             provider="jobber",
             access_token="new-access",
             refresh_token="",
+            jobber_account_id="jobber-acc-1",
             db=db,
         )
 
@@ -3844,6 +3852,7 @@ async def test_flag_off_keyless_plaintext_and_absent_writes_plaintext(monkeypatc
         provider="jobber",
         access_token="plain-access-1",
         refresh_token="plain-refresh-1",
+        jobber_account_id="jobber-acc-1",
         observed_generation=0,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -4659,6 +4668,7 @@ async def test_strengthened_mutation_matrix_durable_representations(monkeypatch,
         provider=provider,
         access_token="conn-acc-token",
         refresh_token="conn-ref-token",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=0,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5228,6 +5238,7 @@ async def test_connect_legacy_record_with_existing_credentials_emits_reconnected
         provider="jobber",
         access_token="new-connected-acc",
         refresh_token="new-connected-ref",
+        jobber_account_id="jobber-acc-1",
         observed_generation=0,
         observed_access_raw="legacy-old-acc",
         observed_refresh_raw="legacy-old-ref",
@@ -5247,6 +5258,7 @@ async def test_connect_legacy_record_with_existing_credentials_emits_reconnected
         provider="jobber",
         access_token="new-acc-first",
         refresh_token="new-ref-first",
+        jobber_account_id="jobber-acc-1",
         observed_generation=0,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5415,6 +5427,7 @@ async def test_durable_monotonic_envelope_floor_across_disconnect_reconnect(monk
         provider="jobber",
         access_token="initial-acc",
         refresh_token="initial-ref",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert gen1 == 1
@@ -5438,6 +5451,7 @@ async def test_durable_monotonic_envelope_floor_across_disconnect_reconnect(monk
         provider="jobber",
         access_token="reconnected-acc",
         refresh_token="reconnected-ref",
+        jobber_account_id="jobber-acc-1",
         observed_generation=2,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5692,6 +5706,7 @@ async def test_default_off_absent_floor_legacy_connect_remains_plaintext(monkeyp
         provider="jobber",
         access_token="plain-acc-1",
         refresh_token="plain-ref-1",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert next_gen == 1
@@ -5822,6 +5837,7 @@ async def test_disconnect_normalizes_malformed_floor_and_forces_envelope_reconne
         provider=provider,
         access_token="reconnected-acc",
         refresh_token="reconnected-ref",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=4,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5880,6 +5896,7 @@ async def test_disconnect_exact_false_floor_with_no_dict_creds_retains_legacy_be
         provider=provider,
         access_token="reconnected-plain-acc",
         refresh_token="reconnected-plain-ref",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=3,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -6148,6 +6165,7 @@ async def test_phased_refresh_claim_and_quarantine_state_machine(monkeypatch, pr
         provider=provider,
         access_token="acc-reauth",
         refresh_token="ref-reauth",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=1,
         observed_lifecycle_epoch=1,
         observed_access_raw="acc-1",
@@ -7309,6 +7327,7 @@ async def test_repair_18a1b_extra_updates_hostile_keys_and_scope_validation(monk
     with pytest.raises(it_mutations.IntegrationTokenEnvelopeError):
         await it_mutations.connect_provider_cas(
             contractor_id=cid, provider="jobber", access_token="acc", refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             extra_updates={"jobber_lead_capture_enabled": "true"}, db=db,
         )
 
@@ -7971,7 +7990,7 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
     class _CountingHttp:
         async def post(self, *args, **kwargs):
             http_call_count[0] += 1
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     class _ConcurrentDiscFakeFirestore(_FakeFirestore):
         def __init__(self):
@@ -8281,14 +8300,15 @@ async def test_18b2_provider_revocation_outcome_mapping_and_outbox_cas(monkeypat
     _setup_keyring(monkeypatch)
 
     class _MockHttp:
-        def __init__(self, status_code: int = 200, raises: bool = False):
+        def __init__(self, status_code: int = 200, raises: bool = False, json_fn: Any = None):
             self.status_code = status_code
             self.raises = raises
+            self._json_fn = json_fn or (lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
         async def post(self, *args, **kwargs):
             if self.raises:
                 raise ConnectionError("Network timeout")
-            return SimpleNamespace(status_code=self.status_code)
+            return SimpleNamespace(status_code=self.status_code, json=self._json_fn)
 
     # 1. Jobber 200 -> provider_confirmed
     cid1 = "c-jobber-200"
@@ -8361,7 +8381,7 @@ async def test_18b2_ambiguous_outcome_persistence_leaves_started_state(monkeypat
     class _CountingHttp:
         async def post(self, *args, **kwargs):
             http_count[0] += 1
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     # First call: disconnect succeeds, HTTP succeeds, but outcome commit fails -> fails closed with CASConflict
     db.fail_outcomes = False
@@ -8468,7 +8488,7 @@ async def test_18b2_no_secret_leakage_in_documents_and_responses(monkeypatch):
 
     class _MockHttp:
         async def post(self, *args, **kwargs):
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     req = SimpleNamespace(state=SimpleNamespace(is_admin=True, contractor_id=cid))
     resp = await integrations.jobber_disconnect(contractor_id=cid, request=req)
@@ -9084,7 +9104,7 @@ async def test_18b2b_orchestration_fail_closed_after_http_if_unpersisted(monkeyp
 
     class _MockHttp:
         async def post(self, *args, **kwargs):
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     # Monkeypatch record_revocation_outcome_cas to simulate network failure leaving outbox in provider_request_started
     async def _failing_record_outcome(*args, **kwargs):
@@ -9131,7 +9151,7 @@ async def test_18b2a_orchestration_zero_http_on_contenders_and_repeats(monkeypat
     class _CountingHttp:
         async def post(self, *args, **kwargs):
             http_call_count[0] += 1
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     # 1. First caller: succeeds, owns claim, executes 1 HTTP call
     res1 = await it_mutations.disconnect_and_revoke_provider_orchestration(
@@ -9188,7 +9208,7 @@ async def test_18b2a_endpoint_structured_response_no_secrets(monkeypatch):
     monkeypatch.setattr(it_mutations, "get_firestore_client", lambda: db)
 
     async def _fake_post(*args, **kwargs):
-        return SimpleNamespace(status_code=200)
+        return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     monkeypatch.setattr("httpx.AsyncClient.post", _fake_post)
 
@@ -10303,7 +10323,7 @@ async def test_18b2c_orchestration_fails_closed_if_reconnected_before_response(m
                 doc.data["jobber_lifecycle_epoch"] = 2
                 doc.data["jobber_access_token"] = "new-access-token"
                 doc.data["jobber_refresh_token"] = "new-refresh-token"
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     http_client = _ReconnectingOnceHttp()
 
@@ -10530,6 +10550,7 @@ async def test_18d_connect_cas_creates_audit_deterministically_without_overwrite
         provider="jobber",
         access_token="valid-acc",
         refresh_token="valid-ref",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert new_gen == 1
@@ -11049,7 +11070,7 @@ async def test_18j_repeated_disconnect_idempotency_low_level_and_orchestration(m
 
         async def post(self, url, *args, **kwargs):
             revoke_http_calls.append(str(url))
-            return type("Resp", (), {"status_code": 200, "json": dict})()
+            return type("Resp", (), {"status_code": 200, "json": lambda self: {"data": {"appDisconnect": {"userErrors": []}}}})()
 
     monkeypatch.setattr("httpx.AsyncClient", _TrackingRevokeClient)
     req = type("Req", (), {"state": type("State", (), {"is_admin": True})()})()
@@ -11171,6 +11192,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
                 provider=provider,
                 access_token="new_acc",
                 refresh_token="new_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id="wrong_claim_" + "x" * 20,
                 db=db,
             )
@@ -11182,6 +11204,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
                 provider=provider,
                 access_token="new_acc",
                 refresh_token="new_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id=None,
                 db=db,
             )
@@ -11205,6 +11228,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
             provider=provider,
             access_token="new_acc_ok",
             refresh_token="new_ref_ok",
+            jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
             claim_id=claim_id,
             observed_generation=1,
             observed_lifecycle_epoch=1,
@@ -11421,6 +11445,7 @@ async def test_repair_18o_connect_collision_proof_and_http_ambiguity_matrix(monk
             provider="jobber",
             access_token="acc",
             refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             claim_id="c" * 32,
             db=db,
         )
@@ -11529,6 +11554,7 @@ async def test_repair_18p_quarantine_oauth_attempt_flow(monkeypatch):
         provider="jobber",
         access_token="new_acc_123",
         refresh_token="new_ref_123",
+        jobber_account_id="jobber-acc-1",
         claim_id=claim_id2,
         observed_generation=1,
         observed_lifecycle_epoch=1,
@@ -11635,6 +11661,7 @@ async def test_repair_18p_commit_time_audit_collision(monkeypatch):
             provider="jobber",
             access_token="acc",
             refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             claim_id="c" * 32,
             db=db,
         )
@@ -11686,6 +11713,7 @@ async def test_18q_exclusive_reauthorization_fence(monkeypatch):
                 provider=provider,
                 access_token="new_acc",
                 refresh_token="new_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id=claim_id,
                 observed_generation=1,
                 observed_lifecycle_epoch=1,
@@ -11739,6 +11767,7 @@ async def test_18q_exclusive_reauthorization_fence(monkeypatch):
             provider=provider,
             access_token="new_acc_ok",
             refresh_token="new_ref_ok",
+            jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
             claim_id=claim_id,
             observed_generation=1,
             observed_lifecycle_epoch=1,
@@ -11836,6 +11865,7 @@ async def test_18q_complete_lifecycle_claim_binding(monkeypatch):
             provider="jobber",
             access_token="new_acc",
             refresh_token="new_ref",
+            jobber_account_id="jobber-acc-1",
             claim_id=None,
             db=db,
         )
@@ -12013,6 +12043,7 @@ async def test_18qc_connect_audit_collision_ordering_and_rollback(monkeypatch):
             provider="jobber",
             access_token="acc_new_val",
             refresh_token="ref_new_val",
+            jobber_account_id="jobber-acc-1",
             claim_id="c" * 32,
             db=db,
         )
@@ -12317,6 +12348,7 @@ async def test_18qd_commit_time_audit_collision_rollback(monkeypatch):
             provider="jobber",
             access_token="acc_new_123",
             refresh_token="ref_new_123",
+            jobber_account_id="jobber-acc-1",
             claim_id=claim_id,
             db=db,
         )
@@ -13026,6 +13058,7 @@ async def test_18qg_fingerprint_guard_connect_provider(monkeypatch):
                 provider=provider,
                 access_token="new_conn_acc",
                 refresh_token="new_conn_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id=claim_id,
                 db=db,
             )
@@ -14137,6 +14170,7 @@ async def test_expired_bound_started_or_uncertain_claims_remain_hard_fences(monk
                 provider=provider,
                 access_token="replacement-access",
                 refresh_token="replacement-refresh",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 observed_generation=1,
                 observed_lifecycle_epoch=1,
                 observed_access_raw=enc_access,
@@ -14145,6 +14179,8 @@ async def test_expired_bound_started_or_uncertain_claims_remain_hard_fences(monk
                 db=db_conn,
             )
         assert c_doc_conn.data.get(f"{provider}_operation_intent_phase") == phase
+        assert c_doc_conn.data.get(f"{provider}_access_token") == enc_access
+        assert c_doc_conn.data.get(f"{provider}_refresh_token") == enc_refresh
         assert f"{provider}_reauthorization_required" not in c_doc_conn.data
 
 
@@ -14260,3 +14296,1051 @@ async def test_classify_google_calendar_reconciliation_record(monkeypatch):
         contractor_id=cid,
         bound_operation_id=bound_id,
     ) is None
+
+# Jobber GraphQL appDisconnect Disconnect Tests (Slice J3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_jobber_disconnect_classification_table_pure_helper():
+    """Pure table-driven unit test for _classify_jobber_disconnect_response across all status codes and payload shapes."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.db.integration_lifecycle_audit import (
+        REVOCATION_STATUS_CONFIRMED,
+        REVOCATION_STATUS_REJECTED,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+
+    classify = it_mutations._classify_jobber_disconnect_response
+
+    class _Resp:
+        def __init__(self, status_code: Any, json_val: Any = None, raises_json: bool = False, has_json: bool = True):
+            self.status_code = status_code
+            self._json_val = json_val
+            self._raises_json = raises_json
+            if not has_json:
+                self.json = None
+
+        def json(self):
+            if self._raises_json:
+                raise ValueError("Malformed JSON string")
+            return self._json_val
+
+    # 1. Confirmed cases (HTTP 200, valid dict, empty userErrors, absent/empty top-level errors)
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_CONFIRMED
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": []}}, "errors": []})) == REVOCATION_STATUS_CONFIRMED
+
+    # 2. Rejected cases (HTTP 200 with non-empty errors list or non-empty userErrors list)
+    assert classify(_Resp(200, {"errors": [{"message": "Unauthenticated"}], "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(200, {"errors": [{"message": "Syntax error"}]})) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": [{"message": "App not installed"}]}}})) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(200, {"errors": [{"message": "Error 1"}], "data": {"appDisconnect": {"userErrors": [{"message": "Error 2"}]}}})) == REVOCATION_STATUS_REJECTED
+
+    # 3. Malformed payload shapes -> TRANSPORT_ERROR
+    # Non-list errors
+    assert classify(_Resp(200, {"errors": None, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": False, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": {"message": "dict"}, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": "string", "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": 123, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Missing / malformed data
+    assert classify(_Resp(200, {"errors": []})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": None})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": []})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": "not-dict"})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Missing / malformed appDisconnect
+    assert classify(_Resp(200, {"data": {}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": None}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": []}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": "not-dict"}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Missing / malformed userErrors
+    assert classify(_Resp(200, {"data": {"appDisconnect": {}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": None}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": "not-list"}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": {}}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": 123}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Non-dict root
+    assert classify(_Resp(200, [])) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, "string")) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, 123)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, None)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Invalid JSON / no callable json method
+    assert classify(_Resp(200, raises_json=True)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, has_json=False)) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+    # 4. Non-200 4xx client rejections (400..499 except 408, 425, 429) -> REJECTED
+    assert classify(_Resp(400)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(401)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(403)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(404)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(422)) == REVOCATION_STATUS_REJECTED
+
+    # 5. Non-200 4xx transient errors (408, 425, 429) -> TRANSPORT_ERROR
+    assert classify(_Resp(408)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(425)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(429)) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+    # 6. Other non-200 status codes (204, 3xx, 5xx) -> TRANSPORT_ERROR
+    assert classify(_Resp(204)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(301)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(302)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(500)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(502)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(503)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(504)) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+    # 7. Malformed / non-int status_code
+    assert classify(_Resp(None)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(True)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp("200")) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_orchestration_comprehensive_matrix(monkeypatch):
+    """Exercise disconnect_and_revoke_provider_orchestration with FakeFirestore across all outcome classes.
+
+    Verifies:
+    - Return schema distinguishes local disconnected vs provider confirmation
+    - Durable outbox and audit records are persisted with exact status
+    - Contractor is tombstoned (jobber_connected=False, tokens deleted, lead_capture=False)
+    - Exactly 1 HTTP request on first call with zero new HTTP on repeat
+    """
+    from app.services import integration_token_mutations as it_mutations
+    from app.db.integration_lifecycle_audit import (
+        REVOCATION_OUTBOX_COLLECTION,
+        REVOCATION_STATUS_CONFIRMED,
+        REVOCATION_STATUS_REJECTED,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+    _setup_keyring(monkeypatch)
+
+    class _MockMatrixHttp:
+        def __init__(self, status_code: int = 200, json_body: Any = None, raises_json: bool = False, raises_network: bool = False):
+            self.status_code = status_code
+            self.json_body = json_body
+            self.raises_json = raises_json
+            self.raises_network = raises_network
+            self.call_count = 0
+
+        async def post(self, *args, **kwargs):
+            self.call_count += 1
+            if self.raises_network:
+                raise ConnectionError("Simulated network timeout")
+            resp_self = self
+            class _Resp:
+                status_code = resp_self.status_code
+                def json(self):
+                    if resp_self.raises_json:
+                        raise ValueError("JSON parse failure")
+                    return resp_self.json_body
+            return _Resp()
+
+    test_matrix = [
+        # (case_id, status_code, json_body, raises_json, raises_network, expected_outcome)
+        ("confirmed", 200, {"data": {"appDisconnect": {"userErrors": []}}}, False, False, REVOCATION_STATUS_CONFIRMED),
+        ("empty_top_errors", 200, {"data": {"appDisconnect": {"userErrors": []}}, "errors": []}, False, False, REVOCATION_STATUS_CONFIRMED),
+        ("top_errors_with_partial_data", 200, {"errors": [{"message": "Unauthorized scope"}], "data": {"appDisconnect": {"userErrors": []}}}, False, False, REVOCATION_STATUS_REJECTED),
+        ("mutation_user_errors", 200, {"data": {"appDisconnect": {"userErrors": [{"message": "App not installed"}]}}}, False, False, REVOCATION_STATUS_REJECTED),
+        ("malformed_null_errors", 200, {"errors": None, "data": {"appDisconnect": {"userErrors": []}}}, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("malformed_null_data", 200, {"data": None}, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("malformed_null_user_errors", 200, {"data": {"appDisconnect": {"userErrors": None}}}, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("invalid_json", 200, None, True, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("client_rejection_400", 400, None, False, False, REVOCATION_STATUS_REJECTED),
+        ("client_rejection_401", 401, None, False, False, REVOCATION_STATUS_REJECTED),
+        ("client_rejection_403", 403, None, False, False, REVOCATION_STATUS_REJECTED),
+        ("transient_408", 408, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("transient_429", 429, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("server_error_500", 500, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("unexpected_204", 204, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("network_timeout", 0, None, False, True, REVOCATION_STATUS_TRANSPORT_ERROR),
+    ]
+
+    for case_id, status_code, json_body, raises_json, raises_network, expected_outcome in test_matrix:
+        cid = f"c-matrix-{case_id}"
+        enc_acc = it_mutations.encrypt_integration_token(f"acc-{case_id}", contractor_id=cid, provider="jobber", token_kind="access")
+        enc_ref = it_mutations.encrypt_integration_token(f"ref-{case_id}", contractor_id=cid, provider="jobber", token_kind="refresh")
+
+        doc = _FakeDocRef({
+            "contractor_id": cid,
+            "active": True,
+            "jobber_connected": True,
+            "jobber_generation": 1,
+            "jobber_lifecycle_epoch": 1,
+            "jobber_token_envelope_required": True,
+            "jobber_lead_capture_enabled": True,
+            "jobber_access_token": enc_acc,
+            "jobber_refresh_token": enc_ref,
+            "jobber_connected_at": 100.0,
+        }, doc_id=cid)
+
+        outbox_store = {}
+        audit_store = {}
+        db = _FakeFirestore({
+            "contractors": {cid: doc},
+            "integration_revocation_outbox": outbox_store,
+            "integration_lifecycle_audit": audit_store,
+        })
+
+        http_client = _MockMatrixHttp(
+            status_code=status_code,
+            json_body=json_body,
+            raises_json=raises_json,
+            raises_network=raises_network,
+        )
+
+        # Call 1: First disconnect
+        res1 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=http_client,
+        )
+
+        # Assert returned schema distinguishes local disconnected from provider confirmation
+        assert res1["status"] == "disconnected", f"Case {case_id}: status must be disconnected"
+        assert res1["contractor_id"] == cid
+        assert res1["provider"] == "jobber"
+        assert res1["generation"] == 2
+        assert res1["lifecycle_epoch"] == 2
+        assert res1["credential_deletion"]["status"] == "executed"
+        assert res1["credential_deletion"]["attempted_by_this_request"] is True
+        assert res1["provider_revocation"]["status"] == expected_outcome, f"Case {case_id}: expected provider status {expected_outcome}, got {res1['provider_revocation']['status']}"
+        assert res1["provider_revocation"]["attempted"] is True
+        assert res1["provider_revocation"]["attempted_by_this_request"] is True
+        assert res1["revocation_status"] == expected_outcome
+        assert http_client.call_count == 1, f"Case {case_id}: exactly 1 HTTP call expected"
+
+        # Assert contractor document tombstone state in Firestore
+        c_data = doc.data
+        assert c_data["jobber_connected"] is False, f"Case {case_id}: connected must be False"
+        assert "jobber_access_token" not in c_data or c_data["jobber_access_token"] is it_mutations.DELETE_FIELD
+        assert "jobber_refresh_token" not in c_data or c_data["jobber_refresh_token"] is it_mutations.DELETE_FIELD
+        assert c_data["jobber_lead_capture_enabled"] is False, f"Case {case_id}: lead capture must be False"
+        assert c_data["jobber_generation"] == 2
+        assert c_data["jobber_lifecycle_epoch"] == 2
+        assert type(c_data.get("jobber_disconnected_at")) is float and c_data["jobber_disconnected_at"] > 0.0
+
+        # Assert durable outbox record in Firestore
+        outbox_doc = outbox_store[res1["outbox_id"]]
+        assert outbox_doc.data["status"] == expected_outcome
+        assert outbox_doc.data["contractor_id"] == cid
+        assert outbox_doc.data["generation"] == 2
+        assert outbox_doc.data["lifecycle_epoch"] == 2
+
+        # Assert durable audit record in Firestore
+        audit_doc = audit_store[res1["audit_id"]]
+        assert audit_doc.data["revocation_status"] == expected_outcome
+        assert audit_doc.data["contractor_id"] == cid
+        assert audit_doc.data["generation"] == 2
+
+        # Call 2: Repeat call on already-disconnected contractor
+        res2 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=http_client,
+        )
+        assert res2["status"] == "disconnected"
+        assert res2["generation"] == 2
+        assert res2["lifecycle_epoch"] == 2
+        assert res2["credential_deletion"]["status"] == "already_disconnected"
+        assert res2["credential_deletion"]["attempted_by_this_request"] is False
+        assert res2["provider_revocation"]["status"] == expected_outcome
+        assert res2["provider_revocation"]["attempted_by_this_request"] is False
+        assert http_client.call_count == 1, f"Case {case_id}: zero new HTTP calls on repeat disconnect"
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_request_pinning_injected_and_owned_clients(monkeypatch):
+    """Pin exact GraphQL URL, query, headers, timeout, and absence of form/OAuth revoke parameters for both injected and owned clients."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.services.jobber import JOBBER_GRAPHQL_URL, JOBBER_GRAPHQL_VERSION
+    _setup_keyring(monkeypatch)
+
+    expected_query = "mutation Disconnect { appDisconnect { userErrors { message } } }"
+
+    # 1. Injected client path
+    cid1 = "c-pin-injected"
+    enc_acc1 = it_mutations.encrypt_integration_token("plain-token-injected-999", contractor_id=cid1, provider="jobber", token_kind="access")
+    enc_ref1 = it_mutations.encrypt_integration_token("plain-token-ref-111", contractor_id=cid1, provider="jobber", token_kind="refresh")
+    doc1 = _FakeDocRef({
+        "contractor_id": cid1,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_token_envelope_required": True,
+        "jobber_lead_capture_enabled": True,
+        "jobber_access_token": enc_acc1,
+        "jobber_refresh_token": enc_ref1,
+    }, doc_id=cid1)
+    db1 = _FakeFirestore({"contractors": {cid1: doc1}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    recorded_injected = []
+
+    class _InjectedCaptureHttp:
+        async def post(self, url, *args, **kwargs):
+            recorded_injected.append({"url": url, "args": args, "kwargs": kwargs})
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": {"appDisconnect": {"userErrors": []}}},
+            )
+
+    await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid1,
+        provider="jobber",
+        db=db1,
+        http_client=_InjectedCaptureHttp(),
+    )
+
+    assert len(recorded_injected) == 1
+    req1 = recorded_injected[0]
+    assert req1["url"] == JOBBER_GRAPHQL_URL
+    assert req1["url"] == "https://api.getjobber.com/api/graphql"
+    assert req1["kwargs"].get("timeout") == 5.0
+    assert req1["kwargs"].get("follow_redirects") is False
+    assert req1["kwargs"].get("json") == {"query": expected_query}
+    headers1 = req1["kwargs"].get("headers", {})
+    assert headers1.get("Authorization") == "Bearer plain-token-injected-999"
+    assert headers1.get("Content-Type") == "application/json"
+    assert headers1.get("X-JOBBER-GRAPHQL-VERSION") == JOBBER_GRAPHQL_VERSION
+    assert headers1.get("X-JOBBER-GRAPHQL-VERSION") == "2025-04-16"
+    assert "data" not in req1["kwargs"] or req1["kwargs"]["data"] is None
+    assert "params" not in req1["kwargs"] or req1["kwargs"]["params"] is None
+    assert "client_id" not in str(req1)
+    assert "client_secret" not in str(req1)
+    assert "refresh_token" not in str(req1)
+    assert "oauth/revoke" not in req1["url"]
+
+    # 2. Owned AsyncClient path (http_client=None)
+    cid2 = "c-pin-owned"
+    enc_acc2 = it_mutations.encrypt_integration_token("plain-token-owned-888", contractor_id=cid2, provider="jobber", token_kind="access")
+    enc_ref2 = it_mutations.encrypt_integration_token("plain-token-ref-222", contractor_id=cid2, provider="jobber", token_kind="refresh")
+    doc2 = _FakeDocRef({
+        "contractor_id": cid2,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_token_envelope_required": True,
+        "jobber_lead_capture_enabled": True,
+        "jobber_access_token": enc_acc2,
+        "jobber_refresh_token": enc_ref2,
+    }, doc_id=cid2)
+    db2 = _FakeFirestore({"contractors": {cid2: doc2}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    recorded_owned = []
+
+    class _OwnedCaptureClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, url, *args, **kwargs):
+            recorded_owned.append({"url": url, "args": args, "kwargs": kwargs})
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": {"appDisconnect": {"userErrors": []}}},
+            )
+
+    monkeypatch.setattr("httpx.AsyncClient", _OwnedCaptureClient)
+
+    await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid2,
+        provider="jobber",
+        db=db2,
+        http_client=None,
+    )
+
+    assert len(recorded_owned) == 1
+    req2 = recorded_owned[0]
+    assert req2["url"] == JOBBER_GRAPHQL_URL
+    assert req2["url"] == "https://api.getjobber.com/api/graphql"
+    assert req2["kwargs"].get("timeout") == 5.0
+    assert req2["kwargs"].get("follow_redirects") is False
+    assert req2["kwargs"].get("json") == {"query": expected_query}
+    headers2 = req2["kwargs"].get("headers", {})
+    assert headers2.get("Authorization") == "Bearer plain-token-owned-888"
+    assert headers2.get("Content-Type") == "application/json"
+    assert headers2.get("X-JOBBER-GRAPHQL-VERSION") == JOBBER_GRAPHQL_VERSION
+    assert "data" not in req2["kwargs"] or req2["kwargs"]["data"] is None
+    assert "client_id" not in str(req2)
+    assert "client_secret" not in str(req2)
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_no_refresh_helper_and_no_401_retry(monkeypatch):
+    """Verify no token refresh helper is called during disconnect and 401 has zero retry."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.services import jobber as jobber_service
+    _setup_keyring(monkeypatch)
+
+    async def _poison_refresh(*args, **kwargs):
+        raise AssertionError("POISON: refresh_access_token must never be called during or after disconnect!")
+
+    monkeypatch.setattr(jobber_service, "refresh_access_token", _poison_refresh)
+
+    # 1. Successful disconnect does not call refresh
+    cid1 = "c-no-refresh-success"
+    enc_acc1 = it_mutations.encrypt_integration_token("tok-1", contractor_id=cid1, provider="jobber", token_kind="access")
+    enc_ref1 = it_mutations.encrypt_integration_token("tok-2", contractor_id=cid1, provider="jobber", token_kind="refresh")
+    doc1 = _FakeDocRef({
+        "contractor_id": cid1, "active": True, "jobber_connected": True,
+        "jobber_generation": 1, "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": enc_acc1, "jobber_refresh_token": enc_ref1,
+    }, doc_id=cid1)
+    db1 = _FakeFirestore({"contractors": {cid1: doc1}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    class _OkHttp:
+        async def post(self, *args, **kwargs):
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
+
+    res1 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid1, provider="jobber", db=db1, http_client=_OkHttp()
+    )
+    assert res1["provider_revocation"]["status"] == "provider_confirmed"
+
+    # 2. 401 response: exactly 1 HTTP call, classified as provider_rejected, NO retry, NO refresh
+    cid2 = "c-no-refresh-401"
+    enc_acc2 = it_mutations.encrypt_integration_token("tok-401", contractor_id=cid2, provider="jobber", token_kind="access")
+    enc_ref2 = it_mutations.encrypt_integration_token("tok-401-ref", contractor_id=cid2, provider="jobber", token_kind="refresh")
+    doc2 = _FakeDocRef({
+        "contractor_id": cid2, "active": True, "jobber_connected": True,
+        "jobber_generation": 1, "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": enc_acc2, "jobber_refresh_token": enc_ref2,
+    }, doc_id=cid2)
+    db2 = _FakeFirestore({"contractors": {cid2: doc2}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    http_401_count = [0]
+    class _Http401:
+        async def post(self, *args, **kwargs):
+            http_401_count[0] += 1
+            return SimpleNamespace(status_code=401, json=lambda: {"errors": [{"message": "Unauthorized"}]})
+
+    res2 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid2, provider="jobber", db=db2, http_client=_Http401()
+    )
+    assert http_401_count[0] == 1
+    assert res2["provider_revocation"]["status"] == "provider_rejected"
+    assert res2["credential_deletion"]["status"] == "executed"
+    assert doc2.data["jobber_connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_hostile_sentinel_privacy(monkeypatch, caplog):
+    """Verify hostile provider error strings or response bodies are never leaked into logs, result, audit, or outbox."""
+    import logging
+    from app.services import integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    sentinel_top = "HOSTILE_TOP_ERR_SENTINEL_777888"
+    sentinel_user = "HOSTILE_USER_ERR_SENTINEL_333444"
+    sentinel_body = "HOSTILE_BODY_SENTINEL_111222"
+    sentinel_exc = "HOSTILE_EXC_SENTINEL_555666"
+
+    sentinel_cases = [
+        ("top_err", SimpleNamespace(status_code=200, json=lambda: {"errors": [{"message": sentinel_top}]}), sentinel_top, False),
+        ("user_err", SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": [{"message": sentinel_user}]}}}), sentinel_user, False),
+        ("400_body", SimpleNamespace(status_code=400, json=lambda: {"detail": sentinel_body}), sentinel_body, False),
+        ("exception", None, sentinel_exc, True),
+    ]
+
+    for case_id, resp_obj, sentinel, is_exc in sentinel_cases:
+        caplog.clear()
+        caplog.set_level(logging.DEBUG)
+
+        cid = f"c-sentinel-{case_id}"
+        enc_acc = it_mutations.encrypt_integration_token("tok-sentinel", contractor_id=cid, provider="jobber", token_kind="access")
+        enc_ref = it_mutations.encrypt_integration_token("tok-sentinel-ref", contractor_id=cid, provider="jobber", token_kind="refresh")
+
+        doc = _FakeDocRef({
+            "contractor_id": cid, "active": True, "jobber_connected": True,
+            "jobber_generation": 1, "jobber_lifecycle_epoch": 1,
+            "jobber_access_token": enc_acc, "jobber_refresh_token": enc_ref,
+        }, doc_id=cid)
+
+        outbox_store = {}
+        audit_store = {}
+        db = _FakeFirestore({
+            "contractors": {cid: doc},
+            "integration_revocation_outbox": outbox_store,
+            "integration_lifecycle_audit": audit_store,
+        })
+
+        class _SentinelHttp:
+            async def post(self, *args, **kwargs):
+                if is_exc:
+                    raise RuntimeError(f"Network error with {sentinel}")
+                return resp_obj
+
+        res = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=_SentinelHttp(),
+        )
+
+        # 1. Assert sentinel NOT in logs
+        assert sentinel not in caplog.text, f"Case {case_id}: sentinel leaked in logs"
+
+        # 2. Assert sentinel NOT in public result
+        assert sentinel not in str(res), f"Case {case_id}: sentinel leaked in result dict"
+
+        # 3. Assert sentinel NOT in contractor doc
+        assert sentinel not in str(doc.data), f"Case {case_id}: sentinel leaked in contractor doc"
+
+        # 4. Assert sentinel NOT in outbox doc
+        outbox_doc = outbox_store[res["outbox_id"]]
+        assert sentinel not in str(outbox_doc.data), f"Case {case_id}: sentinel leaked in outbox doc"
+
+        # 5. Assert sentinel NOT in audit doc
+        audit_doc = audit_store[res["audit_id"]]
+        assert sentinel not in str(audit_doc.data), f"Case {case_id}: sentinel leaked in audit doc"
+
+
+@pytest.mark.asyncio
+async def test_google_calendar_disconnect_remains_unchanged(monkeypatch):
+    """Confirm Google Calendar disconnect request shape and outcomes remain byte-for-byte unchanged."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.db.integration_lifecycle_audit import (
+        REVOCATION_STATUS_CONFIRMED,
+        REVOCATION_STATUS_REJECTED,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+    _setup_keyring(monkeypatch)
+
+    gcal_cases = [
+        ("gcal-200", 200, False, REVOCATION_STATUS_CONFIRMED),
+        ("gcal-204", 204, False, REVOCATION_STATUS_CONFIRMED),
+        ("gcal-400", 400, False, REVOCATION_STATUS_REJECTED),
+        ("gcal-exc", 0, True, REVOCATION_STATUS_TRANSPORT_ERROR),
+    ]
+
+    for case_id, status_code, is_exc, expected_outcome in gcal_cases:
+        cid = f"c-{case_id}"
+        enc_acc = it_mutations.encrypt_integration_token("plain-gcal-token-777", contractor_id=cid, provider="google_calendar", token_kind="access")
+        enc_ref = it_mutations.encrypt_integration_token("plain-gcal-ref-777", contractor_id=cid, provider="google_calendar", token_kind="refresh")
+
+        doc = _FakeDocRef({
+            "contractor_id": cid, "active": True, "google_calendar_connected": True,
+            "google_calendar_generation": 1, "google_calendar_lifecycle_epoch": 1,
+            "google_calendar_access_token": enc_acc, "google_calendar_refresh_token": enc_ref,
+            "google_calendar_scope": it_mutations.CANONICAL_GOOGLE_CALENDAR_SCOPE,
+        }, doc_id=cid)
+
+        recorded = []
+
+        class _GcalHttp:
+            async def post(self, url, *args, **kwargs):
+                recorded.append({"url": url, "args": args, "kwargs": kwargs})
+                if is_exc:
+                    raise ConnectionError("Network failure")
+                return SimpleNamespace(status_code=status_code)
+
+        db = _FakeFirestore({"contractors": {cid: doc}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+        res = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="google_calendar",
+            db=db,
+            http_client=_GcalHttp(),
+        )
+
+        assert res["provider_revocation"]["status"] == expected_outcome
+        assert res["credential_deletion"]["status"] == "executed"
+        assert doc.data["google_calendar_connected"] is False
+
+        assert len(recorded) == 1
+        req = recorded[0]
+        assert req["url"] == "https://oauth2.googleapis.com/revoke"
+        assert req["kwargs"].get("params") == {"token": "plain-gcal-token-777"}
+        assert req["kwargs"].get("timeout") == 5.0
+        assert "headers" not in req["kwargs"] or req["kwargs"]["headers"] is None
+        assert "json" not in req["kwargs"] or req["kwargs"]["json"] is None
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_transport_mock_redirect_blocked(monkeypatch):
+    """Verify httpx.AsyncClient(follow_redirects=True, transport=MockTransport) does not follow 302 redirects when Jobber disconnect is orchestrated."""
+    import httpx
+    from app.services import integration_token_mutations as it_mutations
+    from app.services.jobber import JOBBER_GRAPHQL_URL
+    from app.db.integration_lifecycle_audit import (
+        AUDIT_COLLECTION,
+        REVOCATION_OUTBOX_COLLECTION,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+    _setup_keyring(monkeypatch)
+
+    cid = "c-mock-transport-redirect"
+    enc_acc = it_mutations.encrypt_integration_token("fictional-jobber-access-tok-123", contractor_id=cid, provider="jobber", token_kind="access")
+    enc_ref = it_mutations.encrypt_integration_token("fictional-jobber-refresh-tok-456", contractor_id=cid, provider="jobber", token_kind="refresh")
+
+    doc = _FakeDocRef({
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_token_envelope_required": True,
+        "jobber_lead_capture_enabled": True,
+        "jobber_access_token": enc_acc,
+        "jobber_refresh_token": enc_ref,
+        "jobber_connected_at": 100.0,
+    }, doc_id=cid)
+
+    outbox_store = {}
+    audit_store = {}
+    db = _FakeFirestore({
+        "contractors": {cid: doc},
+        REVOCATION_OUTBOX_COLLECTION: outbox_store,
+        AUDIT_COLLECTION: audit_store,
+    })
+
+    traced_requests: list[httpx.Request] = []
+
+    def _mock_handler(request: httpx.Request) -> httpx.Response:
+        traced_requests.append(request)
+        if str(request.url) == JOBBER_GRAPHQL_URL or str(request.url) == "https://api.getjobber.com/api/graphql":
+            return httpx.Response(
+                status_code=302,
+                headers={"Location": "https://api.getjobber.com/fictional/second-route"},
+            )
+        return httpx.Response(
+            status_code=200,
+            json={"unexpected": "redirect_followed"},
+        )
+
+    transport = httpx.MockTransport(_mock_handler)
+    injected_client = httpx.AsyncClient(follow_redirects=True, transport=transport)
+
+    try:
+        res = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=injected_client,
+        )
+    finally:
+        await injected_client.aclose()
+
+    # Actual orchestration must produce exactly one transport request
+    assert len(traced_requests) == 1
+    req = traced_requests[0]
+    assert str(req.url) == JOBBER_GRAPHQL_URL
+    assert str(req.url) == "https://api.getjobber.com/api/graphql"
+
+    # Classify transport_error_unknown
+    assert res["status"] == "disconnected"
+    assert res["provider_revocation"]["status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert res["provider_revocation"]["status"] == "transport_error_unknown"
+    assert res["revocation_status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert res["revocation_status"] == "transport_error_unknown"
+    assert res["credential_deletion"]["status"] == "executed"
+
+    # Remain locally disconnected with tokens removed and lead capture false
+    c_data = doc.data
+    assert c_data["jobber_connected"] is False
+    assert "jobber_access_token" not in c_data or c_data["jobber_access_token"] is it_mutations.DELETE_FIELD
+    assert "jobber_refresh_token" not in c_data or c_data["jobber_refresh_token"] is it_mutations.DELETE_FIELD
+    assert c_data["jobber_lead_capture_enabled"] is False
+    assert c_data["jobber_generation"] == 2
+    assert c_data["jobber_lifecycle_epoch"] == 2
+    assert type(c_data.get("jobber_disconnected_at")) is float and c_data["jobber_disconnected_at"] > 0.0
+
+    # Verify durable outbox & audit persistence
+    outbox_doc = outbox_store[res["outbox_id"]]
+    assert outbox_doc.data["status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert outbox_doc.data["status"] == "transport_error_unknown"
+    assert outbox_doc.data["contractor_id"] == cid
+
+    audit_doc = audit_store[res["audit_id"]]
+    assert audit_doc.data["revocation_status"] == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert audit_doc.data["revocation_status"] == "transport_error_unknown"
+    assert audit_doc.data["contractor_id"] == cid
+
+# Jobber Identity Foundation & Capture Matrix Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_jobber_identity_connect_validation_and_preflight(monkeypatch):
+    """Prove connect_provider_cas validates jobber_account_id strictly before constructing transactions."""
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-id-val"
+    doc_ref = _FakeDocRef({"contractor_id": cid, "active": True}, doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}})
+    _patch_firestore(monkeypatch, db)
+
+    # 1. Jobber without jobber_account_id raises before writes
+    with pytest.raises(it_mutations.IntegrationTokenEnvelopeError, match="jobber_account_id is required"):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="jobber",
+            access_token="acc",
+            refresh_token="ref",
+            jobber_account_id=None,
+            db=db,
+        )
+
+    # 2. Jobber with invalid jobber_account_id raises before writes
+    invalid_ids = ["", "has space", "has\x00c0", "A" * 4097, 123, True]
+    for bad_id in invalid_ids:
+        with pytest.raises(it_mutations.IntegrationTokenEnvelopeError):
+            await it_mutations.connect_provider_cas(
+                contractor_id=cid,
+                provider="jobber",
+                access_token="acc",
+                refresh_token="ref",
+                jobber_account_id=bad_id,  # type: ignore
+                db=db,
+            )
+
+    # 3. Google Calendar rejects non-None jobber_account_id before writes
+    with pytest.raises(it_mutations.IntegrationTokenEnvelopeError, match="jobber_account_id is not allowed for provider"):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="google_calendar",
+            access_token="acc",
+            refresh_token="ref",
+            jobber_account_id="acc_jobber_123",
+            db=db,
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_contractors_same_jobber_account_id_distinct_tokens(monkeypatch):
+    """Prove two distinct contractors can connect the same Jobber account ID with distinct tokens."""
+    _setup_keyring(monkeypatch)
+    cid1 = "c-jobber-shared-1"
+    cid2 = "c-jobber-shared-2"
+    doc1 = _FakeDocRef({"contractor_id": cid1, "active": True}, doc_id=cid1)
+    doc2 = _FakeDocRef({"contractor_id": cid2, "active": True}, doc_id=cid2)
+    db = _FakeFirestore({"contractors": {cid1: doc1, cid2: doc2}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    shared_account_id = "jobber-account-shared-999"
+
+    # Connect Contractor 1
+    u1, gen1, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid1,
+        provider="jobber",
+        access_token="acc-token-user-1",
+        refresh_token="ref-token-user-1",
+        jobber_account_id=shared_account_id,
+        db=db,
+    )
+    assert gen1 == 1
+    assert doc1.data["jobber_account_id"] == shared_account_id
+
+    # Connect Contractor 2 with same account ID and distinct tokens
+    u2, gen2, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid2,
+        provider="jobber",
+        access_token="acc-token-user-2",
+        refresh_token="ref-token-user-2",
+        jobber_account_id=shared_account_id,
+        db=db,
+    )
+    assert gen2 == 1
+    assert doc2.data["jobber_account_id"] == shared_account_id
+    assert doc1.data["jobber_access_token"] != doc2.data["jobber_access_token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_flag, stored_acc, new_acc, extra_flag, expected_flag",
+    [
+        # Same account ID, existing True preserved
+        (True, "acc_1", "acc_1", None, True),
+        # Identity changed -> reset to False
+        (True, "acc_1", "acc_2", None, False),
+        # Legacy record without stored ID -> reset to False
+        (True, None, "acc_1", None, False),
+        # Int 1 instead of bool True -> reset to False
+        (1, "acc_1", "acc_1", None, False),
+        # Existing False stays False even on same account
+        (False, "acc_1", "acc_1", None, False),
+        # Supplied True cannot enable on connect
+        (False, "acc_1", "acc_1", True, False),
+        # Supplied True with changed identity cannot enable
+        (False, "acc_1", "acc_2", True, False),
+        # Extra updates explicitly requested False
+        (True, "acc_1", "acc_1", False, False),
+        # Absent stored flag on same account defaults to False
+        (None, "acc_1", "acc_1", None, False),
+    ],
+)
+async def test_jobber_lead_capture_matrix_on_connect(
+    monkeypatch, stored_flag, stored_acc, new_acc, extra_flag, expected_flag
+):
+    """Prove Jobber lead capture preservation matrix strictly obeys identity and boolean invariants."""
+    _setup_keyring(monkeypatch)
+    cid = f"c-capture-matrix-{stored_flag}-{stored_acc}-{new_acc}-{extra_flag}"
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+    }
+    if stored_flag is not None:
+        initial_doc["jobber_lead_capture_enabled"] = stored_flag
+    if stored_acc is not None:
+        initial_doc["jobber_account_id"] = stored_acc
+
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    extra_updates = {}
+    if extra_flag is not None:
+        extra_updates["jobber_lead_capture_enabled"] = extra_flag
+
+    updates, next_gen, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid,
+        provider="jobber",
+        access_token="new-acc-tok",
+        refresh_token="new-ref-tok",
+        jobber_account_id=new_acc,
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        extra_updates=extra_updates if extra_updates else None,
+        db=db,
+    )
+
+    assert doc_ref.data["jobber_account_id"] == new_acc
+    assert doc_ref.data["jobber_lead_capture_enabled"] is expected_flag
+    assert type(doc_ref.data["jobber_lead_capture_enabled"]) is bool
+
+
+@pytest.mark.asyncio
+async def test_jobber_retry_recomputes_identity_and_capture_flag(monkeypatch):
+    """Prove transaction retry recomputes Jobber identity matching and capture policy from the live snapshot on retry."""
+    from google.api_core.exceptions import Aborted
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-retry-recompute"
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_account_id": "acc_initial_different",
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    attempt_count = [0]
+    class _RetryTransaction(_FakeTransaction):
+        def commit(self):
+            attempt_count[0] += 1
+            if attempt_count[0] == 1:
+                # On first attempt, update document in background to matching account ID and trigger retry
+                doc_ref.data["jobber_account_id"] = "acc_target_identity"
+                raise Aborted("Simulated retryable transaction collision")
+            super().commit()
+
+    db.transaction = lambda: _RetryTransaction(db)
+
+    updates, next_gen, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid,
+        provider="jobber",
+        access_token="new-acc",
+        refresh_token="new-ref",
+        jobber_account_id="acc_target_identity",
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        db=db,
+    )
+
+    assert attempt_count[0] == 2
+    # Because snapshot on retry had jobber_account_id == "acc_target_identity", capture flag is preserved as True!
+    assert doc_ref.data["jobber_account_id"] == "acc_target_identity"
+    assert doc_ref.data["jobber_lead_capture_enabled"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption_mode",
+    [
+        "drop_account_id",
+        "replace_account_id",
+        "drop_capture_flag",
+        "replace_capture_flag_int1",
+    ],
+)
+@pytest.mark.parametrize("is_ambiguous", [False, True])
+async def test_jobber_postcondition_verification_fails_closed_on_corrupt_id_or_flag_matrix(
+    monkeypatch, corruption_mode, is_ambiguous
+):
+    """Prove postcondition verification (normal and ambiguous recovery) fails closed on corrupt/missing account ID or flag across all matrix modes."""
+    _setup_keyring(monkeypatch)
+    cid = f"c-postcondition-{corruption_mode}-{is_ambiguous}"
+
+    prior_account_id = "acc_verified_prior_123"
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_account_id": prior_account_id,
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    class _CorruptingTransaction(_FakeTransaction):
+        def commit(self):
+            super().commit()
+            if corruption_mode == "drop_account_id":
+                doc_ref.data.pop("jobber_account_id", None)
+            elif corruption_mode == "replace_account_id":
+                doc_ref.data["jobber_account_id"] = "corrupted_or_different_acc_id"
+            elif corruption_mode == "drop_capture_flag":
+                doc_ref.data.pop("jobber_lead_capture_enabled", None)
+            elif corruption_mode == "replace_capture_flag_int1":
+                doc_ref.data["jobber_lead_capture_enabled"] = 1
+
+            if is_ambiguous:
+                raise RuntimeError("Simulated ambiguous commit transport drop")
+
+    db.transaction = lambda: _CorruptingTransaction(db)
+
+    with pytest.raises((it_mutations.IntegrationTokenEnvelopeError, it_mutations.IntegrationTokenCASConflict)):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="jobber",
+            access_token="new_valid_access_token",
+            refresh_token="new_valid_refresh_token",
+            jobber_account_id=prior_account_id,
+            observed_generation=1,
+            observed_lifecycle_epoch=1,
+            db=db,
+        )
+
+
+@pytest.mark.asyncio
+async def test_jobber_connect_cas_stale_generation_conflict_preserves_account_binding_and_tokens(monkeypatch):
+    """Prove connect_provider_cas with stale observed generation fails with CASConflict and leaves account binding and tokens unchanged."""
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-stale-gen-test"
+    initial_account_id = "acc_fictional_bound_original_999"
+    orig_access = "original_access_token_123"
+    orig_refresh = "original_refresh_token_123"
+    enc_access = it_mutations.encrypt_integration_token(orig_access, contractor_id=cid, provider="jobber", token_kind="access")
+    enc_refresh = it_mutations.encrypt_integration_token(orig_refresh, contractor_id=cid, provider="jobber", token_kind="refresh")
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 2,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": enc_access,
+        "jobber_refresh_token": enc_refresh,
+        "jobber_account_id": initial_account_id,
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    # Calling connect_provider_cas with stale generation 1 (current is 2) must raise IntegrationTokenCASConflict
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Generation conflict"):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="jobber",
+            access_token="stale_attempt_access",
+            refresh_token="stale_attempt_refresh",
+            jobber_account_id="acc_attacker_stale_attempt_456",
+            observed_generation=1,
+            observed_lifecycle_epoch=1,
+            db=db,
+        )
+
+    # Doc data and initial account binding and original tokens remain completely unchanged
+    assert doc_ref.data["jobber_account_id"] == initial_account_id
+    assert doc_ref.data["jobber_access_token"] == enc_access
+    assert doc_ref.data["jobber_refresh_token"] == enc_refresh
+    assert doc_ref.data["jobber_generation"] == 2
+    assert doc_ref.data["jobber_lead_capture_enabled"] is True
+    assert len(db.collections["integration_lifecycle_audit"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_jobber_refresh_and_disconnect_preserves_account_id(monkeypatch):
+    """Prove token refresh and disconnect preserve jobber_account_id diagnostic field on contractor document."""
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-refresh-disc-preserve"
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": "old-acc",
+        "jobber_refresh_token": "old-ref",
+        "jobber_account_id": "acc_permanent_diagnostic_123",
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    # 1. Refresh preserves account ID without performing any identity lookup
+    claim_id, _ = await it_mutations.acquire_refresh_claim_cas(
+        contractor_id=cid,
+        provider="jobber",
+        observed_generation=1,
+        observed_access_raw="old-acc",
+        observed_refresh_raw="old-ref",
+        db=db,
+    )
+    await it_mutations.transition_refresh_claim_to_started_cas(
+        contractor_id=cid,
+        provider="jobber",
+        claim_id=claim_id,
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        observed_access_raw="old-acc",
+        observed_refresh_raw="old-ref",
+        db=db,
+    )
+    await it_mutations.persist_refreshed_tokens_cas(
+        contractor_id=cid,
+        provider="jobber",
+        new_access_token="refreshed-acc",
+        new_refresh_token="refreshed-ref",
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        observed_access_raw="old-acc",
+        observed_refresh_raw="old-ref",
+        claim_id=claim_id,
+        db=db,
+    )
+
+    assert doc_ref.data["jobber_generation"] == 2
+    assert doc_ref.data["jobber_account_id"] == "acc_permanent_diagnostic_123"
+    assert doc_ref.data["jobber_lead_capture_enabled"] is True
+
+    # 2. Disconnect preserves non-secret account ID on tombstone
+    tomb_gen, _, _ = await it_mutations.disconnect_provider_cas(
+        contractor_id=cid,
+        provider="jobber",
+        db=db,
+    )
+
+    assert tomb_gen == 3
+    assert doc_ref.data["jobber_connected"] is False
+    assert "jobber_access_token" not in doc_ref.data
+    assert "jobber_refresh_token" not in doc_ref.data
+    assert doc_ref.data["jobber_account_id"] == "acc_permanent_diagnostic_123"
+    assert doc_ref.data["jobber_lead_capture_enabled"] is False

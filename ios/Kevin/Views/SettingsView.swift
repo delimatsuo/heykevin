@@ -943,7 +943,7 @@ struct SettingsHost<Root: View>: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "Jobber"))
                         .font(.subheadline.weight(.medium))
-                    Text(String(localized: "Schedule checking, job creation, customer lookup"))
+                    Text(String(localized: "Customer lookup and optional Request capture"))
                         .font(.caption)
                         .foregroundStyle(Color.secondary)
                 }
@@ -1012,7 +1012,7 @@ struct SettingsHost<Root: View>: View {
         } header: {
             Text(String(localized: "Integrations"))
         } footer: {
-            Text(String(localized: "Connect Jobber to let Kevin look up customers and create jobs automatically. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm."))
+            Text(String(localized: "Connect Jobber so Kevin can recognize existing customers. When lead capture is enabled, calls can create Clients and Requests for follow-up. Connect Google Calendar so Kevin can offer your open times and send you appointment requests to confirm."))
         }
     }
 

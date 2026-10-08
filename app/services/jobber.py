@@ -34,6 +34,131 @@ class JobberAuthError(Exception):
     """Raised when Jobber rejects the current access token."""
 
 
+class JobberIdentityError(Exception):
+    """Raised when Jobber account identity cannot be verified or is invalid."""
+
+
+def validate_jobber_account_id(value: Any) -> str:
+    """Validate Jobber account ID.
+
+    Must be exact str, 1..4096 characters, containing no whitespace, C0 controls, or DEL.
+    Returns value unchanged (no decoding, no normalization).
+    Raises generic JobberIdentityError on any validation failure.
+    """
+    if type(value) is not str:
+        raise JobberIdentityError("Invalid Jobber account ID")
+    if not (1 <= len(value) <= 4096):
+        raise JobberIdentityError("Invalid Jobber account ID")
+    for c in value:
+        code = ord(c)
+        if c.isspace() or code < 0x20 or code == 0x7F:
+            raise JobberIdentityError("Invalid Jobber account ID")
+    return value
+
+
+async def lookup_jobber_account_id(
+    access_token: str,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """Query Jobber GraphQL account ID using newly granted access token.
+
+    Direct POST to JOBBER_GRAPHQL_URL with JOBBER_GRAPHQL_VERSION.
+    Requires HTTP 200, exact dict root/data/account, errors absent or exact empty list, valid id.
+    Does NOT refresh or retry.
+    Never logs or returns raw response, error, or token.
+    Raises generic JobberIdentityError on any failure.
+    """
+    if type(access_token) is not str or not access_token:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account")
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-JOBBER-GRAPHQL-VERSION": JOBBER_GRAPHQL_VERSION,
+    }
+    body = {"query": "query GetAccount { account { id } }"}
+
+    try:
+        if client is not None:
+            resp = await client.post(
+                JOBBER_GRAPHQL_URL,
+                headers=headers,
+                json=body,
+                timeout=5.0,
+                follow_redirects=False,
+            )
+        else:
+            async with httpx.AsyncClient() as managed_client:
+                resp = await managed_client.post(
+                    JOBBER_GRAPHQL_URL,
+                    headers=headers,
+                    json=body,
+                    timeout=5.0,
+                    follow_redirects=False,
+                )
+    except Exception:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account") from None
+
+    if resp.status_code != 200:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account")
+
+    try:
+        payload = resp.json()
+    except Exception:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account") from None
+
+    if type(payload) is not dict:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account")
+
+    if "errors" in payload:
+        errors = payload["errors"]
+        if type(errors) is not list or len(errors) > 0:
+            logger.error(
+                "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+            )
+            raise JobberIdentityError("Failed to verify Jobber account")
+
+    data = payload.get("data")
+    if type(data) is not dict:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account")
+
+    account = data.get("account")
+    if type(account) is not dict:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account")
+
+    raw_id = account.get("id")
+    try:
+        account_id = validate_jobber_account_id(raw_id)
+    except Exception:
+        logger.error(
+            "Jobber account identity lookup failed: provider=jobber operation=lookup_account_id"
+        )
+        raise JobberIdentityError("Failed to verify Jobber account") from None
+
+    return account_id
+
+
 def _token_expires_soon(access_token: str, leeway_seconds: int = 120) -> bool:
     """Return True when a Jobber JWT is expired or close to expiring."""
     try:

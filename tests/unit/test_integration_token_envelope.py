@@ -7971,7 +7971,7 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
     class _CountingHttp:
         async def post(self, *args, **kwargs):
             http_call_count[0] += 1
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     class _ConcurrentDiscFakeFirestore(_FakeFirestore):
         def __init__(self):
@@ -8281,14 +8281,15 @@ async def test_18b2_provider_revocation_outcome_mapping_and_outbox_cas(monkeypat
     _setup_keyring(monkeypatch)
 
     class _MockHttp:
-        def __init__(self, status_code: int = 200, raises: bool = False):
+        def __init__(self, status_code: int = 200, raises: bool = False, json_fn: Any = None):
             self.status_code = status_code
             self.raises = raises
+            self._json_fn = json_fn or (lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
         async def post(self, *args, **kwargs):
             if self.raises:
                 raise ConnectionError("Network timeout")
-            return SimpleNamespace(status_code=self.status_code)
+            return SimpleNamespace(status_code=self.status_code, json=self._json_fn)
 
     # 1. Jobber 200 -> provider_confirmed
     cid1 = "c-jobber-200"
@@ -8361,7 +8362,7 @@ async def test_18b2_ambiguous_outcome_persistence_leaves_started_state(monkeypat
     class _CountingHttp:
         async def post(self, *args, **kwargs):
             http_count[0] += 1
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     # First call: disconnect succeeds, HTTP succeeds, but outcome commit fails -> fails closed with CASConflict
     db.fail_outcomes = False
@@ -8468,7 +8469,7 @@ async def test_18b2_no_secret_leakage_in_documents_and_responses(monkeypatch):
 
     class _MockHttp:
         async def post(self, *args, **kwargs):
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     req = SimpleNamespace(state=SimpleNamespace(is_admin=True, contractor_id=cid))
     resp = await integrations.jobber_disconnect(contractor_id=cid, request=req)
@@ -9084,7 +9085,7 @@ async def test_18b2b_orchestration_fail_closed_after_http_if_unpersisted(monkeyp
 
     class _MockHttp:
         async def post(self, *args, **kwargs):
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     # Monkeypatch record_revocation_outcome_cas to simulate network failure leaving outbox in provider_request_started
     async def _failing_record_outcome(*args, **kwargs):
@@ -9131,7 +9132,7 @@ async def test_18b2a_orchestration_zero_http_on_contenders_and_repeats(monkeypat
     class _CountingHttp:
         async def post(self, *args, **kwargs):
             http_call_count[0] += 1
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     # 1. First caller: succeeds, owns claim, executes 1 HTTP call
     res1 = await it_mutations.disconnect_and_revoke_provider_orchestration(
@@ -9188,7 +9189,7 @@ async def test_18b2a_endpoint_structured_response_no_secrets(monkeypatch):
     monkeypatch.setattr(it_mutations, "get_firestore_client", lambda: db)
 
     async def _fake_post(*args, **kwargs):
-        return SimpleNamespace(status_code=200)
+        return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     monkeypatch.setattr("httpx.AsyncClient.post", _fake_post)
 
@@ -10303,7 +10304,7 @@ async def test_18b2c_orchestration_fails_closed_if_reconnected_before_response(m
                 doc.data["jobber_lifecycle_epoch"] = 2
                 doc.data["jobber_access_token"] = "new-access-token"
                 doc.data["jobber_refresh_token"] = "new-refresh-token"
-            return SimpleNamespace(status_code=200)
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
 
     http_client = _ReconnectingOnceHttp()
 
@@ -11049,7 +11050,7 @@ async def test_18j_repeated_disconnect_idempotency_low_level_and_orchestration(m
 
         async def post(self, url, *args, **kwargs):
             revoke_http_calls.append(str(url))
-            return type("Resp", (), {"status_code": 200, "json": dict})()
+            return type("Resp", (), {"status_code": 200, "json": lambda self: {"data": {"appDisconnect": {"userErrors": []}}}})()
 
     monkeypatch.setattr("httpx.AsyncClient", _TrackingRevokeClient)
     req = type("Req", (), {"state": type("State", (), {"is_admin": True})()})()
@@ -14260,3 +14261,564 @@ async def test_classify_google_calendar_reconciliation_record(monkeypatch):
         contractor_id=cid,
         bound_operation_id=bound_id,
     ) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jobber GraphQL appDisconnect Disconnect Tests (Slice J3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_jobber_disconnect_classification_table_pure_helper():
+    """Pure table-driven unit test for _classify_jobber_disconnect_response across all status codes and payload shapes."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.db.integration_lifecycle_audit import (
+        REVOCATION_STATUS_CONFIRMED,
+        REVOCATION_STATUS_REJECTED,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+
+    classify = it_mutations._classify_jobber_disconnect_response
+
+    class _Resp:
+        def __init__(self, status_code: Any, json_val: Any = None, raises_json: bool = False, has_json: bool = True):
+            self.status_code = status_code
+            self._json_val = json_val
+            self._raises_json = raises_json
+            if not has_json:
+                self.json = None
+
+        def json(self):
+            if self._raises_json:
+                raise ValueError("Malformed JSON string")
+            return self._json_val
+
+    # 1. Confirmed cases (HTTP 200, valid dict, empty userErrors, absent/empty top-level errors)
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_CONFIRMED
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": []}}, "errors": []})) == REVOCATION_STATUS_CONFIRMED
+
+    # 2. Rejected cases (HTTP 200 with non-empty errors list or non-empty userErrors list)
+    assert classify(_Resp(200, {"errors": [{"message": "Unauthenticated"}], "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(200, {"errors": [{"message": "Syntax error"}]})) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": [{"message": "App not installed"}]}}})) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(200, {"errors": [{"message": "Error 1"}], "data": {"appDisconnect": {"userErrors": [{"message": "Error 2"}]}}})) == REVOCATION_STATUS_REJECTED
+
+    # 3. Malformed payload shapes -> TRANSPORT_ERROR
+    # Non-list errors
+    assert classify(_Resp(200, {"errors": None, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": False, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": {"message": "dict"}, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": "string", "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"errors": 123, "data": {"appDisconnect": {"userErrors": []}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Missing / malformed data
+    assert classify(_Resp(200, {"errors": []})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": None})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": []})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": "not-dict"})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Missing / malformed appDisconnect
+    assert classify(_Resp(200, {"data": {}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": None}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": []}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": "not-dict"}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Missing / malformed userErrors
+    assert classify(_Resp(200, {"data": {"appDisconnect": {}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": None}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": "not-list"}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": {}}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, {"data": {"appDisconnect": {"userErrors": 123}}})) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Non-dict root
+    assert classify(_Resp(200, [])) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, "string")) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, 123)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, None)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    # Invalid JSON / no callable json method
+    assert classify(_Resp(200, raises_json=True)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(200, has_json=False)) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+    # 4. Non-200 4xx client rejections (400..499 except 408, 425, 429) -> REJECTED
+    assert classify(_Resp(400)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(401)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(403)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(404)) == REVOCATION_STATUS_REJECTED
+    assert classify(_Resp(422)) == REVOCATION_STATUS_REJECTED
+
+    # 5. Non-200 4xx transient errors (408, 425, 429) -> TRANSPORT_ERROR
+    assert classify(_Resp(408)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(425)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(429)) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+    # 6. Other non-200 status codes (204, 3xx, 5xx) -> TRANSPORT_ERROR
+    assert classify(_Resp(204)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(301)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(302)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(500)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(502)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(503)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(504)) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+    # 7. Malformed / non-int status_code
+    assert classify(_Resp(None)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp(True)) == REVOCATION_STATUS_TRANSPORT_ERROR
+    assert classify(_Resp("200")) == REVOCATION_STATUS_TRANSPORT_ERROR
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_orchestration_comprehensive_matrix(monkeypatch):
+    """Exercise disconnect_and_revoke_provider_orchestration with FakeFirestore across all outcome classes.
+
+    Verifies:
+    - Return schema distinguishes local disconnected vs provider confirmation
+    - Durable outbox and audit records are persisted with exact status
+    - Contractor is tombstoned (jobber_connected=False, tokens deleted, lead_capture=False)
+    - Exactly 1 HTTP request on first call with zero new HTTP on repeat
+    """
+    from app.services import integration_token_mutations as it_mutations
+    from app.db.integration_lifecycle_audit import (
+        REVOCATION_OUTBOX_COLLECTION,
+        REVOCATION_STATUS_CONFIRMED,
+        REVOCATION_STATUS_REJECTED,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+    _setup_keyring(monkeypatch)
+
+    class _MockMatrixHttp:
+        def __init__(self, status_code: int = 200, json_body: Any = None, raises_json: bool = False, raises_network: bool = False):
+            self.status_code = status_code
+            self.json_body = json_body
+            self.raises_json = raises_json
+            self.raises_network = raises_network
+            self.call_count = 0
+
+        async def post(self, *args, **kwargs):
+            self.call_count += 1
+            if self.raises_network:
+                raise ConnectionError("Simulated network timeout")
+            resp_self = self
+            class _Resp:
+                status_code = resp_self.status_code
+                def json(self):
+                    if resp_self.raises_json:
+                        raise ValueError("JSON parse failure")
+                    return resp_self.json_body
+            return _Resp()
+
+    test_matrix = [
+        # (case_id, status_code, json_body, raises_json, raises_network, expected_outcome)
+        ("confirmed", 200, {"data": {"appDisconnect": {"userErrors": []}}}, False, False, REVOCATION_STATUS_CONFIRMED),
+        ("empty_top_errors", 200, {"data": {"appDisconnect": {"userErrors": []}}, "errors": []}, False, False, REVOCATION_STATUS_CONFIRMED),
+        ("top_errors_with_partial_data", 200, {"errors": [{"message": "Unauthorized scope"}], "data": {"appDisconnect": {"userErrors": []}}}, False, False, REVOCATION_STATUS_REJECTED),
+        ("mutation_user_errors", 200, {"data": {"appDisconnect": {"userErrors": [{"message": "App not installed"}]}}}, False, False, REVOCATION_STATUS_REJECTED),
+        ("malformed_null_errors", 200, {"errors": None, "data": {"appDisconnect": {"userErrors": []}}}, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("malformed_null_data", 200, {"data": None}, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("malformed_null_user_errors", 200, {"data": {"appDisconnect": {"userErrors": None}}}, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("invalid_json", 200, None, True, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("client_rejection_400", 400, None, False, False, REVOCATION_STATUS_REJECTED),
+        ("client_rejection_401", 401, None, False, False, REVOCATION_STATUS_REJECTED),
+        ("client_rejection_403", 403, None, False, False, REVOCATION_STATUS_REJECTED),
+        ("transient_408", 408, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("transient_429", 429, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("server_error_500", 500, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("unexpected_204", 204, None, False, False, REVOCATION_STATUS_TRANSPORT_ERROR),
+        ("network_timeout", 0, None, False, True, REVOCATION_STATUS_TRANSPORT_ERROR),
+    ]
+
+    for case_id, status_code, json_body, raises_json, raises_network, expected_outcome in test_matrix:
+        cid = f"c-matrix-{case_id}"
+        enc_acc = it_mutations.encrypt_integration_token(f"acc-{case_id}", contractor_id=cid, provider="jobber", token_kind="access")
+        enc_ref = it_mutations.encrypt_integration_token(f"ref-{case_id}", contractor_id=cid, provider="jobber", token_kind="refresh")
+
+        doc = _FakeDocRef({
+            "contractor_id": cid,
+            "active": True,
+            "jobber_connected": True,
+            "jobber_generation": 1,
+            "jobber_lifecycle_epoch": 1,
+            "jobber_token_envelope_required": True,
+            "jobber_lead_capture_enabled": True,
+            "jobber_access_token": enc_acc,
+            "jobber_refresh_token": enc_ref,
+            "jobber_connected_at": 100.0,
+        }, doc_id=cid)
+
+        outbox_store = {}
+        audit_store = {}
+        db = _FakeFirestore({
+            "contractors": {cid: doc},
+            "integration_revocation_outbox": outbox_store,
+            "integration_lifecycle_audit": audit_store,
+        })
+
+        http_client = _MockMatrixHttp(
+            status_code=status_code,
+            json_body=json_body,
+            raises_json=raises_json,
+            raises_network=raises_network,
+        )
+
+        # Call 1: First disconnect
+        res1 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=http_client,
+        )
+
+        # Assert returned schema distinguishes local disconnected from provider confirmation
+        assert res1["status"] == "disconnected", f"Case {case_id}: status must be disconnected"
+        assert res1["contractor_id"] == cid
+        assert res1["provider"] == "jobber"
+        assert res1["generation"] == 2
+        assert res1["lifecycle_epoch"] == 2
+        assert res1["credential_deletion"]["status"] == "executed"
+        assert res1["credential_deletion"]["attempted_by_this_request"] is True
+        assert res1["provider_revocation"]["status"] == expected_outcome, f"Case {case_id}: expected provider status {expected_outcome}, got {res1['provider_revocation']['status']}"
+        assert res1["provider_revocation"]["attempted"] is True
+        assert res1["provider_revocation"]["attempted_by_this_request"] is True
+        assert res1["revocation_status"] == expected_outcome
+        assert http_client.call_count == 1, f"Case {case_id}: exactly 1 HTTP call expected"
+
+        # Assert contractor document tombstone state in Firestore
+        c_data = doc.data
+        assert c_data["jobber_connected"] is False, f"Case {case_id}: connected must be False"
+        assert "jobber_access_token" not in c_data or c_data["jobber_access_token"] is it_mutations.DELETE_FIELD
+        assert "jobber_refresh_token" not in c_data or c_data["jobber_refresh_token"] is it_mutations.DELETE_FIELD
+        assert c_data["jobber_lead_capture_enabled"] is False, f"Case {case_id}: lead capture must be False"
+        assert c_data["jobber_generation"] == 2
+        assert c_data["jobber_lifecycle_epoch"] == 2
+        assert type(c_data.get("jobber_disconnected_at")) is float and c_data["jobber_disconnected_at"] > 0.0
+
+        # Assert durable outbox record in Firestore
+        outbox_doc = outbox_store[res1["outbox_id"]]
+        assert outbox_doc.data["status"] == expected_outcome
+        assert outbox_doc.data["contractor_id"] == cid
+        assert outbox_doc.data["generation"] == 2
+        assert outbox_doc.data["lifecycle_epoch"] == 2
+
+        # Assert durable audit record in Firestore
+        audit_doc = audit_store[res1["audit_id"]]
+        assert audit_doc.data["revocation_status"] == expected_outcome
+        assert audit_doc.data["contractor_id"] == cid
+        assert audit_doc.data["generation"] == 2
+
+        # Call 2: Repeat call on already-disconnected contractor
+        res2 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=http_client,
+        )
+        assert res2["status"] == "disconnected"
+        assert res2["generation"] == 2
+        assert res2["lifecycle_epoch"] == 2
+        assert res2["credential_deletion"]["status"] == "already_disconnected"
+        assert res2["credential_deletion"]["attempted_by_this_request"] is False
+        assert res2["provider_revocation"]["status"] == expected_outcome
+        assert res2["provider_revocation"]["attempted_by_this_request"] is False
+        assert http_client.call_count == 1, f"Case {case_id}: zero new HTTP calls on repeat disconnect"
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_request_pinning_injected_and_owned_clients(monkeypatch):
+    """Pin exact GraphQL URL, query, headers, timeout, and absence of form/OAuth revoke parameters for both injected and owned clients."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.services.jobber import JOBBER_GRAPHQL_URL, JOBBER_GRAPHQL_VERSION
+    _setup_keyring(monkeypatch)
+
+    expected_query = "mutation Disconnect { appDisconnect { userErrors { message } } }"
+
+    # 1. Injected client path
+    cid1 = "c-pin-injected"
+    enc_acc1 = it_mutations.encrypt_integration_token("plain-token-injected-999", contractor_id=cid1, provider="jobber", token_kind="access")
+    enc_ref1 = it_mutations.encrypt_integration_token("plain-token-ref-111", contractor_id=cid1, provider="jobber", token_kind="refresh")
+    doc1 = _FakeDocRef({
+        "contractor_id": cid1,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_token_envelope_required": True,
+        "jobber_lead_capture_enabled": True,
+        "jobber_access_token": enc_acc1,
+        "jobber_refresh_token": enc_ref1,
+    }, doc_id=cid1)
+    db1 = _FakeFirestore({"contractors": {cid1: doc1}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    recorded_injected = []
+
+    class _InjectedCaptureHttp:
+        async def post(self, url, *args, **kwargs):
+            recorded_injected.append({"url": url, "args": args, "kwargs": kwargs})
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": {"appDisconnect": {"userErrors": []}}},
+            )
+
+    await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid1,
+        provider="jobber",
+        db=db1,
+        http_client=_InjectedCaptureHttp(),
+    )
+
+    assert len(recorded_injected) == 1
+    req1 = recorded_injected[0]
+    assert req1["url"] == JOBBER_GRAPHQL_URL
+    assert req1["url"] == "https://api.getjobber.com/api/graphql"
+    assert req1["kwargs"].get("timeout") == 5.0
+    assert req1["kwargs"].get("json") == {"query": expected_query}
+    headers1 = req1["kwargs"].get("headers", {})
+    assert headers1.get("Authorization") == "Bearer plain-token-injected-999"
+    assert headers1.get("Content-Type") == "application/json"
+    assert headers1.get("X-JOBBER-GRAPHQL-VERSION") == JOBBER_GRAPHQL_VERSION
+    assert headers1.get("X-JOBBER-GRAPHQL-VERSION") == "2025-04-16"
+    assert "data" not in req1["kwargs"] or req1["kwargs"]["data"] is None
+    assert "params" not in req1["kwargs"] or req1["kwargs"]["params"] is None
+    assert "client_id" not in str(req1)
+    assert "client_secret" not in str(req1)
+    assert "refresh_token" not in str(req1)
+    assert "oauth/revoke" not in req1["url"]
+
+    # 2. Owned AsyncClient path (http_client=None)
+    cid2 = "c-pin-owned"
+    enc_acc2 = it_mutations.encrypt_integration_token("plain-token-owned-888", contractor_id=cid2, provider="jobber", token_kind="access")
+    enc_ref2 = it_mutations.encrypt_integration_token("plain-token-ref-222", contractor_id=cid2, provider="jobber", token_kind="refresh")
+    doc2 = _FakeDocRef({
+        "contractor_id": cid2,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_token_envelope_required": True,
+        "jobber_lead_capture_enabled": True,
+        "jobber_access_token": enc_acc2,
+        "jobber_refresh_token": enc_ref2,
+    }, doc_id=cid2)
+    db2 = _FakeFirestore({"contractors": {cid2: doc2}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    recorded_owned = []
+
+    class _OwnedCaptureClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, url, *args, **kwargs):
+            recorded_owned.append({"url": url, "args": args, "kwargs": kwargs})
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"data": {"appDisconnect": {"userErrors": []}}},
+            )
+
+    monkeypatch.setattr("httpx.AsyncClient", _OwnedCaptureClient)
+
+    await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid2,
+        provider="jobber",
+        db=db2,
+        http_client=None,
+    )
+
+    assert len(recorded_owned) == 1
+    req2 = recorded_owned[0]
+    assert req2["url"] == JOBBER_GRAPHQL_URL
+    assert req2["url"] == "https://api.getjobber.com/api/graphql"
+    assert req2["kwargs"].get("timeout") == 5.0
+    assert req2["kwargs"].get("json") == {"query": expected_query}
+    headers2 = req2["kwargs"].get("headers", {})
+    assert headers2.get("Authorization") == "Bearer plain-token-owned-888"
+    assert headers2.get("Content-Type") == "application/json"
+    assert headers2.get("X-JOBBER-GRAPHQL-VERSION") == JOBBER_GRAPHQL_VERSION
+    assert "data" not in req2["kwargs"] or req2["kwargs"]["data"] is None
+    assert "client_id" not in str(req2)
+    assert "client_secret" not in str(req2)
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_no_refresh_helper_and_no_401_retry(monkeypatch):
+    """Verify no token refresh helper is called during disconnect and 401 has zero retry."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.services import jobber as jobber_service
+    _setup_keyring(monkeypatch)
+
+    async def _poison_refresh(*args, **kwargs):
+        raise AssertionError("POISON: refresh_access_token must never be called during or after disconnect!")
+
+    monkeypatch.setattr(jobber_service, "refresh_access_token", _poison_refresh)
+
+    # 1. Successful disconnect does not call refresh
+    cid1 = "c-no-refresh-success"
+    enc_acc1 = it_mutations.encrypt_integration_token("tok-1", contractor_id=cid1, provider="jobber", token_kind="access")
+    enc_ref1 = it_mutations.encrypt_integration_token("tok-2", contractor_id=cid1, provider="jobber", token_kind="refresh")
+    doc1 = _FakeDocRef({
+        "contractor_id": cid1, "active": True, "jobber_connected": True,
+        "jobber_generation": 1, "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": enc_acc1, "jobber_refresh_token": enc_ref1,
+    }, doc_id=cid1)
+    db1 = _FakeFirestore({"contractors": {cid1: doc1}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    class _OkHttp:
+        async def post(self, *args, **kwargs):
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
+
+    res1 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid1, provider="jobber", db=db1, http_client=_OkHttp()
+    )
+    assert res1["provider_revocation"]["status"] == "provider_confirmed"
+
+    # 2. 401 response: exactly 1 HTTP call, classified as provider_rejected, NO retry, NO refresh
+    cid2 = "c-no-refresh-401"
+    enc_acc2 = it_mutations.encrypt_integration_token("tok-401", contractor_id=cid2, provider="jobber", token_kind="access")
+    enc_ref2 = it_mutations.encrypt_integration_token("tok-401-ref", contractor_id=cid2, provider="jobber", token_kind="refresh")
+    doc2 = _FakeDocRef({
+        "contractor_id": cid2, "active": True, "jobber_connected": True,
+        "jobber_generation": 1, "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": enc_acc2, "jobber_refresh_token": enc_ref2,
+    }, doc_id=cid2)
+    db2 = _FakeFirestore({"contractors": {cid2: doc2}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+    http_401_count = [0]
+    class _Http401:
+        async def post(self, *args, **kwargs):
+            http_401_count[0] += 1
+            return SimpleNamespace(status_code=401, json=lambda: {"errors": [{"message": "Unauthorized"}]})
+
+    res2 = await it_mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id=cid2, provider="jobber", db=db2, http_client=_Http401()
+    )
+    assert http_401_count[0] == 1
+    assert res2["provider_revocation"]["status"] == "provider_rejected"
+    assert res2["credential_deletion"]["status"] == "executed"
+    assert doc2.data["jobber_connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_jobber_disconnect_hostile_sentinel_privacy(monkeypatch, caplog):
+    """Verify hostile provider error strings or response bodies are never leaked into logs, result, audit, or outbox."""
+    import logging
+    from app.services import integration_token_mutations as it_mutations
+    _setup_keyring(monkeypatch)
+
+    sentinel_top = "HOSTILE_TOP_ERR_SENTINEL_777888"
+    sentinel_user = "HOSTILE_USER_ERR_SENTINEL_333444"
+    sentinel_body = "HOSTILE_BODY_SENTINEL_111222"
+    sentinel_exc = "HOSTILE_EXC_SENTINEL_555666"
+
+    sentinel_cases = [
+        ("top_err", SimpleNamespace(status_code=200, json=lambda: {"errors": [{"message": sentinel_top}]}), sentinel_top, False),
+        ("user_err", SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": [{"message": sentinel_user}]}}}), sentinel_user, False),
+        ("400_body", SimpleNamespace(status_code=400, json=lambda: {"detail": sentinel_body}), sentinel_body, False),
+        ("exception", None, sentinel_exc, True),
+    ]
+
+    for case_id, resp_obj, sentinel, is_exc in sentinel_cases:
+        caplog.clear()
+        caplog.set_level(logging.DEBUG)
+
+        cid = f"c-sentinel-{case_id}"
+        enc_acc = it_mutations.encrypt_integration_token("tok-sentinel", contractor_id=cid, provider="jobber", token_kind="access")
+        enc_ref = it_mutations.encrypt_integration_token("tok-sentinel-ref", contractor_id=cid, provider="jobber", token_kind="refresh")
+
+        doc = _FakeDocRef({
+            "contractor_id": cid, "active": True, "jobber_connected": True,
+            "jobber_generation": 1, "jobber_lifecycle_epoch": 1,
+            "jobber_access_token": enc_acc, "jobber_refresh_token": enc_ref,
+        }, doc_id=cid)
+
+        outbox_store = {}
+        audit_store = {}
+        db = _FakeFirestore({
+            "contractors": {cid: doc},
+            "integration_revocation_outbox": outbox_store,
+            "integration_lifecycle_audit": audit_store,
+        })
+
+        class _SentinelHttp:
+            async def post(self, *args, **kwargs):
+                if is_exc:
+                    raise RuntimeError(f"Network error with {sentinel}")
+                return resp_obj
+
+        res = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="jobber",
+            db=db,
+            http_client=_SentinelHttp(),
+        )
+
+        # 1. Assert sentinel NOT in logs
+        assert sentinel not in caplog.text, f"Case {case_id}: sentinel leaked in logs"
+
+        # 2. Assert sentinel NOT in public result
+        assert sentinel not in str(res), f"Case {case_id}: sentinel leaked in result dict"
+
+        # 3. Assert sentinel NOT in contractor doc
+        assert sentinel not in str(doc.data), f"Case {case_id}: sentinel leaked in contractor doc"
+
+        # 4. Assert sentinel NOT in outbox doc
+        outbox_doc = outbox_store[res["outbox_id"]]
+        assert sentinel not in str(outbox_doc.data), f"Case {case_id}: sentinel leaked in outbox doc"
+
+        # 5. Assert sentinel NOT in audit doc
+        audit_doc = audit_store[res["audit_id"]]
+        assert sentinel not in str(audit_doc.data), f"Case {case_id}: sentinel leaked in audit doc"
+
+
+@pytest.mark.asyncio
+async def test_google_calendar_disconnect_remains_unchanged(monkeypatch):
+    """Confirm Google Calendar disconnect request shape and outcomes remain byte-for-byte unchanged."""
+    from app.services import integration_token_mutations as it_mutations
+    from app.db.integration_lifecycle_audit import (
+        REVOCATION_STATUS_CONFIRMED,
+        REVOCATION_STATUS_REJECTED,
+        REVOCATION_STATUS_TRANSPORT_ERROR,
+    )
+    _setup_keyring(monkeypatch)
+
+    gcal_cases = [
+        ("gcal-200", 200, False, REVOCATION_STATUS_CONFIRMED),
+        ("gcal-204", 204, False, REVOCATION_STATUS_CONFIRMED),
+        ("gcal-400", 400, False, REVOCATION_STATUS_REJECTED),
+        ("gcal-exc", 0, True, REVOCATION_STATUS_TRANSPORT_ERROR),
+    ]
+
+    for case_id, status_code, is_exc, expected_outcome in gcal_cases:
+        cid = f"c-{case_id}"
+        enc_acc = it_mutations.encrypt_integration_token("plain-gcal-token-777", contractor_id=cid, provider="google_calendar", token_kind="access")
+        enc_ref = it_mutations.encrypt_integration_token("plain-gcal-ref-777", contractor_id=cid, provider="google_calendar", token_kind="refresh")
+
+        doc = _FakeDocRef({
+            "contractor_id": cid, "active": True, "google_calendar_connected": True,
+            "google_calendar_generation": 1, "google_calendar_lifecycle_epoch": 1,
+            "google_calendar_access_token": enc_acc, "google_calendar_refresh_token": enc_ref,
+            "google_calendar_scope": it_mutations.CANONICAL_GOOGLE_CALENDAR_SCOPE,
+        }, doc_id=cid)
+
+        recorded = []
+
+        class _GcalHttp:
+            async def post(self, url, *args, **kwargs):
+                recorded.append({"url": url, "args": args, "kwargs": kwargs})
+                if is_exc:
+                    raise ConnectionError("Network failure")
+                return SimpleNamespace(status_code=status_code)
+
+        db = _FakeFirestore({"contractors": {cid: doc}, "integration_revocation_outbox": {}, "integration_lifecycle_audit": {}})
+
+        res = await it_mutations.disconnect_and_revoke_provider_orchestration(
+            contractor_id=cid,
+            provider="google_calendar",
+            db=db,
+            http_client=_GcalHttp(),
+        )
+
+        assert res["provider_revocation"]["status"] == expected_outcome
+        assert res["credential_deletion"]["status"] == "executed"
+        assert doc.data["google_calendar_connected"] is False
+
+        assert len(recorded) == 1
+        req = recorded[0]
+        assert req["url"] == "https://oauth2.googleapis.com/revoke"
+        assert req["kwargs"].get("params") == {"token": "plain-gcal-token-777"}
+        assert req["kwargs"].get("timeout") == 5.0
+        assert "headers" not in req["kwargs"] or req["kwargs"]["headers"] is None
+        assert "json" not in req["kwargs"] or req["kwargs"]["json"] is None

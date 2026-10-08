@@ -3586,6 +3586,79 @@ async def finalize_revocation_audit_cas(
     return True
 
 
+def _classify_jobber_disconnect_response(resp: Any) -> str:
+    """Pure classifier for Jobber appDisconnect GraphQL responses.
+
+    Pin outcome classification:
+    - HTTP 200 JSON exact dict with absent or exactly-empty-list top-level errors,
+      exact dict data, exact dict appDisconnect and explicitly exactly-empty-list userErrors
+      => REVOCATION_STATUS_CONFIRMED.
+    - HTTP 200 top-level nonempty errors list or appDisconnect nonempty userErrors list
+      => REVOCATION_STATUS_REJECTED, even if partial successful data also exists.
+    - Invalid JSON/root/data/appDisconnect; missing/null/non-list userErrors;
+      malformed/non-list errors (including null, false, object)
+      => REVOCATION_STATUS_TRANSPORT_ERROR. Never confirm by HTTP alone.
+    - Non-200 definitive client rejection (400..499 except 408, 425, 429)
+      => REVOCATION_STATUS_REJECTED.
+    - All other non-200 including 204, 3xx, 408, 425, 429, 5xx
+      => REVOCATION_STATUS_TRANSPORT_ERROR.
+    """
+    status_code = getattr(resp, "status_code", None)
+    if type(status_code) is not int or type(status_code) is bool:
+        return REVOCATION_STATUS_TRANSPORT_ERROR
+
+    if status_code == 200:
+        json_fn = getattr(resp, "json", None)
+        if not callable(json_fn):
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+        try:
+            body = json_fn()
+        except Exception:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+
+        if type(body) is not dict:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+
+        # Check top-level errors if present
+        if "errors" in body:
+            errors = body["errors"]
+            if type(errors) is not list:
+                return REVOCATION_STATUS_TRANSPORT_ERROR
+            if len(errors) > 0:
+                return REVOCATION_STATUS_REJECTED
+
+        # If top-level errors absent or empty list, check data
+        if "data" not in body:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+        data = body["data"]
+        if type(data) is not dict:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+
+        if "appDisconnect" not in data:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+        app_disconnect = data["appDisconnect"]
+        if type(app_disconnect) is not dict:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+
+        if "userErrors" not in app_disconnect:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+        user_errors = app_disconnect["userErrors"]
+        if type(user_errors) is not list:
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+
+        if len(user_errors) == 0:
+            return REVOCATION_STATUS_CONFIRMED
+        else:
+            return REVOCATION_STATUS_REJECTED
+
+    if 400 <= status_code <= 499:
+        if status_code in (408, 425, 429):
+            return REVOCATION_STATUS_TRANSPORT_ERROR
+        return REVOCATION_STATUS_REJECTED
+
+    return REVOCATION_STATUS_TRANSPORT_ERROR
+
+
 async def disconnect_and_revoke_provider_orchestration(
     *,
     contractor_id: str,
@@ -3598,8 +3671,6 @@ async def disconnect_and_revoke_provider_orchestration(
 ) -> dict[str, Any]:
     """Orchestrate disconnect CAS, at-most-once HTTP revocation, and audit finalization."""
     import httpx
-
-    from app.config import settings
 
     if db is None:
         try:
@@ -3629,31 +3700,35 @@ async def disconnect_and_revoke_provider_orchestration(
         outcome_status = REVOCATION_STATUS_TRANSPORT_ERROR
         try:
             if provider == "jobber":
+                from app.services.jobber import (
+                    JOBBER_GRAPHQL_URL,
+                    JOBBER_GRAPHQL_VERSION,
+                )
+
+                jobber_headers = {
+                    "Authorization": f"Bearer {disc_res.access_token_for_revocation}",
+                    "Content-Type": "application/json",
+                    "X-JOBBER-GRAPHQL-VERSION": JOBBER_GRAPHQL_VERSION,
+                }
+                jobber_payload = {
+                    "query": "mutation Disconnect { appDisconnect { userErrors { message } } }",
+                }
                 if http_client is not None:
                     resp = await http_client.post(
-                        "https://api.getjobber.com/api/oauth/revoke",
-                        data={
-                            "token": disc_res.access_token_for_revocation,
-                            "client_id": settings.jobber_client_id,
-                            "client_secret": settings.jobber_client_secret,
-                        },
+                        JOBBER_GRAPHQL_URL,
+                        headers=jobber_headers,
+                        json=jobber_payload,
                         timeout=5.0,
                     )
                 else:
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(
-                            "https://api.getjobber.com/api/oauth/revoke",
-                            data={
-                                "token": disc_res.access_token_for_revocation,
-                                "client_id": settings.jobber_client_id,
-                                "client_secret": settings.jobber_client_secret,
-                            },
+                            JOBBER_GRAPHQL_URL,
+                            headers=jobber_headers,
+                            json=jobber_payload,
                             timeout=5.0,
                         )
-                if resp.status_code == 200:
-                    outcome_status = REVOCATION_STATUS_CONFIRMED
-                else:
-                    outcome_status = REVOCATION_STATUS_REJECTED
+                outcome_status = _classify_jobber_disconnect_response(resp)
 
             elif provider == "google_calendar":
                 if http_client is not None:

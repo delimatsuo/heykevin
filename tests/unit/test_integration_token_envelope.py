@@ -941,7 +941,7 @@ async def test_persist_refreshed_tokens_cas_rejects_non_string_raw_payloads(monk
 async def test_refresh_persistence_failure_leaves_contractor_dict_unchanged(monkeypatch):
     _setup_keyring(monkeypatch)
     fake_db = _FakeFirestore()
-    monkeypatch.setattr(firestore_module, "get_firestore_client", lambda: fake_db)
+    _patch_firestore(monkeypatch, fake_db)
 
     contractor_id = "c-fail-1"
     enc_access = encrypt_integration_token("old-access", contractor_id=contractor_id, provider="jobber", token_kind="access")
@@ -1835,6 +1835,7 @@ async def test_no_database_fails_closed_across_all_cas_helpers(monkeypatch):
             provider="jobber",
             access_token="acc",
             refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             db=None,
         )
 
@@ -2022,6 +2023,7 @@ async def test_ambiguous_commit_connect_and_disconnect(monkeypatch):
         provider="jobber",
         access_token="acc-1",
         refresh_token="ref-1",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert next_gen == 1
@@ -2374,6 +2376,7 @@ async def test_durable_integration_lifecycle_audit_connect_and_disconnect(monkey
         provider="jobber",
         access_token=secret_access,
         refresh_token=secret_refresh,
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
 
@@ -3121,6 +3124,7 @@ async def test_connect_cas_with_observed_precondition_concurrency_race(monkeypat
             provider="jobber",
             access_token="new-acc",
             refresh_token="new-ref",
+            jobber_account_id="jobber-acc-1",
             observed_generation=1,
             observed_access_raw="acc-gen1",
             observed_refresh_raw="ref-gen1",
@@ -3133,6 +3137,7 @@ async def test_connect_cas_with_observed_precondition_concurrency_race(monkeypat
         provider="jobber",
         access_token="new-acc",
         refresh_token="new-ref",
+        jobber_account_id="jobber-acc-1",
         observed_generation=2,
         observed_access_raw="acc-gen2",
         observed_refresh_raw="ref-gen2",
@@ -3603,6 +3608,7 @@ async def test_connect_deletes_stale_disconnected_at_and_token_refreshed_at(monk
         provider="jobber",
         access_token="new-access",
         refresh_token="new-refresh",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
 
@@ -3627,6 +3633,7 @@ async def test_connect_requires_refresh_token(monkeypatch):
             provider="jobber",
             access_token="new-access",
             refresh_token=None,  # type: ignore
+            jobber_account_id="jobber-acc-1",
             db=db,
         )
 
@@ -3636,6 +3643,7 @@ async def test_connect_requires_refresh_token(monkeypatch):
             provider="jobber",
             access_token="new-access",
             refresh_token="",
+            jobber_account_id="jobber-acc-1",
             db=db,
         )
 
@@ -3844,6 +3852,7 @@ async def test_flag_off_keyless_plaintext_and_absent_writes_plaintext(monkeypatc
         provider="jobber",
         access_token="plain-access-1",
         refresh_token="plain-refresh-1",
+        jobber_account_id="jobber-acc-1",
         observed_generation=0,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -4659,6 +4668,7 @@ async def test_strengthened_mutation_matrix_durable_representations(monkeypatch,
         provider=provider,
         access_token="conn-acc-token",
         refresh_token="conn-ref-token",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=0,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5228,6 +5238,7 @@ async def test_connect_legacy_record_with_existing_credentials_emits_reconnected
         provider="jobber",
         access_token="new-connected-acc",
         refresh_token="new-connected-ref",
+        jobber_account_id="jobber-acc-1",
         observed_generation=0,
         observed_access_raw="legacy-old-acc",
         observed_refresh_raw="legacy-old-ref",
@@ -5247,6 +5258,7 @@ async def test_connect_legacy_record_with_existing_credentials_emits_reconnected
         provider="jobber",
         access_token="new-acc-first",
         refresh_token="new-ref-first",
+        jobber_account_id="jobber-acc-1",
         observed_generation=0,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5415,6 +5427,7 @@ async def test_durable_monotonic_envelope_floor_across_disconnect_reconnect(monk
         provider="jobber",
         access_token="initial-acc",
         refresh_token="initial-ref",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert gen1 == 1
@@ -5438,6 +5451,7 @@ async def test_durable_monotonic_envelope_floor_across_disconnect_reconnect(monk
         provider="jobber",
         access_token="reconnected-acc",
         refresh_token="reconnected-ref",
+        jobber_account_id="jobber-acc-1",
         observed_generation=2,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5692,6 +5706,7 @@ async def test_default_off_absent_floor_legacy_connect_remains_plaintext(monkeyp
         provider="jobber",
         access_token="plain-acc-1",
         refresh_token="plain-ref-1",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert next_gen == 1
@@ -5822,6 +5837,7 @@ async def test_disconnect_normalizes_malformed_floor_and_forces_envelope_reconne
         provider=provider,
         access_token="reconnected-acc",
         refresh_token="reconnected-ref",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=4,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -5880,6 +5896,7 @@ async def test_disconnect_exact_false_floor_with_no_dict_creds_retains_legacy_be
         provider=provider,
         access_token="reconnected-plain-acc",
         refresh_token="reconnected-plain-ref",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=3,
         observed_access_raw=None,
         observed_refresh_raw=None,
@@ -6148,6 +6165,7 @@ async def test_phased_refresh_claim_and_quarantine_state_machine(monkeypatch, pr
         provider=provider,
         access_token="acc-reauth",
         refresh_token="ref-reauth",
+        jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
         observed_generation=1,
         observed_lifecycle_epoch=1,
         observed_access_raw="acc-1",
@@ -7309,6 +7327,7 @@ async def test_repair_18a1b_extra_updates_hostile_keys_and_scope_validation(monk
     with pytest.raises(it_mutations.IntegrationTokenEnvelopeError):
         await it_mutations.connect_provider_cas(
             contractor_id=cid, provider="jobber", access_token="acc", refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             extra_updates={"jobber_lead_capture_enabled": "true"}, db=db,
         )
 
@@ -10531,6 +10550,7 @@ async def test_18d_connect_cas_creates_audit_deterministically_without_overwrite
         provider="jobber",
         access_token="valid-acc",
         refresh_token="valid-ref",
+        jobber_account_id="jobber-acc-1",
         db=db,
     )
     assert new_gen == 1
@@ -11172,6 +11192,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
                 provider=provider,
                 access_token="new_acc",
                 refresh_token="new_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id="wrong_claim_" + "x" * 20,
                 db=db,
             )
@@ -11183,6 +11204,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
                 provider=provider,
                 access_token="new_acc",
                 refresh_token="new_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id=None,
                 db=db,
             )
@@ -11206,6 +11228,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
             provider=provider,
             access_token="new_acc_ok",
             refresh_token="new_ref_ok",
+            jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
             claim_id=claim_id,
             observed_generation=1,
             observed_lifecycle_epoch=1,
@@ -11422,6 +11445,7 @@ async def test_repair_18o_connect_collision_proof_and_http_ambiguity_matrix(monk
             provider="jobber",
             access_token="acc",
             refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             claim_id="c" * 32,
             db=db,
         )
@@ -11530,6 +11554,7 @@ async def test_repair_18p_quarantine_oauth_attempt_flow(monkeypatch):
         provider="jobber",
         access_token="new_acc_123",
         refresh_token="new_ref_123",
+        jobber_account_id="jobber-acc-1",
         claim_id=claim_id2,
         observed_generation=1,
         observed_lifecycle_epoch=1,
@@ -11636,6 +11661,7 @@ async def test_repair_18p_commit_time_audit_collision(monkeypatch):
             provider="jobber",
             access_token="acc",
             refresh_token="ref",
+            jobber_account_id="jobber-acc-1",
             claim_id="c" * 32,
             db=db,
         )
@@ -11687,6 +11713,7 @@ async def test_18q_exclusive_reauthorization_fence(monkeypatch):
                 provider=provider,
                 access_token="new_acc",
                 refresh_token="new_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id=claim_id,
                 observed_generation=1,
                 observed_lifecycle_epoch=1,
@@ -11740,6 +11767,7 @@ async def test_18q_exclusive_reauthorization_fence(monkeypatch):
             provider=provider,
             access_token="new_acc_ok",
             refresh_token="new_ref_ok",
+            jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
             claim_id=claim_id,
             observed_generation=1,
             observed_lifecycle_epoch=1,
@@ -11837,6 +11865,7 @@ async def test_18q_complete_lifecycle_claim_binding(monkeypatch):
             provider="jobber",
             access_token="new_acc",
             refresh_token="new_ref",
+            jobber_account_id="jobber-acc-1",
             claim_id=None,
             db=db,
         )
@@ -12014,6 +12043,7 @@ async def test_18qc_connect_audit_collision_ordering_and_rollback(monkeypatch):
             provider="jobber",
             access_token="acc_new_val",
             refresh_token="ref_new_val",
+            jobber_account_id="jobber-acc-1",
             claim_id="c" * 32,
             db=db,
         )
@@ -12318,6 +12348,7 @@ async def test_18qd_commit_time_audit_collision_rollback(monkeypatch):
             provider="jobber",
             access_token="acc_new_123",
             refresh_token="ref_new_123",
+            jobber_account_id="jobber-acc-1",
             claim_id=claim_id,
             db=db,
         )
@@ -13027,6 +13058,7 @@ async def test_18qg_fingerprint_guard_connect_provider(monkeypatch):
                 provider=provider,
                 access_token="new_conn_acc",
                 refresh_token="new_conn_ref",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 claim_id=claim_id,
                 db=db,
             )
@@ -14138,6 +14170,7 @@ async def test_expired_bound_started_or_uncertain_claims_remain_hard_fences(monk
                 provider=provider,
                 access_token="replacement-access",
                 refresh_token="replacement-refresh",
+                jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
                 observed_generation=1,
                 observed_lifecycle_epoch=1,
                 observed_access_raw=enc_access,
@@ -14146,6 +14179,8 @@ async def test_expired_bound_started_or_uncertain_claims_remain_hard_fences(monk
                 db=db_conn,
             )
         assert c_doc_conn.data.get(f"{provider}_operation_intent_phase") == phase
+        assert c_doc_conn.data.get(f"{provider}_access_token") == enc_access
+        assert c_doc_conn.data.get(f"{provider}_refresh_token") == enc_refresh
         assert f"{provider}_reauthorization_required" not in c_doc_conn.data
 
 
@@ -14262,8 +14297,6 @@ async def test_classify_google_calendar_reconciliation_record(monkeypatch):
         bound_operation_id=bound_id,
     ) is None
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Jobber GraphQL appDisconnect Disconnect Tests (Slice J3)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -14925,3 +14958,389 @@ async def test_jobber_disconnect_transport_mock_redirect_blocked(monkeypatch):
     assert audit_doc.data["revocation_status"] == REVOCATION_STATUS_TRANSPORT_ERROR
     assert audit_doc.data["revocation_status"] == "transport_error_unknown"
     assert audit_doc.data["contractor_id"] == cid
+
+# Jobber Identity Foundation & Capture Matrix Tests
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_jobber_identity_connect_validation_and_preflight(monkeypatch):
+    """Prove connect_provider_cas validates jobber_account_id strictly before constructing transactions."""
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-id-val"
+    doc_ref = _FakeDocRef({"contractor_id": cid, "active": True}, doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}})
+    _patch_firestore(monkeypatch, db)
+
+    # 1. Jobber without jobber_account_id raises before writes
+    with pytest.raises(it_mutations.IntegrationTokenEnvelopeError, match="jobber_account_id is required"):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="jobber",
+            access_token="acc",
+            refresh_token="ref",
+            jobber_account_id=None,
+            db=db,
+        )
+
+    # 2. Jobber with invalid jobber_account_id raises before writes
+    invalid_ids = ["", "has space", "has\x00c0", "A" * 4097, 123, True]
+    for bad_id in invalid_ids:
+        with pytest.raises(it_mutations.IntegrationTokenEnvelopeError):
+            await it_mutations.connect_provider_cas(
+                contractor_id=cid,
+                provider="jobber",
+                access_token="acc",
+                refresh_token="ref",
+                jobber_account_id=bad_id,  # type: ignore
+                db=db,
+            )
+
+    # 3. Google Calendar rejects non-None jobber_account_id before writes
+    with pytest.raises(it_mutations.IntegrationTokenEnvelopeError, match="jobber_account_id is not allowed for provider"):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="google_calendar",
+            access_token="acc",
+            refresh_token="ref",
+            jobber_account_id="acc_jobber_123",
+            db=db,
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_contractors_same_jobber_account_id_distinct_tokens(monkeypatch):
+    """Prove two distinct contractors can connect the same Jobber account ID with distinct tokens."""
+    _setup_keyring(monkeypatch)
+    cid1 = "c-jobber-shared-1"
+    cid2 = "c-jobber-shared-2"
+    doc1 = _FakeDocRef({"contractor_id": cid1, "active": True}, doc_id=cid1)
+    doc2 = _FakeDocRef({"contractor_id": cid2, "active": True}, doc_id=cid2)
+    db = _FakeFirestore({"contractors": {cid1: doc1, cid2: doc2}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    shared_account_id = "jobber-account-shared-999"
+
+    # Connect Contractor 1
+    u1, gen1, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid1,
+        provider="jobber",
+        access_token="acc-token-user-1",
+        refresh_token="ref-token-user-1",
+        jobber_account_id=shared_account_id,
+        db=db,
+    )
+    assert gen1 == 1
+    assert doc1.data["jobber_account_id"] == shared_account_id
+
+    # Connect Contractor 2 with same account ID and distinct tokens
+    u2, gen2, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid2,
+        provider="jobber",
+        access_token="acc-token-user-2",
+        refresh_token="ref-token-user-2",
+        jobber_account_id=shared_account_id,
+        db=db,
+    )
+    assert gen2 == 1
+    assert doc2.data["jobber_account_id"] == shared_account_id
+    assert doc1.data["jobber_access_token"] != doc2.data["jobber_access_token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_flag, stored_acc, new_acc, extra_flag, expected_flag",
+    [
+        # Same account ID, existing True preserved
+        (True, "acc_1", "acc_1", None, True),
+        # Identity changed -> reset to False
+        (True, "acc_1", "acc_2", None, False),
+        # Legacy record without stored ID -> reset to False
+        (True, None, "acc_1", None, False),
+        # Int 1 instead of bool True -> reset to False
+        (1, "acc_1", "acc_1", None, False),
+        # Existing False stays False even on same account
+        (False, "acc_1", "acc_1", None, False),
+        # Supplied True cannot enable on connect
+        (False, "acc_1", "acc_1", True, False),
+        # Supplied True with changed identity cannot enable
+        (False, "acc_1", "acc_2", True, False),
+        # Extra updates explicitly requested False
+        (True, "acc_1", "acc_1", False, False),
+        # Absent stored flag on same account defaults to False
+        (None, "acc_1", "acc_1", None, False),
+    ],
+)
+async def test_jobber_lead_capture_matrix_on_connect(
+    monkeypatch, stored_flag, stored_acc, new_acc, extra_flag, expected_flag
+):
+    """Prove Jobber lead capture preservation matrix strictly obeys identity and boolean invariants."""
+    _setup_keyring(monkeypatch)
+    cid = f"c-capture-matrix-{stored_flag}-{stored_acc}-{new_acc}-{extra_flag}"
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+    }
+    if stored_flag is not None:
+        initial_doc["jobber_lead_capture_enabled"] = stored_flag
+    if stored_acc is not None:
+        initial_doc["jobber_account_id"] = stored_acc
+
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    extra_updates = {}
+    if extra_flag is not None:
+        extra_updates["jobber_lead_capture_enabled"] = extra_flag
+
+    updates, next_gen, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid,
+        provider="jobber",
+        access_token="new-acc-tok",
+        refresh_token="new-ref-tok",
+        jobber_account_id=new_acc,
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        extra_updates=extra_updates if extra_updates else None,
+        db=db,
+    )
+
+    assert doc_ref.data["jobber_account_id"] == new_acc
+    assert doc_ref.data["jobber_lead_capture_enabled"] is expected_flag
+    assert type(doc_ref.data["jobber_lead_capture_enabled"]) is bool
+
+
+@pytest.mark.asyncio
+async def test_jobber_retry_recomputes_identity_and_capture_flag(monkeypatch):
+    """Prove transaction retry recomputes Jobber identity matching and capture policy from the live snapshot on retry."""
+    from google.api_core.exceptions import Aborted
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-retry-recompute"
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_account_id": "acc_initial_different",
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    attempt_count = [0]
+    class _RetryTransaction(_FakeTransaction):
+        def commit(self):
+            attempt_count[0] += 1
+            if attempt_count[0] == 1:
+                # On first attempt, update document in background to matching account ID and trigger retry
+                doc_ref.data["jobber_account_id"] = "acc_target_identity"
+                raise Aborted("Simulated retryable transaction collision")
+            super().commit()
+
+    db.transaction = lambda: _RetryTransaction(db)
+
+    updates, next_gen, _ = await it_mutations.connect_provider_cas(
+        contractor_id=cid,
+        provider="jobber",
+        access_token="new-acc",
+        refresh_token="new-ref",
+        jobber_account_id="acc_target_identity",
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        db=db,
+    )
+
+    assert attempt_count[0] == 2
+    # Because snapshot on retry had jobber_account_id == "acc_target_identity", capture flag is preserved as True!
+    assert doc_ref.data["jobber_account_id"] == "acc_target_identity"
+    assert doc_ref.data["jobber_lead_capture_enabled"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption_mode",
+    [
+        "drop_account_id",
+        "replace_account_id",
+        "drop_capture_flag",
+        "replace_capture_flag_int1",
+    ],
+)
+@pytest.mark.parametrize("is_ambiguous", [False, True])
+async def test_jobber_postcondition_verification_fails_closed_on_corrupt_id_or_flag_matrix(
+    monkeypatch, corruption_mode, is_ambiguous
+):
+    """Prove postcondition verification (normal and ambiguous recovery) fails closed on corrupt/missing account ID or flag across all matrix modes."""
+    _setup_keyring(monkeypatch)
+    cid = f"c-postcondition-{corruption_mode}-{is_ambiguous}"
+
+    prior_account_id = "acc_verified_prior_123"
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_account_id": prior_account_id,
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    class _CorruptingTransaction(_FakeTransaction):
+        def commit(self):
+            super().commit()
+            if corruption_mode == "drop_account_id":
+                doc_ref.data.pop("jobber_account_id", None)
+            elif corruption_mode == "replace_account_id":
+                doc_ref.data["jobber_account_id"] = "corrupted_or_different_acc_id"
+            elif corruption_mode == "drop_capture_flag":
+                doc_ref.data.pop("jobber_lead_capture_enabled", None)
+            elif corruption_mode == "replace_capture_flag_int1":
+                doc_ref.data["jobber_lead_capture_enabled"] = 1
+
+            if is_ambiguous:
+                raise RuntimeError("Simulated ambiguous commit transport drop")
+
+    db.transaction = lambda: _CorruptingTransaction(db)
+
+    with pytest.raises((it_mutations.IntegrationTokenEnvelopeError, it_mutations.IntegrationTokenCASConflict)):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="jobber",
+            access_token="new_valid_access_token",
+            refresh_token="new_valid_refresh_token",
+            jobber_account_id=prior_account_id,
+            observed_generation=1,
+            observed_lifecycle_epoch=1,
+            db=db,
+        )
+
+
+@pytest.mark.asyncio
+async def test_jobber_connect_cas_stale_generation_conflict_preserves_account_binding_and_tokens(monkeypatch):
+    """Prove connect_provider_cas with stale observed generation fails with CASConflict and leaves account binding and tokens unchanged."""
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-stale-gen-test"
+    initial_account_id = "acc_fictional_bound_original_999"
+    orig_access = "original_access_token_123"
+    orig_refresh = "original_refresh_token_123"
+    enc_access = it_mutations.encrypt_integration_token(orig_access, contractor_id=cid, provider="jobber", token_kind="access")
+    enc_refresh = it_mutations.encrypt_integration_token(orig_refresh, contractor_id=cid, provider="jobber", token_kind="refresh")
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 2,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": enc_access,
+        "jobber_refresh_token": enc_refresh,
+        "jobber_account_id": initial_account_id,
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    # Calling connect_provider_cas with stale generation 1 (current is 2) must raise IntegrationTokenCASConflict
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Generation conflict"):
+        await it_mutations.connect_provider_cas(
+            contractor_id=cid,
+            provider="jobber",
+            access_token="stale_attempt_access",
+            refresh_token="stale_attempt_refresh",
+            jobber_account_id="acc_attacker_stale_attempt_456",
+            observed_generation=1,
+            observed_lifecycle_epoch=1,
+            db=db,
+        )
+
+    # Doc data and initial account binding and original tokens remain completely unchanged
+    assert doc_ref.data["jobber_account_id"] == initial_account_id
+    assert doc_ref.data["jobber_access_token"] == enc_access
+    assert doc_ref.data["jobber_refresh_token"] == enc_refresh
+    assert doc_ref.data["jobber_generation"] == 2
+    assert doc_ref.data["jobber_lead_capture_enabled"] is True
+    assert len(db.collections["integration_lifecycle_audit"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_jobber_refresh_and_disconnect_preserves_account_id(monkeypatch):
+    """Prove token refresh and disconnect preserve jobber_account_id diagnostic field on contractor document."""
+    _setup_keyring(monkeypatch)
+    cid = "c-jobber-refresh-disc-preserve"
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": True,
+        "jobber_generation": 1,
+        "jobber_lifecycle_epoch": 1,
+        "jobber_access_token": "old-acc",
+        "jobber_refresh_token": "old-ref",
+        "jobber_account_id": "acc_permanent_diagnostic_123",
+        "jobber_lead_capture_enabled": True,
+    }
+    doc_ref = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    db = _FakeFirestore({"contractors": {cid: doc_ref}, "integration_lifecycle_audit": {}})
+    _patch_firestore(monkeypatch, db)
+
+    # 1. Refresh preserves account ID without performing any identity lookup
+    claim_id, _ = await it_mutations.acquire_refresh_claim_cas(
+        contractor_id=cid,
+        provider="jobber",
+        observed_generation=1,
+        observed_access_raw="old-acc",
+        observed_refresh_raw="old-ref",
+        db=db,
+    )
+    await it_mutations.transition_refresh_claim_to_started_cas(
+        contractor_id=cid,
+        provider="jobber",
+        claim_id=claim_id,
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        observed_access_raw="old-acc",
+        observed_refresh_raw="old-ref",
+        db=db,
+    )
+    await it_mutations.persist_refreshed_tokens_cas(
+        contractor_id=cid,
+        provider="jobber",
+        new_access_token="refreshed-acc",
+        new_refresh_token="refreshed-ref",
+        observed_generation=1,
+        observed_lifecycle_epoch=1,
+        observed_access_raw="old-acc",
+        observed_refresh_raw="old-ref",
+        claim_id=claim_id,
+        db=db,
+    )
+
+    assert doc_ref.data["jobber_generation"] == 2
+    assert doc_ref.data["jobber_account_id"] == "acc_permanent_diagnostic_123"
+    assert doc_ref.data["jobber_lead_capture_enabled"] is True
+
+    # 2. Disconnect preserves non-secret account ID on tombstone
+    tomb_gen, _, _ = await it_mutations.disconnect_provider_cas(
+        contractor_id=cid,
+        provider="jobber",
+        db=db,
+    )
+
+    assert tomb_gen == 3
+    assert doc_ref.data["jobber_connected"] is False
+    assert "jobber_access_token" not in doc_ref.data
+    assert "jobber_refresh_token" not in doc_ref.data
+    assert doc_ref.data["jobber_account_id"] == "acc_permanent_diagnostic_123"
+    assert doc_ref.data["jobber_lead_capture_enabled"] is False

@@ -1339,7 +1339,7 @@ async def test_18k_jobber_business_graphql_ambiguity_retains_started_fence_and_b
 )
 async def test_18q_jobber_callback_quarantine_reauth_matrix(monkeypatch, _setup_firestore, case_type):
     """Causal proof for jobber_callback under True/True quarantine reauthorization:
-    - success: 1 HTTP, fresh credentials installed, gen+epoch advance, quarantine+attempt removed.
+    - success: 2 HTTP (token exchange then account lookup), fresh credentials installed, gen+epoch advance, quarantine+attempt removed.
     - pre_dispatch_fail / terminal_400: attempt terminalized, quarantine retained.
     - ambiguity (timeout, 429, invalid/non-dict JSON, missing token, persist fail): attempt retained in provider_request_started, quarantine retained, retry makes ZERO second HTTP call.
     """
@@ -1400,7 +1400,9 @@ async def test_18q_jobber_callback_quarantine_reauth_matrix(monkeypatch, _setup_
         async def post(self, *args, **kwargs):
             http_count[0] += 1
             if case_type == "success":
-                return _FakeResponse(200, {"access_token": "new-acc-tok", "refresh_token": "new-ref-tok", "expires_in": 3600})
+                if http_count[0] == 1:
+                    return _FakeResponse(200, {"access_token": "new-acc-tok", "refresh_token": "new-ref-tok", "expires_in": 3600})
+                return _FakeResponse(200, {"data": {"account": {"id": "acc_123"}}})
             elif case_type == "terminal_400":
                 return _FakeResponse(400, {"error": "invalid_grant"})
             elif case_type == "timeout":
@@ -1420,7 +1422,9 @@ async def test_18q_jobber_callback_quarantine_reauth_matrix(monkeypatch, _setup_
             elif case_type == "missing_access_token":
                 return _FakeResponse(200, {"refresh_token": "new-ref-only"})
             elif case_type == "persistence_fail":
-                return _FakeResponse(200, {"access_token": "new-acc-tok", "refresh_token": "new-ref-tok"})
+                if http_count[0] == 1:
+                    return _FakeResponse(200, {"access_token": "new-acc-tok", "refresh_token": "new-ref-tok"})
+                return _FakeResponse(200, {"data": {"account": {"id": "acc_123"}}})
 
     monkeypatch.setattr(integrations.httpx, "AsyncClient", lambda: _MockClient())
 
@@ -1435,7 +1439,7 @@ async def test_18q_jobber_callback_quarantine_reauth_matrix(monkeypatch, _setup_
     if case_type == "success":
         res = await integrations.jobber_callback(code="jobber-code", state=state_id)
         assert res.status_code == 200
-        assert http_count[0] == 1
+        assert http_count[0] == 2
         durable = c_doc.data
         assert durable.get("jobber_generation") == 2
         assert durable.get("jobber_lifecycle_epoch") == 2
@@ -1628,3 +1632,371 @@ async def test_18qd_jobber_lead_capture_noop(monkeypatch):
     assert txn_counts["create"] == 0
     assert txn_counts["delete"] == 0
     assert c_doc.get().to_dict() == initial_doc
+
+
+# ===========================================================================
+# Jobber Identity Foundation Tests
+# ===========================================================================
+
+def test_validate_jobber_account_id():
+    """Prove validate_jobber_account_id enforces exact str, 1..4096 length, no whitespace/C0/DEL, and returns value unchanged."""
+    # 1. Valid IDs return unchanged
+    assert jobber.validate_jobber_account_id("acc_123456") == "acc_123456"
+    assert jobber.validate_jobber_account_id("1") == "1"
+    assert jobber.validate_jobber_account_id("A" * 4096) == "A" * 4096
+    assert jobber.validate_jobber_account_id("MixedCase_123-abc.XYZ") == "MixedCase_123-abc.XYZ"
+
+    # 2. Invalid types
+    class _StrSubclass(str):
+        pass
+
+    invalid_types = [
+        123,
+        True,
+        False,
+        None,
+        b"acc_123",
+        ["acc_123"],
+        {"id": "acc_123"},
+        _StrSubclass("acc_123"),
+    ]
+    for val in invalid_types:
+        with pytest.raises(jobber.JobberIdentityError):
+            jobber.validate_jobber_account_id(val)
+
+    # 3. Length boundaries
+    with pytest.raises(jobber.JobberIdentityError):
+        jobber.validate_jobber_account_id("")
+    with pytest.raises(jobber.JobberIdentityError):
+        jobber.validate_jobber_account_id("A" * 4097)
+
+    # 4. Whitespace
+    invalid_whitespaces = [
+        " ",
+        "acc 123",
+        "acc\t123",
+        "acc\n123",
+        "acc\r123",
+        "\u00a0acc",
+        "acc ",
+        " acc",
+    ]
+    for val in invalid_whitespaces:
+        with pytest.raises(jobber.JobberIdentityError):
+            jobber.validate_jobber_account_id(val)
+
+    # 5. C0 controls (0x00 - 0x1F) and DEL (0x7F)
+    for code in range(0x20):
+        with pytest.raises(jobber.JobberIdentityError):
+            jobber.validate_jobber_account_id(f"acc{chr(code)}id")
+    with pytest.raises(jobber.JobberIdentityError):
+        jobber.validate_jobber_account_id(f"acc{chr(0x7F)}id")
+
+
+@pytest.mark.asyncio
+async def test_lookup_jobber_account_id_exact_request_and_success(monkeypatch):
+    """Prove lookup_jobber_account_id performs exact single POST with Bearer header, version header, 5.0s timeout, and exact GraphQL query."""
+    captured_requests = []
+
+    class _MockClient:
+        async def post(self, url, **kwargs):
+            captured_requests.append((url, kwargs))
+            return _FakeResponse(200, {"data": {"account": {"id": "acc_verified_999"}}})
+
+    client = _MockClient()
+    account_id = await jobber.lookup_jobber_account_id("fresh_access_token_123", client=client)
+
+    assert account_id == "acc_verified_999"
+    assert len(captured_requests) == 1
+    url, kwargs = captured_requests[0]
+    assert url == jobber.JOBBER_GRAPHQL_URL
+    assert kwargs["headers"]["Authorization"] == "Bearer fresh_access_token_123"
+    assert kwargs["headers"]["X-JOBBER-GRAPHQL-VERSION"] == jobber.JOBBER_GRAPHQL_VERSION
+    assert kwargs["headers"]["Content-Type"] == "application/json"
+    assert kwargs["timeout"] == 5.0
+    assert kwargs["follow_redirects"] is False
+    assert kwargs["json"] == {"query": "query GetAccount { account { id } }"}
+
+    # Also test with empty errors list
+    class _MockClientWithEmptyErrors:
+        async def post(self, url, **kwargs):
+            return _FakeResponse(200, {"data": {"account": {"id": "acc_verified_999"}}, "errors": []})
+
+    account_id2 = await jobber.lookup_jobber_account_id("fresh_access_token_123", client=_MockClientWithEmptyErrors())
+    assert account_id2 == "acc_verified_999"
+
+
+@pytest.mark.asyncio
+async def test_lookup_jobber_account_id_rejects_redirects_and_does_not_follow():
+    """Prove lookup_jobber_account_id enforces follow_redirects=False even if client configured follow_redirects=True."""
+    import httpx
+
+    transport_trace = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        transport_trace.append(str(request.url))
+        if str(request.url) == jobber.JOBBER_GRAPHQL_URL:
+            return httpx.Response(
+                302,
+                headers={"Location": "https://attacker.test/fictional-redirect/graphql"},
+                json={"data": {"account": {"id": "acc_redirected_valid_looking_123"}}},
+            )
+        return httpx.Response(
+            200,
+            json={"data": {"account": {"id": "acc_redirected_valid_looking_123"}}},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, follow_redirects=True) as injected_client:
+        with pytest.raises(jobber.JobberIdentityError) as exc_info:
+            await jobber.lookup_jobber_account_id("test_token_123", client=injected_client)
+
+        assert "Failed to verify Jobber account" in str(exc_info.value)
+        assert len(transport_trace) == 1
+
+
+class _DictSubclass(dict):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resp_obj",
+    [
+        # Root None and list
+        _FakeResponse(200, None),
+        _FakeResponse(200, []),
+        _FakeResponse(200, [{"data": {"account": {"id": "acc_123"}}}]),
+        # Non-200 with valid-looking body
+        _FakeResponse(204, None),
+        _FakeResponse(204, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(302, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(400, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(401, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(403, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(408, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(429, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(500, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(502, {"data": {"account": {"id": "acc_123"}}}),
+        _FakeResponse(503, {"data": {"account": {"id": "acc_123"}}}),
+        # GraphQL partial / non-empty errors / invalid error types
+        _FakeResponse(200, {"data": {"account": {"id": "acc_123"}}, "errors": [{"message": "partial error"}]}),
+        _FakeResponse(200, {"errors": [{"message": "unauthorized"}]}),
+        _FakeResponse(200, {"data": {"account": {"id": "acc_123"}}, "errors": "not_a_list"}),
+        _FakeResponse(200, {"data": {"account": {"id": "acc_123"}}, "errors": None}),
+        _FakeResponse(200, {"data": {"account": {"id": "acc_123"}}, "errors": False}),
+        _FakeResponse(200, {"data": {"account": {"id": "acc_123"}}, "errors": {"message": "dict error"}}),
+        # Dict subclasses for payload, data, and account
+        _FakeResponse(200, _DictSubclass({"data": {"account": {"id": "acc_123"}}})),
+        _FakeResponse(200, {"data": _DictSubclass({"account": {"id": "acc_123"}})}),
+        _FakeResponse(200, {"data": {"account": _DictSubclass({"id": "acc_123"})}}),
+        # Missing / null / invalid data
+        _FakeResponse(200, {}),
+        _FakeResponse(200, {"data": None}),
+        _FakeResponse(200, {"data": "not_a_dict"}),
+        _FakeResponse(200, {"data": []}),
+        # Missing / null / invalid account
+        _FakeResponse(200, {"data": {}}),
+        _FakeResponse(200, {"data": {"account": None}}),
+        _FakeResponse(200, {"data": {"account": "not_a_dict"}}),
+        # Missing / null / invalid id
+        _FakeResponse(200, {"data": {"account": {}}}),
+        _FakeResponse(200, {"data": {"account": {"id": None}}}),
+        _FakeResponse(200, {"data": {"account": {"id": 123}}}),
+        _FakeResponse(200, {"data": {"account": {"id": ""}}}),
+        _FakeResponse(200, {"data": {"account": {"id": "has space"}}}),
+        _FakeResponse(200, {"data": {"account": {"id": "has\x00c0"}}}),
+        _FakeResponse(200, {"data": {"account": {"id": "A" * 4097}}}),
+    ],
+)
+async def test_lookup_jobber_account_id_failure_modes(resp_obj):
+    """Prove lookup_jobber_account_id rejects non-200, errors, missing/null/invalid structures, and malformed IDs."""
+    class _MockClient:
+        async def post(self, url, **kwargs):
+            return resp_obj
+
+    with pytest.raises(jobber.JobberIdentityError):
+        await jobber.lookup_jobber_account_id("token_xyz", client=_MockClient())
+
+
+@pytest.mark.asyncio
+async def test_lookup_jobber_account_id_transport_failures_and_sentinel_suppression(caplog):
+    """Prove lookup_jobber_account_id handles timeout, invalid json, and connection error without exposing token or secrets."""
+    import httpx
+
+    hostile_token = "SECRET_TOKEN_BEARER_XYZ_999"
+    hostile_exception_msg = "HOSTILE_INTERNAL_PAYLOAD_EXCEPTION_123"
+
+    # Timeout
+    class _TimeoutClient:
+        async def post(self, url, **kwargs):
+            raise httpx.TimeoutException(hostile_exception_msg)
+
+    with pytest.raises(jobber.JobberIdentityError) as exc_info:
+        await jobber.lookup_jobber_account_id(hostile_token, client=_TimeoutClient())
+    assert hostile_token not in str(exc_info.value)
+    assert hostile_exception_msg not in str(exc_info.value)
+
+    # Invalid JSON
+    class _BadJsonResp:
+        status_code = 200
+        def json(self):
+            raise ValueError(hostile_exception_msg)
+
+    class _BadJsonClient:
+        async def post(self, url, **kwargs):
+            return _BadJsonResp()
+
+    with pytest.raises(jobber.JobberIdentityError) as exc_info:
+        await jobber.lookup_jobber_account_id(hostile_token, client=_BadJsonClient())
+    assert hostile_token not in str(exc_info.value)
+    assert hostile_exception_msg not in str(exc_info.value)
+
+    # Check logs contain no hostile strings
+    for record in caplog.records:
+        rec_str = str(record.__dict__)
+        assert hostile_token not in rec_str
+        assert hostile_exception_msg not in rec_str
+
+
+@pytest.mark.asyncio
+async def test_jobber_callback_identity_failure_retains_claim_and_commits_zero_tokens(monkeypatch):
+    """Prove Jobber callback identity verification failure raises generic 502, retains claim-bound started intent, and commits 0 credentials/audits."""
+    import base64
+    from fastapi import HTTPException
+    import app.api.integrations as integrations
+    import app.services.integration_token_mutations as mutations_module
+    from app.config import settings
+
+    dummy_key = base64.b64encode(b"k" * 32).decode("ascii")
+    monkeypatch.setattr(settings, "integration_token_encryption_keys", f'{{"1": "{dummy_key}"}}')
+    monkeypatch.setattr(settings, "integration_token_active_key_version", "1")
+    monkeypatch.setattr(settings, "jobber_client_id", "test-client")
+    monkeypatch.setattr(settings, "jobber_client_secret", "test-secret")
+
+    cid = "cid_callback_identity_fail"
+    state_id = "state_j_identity_fail_" + "1" * 16
+
+    initial_doc = {
+        "contractor_id": cid,
+        "active": True,
+        "jobber_connected": False,
+        "jobber_generation": 0,
+        "jobber_lifecycle_epoch": 0,
+    }
+    c_doc = _FakeDocRef(dict(initial_doc), doc_id=cid)
+    s_doc = _FakeDocRef({
+        "contractor_id": cid,
+        "provider": "jobber",
+        "lifecycle_epoch": 0,
+        "generation": 0,
+        "credentials_fingerprint": mutations_module.compute_raw_credentials_fingerprint(None, None),
+        "created_at": time.time(),
+        "expires_at": time.time() + 600.0,
+    }, doc_id=state_id)
+
+    db = _FakeFirestore({
+        "contractors": {cid: c_doc},
+        "jobber_oauth_states": {state_id: s_doc},
+        "integration_lifecycle_audit": {},
+    })
+    monkeypatch.setattr(integrations, "_get_firestore", lambda: db)
+    monkeypatch.setattr(mutations_module, "get_firestore_client", lambda: db)
+
+    http_calls = []
+
+    class _MockClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, url, **kwargs):
+            http_calls.append((url, kwargs))
+            if "oauth/token" in str(url):
+                # Successful code exchange
+                return _FakeResponse(200, {"access_token": "valid_acc_tok", "refresh_token": "valid_ref_tok", "expires_in": 3600})
+            elif "api.getjobber.com" in str(url):
+                # Identity verification failure: GraphQL error
+                return _FakeResponse(200, {"errors": [{"message": "Account query failed"}]})
+            raise AssertionError(f"Unexpected url {url}")
+
+    monkeypatch.setattr(integrations.httpx, "AsyncClient", lambda: _MockClient())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await integrations.jobber_callback(code="valid-jobber-code", state=state_id)
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "Failed to verify Jobber account"
+
+    # Started intent retained on contractor doc
+    durable = c_doc.data
+    assert durable.get("jobber_connected") is False
+    assert durable.get("jobber_operation_intent_phase") == "provider_request_started"
+    assert durable.get("jobber_operation_intent_kind") == "connect"
+    assert "jobber_access_token" not in durable
+    assert "jobber_refresh_token" not in durable
+    assert "jobber_account_id" not in durable
+
+    # Zero audit records committed
+    assert len(db.collections["integration_lifecycle_audit"]) == 0
+
+    assert len(http_calls) == 2
+    assert http_calls[0][0] == integrations.JOBBER_TOKEN_URL
+    assert http_calls[1][0] == jobber.JOBBER_GRAPHQL_URL
+    assert http_calls[1][1]["headers"]["Authorization"] == "Bearer valid_acc_tok"
+
+    # Replay of state: state doc was consumed during first attempt, so replaying raises HTTP 400 and makes 0 further HTTP calls
+    prev_http_count = len(http_calls)
+    with pytest.raises(HTTPException) as replay_exc:
+        await integrations.jobber_callback(code="valid-jobber-code", state=state_id)
+    assert replay_exc.value.status_code == 400
+    assert len(http_calls) == prev_http_count
+
+
+@pytest.mark.asyncio
+async def test_contractor_patch_endpoint_defense_in_depth_drops_jobber_account_id(monkeypatch):
+    """Prove api_update_contractor drops jobber_account_id via PROTECTED_FIELDS even if a rogue client body double supplies it."""
+    from starlette.requests import Request
+    from app.api.contractors import api_update_contractor, ContractorUpdate
+
+    cid = "cid_fictional_protected_test"
+    fictional_doc = {
+        "contractor_id": cid,
+        "business_name": "Original business name",
+        "jobber_account_id": "authoritative_jobber_acc_123",
+    }
+
+    recorded_boundary = []
+    def _mock_require_contractor_access(req, contractor_id):
+        recorded_boundary.append((req, contractor_id))
+
+    persisted_updates = []
+    async def _mock_update_contractor(contractor_id, updates):
+        persisted_updates.append((contractor_id, dict(updates)))
+        fictional_doc.update(updates)
+        return True
+
+    monkeypatch.setattr("app.api.contractors.require_contractor_access", _mock_require_contractor_access)
+    monkeypatch.setattr("app.api.contractors.update_contractor", _mock_update_contractor)
+
+    # Controlled body double that deliberately includes jobber_account_id in dict()
+    class _RogueBodyDouble:
+        def dict(self):
+            return {
+                "business_name": "Updated fictional business",
+                "jobber_account_id": "attacker-chosen-id",
+            }
+
+    fake_request = Request(scope={"type": "http", "method": "PATCH", "path": f"/api/contractors/{cid}"})
+    response = await api_update_contractor(cid, _RogueBodyDouble(), fake_request)
+
+    assert response == {"status": "ok"}
+    assert len(recorded_boundary) == 1
+    assert recorded_boundary[0][1] == cid
+    assert fictional_doc["contractor_id"] == cid
+    assert fictional_doc["jobber_account_id"] == "authoritative_jobber_acc_123"
+    assert fictional_doc["business_name"] == "Updated fictional business"
+    assert len(persisted_updates) == 1
+    assert persisted_updates[0] == (cid, {"business_name": "Updated fictional business"})
+
+    # Also verify real ContractorUpdate schema cannot carry undeclared jobber_account_id
+    real_update = ContractorUpdate(business_name="Updated fictional business", jobber_account_id="attacker-chosen-id")
+    assert "jobber_account_id" not in real_update.model_dump()

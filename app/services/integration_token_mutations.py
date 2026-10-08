@@ -3916,6 +3916,7 @@ async def connect_provider_cas(
     provider: str,
     access_token: str,
     refresh_token: str,
+    jobber_account_id: str | None = None,
     observed_generation: int | None = None,
     observed_lifecycle_epoch: int | None = None,
     observed_access_raw: Any = None,
@@ -3943,6 +3944,19 @@ async def connect_provider_cas(
 
     if type(provider) is not str or provider not in VALID_PROVIDERS:
         raise IntegrationTokenEnvelopeError("Invalid provider")
+
+    valid_jobber_account_id: str | None = None
+    if provider == "jobber":
+        if jobber_account_id is None:
+            raise IntegrationTokenEnvelopeError("jobber_account_id is required for Jobber connect")
+        try:
+            from app.services.jobber import validate_jobber_account_id
+            valid_jobber_account_id = validate_jobber_account_id(jobber_account_id)
+        except Exception:
+            raise IntegrationTokenEnvelopeError("Invalid jobber_account_id") from None
+    else:
+        if jobber_account_id is not None:
+            raise IntegrationTokenEnvelopeError("jobber_account_id is not allowed for provider")
 
     valid_access = validate_token_string(access_token, name="access_token")
     assert valid_access is not None
@@ -4204,7 +4218,22 @@ async def connect_provider_cas(
         if extra_updates:
             updates.update(extra_updates)
 
-        if provider == "google_calendar":
+        if provider == "jobber":
+            updates["jobber_account_id"] = valid_jobber_account_id
+            stored_capture = d_data.get("jobber_lead_capture_enabled")
+            stored_acc_id = d_data.get("jobber_account_id")
+            stored_capture_is_true = (type(stored_capture) is bool and stored_capture is True)
+            same_account = (type(stored_acc_id) is str and stored_acc_id == valid_jobber_account_id)
+            extra_requested_false = (extra_updates is not None and extra_updates.get("jobber_lead_capture_enabled") is False)
+
+            if stored_capture_is_true and same_account and not extra_requested_false:
+                calculated_capture = True
+            else:
+                calculated_capture = False
+
+            updates["jobber_lead_capture_enabled"] = calculated_capture
+
+        elif provider == "google_calendar":
             if scope is not None:
                 ok_scope, norm_scope = validate_and_normalize_google_calendar_scope(scope, allow_none=False)
                 if not ok_scope or norm_scope is None:
@@ -4230,7 +4259,10 @@ async def connect_provider_cas(
         if body_prepared_box[0]:
             try:
                 extra_post_fields = dict(extra_updates or {})
-                if provider == "google_calendar":
+                if provider == "jobber":
+                    extra_post_fields["jobber_account_id"] = updates_box[0].get("jobber_account_id")
+                    extra_post_fields["jobber_lead_capture_enabled"] = updates_box[0].get("jobber_lead_capture_enabled")
+                elif provider == "google_calendar":
                     extra_post_fields["google_calendar_scope"] = updates_box[0].get("google_calendar_scope")
                 _verify_mutation_postcondition(
                     doc_ref,
@@ -4254,7 +4286,10 @@ async def connect_provider_cas(
 
     # Postcondition verification
     extra_post_fields = dict(extra_updates or {})
-    if provider == "google_calendar":
+    if provider == "jobber":
+        extra_post_fields["jobber_account_id"] = updates_box[0].get("jobber_account_id")
+        extra_post_fields["jobber_lead_capture_enabled"] = updates_box[0].get("jobber_lead_capture_enabled")
+    elif provider == "google_calendar":
         extra_post_fields["google_calendar_scope"] = updates_box[0].get("google_calendar_scope")
     _verify_mutation_postcondition(
         doc_ref,

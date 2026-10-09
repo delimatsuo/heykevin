@@ -897,8 +897,8 @@ async def _post_routing_tasks(
                     else:
                         logger.warning(f"No push token for contractor {contractor_id} — notification not sent")
 
-                # Run Twilio Lookup in background (too slow for sync webhook path)
-                # Include CNAM if caller is unknown and contractor has it enabled
+                # Optional caller-name enrichment runs after routing. Native clients
+                # do not consume carrier/line type, so request CNAM alone.
                 include_cnam = False
                 if not caller_name:
                     from app.db.contractors import get_contractor
@@ -906,36 +906,25 @@ async def _post_routing_tasks(
                     if cnam_contractor and cnam_contractor.get("cnam_lookup_enabled", False):
                         include_cnam = True
 
-                try:
-                    from app.services.lookup import _lookup_twilio
-                    lookup_result = await asyncio.wait_for(
-                        _lookup_twilio(caller_phone, include_cnam=include_cnam), timeout=5.0
-                    )
-                    if lookup_result:
-                        carrier_from_lookup = lookup_result.get("carrier", "")
-                        line_type_from_lookup = lookup_result.get("line_type", "")
-
-                        updates = {}
-                        if carrier_from_lookup:
-                            updates["carrier"] = carrier_from_lookup
-                        if line_type_from_lookup:
-                            updates["line_type"] = line_type_from_lookup
-
-                        # If CNAM returned a name, save it
-                        cnam_name = lookup_result.get("caller_name", "")
-                        if cnam_name:
-                            updates["caller_name"] = cnam_name
-                            # Also update the Firestore call record
-                            from app.db.calls import save_call
-                            await save_call(call_sid, {"caller_name": cnam_name})
-                            logger.info(f"CNAM lookup resolved: {cnam_name[:1]}***")
-
-                        if updates:
-                            from app.db.cache import update_active_call
-                            await update_active_call(call_sid, updates)
-                            logger.info(f"Lookup enrichment saved: {updates}")
-                except Exception as e:
-                    logger.warning(f"Background Twilio lookup failed: {e}")
+                if include_cnam:
+                    try:
+                        from app.services.lookup import _lookup_twilio
+                        lookup_result = await asyncio.wait_for(
+                            _lookup_twilio(caller_phone, include_cnam=True, include_line_type=False),
+                            timeout=5.0,
+                        )
+                        if lookup_result:
+                            # If CNAM returned a name, save it
+                            cnam_name = lookup_result.get("caller_name", "")
+                            if cnam_name:
+                                # Also update the Firestore call record
+                                from app.db.calls import save_call
+                                await save_call(call_sid, {"caller_name": cnam_name})
+                                from app.db.cache import update_active_call
+                                await update_active_call(call_sid, {"caller_name": cnam_name})
+                                logger.info(f"CNAM lookup resolved: {cnam_name[:1]}***")
+                    except Exception as e:
+                        logger.warning(f"Background Twilio lookup failed: {e}")
 
     except Exception as e:
         logger.error(f"Post-routing task error: {e}", exc_info=True)

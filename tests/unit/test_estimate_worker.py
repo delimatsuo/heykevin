@@ -388,3 +388,80 @@ def test_notification_claim_grants_exactly_one_winner(monkeypatch):
     assert first[0] is True and first[1] is True
     assert second[0] is False
     assert second[1] is False
+
+
+@pytest.mark.asyncio
+async def test_estimate_worker_already_notified_exhausted_skips_contractor_and_spies(monkeypatch):
+    db = FakeDB()
+    monkeypatch.setattr(estimate_worker, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+
+    contractor_calls = []
+
+    async def spy_get_contractor(cid):
+        contractor_calls.append(cid)
+        return {"contractor_id": cid, "business_name": "Acme", "services": []}
+
+    analyze_media_calls = []
+
+    async def spy_analyze_media(**kwargs):
+        analyze_media_calls.append(kwargs)
+        return {}
+
+    read_media_calls = []
+
+    def spy_read_media(path):
+        read_media_calls.append(path)
+        return b""
+
+    send_notifications_calls = []
+
+    async def spy_send_notifications(**kwargs):
+        send_notifications_calls.append(kwargs)
+
+    monkeypatch.setattr(estimate_worker, "get_contractor", spy_get_contractor)
+    monkeypatch.setattr(estimate_worker, "analyze_media", spy_analyze_media)
+    monkeypatch.setattr(estimate_worker, "read_media", spy_read_media)
+    monkeypatch.setattr(estimate_worker, "send_estimate_notifications", spy_send_notifications)
+
+    token_hash = "token_already_notified_exhausted"
+    media_id = "media_already_notified_exhausted"
+    now = time.time()
+    initial_notified_at = now - 500.0
+
+    # Seed doc with attempts=3 (MAX_ANALYSIS_ATTEMPTS), status="processing", lease expired, notified_at set
+    db.collection("estimates").document(token_hash).set({
+        "token_hash": token_hash,
+        "contractor_id": "c1",
+        "caller_phone": "+15551234567",
+        "call_sid": "CA_EXHAUSTED",
+        "status": "processing",
+        "attempts": estimate_worker.MAX_ANALYSIS_ATTEMPTS,
+        "lease_expires_at": now - 10.0,
+        "media_id": media_id,
+        "media_object_path": f"{token_hash}/{media_id}.mp4",
+        "media_content_type": "video/mp4",
+        "notified_at": initial_notified_at,
+        "result": None,
+    })
+
+    # Run once: transitions status=failed, preserves notified_at, all spies untouched
+    await estimate_worker.run_pending_estimates_once(now=now)
+
+    doc = db.collection("estimates").document(token_hash).get().to_dict()
+    assert doc["status"] == "failed"
+    assert doc["notified_at"] == initial_notified_at
+    assert doc["completed_at"] == now
+
+    # Spies get_contractor/analyze_media/read_media/send_estimate_notifications all untouched
+    assert len(contractor_calls) == 0
+    assert len(analyze_media_calls) == 0
+    assert len(read_media_calls) == 0
+    assert len(send_notifications_calls) == 0
+
+    # Repeat sweep remains no-op
+    await estimate_worker.run_pending_estimates_once(now=now + 60.0)
+    assert len(contractor_calls) == 0
+    assert len(analyze_media_calls) == 0
+    assert len(read_media_calls) == 0
+    assert len(send_notifications_calls) == 0

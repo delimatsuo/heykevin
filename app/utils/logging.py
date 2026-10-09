@@ -43,6 +43,50 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_entry)
 
 
+_OAUTH_CALLBACK_PATHS = (
+    "/api/integrations/jobber/callback",
+    "/api/integrations/google-calendar/callback",
+)
+_UVICORN_ACCESS_MSG_FORMAT = '%s - "%s %s HTTP/%s" %d'
+
+
+class OAuthCallbackAccessLogFilter(logging.Filter):
+    """Filter for uvicorn.access logger to redact query parameters from OAuth callbacks."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            getattr(record, "exc_info", None)
+            or getattr(record, "exc_text", None)
+            or getattr(record, "stack_info", None)
+        ):
+            return False
+
+        if getattr(record, "msg", None) != _UVICORN_ACCESS_MSG_FORMAT:
+            return False
+
+        args = getattr(record, "args", None)
+        if not isinstance(args, tuple) or len(args) != 5:
+            return False
+
+        client, method, target, http_version, status = args
+        if (
+            not isinstance(client, str)
+            or not isinstance(method, str)
+            or not isinstance(target, str)
+            or not isinstance(http_version, str)
+            or not isinstance(status, int)
+            or isinstance(status, bool)
+        ):
+            return False
+
+        path = target.split("?", 1)[0]
+        if path.rstrip("/") in _OAUTH_CALLBACK_PATHS:
+            if target != path:
+                record.args = (client, method, path, http_version, status)
+
+        return True
+
+
 def redact_phone(phone: str) -> str:
     """Redact phone number for logging, keeping last 4 digits."""
     if not phone or len(phone) < 4:
@@ -68,6 +112,10 @@ def setup_logging(level: str = "INFO"):
     # put caller phone numbers in that URL, so keep the SDK at WARNING.
     for name in ("twilio", "twilio.http_client", "twilio.async_http_client"):
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, OAuthCallbackAccessLogFilter) for f in uvicorn_access.filters):
+        uvicorn_access.addFilter(OAuthCallbackAccessLogFilter())
 
 
 def get_logger(name: str) -> logging.Logger:

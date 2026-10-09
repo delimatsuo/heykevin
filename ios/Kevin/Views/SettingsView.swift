@@ -2031,7 +2031,11 @@ struct SettingsHost<Root: View>: View {
         }
         #endif
         do {
-            _ = try await APIClient.shared.disconnectIntegration("jobber", contractorId: auth.contractorId)
+            let disconnected = try await APIClient.shared.disconnectIntegration("jobber", contractorId: auth.contractorId)
+            guard disconnected else {
+                debugLog("Disconnect Jobber failed: backend did not confirm local disconnect")
+                return
+            }
             await MainActor.run {
                 guard appState.currentAuthContext() == auth else { return }
                 appState.jobberConnected = false

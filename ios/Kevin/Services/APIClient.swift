@@ -312,7 +312,7 @@ enum CallHistoryResponseParser {
     }
 }
 
-final class APIClient: @unchecked Sendable {
+final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
     static let shared = APIClient()
 
     let baseURL: String = {
@@ -1237,6 +1237,73 @@ final class APIClient: @unchecked Sendable {
             debugLog("Get services failed: \(error.localizedDescription)")
         }
         return []
+    }
+
+    // MARK: - Native Jobber Integration
+
+    func getJobberConnectURL(auth: CallAuthContext) async throws -> URL {
+        guard auth.isValid else {
+            throw JobberManagementError.invalidAuthContext
+        }
+        var components = URLComponents(string: "\(baseURL)/api/integrations/jobber/connect")!
+        components.queryItems = [URLQueryItem(name: "contractor_id", value: auth.contractorId)]
+        guard let url = components.url else {
+            throw JobberManagementError.invalidAuthorizeURL
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await retryRequest(request, maxRetries: 0, signalReauth: true)
+        guard let http = response as? HTTPURLResponse else {
+            throw JobberManagementError.malformedResponse
+        }
+        return try JobberConnectResponseParser.parse(data: data, response: http)
+    }
+
+    func getJobberStatus(auth: CallAuthContext) async throws -> JobberStatusPayload {
+        guard auth.isValid else {
+            throw JobberManagementError.invalidAuthContext
+        }
+        var components = URLComponents(string: "\(baseURL)/api/integrations/jobber/status")!
+        components.queryItems = [URLQueryItem(name: "contractor_id", value: auth.contractorId)]
+        guard let url = components.url else {
+            throw JobberManagementError.malformedResponse
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await retryRequest(request, maxRetries: 1, signalReauth: true)
+        guard let http = response as? HTTPURLResponse else {
+            throw JobberManagementError.malformedResponse
+        }
+        return try JobberStatusParser.parse(data: data, response: http)
+    }
+
+    func disconnectJobber(auth: CallAuthContext) async throws -> JobberDisconnectPayload {
+        guard auth.isValid else {
+            throw JobberManagementError.invalidAuthContext
+        }
+        var components = URLComponents(string: "\(baseURL)/api/integrations/jobber/disconnect")!
+        components.queryItems = [URLQueryItem(name: "contractor_id", value: auth.contractorId)]
+        guard let url = components.url else {
+            throw JobberManagementError.malformedResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await retryRequest(request, maxRetries: 0, signalReauth: true)
+        guard let http = response as? HTTPURLResponse else {
+            throw JobberManagementError.malformedResponse
+        }
+        return try JobberDisconnectParser.parse(
+            data: data,
+            response: http,
+            expectedContractorId: auth.contractorId
+        )
     }
 
     // MARK: - Integrations

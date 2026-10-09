@@ -966,4 +966,228 @@ final class FrontendNavigationTests: XCTestCase {
         nav.openHistoricalDetail(call: laterRecord, expectedAuth: currentAuth)
         XCTAssertNil(nav.presentedSheet, "Historical presentation rejected by connected call priority")
     }
+
+    // MARK: - Jobber Deep Link Navigation
+
+    func testHandleDeepLinkValidCanonicalURLInBusinessMode() {
+        let auth = makeAuth(contractorId: "c-business-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true
+        )
+
+        XCTAssertTrue(handled)
+        XCTAssertEqual(nav.selectedTab, .kevin)
+        XCTAssertTrue(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsInPersonalMode() {
+        let auth = makeAuth(contractorId: "c-personal-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: false
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsWhenNotReady() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: false,
+            isOnboarded: true,
+            isBusinessMode: true
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsWhenNotOnboarded() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: false,
+            isBusinessMode: true
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsWhenBlockingPresentationActive() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true,
+            hasBlockingPresentation: true
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsWhenOnCall() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true,
+            isOnCall: true
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsWhenUnauthenticated() {
+        let invalidAuth = CallAuthContext(contractorId: "", bearerToken: "", generation: 1)
+        let nav = FrontendNavigation(authProvider: { invalidAuth })
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsWhenConnectedCallActiveOrPending() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_CONN_1")
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+
+        // 1. In-call active
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: false)
+        XCTAssertTrue(nav.shouldPresentInCall)
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled1 = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true
+        )
+
+        XCTAssertFalse(handled1)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+
+        // Dismiss in-call
+        nav.handleInCallDismissed()
+
+        // 2. Call connected pending presentation
+        nav.openAccount()
+        nav.handleCallConnectionStarted(lease: lease, hasOpenSheets: true)
+        XCTAssertTrue(nav.isCallConnectedPendingPresentation)
+
+        let handled2 = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true
+        )
+
+        XCTAssertFalse(handled2)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
+
+    func testHandleDeepLinkRejectsAdversarialURLs() {
+        let auth = makeAuth()
+        let nav = FrontendNavigation(authProvider: { auth })
+
+        let invalidURLs = [
+            "heykevin://integrations/jobber?code=123",
+            "heykevin://integrations/jobber?",
+            "heykevin://integrations/jobber/",
+            "heykevin://integrations/jobber#fragment",
+            "heykevin://integrations:8080/jobber",
+            "heykevin://user:pass@integrations/jobber",
+            "heykevin://integrations/jobber/extra",
+            "heykevin://integrations/calendar",
+            "https://integrations/jobber",
+            "http://integrations/jobber",
+            "heykevin://settings/jobber",
+            "heykevin://integrations/%6aobber"
+        ]
+
+        for urlStr in invalidURLs {
+            nav.selectedTab = .calls
+            nav.shouldScrollToJobber = false
+            if let url = URL(string: urlStr) {
+                let handled = nav.handleDeepLink(
+                    url: url,
+                    isReady: true,
+                    isOnboarded: true,
+                    isBusinessMode: true
+                )
+                XCTAssertFalse(handled, "Deep link routing must reject \(urlStr)")
+                XCTAssertEqual(nav.selectedTab, .calls, "Deep link routing must reject \(urlStr)")
+                XCTAssertFalse(nav.shouldScrollToJobber, "Deep link routing must reject \(urlStr)")
+            }
+        }
+    }
+
+    func testAuthChangeClearsShouldScrollToJobber() {
+        var currentAuth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { currentAuth })
+        nav.shouldScrollToJobber = true
+
+        currentAuth = makeAuth(contractorId: "c-2", generation: 2)
+        nav.handleAuthChange()
+
+        XCTAssertFalse(nav.shouldScrollToJobber)
+    }
 }

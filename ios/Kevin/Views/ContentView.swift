@@ -39,6 +39,7 @@ struct ContentView: View {
                 set: { frontendNav.setAccountPresented($0) }
             ),
             shouldScrollToGoogleCalendar: $frontendNav.shouldScrollToGoogleCalendar,
+            shouldScrollToJobber: $frontendNav.shouldScrollToJobber,
             onDismissAccount: {
                 let hasOpenSheets = frontendNav.presentedSheet != nil || showWhatsNew
                 frontendNav.handleAccountDismissed(hasRemainingSheets: hasOpenSheets)
@@ -313,6 +314,16 @@ struct ContentView: View {
             LiveCallObserver.shared.handleAuthChange()
             historyModel.invalidate()
             Task { await historyModel.loadCalls() }
+        }
+        .onOpenURL { url in
+            frontendNav.handleDeepLink(
+                url: url,
+                isReady: appState.sessionState == .ready,
+                isOnboarded: appState.isOnboarded,
+                isBusinessMode: !appState.isPersonalMode,
+                isOnCall: callManager.isOnCall || appState.hasActiveCall,
+                hasBlockingPresentation: showForcedPaywall || showWhatsNew
+            )
         }
     }
 

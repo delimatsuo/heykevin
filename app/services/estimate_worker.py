@@ -180,7 +180,7 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
             logger.error("Failed to execute claim transaction for %s: %s", token_hash[:8], type(e).__name__)
             continue
 
-        if action == "noop":
+        if action in ("noop", "failed_no_notify"):
             continue
 
         media_id = claim_data.get("media_id", "")
@@ -205,8 +205,6 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
                 is_failure=True,
                 watch_url=watch_url,
             )
-            continue
-        elif action == "failed_no_notify":
             continue
 
         # action == "reclaimed"

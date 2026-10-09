@@ -1,0 +1,111 @@
+{
+  "date": "2026-10-08",
+  "scope": "Safe source cost cuts; zero new provider spend and no live calls/SMS",
+  "base_sha": "5a1236d7d0aaa187b5bf1d951c8765d83d9d8117",
+  "source_test_patch_sha256": "bc494c43cfdef60661a02b336b9bdbfe277209874a9b53208737ce62b5dcd77a",
+  "implemented_guards": [
+    {
+      "id": "twilio-native-cnam-only",
+      "behavior": "Native AI-screening enrichment requests caller_name only for opted-in unknown callers; generic lookup defaults keep line_type_intelligence.",
+      "request_saving": "One unused paid line-type field avoided per native AI-screening enrichment; complete lookup avoided when caller name is known or CNAM disabled."
+    },
+    {
+      "id": "twilio-withheld-lookup-skip",
+      "behavior": "Caller-name-only enrichment skips noncanonical/withheld identifiers before Client construction.",
+      "request_saving": "No provider lookup for identifiers that cannot be canonical E.164; syntax-only guard preserves new/international ranges."
+    },
+    {
+      "id": "backend-estimate-skip-unused-contractor-read",
+      "behavior": "Already-notified exhausted estimate still transactionally becomes failed but skips unused contractor context.",
+      "request_saving": "One contractor document read avoided per qualifying exhausted estimate."
+    }
+  ],
+  "verification": {
+    "focused_related_tests": {
+      "passed": 281,
+      "exit_code": 0,
+      "external_connections_blocked": true,
+      "blocked_boundary_attempts": 7,
+      "note": "Legacy tests attempted credential discovery; verification blocked it before any external connection."
+    },
+    "changed_tests": {
+      "pytest_exit_code": 0,
+      "external_connections_blocked": true,
+      "blocked_boundary_attempts": 0,
+      "mutation_applied": false,
+      "failed_calls": 0,
+      "passed": 44
+    },
+    "mutation_probes": {
+      "expected": 6,
+      "returned": 6,
+      "all_killed": true,
+      "blocked_boundary_attempts": 0
+    },
+    "fatal_ruff": "pass",
+    "git_diff_check": "pass"
+  },
+  "independent_review": {
+    "decision": "pass",
+    "source_logic_regressions_found": 0,
+    "fixture_issue": "Shared RTDB update mock added; all six guarded probes have zero boundary attempts."
+  },
+  "live_provider_observations": {
+    "cloud_run_production": {
+      "min_revision_instances": 1,
+      "cpu_throttling": false,
+      "cpu": "1",
+      "memory": "512Mi",
+      "lapsed_number_release_enabled": "true",
+      "deployed_sha": "b62eea38d9ab5656fb8d809fb872f05d9c81147d"
+    },
+    "cloud_run_staging": {
+      "min_service_instances": 1,
+      "min_revision_instances": 1,
+      "cpu_throttling": false,
+      "cpu": "1",
+      "memory": "512Mi",
+      "deployed_sha": "5a1236d7d0aaa187b5bf1d951c8765d83d9d8117"
+    },
+    "always_on_instance_list_price_estimate": {
+      "usd_per_730_hours": "49.932",
+      "formula": "730 * 3600 * (0.000018 + 0.5 * 0.000002)",
+      "source": "https://cloud.google.com/run/pricing",
+      "actual_invoice": null,
+      "credits_and_discounts": "unverified shared billing account",
+      "staging_change_applied": false
+    },
+    "billing_access": "Existing personal account reads service configuration; billing-account financial permissions denied."
+  },
+  "deferred_cuts": [
+    {
+      "id": "staging-on-demand",
+      "reason": "Background recovery and cold-start behavior need qualification before reducing minimum instances or CPU availability."
+    },
+    {
+      "id": "number-releases",
+      "reason": "Cleanup flag already enabled; individual ownership, quiet windows and Apple holds unverified."
+    },
+    {
+      "id": "provisioning-durable-claim",
+      "reason": "Requires separate distributed purchase/binding state machine and uncertain-outcome reconciliation."
+    },
+    {
+      "id": "handoff-read-elision",
+      "reason": "Preserve observing concurrent quarantine and mirror recovery until separately qualified."
+    },
+    {
+      "id": "lazy-sms-translation",
+      "reason": "Unmeasured savings; changes authoritative send boundary and adds eligible-send reads."
+    }
+  ],
+  "activation": {
+    "production_deployed": false,
+    "provider_configuration_changed": false,
+    "new_provider_spend_usd": "0",
+    "live_calls": 0,
+    "live_sms": 0,
+    "realized_monthly_savings_usd": null,
+    "limitation": "Source guards require a separately authorized deployment; published price estimates are not invoices or achieved savings."
+  }
+}

@@ -1,6 +1,7 @@
 """Parallel number lookups with 3-second per-lookup timeout."""
 
 import asyncio
+import re
 from typing import Optional
 
 from twilio.rest import Client
@@ -13,15 +14,32 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 LOOKUP_TIMEOUT = 3.0  # seconds per lookup
+_CANONICAL_E164_RE = re.compile(r"^\+[1-9][0-9]{1,14}$")
 
 
-async def _lookup_twilio(phone: str, include_cnam: bool = False) -> dict:
+async def _lookup_twilio(
+    phone: str,
+    include_cnam: bool = False,
+    *,
+    include_line_type: bool = True,
+) -> dict:
     """Twilio Lookup API — carrier, line type, and optionally CNAM."""
+    if not include_line_type and not include_cnam:
+        return {}
+
+    if include_cnam and not include_line_type:
+        if not isinstance(phone, str) or not _CANONICAL_E164_RE.fullmatch(phone):
+            return {}
+
     try:
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-        fields = "line_type_intelligence"
+        field_parts = []
+        if include_line_type:
+            field_parts.append("line_type_intelligence")
         if include_cnam:
-            fields = "line_type_intelligence,caller_name"
+            field_parts.append("caller_name")
+        fields = ",".join(field_parts)
+
         # Run synchronous Twilio API call in executor to avoid blocking
         loop = asyncio.get_event_loop()
         result = await asyncio.wait_for(
@@ -33,11 +51,11 @@ async def _lookup_twilio(phone: str, include_cnam: bool = False) -> dict:
             ),
             timeout=LOOKUP_TIMEOUT,
         )
-        line_type_info = getattr(result, "line_type_intelligence", {}) or {}
-        data = {
-            "carrier": line_type_info.get("carrier_name", ""),
-            "line_type": line_type_info.get("type", ""),
-        }
+        data = {}
+        if include_line_type:
+            line_type_info = getattr(result, "line_type_intelligence", {}) or {}
+            data["carrier"] = line_type_info.get("carrier_name", "")
+            data["line_type"] = line_type_info.get("type", "")
         if include_cnam:
             cnam_info = getattr(result, "caller_name", {}) or {}
             cnam_name = cnam_info.get("caller_name", "")

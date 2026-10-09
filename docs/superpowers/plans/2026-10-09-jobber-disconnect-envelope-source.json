@@ -1,0 +1,69 @@
+{
+  "slice": "authenticated Jobber disconnect envelope",
+  "base_sha": "8cc4a01e85e5c3e0c741037722c18aa7aba04735",
+  "scope": "pure unmounted source; no routing, persistence, provider or cloud changes",
+  "master_model": "gpt-6.1-sol",
+  "builder_model_tier": "gemini-3.7-flash-high",
+  "agy_transport_headless": true,
+  "routing_reason": "Pinned Python implementation; independent strongest-model security review and master verification",
+  "builder_dispatches": 2,
+  "retries": 1,
+  "builder_usage": [
+    {
+      "dispatch": "envelope-builder.json",
+      "usage": {
+        "input_tokens": 140988,
+        "output_tokens": 34283,
+        "thinking_tokens": 21396,
+        "cache_read_tokens": 759720,
+        "total_tokens": 175271
+      }
+    },
+    {
+      "dispatch": "envelope-repair.json",
+      "usage": {
+        "input_tokens": 132783,
+        "output_tokens": 22032,
+        "thinking_tokens": 16836,
+        "cache_read_tokens": 910751,
+        "total_tokens": 154815
+      }
+    }
+  ],
+  "audit_defects_found": [
+    "P2 numeric-offset trailing newline accepted",
+    "P2 Unicode RFC3339 digits accepted",
+    "P2 authenticate-before-parse assertion swallowed"
+  ],
+  "audit_disposition": "remediated; independent final review passed",
+  "tests": {
+    "focused_events_and_auth": {
+      "passed": 27,
+      "seconds": 0.36
+    },
+    "mutants_killed": [
+      "hmac guard",
+      "expected app equality",
+      "APP_DISCONNECT topic",
+      "full-string timestamp guard",
+      "ASCII timestamp digits"
+    ]
+  },
+  "independent_review": {
+    "model": "gpt-6-astra",
+    "final_verdict": "pass",
+    "probes": {
+      "malformed_timestamps_rejected": 8,
+      "valid_timestamps_preserved": 4
+    }
+  },
+  "source_sha256": {
+    "app/services/jobber_webhook_events.py": "4e0e99c0dc5f0fcc5752f9581de9f6360f4d0512cea619fbb319578eb56cf21f",
+    "tests/unit/test_jobber_webhook_events.py": "92f304350e4cc0d510294c07b89f038b01ab7d4ef3ee8a0ef3ca5366ccd274c4"
+  },
+  "remaining_gates": [
+    "Provider event identity, retry horizon and grant ordering unresolved",
+    "Durable receipt/barrier and mounted lifecycle receiver not implemented",
+    "Source and mocks do not establish provider acceptance"
+  ]
+}

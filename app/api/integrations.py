@@ -292,6 +292,12 @@ def _success_page(service_name: str) -> str:
     """Return a styled HTML success page after OAuth connection."""
     is_jobber = service_name.strip().lower() == "jobber"
     return_link_html = '<a href="heykevin://integrations/jobber" class="return-btn">Return to Hey Kevin</a>\n        ' if is_jobber else ""
+    jobber_css = (
+        "\n        body { background: #0f172a; }"
+        "\n        .card { background: #1e293b; }"
+        "\n        p { color: #cbd5e1; opacity: 1; }"
+        "\n        .hint { color: #94a3b8; opacity: 1; }"
+    ) if is_jobber else ""
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -350,7 +356,7 @@ def _success_page(service_name: str) -> str:
             font-size: 14px;
             opacity: 0.7;
             margin-top: 8px;
-        }}
+        }}{jobber_css}
     </style>
 </head>
 <body>

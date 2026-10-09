@@ -239,3 +239,27 @@ and JobberManagementTests.swift for this repair:
 
 No other file changes, Git operations, test/build execution, network or
 credential access. Tier remains gemini-3.7-flash-high for cancellation races.
+
+## Final audit coverage and capture repair
+
+The fresh independent diff audit found two final P2 issues. The cancellation
+resolver itself passes source audit. Only edit SettingsView.swift and
+JobberManagementTests.swift for these bounded changes:
+
+- In performJobberConnect, the injected browser opener must explicitly capture
+  `[appState]` plus its already-local auth value, so a stalled opener does not
+  implicitly retain the entire SettingsHost and its Jobber model after timeout.
+  No other UI behavior changes.
+- Add an independent elapsed bound to the controlled parent-cancellation
+  regression (e.g. completion less than 2 seconds versus production default
+  10-second timeout), so removing cancellation handling cannot just wait for
+  timeout and still pass the test.
+- For cancellation, true non-cooperative timeout and late-result/newer-busy
+  tests, explicitly signal/await completion of the old opener after resuming
+  its checked continuation. Replace each 20ms sleep with that deterministic
+  signal. Keep the newer status operation suspended until assertions on its
+  UUID/busy state pass, and then resume/await it for cleanup. Ensure guard
+  failure cleanup also resumes and awaits controlled tasks.
+
+Preserve all parser, lease, API, navigation and localization behavior. No
+model changes, unrelated test cleanup, tests/builds, Git or network access.

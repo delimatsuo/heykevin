@@ -1117,10 +1117,12 @@ final class JobberManagementTests: XCTestCase {
 
         let browserEnteredBox = TestVoidContinuationBox()
         let openerResumeBox = TestContinuationBox<Bool>()
+        let openerExitedBox = TestVoidContinuationBox()
 
         let connectTask = Task { @MainActor in
             await model.connect(auth: auth, client: mockClient) { _ in
-                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                defer { openerExitedBox.resume() }
+                return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     openerResumeBox.setContinuation(continuation)
                     browserEnteredBox.resume()
                 }
@@ -1132,21 +1134,25 @@ final class JobberManagementTests: XCTestCase {
             browserEnteredBox.setContinuation(continuation)
         }
 
-        // 2. Cancel parent connect task
+        // 2. Cancel parent connect task and measure elapsed time to ensure prompt return (< 2.0s)
+        let startTime = Date()
         connectTask.cancel()
 
         // 3. Verify bounded fixed-error completion
         await connectTask.value
+        let elapsed = Date().timeIntervalSince(startTime)
+        XCTAssertLessThan(elapsed, 2.0, "Cancellation must resolve promptly without waiting for the 10-second timeout")
 
         XCTAssertEqual(model.statusErrorMessage, JobberManagementModel.fixedConnectErrorMessage)
         XCTAssertNil(model.browserPromptMessage)
         XCTAssertFalse(model.isBusy)
         XCTAssertNil(model.activeLease)
 
-        // 4. Resume suspended opener true and prove no success/state mutation
+        // 4. Resume suspended opener true, await its deterministic exit, and prove no success/state mutation
         openerResumeBox.resume(returning: true)
-
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            openerExitedBox.setContinuation(continuation)
+        }
 
         XCTAssertEqual(model.statusErrorMessage, JobberManagementModel.fixedConnectErrorMessage)
         XCTAssertNil(model.browserPromptMessage)
@@ -1190,13 +1196,15 @@ final class JobberManagementTests: XCTestCase {
 
         let openerEnteredBox = TestVoidContinuationBox()
         let openerResumeBox = TestContinuationBox<Bool>()
+        let openerExitedBox = TestVoidContinuationBox()
 
         var timeoutCompletedFirst = false
 
         let connectTask = Task { @MainActor in
             await model.connect(auth: auth, client: mockClient, timeout: 0.05) { _ in
                 // Truly non-cooperative opener: ignores cancellation by awaiting checked continuation
-                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                defer { openerExitedBox.resume() }
+                return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     openerResumeBox.setContinuation(continuation)
                     openerEnteredBox.resume()
                 }
@@ -1219,10 +1227,11 @@ final class JobberManagementTests: XCTestCase {
         XCTAssertFalse(model.isBusy)
         XCTAssertNil(model.activeLease)
 
-        // Resume opener after timeout to clean up without leaving pending test tasks
+        // Resume opener after timeout to clean up without leaving pending test tasks, awaiting its deterministic exit
         openerResumeBox.resume(returning: true)
-
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            openerExitedBox.setContinuation(continuation)
+        }
 
         XCTAssertEqual(model.statusErrorMessage, JobberManagementModel.fixedConnectErrorMessage)
         XCTAssertNil(model.browserPromptMessage)
@@ -1240,11 +1249,13 @@ final class JobberManagementTests: XCTestCase {
 
         let oldOpenerEnteredBox = TestVoidContinuationBox()
         let oldOpenerResumeBox = TestContinuationBox<Bool>()
+        let oldOpenerExitedBox = TestVoidContinuationBox()
 
         // 1. First connect with short timeout and controlled suspended opener
         let connectTask = Task { @MainActor in
             await model.connect(auth: auth, client: mockClient, timeout: 0.05) { _ in
-                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                defer { oldOpenerExitedBox.resume() }
+                return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     oldOpenerResumeBox.setContinuation(continuation)
                     oldOpenerEnteredBox.resume()
                 }
@@ -1289,18 +1300,22 @@ final class JobberManagementTests: XCTestCase {
         XCTAssertEqual(model.activeOperation, .refreshStatus)
         guard let newerLease = model.activeLease else {
             XCTFail("Newer operation must have an active lease")
-            newerStatusResumeBox.resume()
             oldOpenerResumeBox.resume(returning: true)
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                oldOpenerExitedBox.setContinuation(continuation)
+            }
+            newerStatusResumeBox.resume()
             await refreshTask.value
             return
         }
         let newerLeaseId = newerLease.id
         XCTAssertEqual(newerLease.operation, .refreshStatus)
 
-        // 3. Resume the OLD opener while newer operation is actively busy
+        // 3. Resume the OLD opener while newer operation is actively busy and await deterministic exit of old opener
         oldOpenerResumeBox.resume(returning: true)
-
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            oldOpenerExitedBox.setContinuation(continuation)
+        }
 
         // Assert newer UUID and isBusy stay intact, and old completion did NOT set prompt
         XCTAssertTrue(model.isBusy, "Newer operation must remain busy after old opener resumes")

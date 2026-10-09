@@ -2061,7 +2061,7 @@ struct SettingsHost<Root: View>: View {
         let auth = appState.currentAuthContext()
         guard auth.isValid, appState.sessionState == .ready, appState.isOnboarded, !appState.isPersonalMode else { return }
         Task { @MainActor in
-            await jobberModel.connect(auth: auth) { url in
+            await jobberModel.connect(auth: auth) { [appState] url in
                 guard appState.sessionState == .ready, appState.isOnboarded, !appState.isPersonalMode, appState.currentAuthContext() == auth else {
                     return false
                 }

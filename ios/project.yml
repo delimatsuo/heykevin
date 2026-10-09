@@ -91,6 +91,11 @@ targets:
         UILaunchScreen: {}
         BackendURL: $(BACKEND_URL)
         AppEnvironment: $(APP_ENV)
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: com.kevin.callscreen
+            CFBundleURLSchemes:
+              - heykevin
 
   KevinTests:
     type: bundle.unit-test

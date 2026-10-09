@@ -74,6 +74,7 @@ final class FrontendNavigation: ObservableObject {
     @Published var isAccountPresented: Bool = false
     @Published var presentedSheet: RootNavigationSheet? = nil
     @Published var shouldScrollToGoogleCalendar: Bool = false
+    @Published var shouldScrollToJobber: Bool = false
     @Published var pendingCallPresentationLease: CallPresentationLease? = nil
     @Published var isCallConnectedPendingPresentation: Bool = false
     @Published var shouldPresentInCall: Bool = false
@@ -433,6 +434,43 @@ final class FrontendNavigation: ObservableObject {
         pendingCallPresentationLease = nil
     }
 
+    // MARK: - Jobber Deep Link Navigation
+
+    @discardableResult
+    func handleDeepLink(
+        url: URL,
+        isReady: Bool,
+        isOnboarded: Bool,
+        isBusinessMode: Bool,
+        isOnCall: Bool = false,
+        hasBlockingPresentation: Bool = false
+    ) -> Bool {
+        guard JobberDeepLinkValidator.isValidJobberDeepLink(url) else {
+            return false
+        }
+        guard isReady, isOnboarded, isBusinessMode else {
+            return false
+        }
+        guard !hasBlockingPresentation, presentedSheet == nil else {
+            return false
+        }
+        guard !isOnCall, !shouldPresentInCall, !isCallConnectedPendingPresentation else {
+            return false
+        }
+        let currentAuth = authProvider()
+        guard currentAuth.isValid else {
+            return false
+        }
+
+        if isAccountPresented {
+            isAccountDismissalInProgress = true
+            isAccountPresented = false
+        }
+        selectedTab = .kevin
+        shouldScrollToJobber = true
+        return true
+    }
+
     // MARK: - Auth Lifecycle Invalidation
 
     func handleAuthChange() {
@@ -445,6 +483,7 @@ final class FrontendNavigation: ObservableObject {
             pendingAccountDestination = nil
             pendingCallPresentationLease = nil
             shouldScrollToGoogleCalendar = false
+            shouldScrollToJobber = false
             isCallConnectedPendingPresentation = false
             shouldPresentInCall = false
             pendingNotificationTarget = nil

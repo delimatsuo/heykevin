@@ -107,7 +107,7 @@ def _setup_page_html() -> str:
             line-height: 1.8;
         }
         li { margin-bottom: 6px; }
-        .appstore-btn {
+        .open-btn {
             display: block;
             text-align: center;
             background: #2563eb;
@@ -117,10 +117,26 @@ def _setup_page_html() -> str:
             font-weight: 600;
             padding: 12px 20px;
             border-radius: 12px;
+            margin-bottom: 12px;
+            transition: background 0.15s ease;
+        }
+        .open-btn:hover {
+            background: #1d4ed8;
+        }
+        .appstore-btn {
+            display: block;
+            text-align: center;
+            background: #334155;
+            color: #f8fafc;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            padding: 10px 20px;
+            border-radius: 12px;
             transition: background 0.15s ease;
         }
         .appstore-btn:hover {
-            background: #1d4ed8;
+            background: #475569;
         }
         .note {
             margin-top: 18px;
@@ -138,12 +154,135 @@ def _setup_page_html() -> str:
         <p class="subtitle">To link your Jobber account with Hey Kevin, follow these steps in the mobile app:</p>
         <ol>
             <li>Open <strong>Hey Kevin</strong> on your iPhone and sign in.</li>
-            <li>Go to <strong>Settings</strong> &rarr; <strong>Integrations</strong> &rarr; <strong>Jobber</strong> &rarr; <strong>Connect</strong>.</li>
+            <li>Go to the <strong>Kevin</strong> tab &rarr; <strong>Integrations</strong> &rarr; <strong>Jobber</strong> &rarr; <strong>Connect</strong>.</li>
             <li>Approve Jobber access in your browser.</li>
             <li>Return to the Kevin app to complete connection.</li>
         </ol>
+        <a href="heykevin://integrations/jobber" class="open-btn">Open Hey Kevin</a>
         <a href="https://apps.apple.com/app/id6761427495" class="appstore-btn" rel="noopener noreferrer">Download Hey Kevin on the App Store</a>
-        <p class="note">Existing connections can be managed anytime in Kevin Settings.</p>
+        <p class="note">Existing connections can be managed anytime in the Kevin tab.</p>
+    </div>
+</body>
+</html>"""
+
+
+def _manage_page_html() -> str:
+    """Return static HTML management guide for Jobber integration."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Manage Jobber - Hey Kevin</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #f8fafc;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+        }
+        .container {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 20px;
+            max-width: 440px;
+            width: 100%;
+            padding: 36px 28px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+        }
+        .icon {
+            width: 56px;
+            height: 56px;
+            background: #3b82f6;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 28px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            text-align: center;
+            margin-bottom: 8px;
+            color: #ffffff;
+        }
+        p.subtitle {
+            font-size: 14px;
+            color: #94a3b8;
+            text-align: center;
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+        ol {
+            margin: 0 0 24px 20px;
+            padding: 0;
+            color: #cbd5e1;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+        li { margin-bottom: 6px; }
+        .open-btn {
+            display: block;
+            text-align: center;
+            background: #2563eb;
+            color: #ffffff;
+            text-decoration: none;
+            font-size: 15px;
+            font-weight: 600;
+            padding: 12px 20px;
+            border-radius: 12px;
+            margin-bottom: 12px;
+            transition: background 0.15s ease;
+        }
+        .open-btn:hover {
+            background: #1d4ed8;
+        }
+        .appstore-btn {
+            display: block;
+            text-align: center;
+            background: #334155;
+            color: #f8fafc;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            padding: 10px 20px;
+            border-radius: 12px;
+            transition: background 0.15s ease;
+        }
+        .appstore-btn:hover {
+            background: #475569;
+        }
+        .note {
+            margin-top: 18px;
+            font-size: 12px;
+            color: #94a3b8;
+            text-align: center;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">K</div>
+        <h1>Manage Jobber Integration</h1>
+        <p class="subtitle">Jobber integration settings are managed directly in the Hey Kevin iOS app:</p>
+        <ol>
+            <li>Open <strong>Hey Kevin</strong> on your iPhone and sign in.</li>
+            <li>Go to the <strong>Kevin</strong> tab &rarr; <strong>Integrations</strong> &rarr; <strong>Jobber</strong>.</li>
+            <li>View connection status, refresh, or disconnect.</li>
+        </ol>
+        <a href="heykevin://integrations/jobber" class="open-btn">Open Hey Kevin</a>
+        <a href="https://apps.apple.com/app/id6761427495" class="appstore-btn" rel="noopener noreferrer">Download Hey Kevin on the App Store</a>
+        <p class="note">If you are not signed in, sign in to Hey Kevin first, then reopen this link.</p>
     </div>
 </body>
 </html>"""
@@ -151,6 +290,8 @@ def _setup_page_html() -> str:
 
 def _success_page(service_name: str) -> str:
     """Return a styled HTML success page after OAuth connection."""
+    is_jobber = service_name.strip().lower() == "jobber"
+    return_link_html = '<a href="heykevin://integrations/jobber" class="return-btn">Return to Hey Kevin</a>\n        ' if is_jobber else ""
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -188,7 +329,23 @@ def _success_page(service_name: str) -> str:
             font-size: 36px;
         }}
         h1 {{ font-size: 24px; margin-bottom: 12px; }}
-        p {{ font-size: 16px; opacity: 0.85; line-height: 1.5; margin-bottom: 32px; }}
+        p {{ font-size: 16px; opacity: 0.85; line-height: 1.5; margin-bottom: 24px; }}
+        .return-btn {{
+            display: inline-block;
+            text-align: center;
+            background: #ffffff;
+            color: #4f46e5;
+            text-decoration: none;
+            font-size: 15px;
+            font-weight: 600;
+            padding: 12px 24px;
+            border-radius: 12px;
+            margin-bottom: 16px;
+            transition: opacity 0.15s ease;
+        }}
+        .return-btn:hover {{
+            opacity: 0.9;
+        }}
         .hint {{
             font-size: 14px;
             opacity: 0.7;
@@ -201,7 +358,7 @@ def _success_page(service_name: str) -> str:
         <div class="check">&#10003;</div>
         <h1>{service_name} Connected</h1>
         <p>Your {service_name} account is now linked to Hey Kevin.</p>
-        <p class="hint">You can close this page and go back to the app.</p>
+        {return_link_html}<p class="hint">You can also close this page and switch back to the app.</p>
     </div>
 </body>
 </html>"""
@@ -231,7 +388,7 @@ class JobberLeadCaptureUpdate(BaseModel):
         return v
 
 
-# ── Setup (static instructions for Marketplace handoff) ─────────────
+# ── Setup & Manage (static instructions for Marketplace handoff) ────
 
 @router.get("/jobber/setup", response_class=HTMLResponse)
 async def jobber_setup():
@@ -248,6 +405,23 @@ async def jobber_setup():
         ),
     }
     return HTMLResponse(content=_setup_page_html(), headers=headers)
+
+
+@router.get("/jobber/manage", response_class=HTMLResponse)
+async def jobber_manage():
+    """Public static safe handoff page for managing Jobber integration in Hey Kevin."""
+    headers = {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": (
+            "default-src 'none'; "
+            "style-src 'unsafe-inline'; "
+            "frame-ancestors 'none'; "
+            "form-action 'none';"
+        ),
+    }
+    return HTMLResponse(content=_manage_page_html(), headers=headers)
 
 
 # ── Connect (start OAuth flow) ──────────────────────────────────────

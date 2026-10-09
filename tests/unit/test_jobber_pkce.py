@@ -1249,7 +1249,7 @@ async def test_jobber_callback_absent_state_returns_hardcoded_303_to_setup_befor
     body = setup_resp.text
     assert "https://apps.apple.com/app/id6761427495" in body
     assert "Hey Kevin" in body
-    assert "Settings" in body
+    assert "Kevin" in body
     assert "Integrations" in body
     assert "Jobber" in body
     assert "Connect" in body
@@ -1355,7 +1355,7 @@ async def test_jobber_setup_page_has_honest_instructions_and_strict_csp(
     body = resp.text
     assert "https://apps.apple.com/app/id6761427495" in body
     assert "Hey Kevin" in body
-    assert "Settings" in body
+    assert "Kevin" in body
     assert "Integrations" in body
     assert "Jobber" in body
     assert "Connect" in body

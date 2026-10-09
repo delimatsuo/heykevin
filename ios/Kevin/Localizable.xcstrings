@@ -6833,6 +6833,198 @@
           }
         }
       }
+    },
+    "Status unknown" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Estado desconocido"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Status desconhecido"
+          }
+        }
+      }
+    },
+    "Connection not ready" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La conexión no está lista"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A conexão ainda não está pronta"
+          }
+        }
+      }
+    },
+    "Connected • Lead capture enabled" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conectado • Captura de oportunidades activada"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conectado • Captura de oportunidades ativada"
+          }
+        }
+      }
+    },
+    "Connected • Lead capture off" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conectado • Captura de oportunidades desactivada"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conectado • Captura de oportunidades desativada"
+          }
+        }
+      }
+    },
+    "Refresh" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Actualizar"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Atualizar"
+          }
+        }
+      }
+    },
+    "Couldn't disconnect Jobber. Tap Refresh to check current status." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudo desconectar Jobber. Toca Actualizar para comprobar el estado actual."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não foi possível desconectar o Jobber. Toque em Atualizar para verificar o status atual."
+          }
+        }
+      }
+    },
+    "Couldn't refresh Jobber status. Please check your connection and try again." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudo actualizar el estado de Jobber. Comprueba tu conexión e inténtalo de nuevo."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não foi possível atualizar o status do Jobber. Verifique sua conexão e tente novamente."
+          }
+        }
+      }
+    },
+    "Couldn't start Jobber connection. Please try again." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudo iniciar la conexión con Jobber. Inténtalo de nuevo."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não foi possível iniciar a conexão com o Jobber. Tente novamente."
+          }
+        }
+      }
+    },
+    "Finish connecting in your browser, then return to Kevin and tap Refresh." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Completa la conexión en tu navegador. Luego vuelve a Kevin y toca Actualizar."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conclua a conexão no navegador. Depois, volte ao Kevin e toque em Atualizar."
+          }
+        }
+      }
+    },
+    "Jobber access was removed from Kevin, but could not be confirmed with Jobber. Please check your Installed Apps in Jobber to ensure access is removed." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se eliminó el acceso a Jobber en Kevin, pero no se pudo confirmar la revocación con Jobber. Revisa tus aplicaciones instaladas en Jobber para comprobar que se haya eliminado el acceso."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O acesso ao Jobber foi removido do Kevin, mas a revogação não pôde ser confirmada com o Jobber. Confira seus aplicativos instalados no Jobber para verificar se o acesso foi removido."
+          }
+        }
+      }
+    },
+    "An operation is already in progress." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ya hay una operación en curso."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Já existe uma operação em andamento."
+          }
+        }
+      }
+    },
+    "Operation lease expired." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La operación ha caducado."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A operação expirou."
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

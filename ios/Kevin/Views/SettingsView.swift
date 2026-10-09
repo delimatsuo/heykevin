@@ -34,6 +34,7 @@ struct SettingsHost<Root: View>: View {
 
     @Binding var isAccountPresented: Bool
     var shouldScrollToGoogleCalendar: Binding<Bool>? = nil
+    var shouldScrollToJobber: Binding<Bool>? = nil
     var onDismissAccount: (() -> Void)? = nil
     let assistantIsSelected: Bool
     let onOpenCall: (CallPresentationLease) -> Void
@@ -41,6 +42,7 @@ struct SettingsHost<Root: View>: View {
 
     // MARK: - State
 
+    @StateObject private var jobberModel = JobberManagementModel()
     @State private var activePaywallDestination: SettingsPaywallDestination? = nil
     @State private var loadCoordinator = SettingsLoadCoordinator()
     @State private var confirmedBaseline = SettingsConfirmedBaseline(
@@ -168,6 +170,7 @@ struct SettingsHost<Root: View>: View {
     init(
         isAccountPresented: Binding<Bool>,
         shouldScrollToGoogleCalendar: Binding<Bool>? = nil,
+        shouldScrollToJobber: Binding<Bool>? = nil,
         onDismissAccount: (() -> Void)? = nil,
         assistantIsSelected: Bool,
         onOpenCall: @escaping (CallPresentationLease) -> Void,
@@ -175,6 +178,7 @@ struct SettingsHost<Root: View>: View {
     ) {
         self._isAccountPresented = isAccountPresented
         self.shouldScrollToGoogleCalendar = shouldScrollToGoogleCalendar
+        self.shouldScrollToJobber = shouldScrollToJobber
         self.onDismissAccount = onDismissAccount
         self.assistantIsSelected = assistantIsSelected
         self.onOpenCall = onOpenCall
@@ -274,6 +278,7 @@ struct SettingsHost<Root: View>: View {
         cancelPendingDeleteConfirmation()
         loadCoordinator.handleAuthChange(newAuth: newAuth)
         ownerSMSPreference.reset(auth: newAuth)
+        jobberModel.handleAuthChange(newAuth: newAuth)
 
         urgentPreferenceFence = PreferenceWriteFence()
         screenAllCallsFence = PreferenceWriteFence()
@@ -389,6 +394,14 @@ struct SettingsHost<Root: View>: View {
                         proxy.scrollTo("google_calendar_section", anchor: .top)
                     }
                     shouldScrollToGoogleCalendar?.wrappedValue = false
+                }
+            }
+            .onChange(of: shouldScrollToJobber?.wrappedValue ?? false) { _, shouldScroll in
+                if shouldScroll {
+                    withAnimation {
+                        proxy.scrollTo("jobber_integration_section", anchor: .top)
+                    }
+                    shouldScrollToJobber?.wrappedValue = false
                 }
             }
             .sheet(isPresented: $showKnowledgeEditor, onDismiss: {
@@ -939,40 +952,111 @@ struct SettingsHost<Root: View>: View {
 
     private var integrationsSection: some View {
         Section {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(localized: "Jobber"))
-                        .font(.subheadline.weight(.medium))
-                    Text(String(localized: "Customer lookup and optional Request capture"))
-                        .font(.caption)
-                        .foregroundStyle(Color.secondary)
-                }
-                Spacer()
-                if appState.jobberConnected {
-                    Button(role: .destructive) {
-                        Task { await disconnectJobber() }
-                    } label: {
-                        Text(String(localized: "Disconnect"))
-                            .font(.caption)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Jobber"))
+                            .font(.subheadline.weight(.medium))
+                        switch jobberModel.connectionState {
+                        case .unknown:
+                            Text(String(localized: "Status unknown"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        case .notReady:
+                            Text(String(localized: "Connection not ready"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        case .connected(let leadCaptureEnabled):
+                            Text(leadCaptureEnabled
+                                 ? String(localized: "Connected • Lead capture enabled")
+                                 : String(localized: "Connected • Lead capture off"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        }
                     }
-                    .buttonStyle(.borderless)
-                    .disabled(isFixtureMode)
-                } else {
-                    Button {
-                        Task { await connectJobber() }
-                    } label: {
-                        Text(String(localized: "Connect"))
+                    Spacer()
+
+                    if jobberModel.isBusy {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    } else {
+                        switch jobberModel.connectionState {
+                        case .unknown:
+                            Button(String(localized: "Refresh")) {
+                                performJobberRefresh()
+                            }
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.blue)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
                             .background(Color.blue.opacity(0.12))
                             .clipShape(Capsule())
+                            .buttonStyle(.borderless)
+                            .disabled(isFixtureMode)
+                        case .notReady:
+                            HStack(spacing: 8) {
+                                Button(String(localized: "Refresh")) {
+                                    performJobberRefresh()
+                                }
+                                .font(.caption)
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+
+                                Button {
+                                    performJobberConnect()
+                                } label: {
+                                    Text(String(localized: "Connect"))
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(.blue)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Color.blue.opacity(0.12))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+                            }
+                        case .connected:
+                            HStack(spacing: 8) {
+                                Button(String(localized: "Refresh")) {
+                                    performJobberRefresh()
+                                }
+                                .font(.caption)
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+
+                                Button(role: .destructive) {
+                                    performJobberDisconnect()
+                                } label: {
+                                    Text(String(localized: "Disconnect"))
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+                            }
+                        }
                     }
-                    .buttonStyle(.borderless)
-                    .disabled(isFixtureMode)
+                }
+
+                if let prompt = jobberModel.browserPromptMessage {
+                    Text(prompt)
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+
+                if let notice = jobberModel.unconfirmedRevocationNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                if let errorMsg = jobberModel.statusErrorMessage {
+                    Text(errorMsg)
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
             }
+            .id("jobber_integration_section")
 
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -1962,23 +2046,65 @@ struct SettingsHost<Root: View>: View {
         }
     }
 
+    // MARK: - Jobber Actions
+
+    private func performJobberRefresh() {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, appState.sessionState == .ready, appState.isOnboarded, !appState.isPersonalMode else { return }
+        Task { @MainActor in
+            await jobberModel.refreshStatus(auth: auth)
+            syncJobberConnectedState(auth: auth)
+        }
+    }
+
+    private func performJobberConnect() {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, appState.sessionState == .ready, appState.isOnboarded, !appState.isPersonalMode else { return }
+        Task { @MainActor in
+            await jobberModel.connect(auth: auth) { [appState] url in
+                guard appState.sessionState == .ready, appState.isOnboarded, !appState.isPersonalMode, appState.currentAuthContext() == auth else {
+                    return false
+                }
+                return await UIApplication.shared.open(url)
+            }
+            syncJobberConnectedState(auth: auth)
+        }
+    }
+
+    private func performJobberDisconnect() {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, appState.sessionState == .ready, appState.isOnboarded, !appState.isPersonalMode else { return }
+        Task { @MainActor in
+            await jobberModel.disconnect(auth: auth)
+            syncJobberConnectedState(auth: auth)
+        }
+    }
+
+    private func syncJobberConnectedState(auth: CallAuthContext) {
+        guard appState.sessionState == .ready,
+              appState.isOnboarded,
+              !appState.isPersonalMode,
+              appState.currentAuthContext() == auth else {
+            return
+        }
+        switch jobberModel.connectionState {
+        case .connected:
+            appState.jobberConnected = true
+        case .notReady:
+            appState.jobberConnected = false
+        case .unknown:
+            break
+        }
+    }
+
     private func checkIntegrationsStatus(capturedAuth: CallAuthContext) async {
         guard !appState.isPersonalMode else { return }
         guard capturedAuth.isValid else { return }
 
         // Jobber
-        do {
-            let connected = try await APIClient.shared.checkIntegrationStatus(
-                "jobber",
-                contractorId: capturedAuth.contractorId,
-                bearerToken: capturedAuth.bearerToken
-            )
-            await MainActor.run {
-                guard appState.currentAuthContext() == capturedAuth else { return }
-                appState.jobberConnected = connected
-            }
-        } catch {
-            debugLog("Check Jobber status failed: \(error)")
+        await jobberModel.refreshStatus(auth: capturedAuth)
+        await MainActor.run {
+            syncJobberConnectedState(auth: capturedAuth)
         }
 
         // Google Calendar
@@ -1994,54 +2120,6 @@ struct SettingsHost<Root: View>: View {
             }
         } catch {
             debugLog("Check Google Calendar status failed: \(error)")
-        }
-    }
-
-    private func connectJobber() async {
-        let auth = appState.currentAuthContext()
-        guard auth.isValid else { return }
-        #if DEBUG
-        if isFixtureMode { return }
-        #endif
-        do {
-            if let authorizeURL = try await APIClient.shared.getIntegrationConnectURL("jobber", contractorId: auth.contractorId) {
-                guard let url = URL(string: authorizeURL),
-                      let scheme = url.scheme, scheme == "https",
-                      let host = url.host,
-                      host == "getjobber.com" || host.hasSuffix(".getjobber.com") else {
-                    return
-                }
-                await MainActor.run {
-                    guard appState.currentAuthContext() == auth else { return }
-                    UIApplication.shared.open(url)
-                }
-            }
-        } catch {
-            debugLog("Connect Jobber failed: \(error)")
-        }
-    }
-
-    private func disconnectJobber() async {
-        let auth = appState.currentAuthContext()
-        guard auth.isValid else { return }
-        #if DEBUG
-        if isFixtureMode {
-            appState.jobberConnected = false
-            return
-        }
-        #endif
-        do {
-            let disconnected = try await APIClient.shared.disconnectIntegration("jobber", contractorId: auth.contractorId)
-            guard disconnected else {
-                debugLog("Disconnect Jobber failed: backend did not confirm local disconnect")
-                return
-            }
-            await MainActor.run {
-                guard appState.currentAuthContext() == auth else { return }
-                appState.jobberConnected = false
-            }
-        } catch {
-            debugLog("Disconnect Jobber failed: \(error)")
         }
     }
 

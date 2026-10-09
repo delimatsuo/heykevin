@@ -1065,6 +1065,85 @@ final class FrontendNavigationTests: XCTestCase {
         XCTAssertFalse(nav.shouldScrollToJobber)
     }
 
+    func testHandleDeepLinkRejectsWhenHistoricalDetailSheetActive() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        let record = makeRecord(id: "CA_HIST_JOBBER_GUARD")
+        nav.openHistoricalDetail(call: record)
+        let expectedSheet = nav.presentedSheet
+        XCTAssertNotNil(expectedSheet)
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true,
+            hasBlockingPresentation: false
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+        XCTAssertEqual(nav.presentedSheet, expectedSheet)
+    }
+
+    func testHandleDeepLinkRejectsWhenLiveCallDetailSheetActive() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let scope = makeScope(callSid: "CA_LIVE_JOBBER_GUARD", revision: 1)
+        let lease = CallPresentationLease(auth: auth, scope: scope)
+        let nav = FrontendNavigation(authProvider: { auth }, scopeProvider: { scope })
+        nav.openLive(lease: lease)
+        let expectedSheet = nav.presentedSheet
+        XCTAssertNotNil(expectedSheet)
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true,
+            hasBlockingPresentation: false
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+        XCTAssertEqual(nav.presentedSheet, expectedSheet)
+    }
+
+    func testHandleDeepLinkRejectsWhenUnavailableNotificationSheetActive() {
+        let auth = makeAuth(contractorId: "c-1", generation: 1)
+        let nav = FrontendNavigation(authProvider: { auth })
+        nav.resolveNotificationTarget(
+            callSid: "CA_UNAVAIL_JOBBER_GUARD",
+            allCalls: [],
+            fallbackMessage: "Call expired"
+        )
+        let expectedSheet = nav.presentedSheet
+        XCTAssertNotNil(expectedSheet)
+        nav.selectedTab = .calls
+        nav.shouldScrollToJobber = false
+
+        let url = URL(string: "heykevin://integrations/jobber")!
+        let handled = nav.handleDeepLink(
+            url: url,
+            isReady: true,
+            isOnboarded: true,
+            isBusinessMode: true,
+            hasBlockingPresentation: false
+        )
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(nav.selectedTab, .calls)
+        XCTAssertFalse(nav.shouldScrollToJobber)
+        XCTAssertEqual(nav.presentedSheet, expectedSheet)
+    }
+
     func testHandleDeepLinkRejectsWhenOnCall() {
         let auth = makeAuth(contractorId: "c-1", generation: 1)
         let nav = FrontendNavigation(authProvider: { auth })

@@ -451,7 +451,7 @@ final class FrontendNavigation: ObservableObject {
         guard isReady, isOnboarded, isBusinessMode else {
             return false
         }
-        guard !hasBlockingPresentation else {
+        guard !hasBlockingPresentation, presentedSheet == nil else {
             return false
         }
         guard !isOnCall, !shouldPresentInCall, !isCallConnectedPendingPresentation else {

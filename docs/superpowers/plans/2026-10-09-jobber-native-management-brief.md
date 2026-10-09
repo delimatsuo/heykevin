@@ -263,3 +263,27 @@ JobberManagementTests.swift for these bounded changes:
 
 Preserve all parser, lease, API, navigation and localization behavior. No
 model changes, unrelated test cleanup, tests/builds, Git or network access.
+
+## PR 289 valid Codex navigation finding
+
+Exact-head CI at 7f5a6f0 passed and configured Codex review completed. Its P2
+finding is valid: ContentView's hasBlockingPresentation omits the existing
+root historical/live-detail/unavailable-notification sheet, so a Jobber link
+can change tab/scroll state behind that active sheet.
+
+Only edit ContentView.swift, FrontendNavigation.swift and
+FrontendNavigationTests.swift for this repair:
+
+- Pass `frontendNav.presentedSheet != nil` in ContentView's existing blocking
+  presentation expression, preserving paywall/WhatsNew/call inputs.
+- FrontendNavigation.handleDeepLink also rejects its own non-nil
+  presentedSheet, even when a caller omits or falsely passes the blocking
+  input. Preserve the active sheet, selected tab, scroll flags and other
+  navigation state on rejection. Do not alter any account/call-sheet behavior.
+- Add production-model regression coverage for existing historical detail,
+  live-call detail and unavailable-notification sheets. With an otherwise
+  ready/onboarded/business/valid session and canonical Jobber link, each must
+  reject without changing navigation or sheet state. Keep the happy path.
+
+No tests/builds or Git operations by builder; master verifies and publishes.
+Tier gemini-3.7-flash-high for bounded navigation implementation and tests.

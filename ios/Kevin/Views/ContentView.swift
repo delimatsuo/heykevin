@@ -322,7 +322,7 @@ struct ContentView: View {
                 isOnboarded: appState.isOnboarded,
                 isBusinessMode: !appState.isPersonalMode,
                 isOnCall: callManager.isOnCall || appState.hasActiveCall,
-                hasBlockingPresentation: showForcedPaywall || showWhatsNew
+                hasBlockingPresentation: showForcedPaywall || showWhatsNew || frontendNav.presentedSheet != nil
             )
         }
     }

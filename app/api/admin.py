@@ -449,8 +449,14 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
     except IntegrationTokenContractorNotFound:
         raise HTTPException(404, "Contractor not found") from None
     except Exception:
-        raise HTTPException(503, "Jobber status unavailable") from None
-    result["jobber"] = _jobber_summary(status)
+        # Preserve the loaded support detail without trusting cached Jobber state.
+        result["jobber"] = {
+            "connected": False, "connection_status": "unavailable",
+            "connected_at": None, "lead_capture_enabled": False,
+            "lead_capture_updated_at": None,
+        }
+    else:
+        result["jobber"] = _jobber_summary(status)
     return result
 
 

@@ -527,3 +527,138 @@ async def test_revoke_writes_audit_event(monkeypatch):
     assert audit_events[0]["reason"] == "fraud report"
     assert audit_events[0]["before"]["subscription_status"] == "trial"
     assert audit_events[0]["after"]["subscription_status"] == "expired"
+
+
+class _UnformattableJobberError(Exception):
+    def __str__(self):
+        raise AssertionError("Status-reader exceptions must never be formatted")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [TimeoutError, ConnectionError, _UnformattableJobberError])
+async def test_admin_detail_preserves_support_context_when_jobber_status_unavailable(monkeypatch, caplog, error_type):
+    import json
+    from app.services import integration_token_mutations as mutations
+    marker = "FICTIONAL_CREDENTIAL_MUST_NOT_LEAK"
+    fake_db = _FakeFirestore(
+        [_FakeDoc("contractor-1", {
+            "active": True, "owner_name": "Fictional Owner", "business_name": "Fictional Business",
+            "subscription_status": "expired", "contractor_api_token": marker, "api_token_hash": marker,
+            "jobber_access_token": marker, "jobber_refresh_token": marker,
+            "jobber_connected": True, "jobber_connected_at": 123.0,
+            "jobber_lead_capture_enabled": True, "jobber_lead_capture_updated_at": 456.0,
+        })],
+        subcollections={"contractor-1": {"devices": [_FakeDoc("primary", {
+            "push_token": marker, "voip_token": marker, "updated_at": 789,
+        })]}},
+        collections={"calls": [
+            _FakeDoc("older", {"contractor_id": "contractor-1", "timestamp": 10,
+                "caller_name": "Older caller", "summary": marker, "transcript": marker}),
+            _FakeDoc("newer", {"contractor_id": "contractor-1", "timestamp": 20,
+                "caller_name": "Newer caller", "outcome": "message", "duration": 42}),
+            _FakeDoc("other", {"contractor_id": "contractor-2", "timestamp": 30}),
+        ]},
+    )
+    status_reads = []
+    async def unavailable(contractor_id, *, db):
+        status_reads.append((contractor_id, db))
+        raise error_type(marker)
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(mutations, "load_jobber_connection_status", unavailable)
+    response = await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+    assert status_reads == [("contractor-1", fake_db)]
+    assert set(response) == {"contractor", "device", "recent_calls", "diagnostics", "audit_events", "jobber"}
+    assert response["contractor"]["contractor_id"] == "contractor-1"
+    assert response["contractor"]["owner_name"] == "Fictional Owner"
+    assert response["contractor"]["business_name"] == "Fictional Business"
+    assert response["device"] == {"push_token_present": True, "voip_token_present": True, "updated_at": 789}
+    assert response["recent_calls"] == [
+        {"call_sid": "newer", "contractor_id": "contractor-1", "timestamp": 20,
+         "caller_phone": "[REDACTED]", "caller_name": "Newer caller", "outcome": "message", "route": "",
+         "duration_seconds": 42, "has_summary": False, "has_transcript": False},
+        {"call_sid": "older", "contractor_id": "contractor-1", "timestamp": 10,
+         "caller_phone": "[REDACTED]", "caller_name": "Older caller", "outcome": "", "route": "",
+         "duration_seconds": 0, "has_summary": True, "has_transcript": True},
+    ]
+    assert response["diagnostics"] == [
+        {"severity": "critical", "code": "missing_twilio_number"},
+        {"severity": "warning", "code": "subscription_expired"},
+    ]
+    assert response["audit_events"] == []
+    assert response["jobber"] == {"connected": False, "connection_status": "unavailable",
+        "connected_at": None, "lead_capture_enabled": False, "lead_capture_updated_at": None}
+    assert marker not in json.dumps(response) and marker not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_status_missing_contractor_keeps_404(monkeypatch):
+    from fastapi import HTTPException
+    from app.services import integration_token_mutations as mutations
+    fake_db = _FakeFirestore([_FakeDoc("contractor-1", {"active": True})])
+    status_reads = []
+    async def missing(contractor_id, *, db):
+        status_reads.append((contractor_id, db))
+        raise mutations.IntegrationTokenContractorNotFound("FICTIONAL_PRIVATE_MISSING_REASON")
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(mutations, "load_jobber_connection_status", missing)
+    with pytest.raises(HTTPException) as error:
+        await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+    assert error.value.status_code == 404 and error.value.detail == "Contractor not found"
+    assert status_reads == [("contractor-1", fake_db)]
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_initial_missing_skips_status_read(monkeypatch):
+    from fastapi import HTTPException
+    from app.services import integration_token_mutations as mutations
+    async def forbidden(*args, **kwargs): pytest.fail("Missing profile must skip Jobber read")
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: _FakeFirestore([]))
+    monkeypatch.setattr(mutations, "load_jobber_connection_status", forbidden)
+    with pytest.raises(HTTPException) as error:
+        await admin_api.admin_get_contractor_detail("missing", _admin_request())
+    assert error.value.status_code == 404 and error.value.detail == "Contractor not found"
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_unauthorized_never_fetches_or_reads_status(monkeypatch):
+    from fastapi import HTTPException
+    from app.services import integration_token_mutations as mutations
+    def no_database(): pytest.fail("Unauthorized request must not fetch database")
+    async def no_status(*args, **kwargs): pytest.fail("Unauthorized request must not read Jobber")
+    monkeypatch.setattr(admin_api, "get_firestore_client", no_database)
+    monkeypatch.setattr(mutations, "load_jobber_connection_status", no_status)
+    request = _admin_request(); request.state.is_admin = False
+    with pytest.raises(HTTPException) as error:
+        await admin_api.admin_get_contractor_detail("contractor-1", request)
+    assert error.value.status_code == 403 and error.value.detail == "Admin access required"
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_jobber_cancellation_propagates(monkeypatch):
+    import asyncio
+    from app.services import integration_token_mutations as mutations
+    fake_db = _FakeFirestore([_FakeDoc("contractor-1", {"active": True})])
+    status_reads = []
+    async def cancelled(contractor_id, *, db):
+        status_reads.append((contractor_id, db))
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(mutations, "load_jobber_connection_status", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+    assert status_reads == [("contractor-1", fake_db)]
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_initial_fetch_failure_still_propagates(monkeypatch):
+    from app.services import integration_token_mutations as mutations
+    failure = ConnectionError("fictional initial profile read failure")
+    fake_db = _FakeFirestore([_FakeDoc("contractor-1", {"active": True})])
+    def failed_get(self): raise failure
+    async def no_status(*args, **kwargs): pytest.fail("Failed profile fetch must skip Jobber read")
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(_FakeDocumentRef, "get", failed_get)
+    monkeypatch.setattr(mutations, "load_jobber_connection_status", no_status)
+    with pytest.raises(ConnectionError) as error:
+        await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+    assert error.value is failure

@@ -1453,4 +1453,280 @@ final class JobberManagementTests: XCTestCase {
         XCTAssertEqual(model.statusErrorMessage, JobberManagementModel.fixedDisconnectErrorMessage)
         XCTAssertFalse(model.isBusy)
     }
+
+    // MARK: - Connection Status & Disconnect State Tests
+
+    func testStatusParserConnectionStatusVariants() throws {
+        let response200 = HTTPURLResponse(
+            url: URL(string: "https://api.example.com")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+
+        // 1. Connected
+        let connectedJson = """
+        {"connected": true, "lead_capture_enabled": true, "connection_status": "connected", "connected_at": 1700000000.0}
+        """.data(using: .utf8)!
+        let connectedPayload = try JobberStatusParser.parse(data: connectedJson, response: response200)
+        XCTAssertTrue(connectedPayload.connected)
+        XCTAssertTrue(connectedPayload.leadCaptureEnabled)
+        XCTAssertEqual(connectedPayload.connectionStatus, .connected)
+        XCTAssertEqual(connectedPayload.connectedAt, 1700000000.0)
+
+        // 2. Disconnected
+        let disconnectedJson = """
+        {"connected": false, "lead_capture_enabled": false, "connection_status": "disconnected"}
+        """.data(using: .utf8)!
+        let disconnectedPayload = try JobberStatusParser.parse(data: disconnectedJson, response: response200)
+        XCTAssertFalse(disconnectedPayload.connected)
+        XCTAssertFalse(disconnectedPayload.leadCaptureEnabled)
+        XCTAssertEqual(disconnectedPayload.connectionStatus, .disconnected)
+        XCTAssertNil(disconnectedPayload.connectedAt)
+
+        // 3. Disconnect Pending
+        let pendingJson = """
+        {"connected": false, "lead_capture_enabled": false, "connection_status": "disconnect_pending"}
+        """.data(using: .utf8)!
+        let pendingPayload = try JobberStatusParser.parse(data: pendingJson, response: response200)
+        XCTAssertFalse(pendingPayload.connected)
+        XCTAssertFalse(pendingPayload.leadCaptureEnabled)
+        XCTAssertEqual(pendingPayload.connectionStatus, .disconnectPending)
+        XCTAssertNil(pendingPayload.connectedAt)
+
+        // 4. Reauthorization Required
+        let reauthJson = """
+        {"connected": false, "lead_capture_enabled": false, "connection_status": "reauthorization_required"}
+        """.data(using: .utf8)!
+        let reauthPayload = try JobberStatusParser.parse(data: reauthJson, response: response200)
+        XCTAssertFalse(reauthPayload.connected)
+        XCTAssertFalse(reauthPayload.leadCaptureEnabled)
+        XCTAssertEqual(reauthPayload.connectionStatus, .reauthorizationRequired)
+        XCTAssertNil(reauthPayload.connectedAt)
+    }
+
+    func testStatusParserOldServerWithoutConnectionStatusFallback() throws {
+        let response200 = HTTPURLResponse(
+            url: URL(string: "https://api.example.com")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+
+        let oldServerConnectedJson = """
+        {"connected": true, "lead_capture_enabled": false}
+        """.data(using: .utf8)!
+        let payload1 = try JobberStatusParser.parse(data: oldServerConnectedJson, response: response200)
+        XCTAssertTrue(payload1.connected)
+        XCTAssertEqual(payload1.connectionStatus, .connected)
+
+        let oldServerDisconnectedJson = """
+        {"connected": false, "lead_capture_enabled": false}
+        """.data(using: .utf8)!
+        let payload2 = try JobberStatusParser.parse(data: oldServerDisconnectedJson, response: response200)
+        XCTAssertFalse(payload2.connected)
+        XCTAssertEqual(payload2.connectionStatus, .disconnected)
+    }
+
+    func testStatusParserInconsistentConnectionStatusRejection() {
+        let response200 = HTTPURLResponse(
+            url: URL(string: "https://api.example.com")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+
+        // connected: false with connection_status: "connected"
+        let badJson1 = """
+        {"connected": false, "lead_capture_enabled": false, "connection_status": "connected"}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try JobberStatusParser.parse(data: badJson1, response: response200)) { error in
+            XCTAssertEqual(error as? JobberManagementError, .malformedResponse)
+        }
+
+        // connected: true with connection_status: "reauthorization_required"
+        let badJson2 = """
+        {"connected": true, "lead_capture_enabled": false, "connection_status": "reauthorization_required"}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try JobberStatusParser.parse(data: badJson2, response: response200)) { error in
+            XCTAssertEqual(error as? JobberManagementError, .malformedResponse)
+        }
+
+        // connected: false with connected_at present
+        let badJson3 = """
+        {"connected": false, "lead_capture_enabled": false, "connected_at": 1700000000.0}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try JobberStatusParser.parse(data: badJson3, response: response200)) { error in
+            XCTAssertEqual(error as? JobberManagementError, .malformedResponse)
+        }
+    }
+
+    func testModelRefreshStatusDisconnectPendingAndReauth() async {
+        let auth = makeAuth()
+        let model = JobberManagementModel(currentAuthProvider: { auth })
+        let mockClient = MockJobberAPIClient()
+
+        mockClient.statusResult = .success(JobberStatusPayload(
+            connected: true, leadCaptureEnabled: true, connectedAt: 12345.0))
+        await model.refreshStatus(auth: auth, client: mockClient)
+        XCTAssertEqual(model.lastConnectedAt, 12345.0)
+
+        // 1. Pending status
+        mockClient.statusResult = .success(
+            JobberStatusPayload(
+                connected: false,
+                leadCaptureEnabled: false,
+                connectionStatus: .disconnectPending
+            )
+        )
+        await model.refreshStatus(auth: auth, client: mockClient)
+        XCTAssertEqual(model.connectionState, .disconnectPending)
+        XCTAssertNil(model.lastConnectedAt)
+
+        // 2. Reauthorization required status
+        mockClient.statusResult = .success(
+            JobberStatusPayload(
+                connected: false,
+                leadCaptureEnabled: false,
+                connectionStatus: .reauthorizationRequired
+            )
+        )
+        await model.refreshStatus(auth: auth, client: mockClient)
+        XCTAssertEqual(model.connectionState, .reauthorizationRequired)
+        XCTAssertNil(model.lastConnectedAt)
+    }
+    func testPresentInvalidConnectionStatusNeverUsesOldServerFallback() throws {
+        let response = HTTPURLResponse(url: URL(string: "https://example.test")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        for value in [NSNull(), true, 0, 1.0, [:], [], "unknown", "future_value"] as [Any] {
+            let json: [String: Any] = ["connected": false, "lead_capture_enabled": false, "connection_status": value]
+            let body = try JSONSerialization.data(withJSONObject: json)
+            XCTAssertThrowsError(try JobberStatusParser.parse(data: body, response: response))
+        }
+    }
+
+    func testOmittedStatusInitializerDerivesExistingMockConnection() {
+        XCTAssertEqual(JobberStatusPayload(connected: true, leadCaptureEnabled: false).connectionStatus, .connected)
+        XCTAssertEqual(JobberStatusPayload(connected: false, leadCaptureEnabled: false).connectionStatus, .disconnected)
+    }
+
+    func testLocalOnlyRemovalParserRequiresNoProviderAttempt() throws {
+        let response = HTTPURLResponse(url: URL(string: "https://example.test")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        for attempted in [false, true, 0, NSNull()] as [Any] {
+            let json: [String: Any] = ["status": "disconnected", "contractor_id": "c-123", "provider": "jobber",
+                "credential_deletion": ["status": "executed"],
+                "provider_revocation": ["status": "not_attempted_local_only", "attempted": attempted],
+                "revocation_status": "not_attempted_local_only"]
+            let body = try JSONSerialization.data(withJSONObject: json)
+            if let number = attempted as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID(), !number.boolValue {
+                let payload = try JobberDisconnectParser.parse(data: body, response: response, expectedContractorId: "c-123")
+                XCTAssertEqual(payload.revocationStatus, .notAttemptedLocalOnly)
+                XCTAssertFalse(payload.isProviderConfirmed)
+            } else {
+                XCTAssertThrowsError(try JobberDisconnectParser.parse(data: body, response: response, expectedContractorId: "c-123"))
+            }
+        }
+    }
+
+    func testLocalOnlyRemovalModelUsesTruthfulNotice() async {
+        let auth = makeAuth()
+        let model = JobberManagementModel(currentAuthProvider: { auth })
+        let client = MockJobberAPIClient()
+        client.disconnectResult = .success(JobberDisconnectPayload(status: "disconnected", contractorId: "c-123",
+            provider: "jobber", credentialDeletionStatus: "executed", revocationStatus: .notAttemptedLocalOnly))
+        await model.disconnect(auth: auth, client: client)
+        XCTAssertEqual(model.connectionState, .notReady)
+        XCTAssertEqual(model.unconfirmedRevocationNotice, JobberManagementModel.fixedLocalRemovalNotice)
+        XCTAssertNil(model.lastConnectedAt)
+    }
+
+    func testLocalOnlyDeclarationCannotHideMissingOrContradictoryEvidence() throws {
+        let response = HTTPURLResponse(url: URL(string: "https://example.test")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let base: [String: Any] = ["status": "disconnected", "contractor_id": "c-123", "provider": "jobber",
+            "credential_deletion": ["status": "executed"], "revocation_status": "not_attempted_local_only"]
+        var hostile: [[String: Any]] = [base]
+        for nested in [NSNull(), 1, "provider_confirmed"] as [Any] {
+            for attempted in [false, true] {
+                var json = base
+                json["provider_revocation"] = ["status": nested, "attempted": attempted]
+                hostile.append(json)
+            }
+        }
+        for attempted in [false, true] {
+            var json = base
+            json["provider_revocation"] = ["attempted": attempted]
+            hostile.append(json)
+        }
+        for top in [NSNull(), 1, "provider_confirmed"] as [Any] {
+            var json = base
+            json["revocation_status"] = top
+            json["provider_revocation"] = ["status": "not_attempted_local_only", "attempted": false]
+            hostile.append(json)
+        }
+        var missingTop = base
+        missingTop.removeValue(forKey: "revocation_status")
+        missingTop["provider_revocation"] = ["status": "not_attempted_local_only", "attempted": false]
+        hostile.append(missingTop)
+        var unexecuted = base
+        unexecuted["credential_deletion"] = ["status": "partial_reconciled"]
+        unexecuted["provider_revocation"] = ["status": "not_attempted_local_only", "attempted": false]
+        hostile.append(unexecuted)
+        for json in hostile {
+            let body = try JSONSerialization.data(withJSONObject: json)
+            XCTAssertThrowsError(try JobberDisconnectParser.parse(data: body, response: response, expectedContractorId: "c-123"))
+        }
+    }
+
+    func testDelayedLocalRemovalCannotOverwriteReplacementAuthOperation() async {
+        for failOldRemoval in [false, true] {
+            var liveAuth: CallAuthContext? = makeAuth(contractorId: "c-A", token: "tok-A", generation: 1)
+            let oldAuth = liveAuth!
+            let model = JobberManagementModel(currentAuthProvider: { liveAuth })
+            let oldClient = MockJobberAPIClient()
+            oldClient.disconnectResult = failOldRemoval
+                ? .failure(JobberManagementError.httpError(statusCode: 500))
+                : .success(JobberDisconnectPayload(status: "disconnected", contractorId: "c-A", provider: "jobber",
+                    credentialDeletionStatus: "executed", revocationStatus: .notAttemptedLocalOnly))
+            let oldEntered = TestVoidContinuationBox()
+            let oldResume = TestVoidContinuationBox()
+            oldClient.onDisconnectCall = {
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    oldResume.setContinuation(cont)
+                    oldEntered.resume()
+                }
+            }
+            let oldTask = Task { @MainActor in await model.disconnect(auth: oldAuth, client: oldClient) }
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in oldEntered.setContinuation(cont) }
+            liveAuth = makeAuth(contractorId: "c-B", token: "tok-B", generation: 2)
+            let newAuth = liveAuth!
+            model.handleAuthChange(newAuth: newAuth)
+            let newClient = MockJobberAPIClient()
+            newClient.statusResult = .success(JobberStatusPayload(connected: true, leadCaptureEnabled: true, connectedAt: 54321.0))
+            await model.refreshStatus(auth: newAuth, client: newClient)
+            let newEntered = TestVoidContinuationBox()
+            let newResume = TestVoidContinuationBox()
+            newClient.onStatusCall = {
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    newResume.setContinuation(cont)
+                    newEntered.resume()
+                }
+            }
+            let newTask = Task { @MainActor in await model.refreshStatus(auth: newAuth, client: newClient) }
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in newEntered.setContinuation(cont) }
+            let leaseID = model.activeLease?.id
+            XCTAssertNotNil(leaseID)
+            oldResume.resume()
+            await oldTask.value
+            XCTAssertTrue(model.isBusy)
+            XCTAssertEqual(model.activeLease?.id, leaseID)
+            XCTAssertEqual(model.activeOperation, .refreshStatus)
+            XCTAssertEqual(model.connectionState, .connected(leadCaptureEnabled: true))
+            XCTAssertEqual(model.lastConnectedAt, 54321.0)
+            XCTAssertNil(model.statusErrorMessage)
+            XCTAssertNil(model.unconfirmedRevocationNotice)
+            newResume.resume()
+            await newTask.value
+            XCTAssertFalse(model.isBusy)
+        }
+    }
+
 }

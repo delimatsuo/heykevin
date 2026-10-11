@@ -109,9 +109,11 @@ _BASELINE_HASHES = {
     # decision 2026-09-03). Still only a wiring change to main.py.
     # Re-pinned 2026-09-30 for reviewed acquisition router registration.
     # Re-pinned 2026-10-01 for reviewed public market-availability router.
+    # Re-pinned 2026-10-11 for reviewed default-off Jobber webhook/recovery
+    # wiring and bounded shutdown drain.
     # Voice bakeoff imports and activation remain prohibited.
     "app/main.py":
-        "b309613be996ba570615ab2703020ab58982278482e24304588a7dead76d74f2",
+        "3558b3e4d0ec7818416ec8eccc4a56a867d123c874e89972e741ec3c627f45f2",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

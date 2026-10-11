@@ -155,6 +155,10 @@ class _FakeFirestore:
         self.last_transaction = tx
         return tx
 
+    def jobber_transaction_factory(self, *, deadline, read_only):
+        from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+        return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
 
 def _make_key_b64(byte_val: bytes = b"k") -> str:
     return base64.b64encode(byte_val * 32).decode("ascii")
@@ -559,6 +563,8 @@ async def test_jobber_callback_sends_consumed_verifier_and_server_secrets(
         "jobber_lifecycle_epoch": 0,
     }, doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -631,6 +637,8 @@ async def test_jobber_callback_overlapping_requests_fenced_and_single_exchange(
         "jobber_lifecycle_epoch": 0,
     }, doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -754,6 +762,8 @@ async def test_jobber_callback_cas_conflict_on_concurrent_lifecycle_mutation(
         "jobber_lifecycle_epoch": 0,
     }, doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -842,6 +852,8 @@ async def test_jobber_callback_token_endpoint_redirect_rejected_with_502(
         "jobber_lifecycle_epoch": 0,
     }, doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -1014,6 +1026,9 @@ async def test_jobber_callback_rejects_malformed_pkce_schema_with_zero_http(
         "created_at": time.time(),
         "expires_at": time.time() + 600.0,
     }
+    state_dict.update(schema_version=1, source_account_id=None, receipt_counter_at_start=0,
+        enforcement_context={"schema_version": 1, "purpose": "oauth", "mode": "preactivation",
+            "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0})
     state_dict.update(bad_state_fields)
 
     s_doc = _FakeDocRef(state_dict, doc_id=state_id)
@@ -1096,6 +1111,8 @@ async def test_jobber_callback_expired_valid_schema_state_deletes_row_and_fails_
         "jobber_lifecycle_epoch": 0,
     }, doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -1146,6 +1163,8 @@ async def test_jobber_state_replay_fails_closed_and_makes_zero_http(
         "jobber_lifecycle_epoch": 0,
     }, doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,

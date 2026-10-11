@@ -190,9 +190,27 @@ def _timestamp_expires_soon(expires_at: float, leeway_seconds: int = 120) -> boo
     return (type(expires_at) in (int, float) and type(expires_at) is not bool) and expires_at <= time.time() + leeway_seconds
 
 
+def _hydrate_jobber_snapshot(contractor: dict, snapshot: dict) -> None:
+    from app.services.jobber_admissions import BINDING_KEYS
+    keys = BINDING_KEYS | {"jobber_access_token", "jobber_refresh_token", "jobber_generation",
+        "jobber_lifecycle_epoch", "jobber_connected", "jobber_token_expires_at",
+        "jobber_token_envelope_required", "jobber_lead_capture_enabled"}
+    durable = snapshot.get("data", {})
+    for key in keys:
+        if key in durable:
+            contractor[key] = durable[key]
+        else:
+            contractor.pop(key, None)
+
+
 async def _read_jobber_tokens(contractor_id: str) -> dict[str, Any] | None:
     """Read latest stored Jobber tokens from durable Firestore store."""
     from app.services.integration_token_mutations import load_durable_provider_snapshot
+    from app.services.integration_tokens import validate_token_string
+    try:
+        validate_token_string(contractor_id, name="contractor_id")
+    except Exception:
+        return None
     return await load_durable_provider_snapshot(contractor_id, provider="jobber")
 
 
@@ -231,6 +249,12 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
     if valid_cid is None:
         return None
 
+    try:
+        validate_token_string(settings.jobber_client_id, name="client_id")
+        validate_token_string(settings.jobber_client_secret, name="client_secret")
+    except Exception:
+        return None
+
     preflight_status, preflight_msg = await check_and_recover_expired_intent_preflight_cas(
         contractor_id=valid_cid,
         provider="jobber",
@@ -247,13 +271,7 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
         return None
 
     def _hydrate_and_return(s: dict) -> str:
-        contractor["jobber_access_token"] = s.get("access_token_raw")
-        contractor["jobber_refresh_token"] = s.get("refresh_token_raw")
-        contractor["jobber_generation"] = s.get("generation", 0)
-        if s.get("jobber_token_expires_at") is not None:
-            contractor["jobber_token_expires_at"] = s["jobber_token_expires_at"]
-        else:
-            contractor.pop("jobber_token_expires_at", None)
+        _hydrate_jobber_snapshot(contractor, s)
         return s["jobber_access_token"]
 
     # Check expiration unless force is requested
@@ -290,6 +308,7 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
                 contractor_id=valid_cid,
                 provider="jobber",
                 observed_generation=snapshot["generation"],
+                observed_jobber_context=snapshot.get("jobber_context"),
                 observed_access_raw=snapshot["access_token_raw"],
                 observed_refresh_raw=snapshot["refresh_token_raw"],
             )
@@ -301,13 +320,7 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
             if latest_snap and latest_snap["generation"] > snapshot["generation"]:
                 winner_token = latest_snap.get("jobber_access_token")
                 if winner_token:
-                    contractor["jobber_access_token"] = latest_snap.get("access_token_raw")
-                    contractor["jobber_refresh_token"] = latest_snap.get("refresh_token_raw")
-                    contractor["jobber_generation"] = latest_snap["generation"]
-                    if latest_snap.get("jobber_token_expires_at") is not None:
-                        contractor["jobber_token_expires_at"] = latest_snap["jobber_token_expires_at"]
-                    else:
-                        contractor.pop("jobber_token_expires_at", None)
+                    _hydrate_jobber_snapshot(contractor, latest_snap)
                     return winner_token
             logger.warning("Jobber token refresh actively locked by concurrent lease")
             return None
@@ -531,18 +544,12 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
                     logger.error("Jobber quarantine failed after persistence failure; started claim retained")
                 return None
 
-            # Mutate in-memory contractor only on verified durable success
-            contractor["jobber_access_token"] = updates["jobber_access_token"]
-            contractor["jobber_refresh_token"] = updates["jobber_refresh_token"]
-            contractor["jobber_generation"] = next_gen
-            from google.cloud.firestore_v1 import DELETE_FIELD
-            if "jobber_token_expires_at" in updates and updates["jobber_token_expires_at"] is not DELETE_FIELD:
-                contractor["jobber_token_expires_at"] = updates["jobber_token_expires_at"]
-            else:
-                contractor.pop("jobber_token_expires_at", None)
-
+            latest = await _read_jobber_tokens(valid_cid)
+            if latest is None or latest["generation"] != next_gen:
+                return None
+            _hydrate_jobber_snapshot(contractor, latest)
             logger.info("Jobber token refreshed: provider=jobber operation=refresh result=success")
-            return access_token
+            return latest["access_token"]
         finally:
             if claim_id is not None and claim_phase == "reserved":
                 await release_refresh_claim_cas(
@@ -553,22 +560,14 @@ async def refresh_access_token(contractor: dict, *, force: bool = False) -> str 
 
 
 async def _resolve_access_token(auth: str | dict) -> str:
+    """Compatibility helper; cached credentials never authorize an operation."""
     if type(auth) is not dict:
         return ""
-
-    from app.services.integration_tokens import resolve_usable_token
-
-    access_token = resolve_usable_token(
-        auth,
-        provider="jobber",
-        token_kind="access",
-    ) or ""
-
-    if access_token and _token_expires_soon(access_token):
-        refreshed = await refresh_access_token(auth)
-        if refreshed:
-            return refreshed
-    return access_token
+    cid = auth.get("contractor_id", auth.get("id"))
+    if type(cid) is not str or not cid:
+        return ""
+    snapshot = await _read_jobber_tokens(cid)
+    return snapshot["access_token"] if snapshot else ""
 
 
 def _timestamp_expires_soon(expires_at: Any) -> bool:
@@ -662,16 +661,7 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
         if snap is None:
             return None
 
-    in_memory_expires_at = auth.get("jobber_token_expires_at")
-    auth["jobber_access_token"] = snap.get("access_token_raw")
-    auth["jobber_refresh_token"] = snap.get("refresh_token_raw")
-    auth["jobber_generation"] = snap.get("generation", 0)
-    if snap.get("expires_at") is not None:
-        auth["jobber_token_expires_at"] = snap["expires_at"]
-    elif in_memory_expires_at is not None:
-        auth["jobber_token_expires_at"] = in_memory_expires_at
-    else:
-        auth.pop("jobber_token_expires_at", None)
+    _hydrate_jobber_snapshot(auth, snap)
 
     # Proactive refresh check
     if (auth.get("jobber_token_expires_at") is not None and _timestamp_expires_soon(auth["jobber_token_expires_at"])) or (
@@ -703,6 +693,9 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
             kind="business",
             observed_generation=snap.get("generation"),
             observed_lifecycle_epoch=snap.get("lifecycle_epoch"),
+            observed_access_raw=snap["access_token_raw"],
+            observed_refresh_raw=snap["refresh_token_raw"],
+            observed_jobber_context=snap.get("jobber_context"),
         )
         await transition_provider_operation_intent_to_started_cas(
             contractor_id=valid_cid,
@@ -717,6 +710,8 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
         terminal_outcome = True
     except JobberNetworkError:
         raise
+    except Exception:
+        return None
     finally:
         if terminal_outcome and claim_id is not None:
             await terminalize_provider_operation_intent_cas(
@@ -745,6 +740,9 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
             kind="business",
             observed_generation=retry_snap.get("generation"),
             observed_lifecycle_epoch=retry_snap.get("lifecycle_epoch"),
+            observed_access_raw=retry_snap["access_token_raw"],
+            observed_refresh_raw=retry_snap["refresh_token_raw"],
+            observed_jobber_context=retry_snap.get("jobber_context"),
         )
         await transition_provider_operation_intent_to_started_cas(
             contractor_id=valid_cid,
@@ -761,6 +759,8 @@ async def _graphql_request_with_refresh(auth: str | dict, query: str, variables:
         return None
     except JobberNetworkError:
         raise
+    except Exception:
+        return None
     finally:
         if retry_terminal_outcome and retry_claim_id is not None:
             await terminalize_provider_operation_intent_cas(

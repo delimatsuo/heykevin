@@ -43,6 +43,14 @@ from app.services.message_taking import build_relay_instruction_text
 from app.services.relay_pipeline import RelayPipeline
 
 
+@pytest.fixture
+def canonical_owner_record_without_legacy_adoption():
+    """These canonical-record tests do not exercise legacy datastore adoption."""
+    with patch("app.services.legacy_call_commands.adopt_legacy_message_intent",
+               AsyncMock(return_value=None)) as adoption:
+        yield adoption
+
+
 class _Recorder:
     def __init__(self):
         self.sent = []
@@ -638,6 +646,7 @@ async def test_explicit_preemptible_false_interruptible_true():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("canonical_owner_record_without_legacy_adoption")
 async def test_caller_prompt_during_message_delivery_starts_response_after_ack():
     """Caller speech during in-flight message delivery cancels turn 1, accepts ACK, and starts natural response."""
     recorder = _Recorder()
@@ -745,6 +754,7 @@ async def test_caller_prompt_during_message_delivery_starts_response_after_ack()
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("canonical_owner_record_without_legacy_adoption")
 async def test_consumer_regression_post_delivery_guard_rejection_no_continuation():
     """When final pre-ACK record read returns invalid ws/claim after accepted partial transition, consumer returns False, exactly 1 generator, no continuation token."""
     recorder = _Recorder()
@@ -844,6 +854,7 @@ async def test_consumer_regression_post_delivery_guard_rejection_no_continuation
 
 @pytest.mark.parametrize("mode", ["text", "tool"])
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("canonical_owner_record_without_legacy_adoption")
 async def test_invalidation_after_ack_while_continuation_paused_rejects_token_or_tool(mode: str):
     """Mutating pipeline ws or durable claim while continuation is paused blocks tokens and tool execution."""
     recorder = _Recorder()

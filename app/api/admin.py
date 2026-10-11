@@ -123,18 +123,13 @@ def _sanitize_contractor_profile(contractor_id: str, data: dict) -> dict:
     return sanitized
 
 
-def _jobber_summary(data: dict, *, contractor_id: str = "") -> dict:
-    from app.services.integration_tokens import has_usable_token
-
-    effective_id = contractor_id or data.get("contractor_id", "")
-    connected = has_usable_token(data, "jobber", contractor_id=effective_id)
-
-    return {
-        "connected": connected,
-        "connected_at": data.get("jobber_connected_at"),
-        "lead_capture_enabled": connected and data.get("jobber_lead_capture_enabled") is True,
-        "lead_capture_updated_at": data.get("jobber_lead_capture_updated_at"),
-    }
+def _jobber_summary(status_snapshot) -> dict:
+    """Format an already authoritative snapshot; never reads credentials or DB."""
+    return {"connected": status_snapshot.connected,
+            "connection_status": status_snapshot.connection_status,
+            "connected_at": status_snapshot.connected_at,
+            "lead_capture_enabled": status_snapshot.lead_capture_enabled,
+            "lead_capture_updated_at": status_snapshot.lead_capture_updated_at}
 
 
 def _device_summary(device_doc) -> dict:
@@ -440,7 +435,6 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
         return {
             "contractor": contractor,
             "device": device,
-            "jobber": _jobber_summary(contractor_data, contractor_id=contractor_id),
             "recent_calls": recent_calls,
             "diagnostics": diagnose_contractor(contractor, device, recent_calls),
             "audit_events": [],
@@ -449,6 +443,20 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
     result = await loop.run_in_executor(None, _fetch)
     if result is None:
         raise HTTPException(status_code=404, detail="Contractor not found")
+    from app.services.integration_token_mutations import load_jobber_connection_status, IntegrationTokenContractorNotFound
+    try:
+        status = await load_jobber_connection_status(contractor_id, db=db)
+    except IntegrationTokenContractorNotFound:
+        raise HTTPException(404, "Contractor not found") from None
+    except Exception:
+        # Preserve the loaded support detail without trusting cached Jobber state.
+        result["jobber"] = {
+            "connected": False, "connection_status": "unavailable",
+            "connected_at": None, "lead_capture_enabled": False,
+            "lead_capture_updated_at": None,
+        }
+    else:
+        result["jobber"] = _jobber_summary(status)
     return result
 
 

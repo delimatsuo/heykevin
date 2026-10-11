@@ -198,6 +198,10 @@ class _FakeFirestore:
         self.last_transaction = tx
         return tx
 
+    def jobber_transaction_factory(self, *, deadline, read_only):
+        from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+        return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
 
 @pytest.fixture(autouse=True)
 def _setup_firestore(monkeypatch):
@@ -212,6 +216,9 @@ def _setup_firestore(monkeypatch):
         settings, "integration_token_encryption_keys", f'{{"1": "{dummy_key}"}}'
     )
     monkeypatch.setattr(settings, "integration_token_active_key_version", "1")
+    # Each test gets fictional configured OAuth credentials; overrides remain local.
+    monkeypatch.setattr(settings, "jobber_client_id", "fictional-jobber-client")
+    monkeypatch.setattr(settings, "jobber_client_secret", "fictional-jobber-secret")
 
     db = _FakeFirestore({
         "contractors": {
@@ -1004,6 +1011,8 @@ async def test_jobber_callback_rejects_malformed_access_token(monkeypatch, bad_a
     from app.services.integration_tokens import compute_raw_credentials_fingerprint
 
     state_data = {
+                     "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                     "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": "c-jobber-cb",
         "provider": "jobber",
         "created_at": 1000.0,
@@ -1501,6 +1510,8 @@ async def test_18qc_jobber_quarantined_callback_retry_zero_http(monkeypatch):
         "jobber_reauthorization_attempt_credentials_fingerprint": fp,
     }, doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 1,
@@ -1890,6 +1901,8 @@ async def test_jobber_callback_identity_failure_retains_claim_and_commits_zero_t
     }
     c_doc = _FakeDocRef(dict(initial_doc), doc_id=cid)
     s_doc = _FakeDocRef({
+                            "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                            "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,

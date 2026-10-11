@@ -963,7 +963,15 @@ struct SettingsHost<Root: View>: View {
                                 .font(.caption)
                                 .foregroundStyle(Color.secondary)
                         case .notReady:
-                            Text(String(localized: "Connection not ready"))
+                            Text(String(localized: "Not connected"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        case .disconnectPending:
+                            Text(String(localized: "Connection paused • Reconnect to resume"))
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        case .reauthorizationRequired:
+                            Text(String(localized: "Reconnection required"))
                                 .font(.caption)
                                 .foregroundStyle(Color.secondary)
                         case .connected(let leadCaptureEnabled):
@@ -1012,6 +1020,63 @@ struct SettingsHost<Root: View>: View {
                                         .padding(.vertical, 5)
                                         .background(Color.blue.opacity(0.12))
                                         .clipShape(Capsule())
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+                            }
+                        case .disconnectPending:
+                            HStack(spacing: 8) {
+                                Button(String(localized: "Refresh")) {
+                                    performJobberRefresh()
+                                }
+                                .font(.caption)
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+
+                                Button(String(localized: "Reconnect")) {
+                                    performJobberConnect()
+                                }
+                                .font(.caption)
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+
+                                Button(role: .destructive) {
+                                    performJobberDisconnect()
+                                } label: {
+                                    Text(String(localized: "Remove"))
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+                            }
+                        case .reauthorizationRequired:
+                            HStack(spacing: 8) {
+                                Button(String(localized: "Refresh")) {
+                                    performJobberRefresh()
+                                }
+                                .font(.caption)
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+
+                                Button {
+                                    performJobberConnect()
+                                } label: {
+                                    Text(String(localized: "Reconnect"))
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(.blue)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Color.blue.opacity(0.12))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(isFixtureMode)
+
+                                Button(role: .destructive) {
+                                    performJobberDisconnect()
+                                } label: {
+                                    Text(String(localized: "Remove"))
+                                        .font(.caption)
                                 }
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
@@ -2090,7 +2155,7 @@ struct SettingsHost<Root: View>: View {
         switch jobberModel.connectionState {
         case .connected:
             appState.jobberConnected = true
-        case .notReady:
+        case .notReady, .disconnectPending, .reauthorizationRequired:
             appState.jobberConnected = false
         case .unknown:
             break

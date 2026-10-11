@@ -57,7 +57,17 @@ PROTECTED_FIELDS = frozenset({
     # Integrations — credentials, lifecycle, claims, operation intents, generations, and scopes
     # are server-owned and mutated strictly through atomic CAS transactions.
     "jobber_connected",
+    "jobber_operation_intent_context",
+    "jobber_reauthorization_attempt_context",
+    "jobber_app_id",
     "jobber_account_id",
+    "jobber_accepted_disconnect_barrier",
+    "jobber_disconnect_state",
+    "jobber_disconnect_processed_barrier",
+    "jobber_disconnect_pending",
+    "jobber_disconnect_pending_barrier",
+    "jobber_disconnect_pending_at",
+    "jobber_disconnect_pending_receipt_id",
     "jobber_generation",
     "jobber_lifecycle_epoch",
     "jobber_access_token",

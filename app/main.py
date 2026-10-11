@@ -34,6 +34,7 @@ from app.api.integrations import router as integrations_router
 from app.api.forwarding import router as forwarding_router
 from app.api.subscription import router as subscription_router
 from app.webhooks.appstore import router as appstore_router
+from app.webhooks.jobber import router as jobber_webhook_router
 from app.api.admin import router as admin_router
 from app.api.app_version import router as app_version_router
 from app.api.acquisition import router as acquisition_router
@@ -50,6 +51,7 @@ _shutting_down = False
 _post_call_worker_task: asyncio.Task | None = None
 _service_request_recovery_task: asyncio.Task | None = None
 _estimate_worker_task: asyncio.Task | None = None
+_jobber_disconnect_recovery_task: asyncio.Task | None = None
 
 app = FastAPI(
     title="Kevin",
@@ -84,6 +86,7 @@ app.include_router(integrations_router)
 app.include_router(forwarding_router)
 app.include_router(subscription_router)
 app.include_router(appstore_router)
+app.include_router(jobber_webhook_router)
 app.include_router(admin_router)
 app.include_router(app_version_router)
 app.include_router(acquisition_router)
@@ -344,7 +347,7 @@ async def _expired_contractor_cleanup():
 
 @app.on_event("startup")
 async def startup():
-    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task
+    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task, _jobber_disconnect_recovery_task
 
     # Validate required config
     required = ['twilio_account_sid', 'twilio_auth_token', 'anthropic_api_key',
@@ -390,6 +393,21 @@ async def startup():
             service_request_recovery_worker_loop()
         )
 
+    from app.services.jobber_disconnect_recovery import (
+        jobber_disconnect_recovery_worker_loop,
+    )
+
+    if (
+        getattr(settings, "jobber_disconnect_recovery_enabled", False) is True
+        and (
+            _jobber_disconnect_recovery_task is None
+            or _jobber_disconnect_recovery_task.done()
+        )
+    ):
+        _jobber_disconnect_recovery_task = asyncio.create_task(
+            jobber_disconnect_recovery_worker_loop()
+        )
+
     # F-21: drop the redacted Twilio number from startup logs entirely. Even
     # the last 4 digits are unnecessary signal in centralised logs and the
     # number is verifiable through admin tooling when actually needed.
@@ -398,7 +416,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task
+    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task, _jobber_disconnect_recovery_task
 
     if _post_call_worker_task is not None:
         _post_call_worker_task.cancel()
@@ -415,6 +433,14 @@ async def shutdown():
         with suppress(asyncio.CancelledError):
             await _service_request_recovery_task
         _service_request_recovery_task = None
+    if _jobber_disconnect_recovery_task is not None:
+        _jobber_disconnect_recovery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _jobber_disconnect_recovery_task
+        _jobber_disconnect_recovery_task = None
+
+    from app.db.jobber_disconnect_transactions import drain_jobber_operations
+    await drain_jobber_operations()
     logger.info("Kevin shutting down — finishing in-flight requests")
 
 

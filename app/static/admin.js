@@ -465,8 +465,32 @@
   }
 
   function renderJobberPanel(contractor, jobber) {
-    const connected = jobber.connected === true;
-    const enabled = jobber.lead_capture_enabled === true;
+    const hasStatus = Object.prototype.hasOwnProperty.call(jobber, 'connection_status');
+    const labels = {
+      connected: 'Connected',
+      disconnected: 'Not connected',
+      disconnect_pending: 'Disconnect pending',
+      reauthorization_required: 'Reconnect required',
+      unavailable: 'Status unavailable',
+    };
+    let connectionStatus = jobber.connected === true ? 'connected' : 'disconnected';
+    if (hasStatus) {
+      const status = jobber.connection_status;
+      const known = typeof status === 'string' && [
+        'connected', 'disconnected', 'disconnect_pending', 'reauthorization_required',
+      ].includes(status);
+      connectionStatus = known && typeof jobber.connected === 'boolean'
+        && jobber.connected === (status === 'connected') ? status : 'unavailable';
+    }
+    const connected = connectionStatus === 'connected' && jobber.connected === true;
+    const enabled = connected && jobber.lead_capture_enabled === true;
+    const guidance = connectionStatus === 'disconnect_pending'
+      ? 'Jobber use is paused while the disconnect is processed. Reconnect or remove the connection in the Kevin app.'
+      : connectionStatus === 'reauthorization_required'
+        ? 'Jobber use is paused. Reconnect or remove the connection in the Kevin app.'
+        : connectionStatus === 'unavailable'
+          ? 'Connection status could not be verified. Refresh this page before changing lead capture.'
+          : '';
     const toggleLabel = enabled ? 'Disable lead capture' : 'Enable lead capture';
     const toggleAction = enabled ? 'disable' : 'enable';
     return `
@@ -481,9 +505,10 @@
             ${connected ? '' : 'disabled'}
           >${esc(toggleLabel)}</button>
         </div>
+        ${guidance ? `<div class="notice notice-soft">${esc(guidance)}</div>` : ''}
         <dl class="key-value">
-          <dt>Connection</dt><dd>${connected ? '<span class="text-green">Connected</span>' : '<span class="text-muted">Not connected</span>'}</dd>
-          <dt>Connected At</dt><dd>${fmtDate(jobber.connected_at)}</dd>
+          <dt>Connection</dt><dd><span class="${connected ? 'text-green' : 'text-muted'}">${esc(labels[connectionStatus])}</span></dd>
+          <dt>Connected At</dt><dd>${connected ? fmtDate(jobber.connected_at) : '-'}</dd>
           <dt>Lead Capture</dt><dd>${enabled ? '<span class="text-green">Enabled</span>' : '<span class="text-muted">Disabled</span>'}</dd>
           <dt>Lead Capture Updated</dt><dd>${fmtDate(jobber.lead_capture_updated_at)}</dd>
         </dl>

@@ -480,7 +480,8 @@ async def jobber_callback(
     """Exchange authorization code for access + refresh tokens or redirect stateless entries to setup."""
     from app.services.integration_token_mutations import (
         connect_provider_cas,
-        consume_oauth_state,
+        consume_jobber_oauth_state,
+        finalize_jobber_binding_proof,
         terminalize_provider_operation_intent_cas,
         terminalize_provider_reauthorization_attempt_cas,
         transition_provider_operation_intent_to_started_cas,
@@ -533,10 +534,9 @@ async def jobber_callback(
 
     db = _get_firestore()
 
-    # Atomically validate and consume state (one-time use, deletes even if expired/malformed)
-    state_data, contractor_obs = await consume_oauth_state(
+    # Atomically consume a versioned state and obtain its internal proof.
+    state_data, contractor_obs, consumed_proof = await consume_jobber_oauth_state(
         db=db,
-        collection_name="jobber_oauth_states",
         state=state,
     )
     contractor_id = contractor_obs["contractor_id"]
@@ -710,6 +710,8 @@ async def jobber_callback(
             access_token=access_token,
             refresh_token=refresh_token,
             jobber_account_id=jobber_account_id,
+            jobber_binding_proof=finalize_jobber_binding_proof(
+                consumed_proof, jobber_account_id, access_token, refresh_token),
             claim_id=claim_id,
             expires_in=expires_in,
             expires_at=expires_at,
@@ -743,27 +745,19 @@ async def jobber_callback(
 async def jobber_status(contractor_id: str = Query(...), request: Request = None):
     """Check whether a contractor has Jobber connected."""
     from app.services.integration_token_mutations import (
-        extract_safe_connected_at,
-        is_durable_provider_connected,
+        load_jobber_connection_status, IntegrationTokenContractorNotFound,
     )
-
     require_contractor_access(request, contractor_id)
     db = _get_firestore()
-    doc = db.collection("contractors").document(contractor_id).get()
-    if not getattr(doc, "exists", False):
-        raise HTTPException(status_code=404, detail="Contractor not found")
-
-    data = doc.to_dict()
-    if type(data) is not dict:
-        raise HTTPException(status_code=500, detail="Contractor document is not an exact dict")
-    connected = is_durable_provider_connected(data, "jobber", contractor_id=contractor_id)
-    connected_at = extract_safe_connected_at(data, "jobber") if connected else None
-
-    return {
-        "connected": connected,
-        "connected_at": connected_at,
-        "lead_capture_enabled": connected and data.get("jobber_lead_capture_enabled") is True,
-    }
+    try:
+        status = await load_jobber_connection_status(contractor_id, db=db)
+    except IntegrationTokenContractorNotFound:
+        raise HTTPException(404, "Contractor not found") from None
+    except Exception:
+        raise HTTPException(503, "Jobber status unavailable") from None
+    return {"connected": status.connected, "connected_at": status.connected_at,
+            "lead_capture_enabled": status.lead_capture_enabled,
+            "connection_status": status.connection_status}
 
 
 # ── Lead capture toggle ──────────────────────────────────────────────

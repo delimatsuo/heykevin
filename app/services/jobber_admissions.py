@@ -759,6 +759,30 @@ async def load_jobber_connection_status(contractor_id, *, db):
     return await _run(db, body)
 
 
+def _oauth_retained(data):
+    keys = (get_provider_operation_intent_keys("jobber") | BINDING_KEYS | {
+        "active", "jobber_generation", "jobber_lifecycle_epoch", "jobber_connected",
+        "jobber_access_token", "jobber_refresh_token", "jobber_token_envelope_required",
+        "jobber_lead_capture_enabled", "jobber_disconnected_at"})
+    return {key: (key in data, data.get(key)) for key in keys}
+
+
+def _apply_local_updates(data, updates):
+    result = dict(data)
+    for key, value in updates.items():
+        if value is DELETE_FIELD:
+            result.pop(key, None)
+        else:
+            result[key] = value
+    return result
+
+
+def _verify_oauth_retained(data, expected):
+    if any((key in data) != present or (present and not _mutations()._exact_scalar_or_composite_equal(data[key], value))
+           for key, (present, value) in expected.items()):
+        raise IntegrationTokenCASConflict("OAuth retained binding changed")
+
+
 async def create_state(*, db, collection_name, state, contractor_id, ttl_seconds=600.0, **unused):
     from app.services.oauth_pkce import generate_pkce_code_verifier
     validate_token_string(contractor_id, name="contractor_id")
@@ -782,34 +806,47 @@ async def create_state(*, db, collection_name, state, contractor_id, ttl_seconds
             gen, epoch, _ = _life(data)
         except IntegrationTokenCASConflict:
             raise HTTPException(400, "Invalid contractor lifecycle metadata") from None
-        status = _status_in_txn(db, txn, data, contractor_id)
-        # Only provider authority permits preempting an in-flight operation.
-        provider_suspended = control is not None and status in ("disconnect_pending", "reauthorization_required")
-        # A healthy ordinary claim is not suspension. Classification treats it as
-        # connected; a legacy unknown refresh outcome retains its explicit attempt.
-        if control is not None:
-            binding_current = (data.get("jobber_app_id") == control["expected_app_id"]
-                and source is not None and type(data.get("jobber_accepted_disconnect_barrier")) is int
-                and data["jobber_accepted_disconnect_barrier"] == _barrier(db, txn, control, source))
-            provider_suspended = not binding_current or bool(ENFORCEMENT_FIELDS.intersection(data) - {"jobber_app_id", "jobber_accepted_disconnect_barrier"})
-            if not any(k in data for k in ("jobber_access_token", "jobber_refresh_token")) and not BINDING_KEYS.intersection(data):
-                provider_suspended = False
         if _read(state_ref, txn).exists:
             raise IntegrationTokenCASConflict("OAuth state collision")
-        updates = {}
-        if provider_suspended:
-            gen, epoch = _next(gen), _next(epoch)
-            updates = {k: DELETE_FIELD for k in get_provider_operation_intent_keys("jobber")}
-            updates.update(jobber_generation=gen, jobber_lifecycle_epoch=epoch,
-                           jobber_connected=False, jobber_lead_capture_enabled=False)
+        updates, audit_ref, audit = {}, None, None
+        suspension = None
+        if control is not None:
+            from app.services.jobber_disconnect_recovery import (
+                read_suspension_account_in_txn, prepare_suspension_in_txn, post_barrier_oauth_owner,
+            )
+            accepted = data.get("jobber_accepted_disconnect_barrier")
+            has_binding_metadata = bool(ENFORCEMENT_FIELDS.intersection(data))
+            if has_binding_metadata:
+                if (data.get("jobber_app_id") != control["expected_app_id"] or source is None
+                        or type(accepted) is not int or not 0 <= accepted <= MAX_RECEIPT_COUNTER):
+                    raise IntegrationTokenCASConflict("Malformed Jobber binding authority")
+                current_barrier = _barrier(db, txn, control, source)
+                if accepted > current_barrier:
+                    raise IntegrationTokenCASConflict("Jobber accepted barrier exceeds authority")
+                if accepted < current_barrier:
+                    c, b, _, suspension_now = read_suspension_account_in_txn(
+                        txn, db, control["expected_app_id"], source)
+                    updates, audit_ref, audit, phase = prepare_suspension_in_txn(
+                        txn, db, contractor_id, data, c, b, suspension_now)
+                    if phase == "already_processed":
+                        owner = post_barrier_oauth_owner(data, c, b["barrier"], now)
+                        if owner is not None and owner["expires_at"] > now:
+                            raise HTTPException(409, "Another Jobber authorization is in progress")
+                    suspension = b["barrier"]
+                elif ENFORCEMENT_FIELDS.intersection(data) - {"jobber_app_id", "jobber_accepted_disconnect_barrier"}:
+                    raise IntegrationTokenCASConflict("Malformed Jobber suspension metadata")
+        prepared_data = _apply_local_updates(data, updates)
+        gen, epoch, _ = _life(prepared_data)
         context = JobberAdmissionContext("oauth", "enforced" if control else "preactivation",
             control["expected_app_id"] if control else None, source, control["receipt_counter"] if control else 0)
         payload = dict(schema_version=1, contractor_id=contractor_id, provider="jobber", generation=gen,
             lifecycle_epoch=epoch, credentials_fingerprint=_fingerprint(data), created_at=now,
             expires_at=now + duration, pkce_method="S256", pkce_code_verifier=verifier,
             receipt_counter_at_start=context.counter, enforcement_context=context.as_dict(), source_account_id=source)
-        box.update(payload=payload, updates=updates, context=context)
+        box.update(payload=payload, updates=updates, context=context, retained=_oauth_retained(prepared_data),
+                   suspension=suspension, audit=audit)
         if updates:
+            txn.create(audit_ref, audit)
             txn.update(ref, updates)
         txn.create(state_ref, payload)
         return payload
@@ -821,9 +858,14 @@ async def create_state(*, db, collection_name, state, contractor_id, ttl_seconds
             raise IntegrationTokenCASConflict("OAuth state readback mismatch")
         if _life(data)[:2] != (box["payload"]["generation"], box["payload"]["lifecycle_epoch"]) or _fingerprint(data) != box["payload"]["credentials_fingerprint"]:
             raise IntegrationTokenCASConflict("OAuth state lifecycle changed")
-        for k, v in box["updates"].items():
-            if (v is DELETE_FIELD and k in data) or (v is not DELETE_FIELD and not _mutations()._exact_scalar_or_composite_equal(data.get(k), v)):
-                raise IntegrationTokenCASConflict("OAuth recovery advance not durable")
+        _verify_oauth_retained(data, box["retained"])
+        if box["suspension"] is not None:
+            from app.services.jobber_disconnect_recovery import read_suspension_account_in_txn, prepare_suspension_in_txn
+            c, b, _, now = read_suspension_account_in_txn(txn, db, box["context"].app_id, box["context"].account_id)
+            updates, _, audit, phase = prepare_suspension_in_txn(txn, db, contractor_id, data, c, b, now)
+            if (updates or phase != "already_processed" or b["barrier"] != box["suspension"]
+                    or not _mutations()._exact_scalar_or_composite_equal(audit, box["audit"])):
+                raise IntegrationTokenCASConflict("OAuth suspension readback mismatch")
         return box["payload"]
     return await _run(db, body, verify)
 
@@ -870,16 +912,40 @@ async def consume_jobber_oauth_state(*, db, state):
         if (gen, epoch) != (payload["generation"], payload["lifecycle_epoch"]) or _fingerprint(data) != payload["credentials_fingerprint"]:
             raise HTTPException(400, "OAuth state lifecycle changed")
         status, parsed, _ = parse_provider_operation_intent(data, "jobber")
-        is_quarantined = status == "quarantined"
-        if status not in ("absent", "quarantined"):
+        is_quarantined = status in ("quarantined", "quarantined_reauthorizing")
+        updates = {}
+        quarantine_expired_started = False
+        if status in ("valid", "quarantined_reauthorizing") and parsed is not None:
+            # A fresh state does not establish that an old request never ran.
+            # Validate its complete ownership before considering lease expiry.
+            held = _claim(data, parsed["id"])
+            if (held.get("is_legacy") or held.get("jobber_context") is None
+                    or held["phase"] not in ("reserved", "provider_request_started")
+                    or not held["acquired_at"] <= now or not held["acquired_at"] < held["expires_at"]):
+                raise HTTPException(409, "Jobber claim recovery unavailable")
+            _claim_authority(db, txn, _with_cid(data, cid), held)
+            if held["expires_at"] > now:
+                raise HTTPException(409, "Another Jobber operation is in progress")
+            if is_quarantined:
+                updates = {key: DELETE_FIELD for key in get_provider_reauthorization_attempt_keys("jobber")}
+            else:
+                updates = {key: DELETE_FIELD for key in ORDINARY_CLAIM_KEYS}
+                if held["phase"] == "provider_request_started":
+                    updates.update(jobber_refresh_outcome_unknown=True, jobber_reauthorization_required=True)
+                    quarantine_expired_started = True
+        elif status not in ("absent", "quarantined"):
             raise HTTPException(409, "Another Jobber operation is in progress")
-        updates = _claim_updates(data, claim_id, "reconnect" if is_quarantined else "connect", now, 60.0, context, attempt=is_quarantined)
+        if not quarantine_expired_started:
+            updates.update(_claim_updates(data, claim_id, "reconnect" if is_quarantined else "connect",
+                now, 60.0, context, attempt=is_quarantined))
         proof = JobberConsumedStateProof(state, cid, claim_id, gen, epoch, _fingerprint(data), context)
         observation = dict(contractor_id=cid, provider="jobber", generation=gen, lifecycle_epoch=epoch,
             observed_access_raw=data.get("jobber_access_token"), observed_refresh_raw=data.get("jobber_refresh_token"),
             envelope_required=data.get("jobber_token_envelope_required"), claim_id=claim_id,
             is_quarantined=is_quarantined, jobber_context=context)
-        box.update(updates=updates, proof=proof, observation=observation, payload=payload)
+        box.update(updates=updates, proof=proof, observation=observation, payload=payload,
+                   quarantine_expired_started=quarantine_expired_started,
+                   retained=_oauth_retained(_apply_local_updates(data, updates)))
         txn.update(ref, updates)
         txn.delete(state_ref)
         return payload, observation, proof
@@ -901,11 +967,21 @@ async def consume_jobber_oauth_state(*, db, state):
         if _read(state_ref, txn).exists:
             raise IntegrationTokenCASConflict("OAuth state not consumed")
         def authority(tx, data):
-            parsed = _claim(data, proof.claim_id, phase="reserved")
-            if parsed.get("jobber_context") != proof.context:
-                raise IntegrationTokenCASConflict("OAuth proof claim changed")
+            _verify_oauth_retained(data, box["retained"])
             _oauth_authority(db, tx, data, proof.context)
+            if box["quarantine_expired_started"]:
+                if parse_provider_operation_intent(data, "jobber")[0] != "quarantined":
+                    raise IntegrationTokenCASConflict("OAuth quarantine not durable")
+            else:
+                snap = _read(db.collection("contractors").document(proof.contractor_id), tx)
+                parsed = _claim(data, proof.claim_id, phase="reserved", now=extract_snapshot_time(snap))
+                if parsed.get("jobber_context") != proof.context:
+                    raise IntegrationTokenCASConflict("OAuth proof claim changed")
         _verify_updates(db, txn, proof.contractor_id, box["updates"], authority=authority)
+        if box["quarantine_expired_started"]:
+            # Raise only after both normal and ambiguous readbacks prove the
+            # quarantine and consumed state. A subsequent fresh state can retry.
+            return HTTPException(409, "Previous Jobber authorization outcome is unknown; restart authorization")
         return box["result"]
     result = await _run(db, body, verify)
     if isinstance(result, HTTPException):

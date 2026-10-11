@@ -1067,3 +1067,420 @@ async def test_orchestration_rechecks_cancelled_pair_after_cas_returns(monkeypat
     with pytest.raises(IntegrationTokenCASConflict):
         await mutations.disconnect_and_revoke_provider_orchestration(contractor_id="contractor", provider="jobber", db=db)
     if mutation == "replacement": assert data(db)["jobber_connected"] is True
+
+
+async def fresh_oauth_state(db, label):
+    state = "oauth_repair_state_" + label
+    await mutations.create_oauth_state(db=db, collection_name="jobber_oauth_states", state=state,
+        contractor_id="contractor", provider="jobber")
+    return state
+
+
+async def consume_fresh(db, label):
+    state = await fresh_oauth_state(db, label)
+    return await mutations.consume_jobber_oauth_state(db=db, state=state)
+
+
+def advance_server(db, seconds):
+    import datetime
+    db.set_server_time(db.get_server_time() + datetime.timedelta(seconds=seconds))
+
+
+async def start_and_bind_proof(db, observation, proof):
+    if observation["is_quarantined"]:
+        await mutations.transition_provider_reauthorization_attempt_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=observation["claim_id"],
+            observed_generation=observation["generation"], observed_lifecycle_epoch=observation["lifecycle_epoch"],
+            observed_access_raw=observation["observed_access_raw"], observed_refresh_raw=observation["observed_refresh_raw"], db=db)
+    else:
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=observation["claim_id"], kind="connect", db=db)
+    bound = mutations.finalize_jobber_binding_proof(proof, "account", "new-access", "new-refresh")
+    await complete(db, observation, bound)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["reserved", "provider_request_started"])
+@pytest.mark.parametrize("initial", [False, True])
+async def test_expired_oauth_owner_recovery_and_old_proof_fencing(monkeypatch, phase, initial):
+    from fastapi import HTTPException
+    db = active_db()
+    if initial:
+        db.collection("contractors").document("contractor").set(dict(active=True, jobber_connected=False,
+            jobber_generation=0, jobber_lifecycle_epoch=0, jobber_lead_capture_enabled=False))
+    else: binding(db)
+    forbid_http(monkeypatch)
+    _, old, old_proof = await consume_fresh(db, "old")
+    if phase == "provider_request_started":
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=old["claim_id"], kind="connect", db=db)
+    before = data(db)
+    advance_server(db, 60)  # Exact expiry is recoverable, not a live lease.
+    state = await fresh_oauth_state(db, "replacement")
+    if phase == "provider_request_started":
+        with pytest.raises(HTTPException) as error:
+            await mutations.consume_jobber_oauth_state(db=db, state=state)
+        assert error.value.status_code == 409
+        assert not db.collection("jobber_oauth_states").document(state).get().exists
+        assert parse_provider_operation_intent(data(db), "jobber")[0] == "quarantined"
+        assert not admission.ORDINARY_CLAIM_KEYS.intersection(data(db))
+        _, new, proof = await consume_fresh(db, "after_quarantine")
+        assert new["is_quarantined"] is True
+    else:
+        _, new, proof = await mutations.consume_jobber_oauth_state(db=db, state=state)
+        assert new["is_quarantined"] is False
+    assert new["claim_id"] != old["claim_id"]
+    for key in ("jobber_access_token", "jobber_refresh_token", "jobber_token_envelope_required",
+                "jobber_generation", "jobber_lifecycle_epoch"):
+        assert (key in data(db), data(db).get(key)) == (key in before, before.get(key))
+    with pytest.raises(IntegrationTokenCASConflict):
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=old["claim_id"], kind="connect", db=db)
+    assert await admission.clear_claim(contractor_id="contractor", claim_id=old["claim_id"], terminal=True, db=db) is False
+    old_binding = mutations.finalize_jobber_binding_proof(old_proof, "account", "new-access", "new-refresh")
+    with pytest.raises(IntegrationTokenCASConflict): await complete(db, old, old_binding)
+    await start_and_bind_proof(db, new, proof)
+    assert (await mutations.load_jobber_connection_status("contractor", db=db)).connected is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempt", [False, True])
+@pytest.mark.parametrize("phase", ["reserved", "provider_request_started"])
+@pytest.mark.parametrize("elapsed", [59.999, 60.0])
+async def test_live_and_expired_ordinary_or_attempt_owner(attempt, phase, elapsed):
+    from fastapi import HTTPException
+    db = active_db(); binding(db)
+    if attempt:
+        db.collection("contractors").document("contractor").update({
+            "jobber_refresh_outcome_unknown": True, "jobber_reauthorization_required": True})
+    _, old, _ = await consume_fresh(db, "held")
+    if phase == "provider_request_started":
+        if attempt:
+            await mutations.transition_provider_reauthorization_attempt_to_started_cas(
+                contractor_id="contractor", provider="jobber", claim_id=old["claim_id"],
+                observed_generation=old["generation"], observed_lifecycle_epoch=old["lifecycle_epoch"],
+                observed_access_raw=old["observed_access_raw"], observed_refresh_raw=old["observed_refresh_raw"], db=db)
+        else:
+            await mutations.transition_provider_operation_intent_to_started_cas(
+                contractor_id="contractor", provider="jobber", claim_id=old["claim_id"], kind="connect", db=db)
+    advance_server(db, elapsed)
+    state = await fresh_oauth_state(db, "next")
+    before = data(db)
+    if elapsed < 60 or (phase == "provider_request_started" and not attempt):
+        with pytest.raises(HTTPException): await mutations.consume_jobber_oauth_state(db=db, state=state)
+        if elapsed < 60: assert data(db) == before
+        else: assert parse_provider_operation_intent(data(db), "jobber")[0] == "quarantined"
+    else:
+        _, current, _ = await mutations.consume_jobber_oauth_state(db=db, state=state)
+        assert current["claim_id"] != old["claim_id"] and current["is_quarantined"] is attempt
+        if attempt:
+            assert data(db)["jobber_refresh_outcome_unknown"] is True
+            assert data(db)["jobber_reauthorization_required"] is True
+            assert not admission.ORDINARY_CLAIM_KEYS.intersection(data(db))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_first", [False, True])
+@pytest.mark.parametrize("window", ["before_consume", "reserved", "started"])
+async def test_audited_state_creation_and_fanout_preserve_fresh_oauth(monkeypatch, worker_first, window):
+    from app.services.jobber_disconnect_recovery import acquire_work_lease_atomic, process_work_batch
+    db = active_db(); original = binding(db); admit(db)
+    forbid_http(monkeypatch)
+    work = acquire_work_lease_atomic(db, "worker")
+    if worker_first: assert process_work_batch(db, work, work["lease_id"])[0] == 1
+    state = await fresh_oauth_state(db, "post_barrier")
+    assert data(db)["jobber_generation"] == original["jobber_generation"] + 1
+    work_before = copy.deepcopy(db._data["jobber_disconnect_work/" + work["work_id"]])
+    obs = proof = None
+    if window != "before_consume":
+        _, obs, proof = await mutations.consume_jobber_oauth_state(db=db, state=state)
+        if window == "started":
+            await mutations.transition_provider_operation_intent_to_started_cas(
+                contractor_id="contractor", provider="jobber", claim_id=obs["claim_id"], kind="connect", db=db)
+    before = data(db)
+    assert process_work_batch(db, work, work["lease_id"])[0] == 0
+    assert data(db) == before
+    assert db._data["jobber_disconnect_work/" + work["work_id"]] == work_before
+    audits = [v for k, v in db._data.items() if k.startswith("jobber_provider_suspension_audit/")]
+    assert len(audits) == 1 and audits[0]["credentials_retained"] is True
+    for key in ("jobber_access_token", "jobber_refresh_token", "jobber_token_envelope_required"):
+        assert data(db)[key] == original[key]
+    assert await mutations.load_durable_provider_snapshot("contractor", "jobber", db=db) is None
+    with pytest.raises(IntegrationTokenCASConflict):
+        await mutations.update_jobber_lead_capture_cas(contractor_id="contractor", enabled=True, db=db)
+    assert not any(k.startswith("integration_revocation_outbox/") for k in db._data)
+    if window == "before_consume": _, obs, proof = await mutations.consume_jobber_oauth_state(db=db, state=state)
+    if window != "started":
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=obs["claim_id"], kind="connect", db=db)
+    bound = mutations.finalize_jobber_binding_proof(proof, "account", "new-access", "new-refresh")
+    await complete(db, obs, bound)
+    assert (await mutations.load_jobber_connection_status("contractor", db=db)).connected is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["reserved", "provider_request_started"])
+async def test_repeated_state_creation_never_steals_live_postbarrier_owner(phase):
+    from fastapi import HTTPException
+    db = active_db(); binding(db); admit(db)
+    first = await fresh_oauth_state(db, "first")
+    second = await fresh_oauth_state(db, "second")
+    assert data(db)["jobber_generation"] == 3
+    assert len([k for k in db._data if k.startswith("jobber_provider_suspension_audit/")]) == 1
+    _, obs, _ = await mutations.consume_jobber_oauth_state(db=db, state=first)
+    if phase == "provider_request_started":
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=obs["claim_id"], kind="connect", db=db)
+    before, version = copy.deepcopy(db._data), db.version
+    with pytest.raises(HTTPException) as error: await fresh_oauth_state(db, "third")
+    assert error.value.status_code == 409 and db._data == before and db.version == version
+    with pytest.raises(HTTPException): await mutations.consume_jobber_oauth_state(db=db, state=second)
+    assert data(db) == before["contractors/contractor"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["reserved", "provider_request_started"])
+@pytest.mark.parametrize("fault", ["lost_ack", "drop", "drop_ambiguous"])
+async def test_expired_oauth_recovery_commit_faults_are_verified(phase, fault):
+    from fastapi import HTTPException
+    db = active_db(); binding(db)
+    _, old, _ = await consume_fresh(db, "old_fault")
+    if phase == "provider_request_started":
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=old["claim_id"], kind="connect", db=db)
+    advance_server(db, 60)
+    state = await fresh_oauth_state(db, "new_fault")
+    before = copy.deepcopy(db._data)
+    if fault == "lost_ack": db.commit_then_raise = True
+    else:
+        def drop(txn):
+            txn.writes.clear()
+            if fault == "drop_ambiguous": raise RuntimeError("fictional lost acknowledgement")
+        db.before_commit = drop
+    if fault != "lost_ack":
+        with pytest.raises(IntegrationTokenCASConflict): await mutations.consume_jobber_oauth_state(db=db, state=state)
+        assert db._data == before
+    else:
+        if phase == "provider_request_started":
+            with pytest.raises(HTTPException): await mutations.consume_jobber_oauth_state(db=db, state=state)
+            assert parse_provider_operation_intent(data(db), "jobber")[0] == "quarantined"
+        else:
+            _, obs, _ = await mutations.consume_jobber_oauth_state(db=db, state=state)
+            assert obs["claim_id"] != old["claim_id"]
+        assert not db.collection("jobber_oauth_states").document(state).get().exists
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["lost_ack", "drop", "drop_ambiguous"])
+async def test_state_suspension_audit_commit_faults(fault):
+    db = active_db(); binding(db); admit(db)
+    before = copy.deepcopy(db._data)
+    if fault == "lost_ack": db.commit_then_raise = True
+    else:
+        def drop(txn):
+            txn.writes.clear()
+            if fault == "drop_ambiguous": raise RuntimeError("fictional lost acknowledgement")
+        db.before_commit = drop
+    if fault == "lost_ack":
+        await fresh_oauth_state(db, "audit_fault")
+        assert data(db)["jobber_disconnect_processed_barrier"] == 1
+        assert len([k for k in db._data if k.startswith("jobber_provider_suspension_audit/")]) == 1
+    else:
+        with pytest.raises(IntegrationTokenCASConflict): await fresh_oauth_state(db, "audit_fault")
+        assert db._data == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["generation", "epoch", "fingerprint", "context_missing", "source", "app", "future", "phase", "expiry_bool"])
+async def test_expired_claim_hostile_metadata_cannot_be_recovered(corruption):
+    from fastapi import HTTPException
+    db = active_db(); binding(db)
+    _, _, _ = await consume_fresh(db, "hostile_old")
+    advance_server(db, 60)
+    state = await fresh_oauth_state(db, "hostile_new")
+    ref = db.collection("contractors").document("contractor")
+    prefix = "jobber_operation_intent_"
+    changes = {}
+    if corruption == "generation": changes[prefix + "generation"] = 999
+    elif corruption == "epoch": changes[prefix + "lifecycle_epoch"] = 999
+    elif corruption == "fingerprint": changes[prefix + "credentials_fingerprint"] = "0" * 64
+    elif corruption == "context_missing": changes[prefix + "context"] = DELETE_FIELD
+    elif corruption in ("source", "app"):
+        context = dict(data(db)[prefix + "context"])
+        context["source_account_id" if corruption == "source" else "app_id"] = "other"
+        changes[prefix + "context"] = context
+    elif corruption == "future":
+        changes.update({prefix + "acquired_at": db.get_server_time().timestamp() + 1.0,
+                        prefix + "expires_at": db.get_server_time().timestamp() + 61.0})
+    elif corruption == "phase": changes[prefix + "phase"] = "provider_outcome_uncertain"
+    else: changes[prefix + "expires_at"] = True
+    ref.update(changes)
+    before = data(db)
+    with pytest.raises(HTTPException): await mutations.consume_jobber_oauth_state(db=db, state=state)
+    assert data(db) == before
+    assert not db.collection("jobber_oauth_states").document(state).get().exists
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race", ["renew", "start", "replace", "reconnect", "receipt"])
+async def test_expired_claim_retry_never_steals_new_owner(race):
+    from fastapi import HTTPException
+    db = active_db(); binding(db)
+    _, old, _ = await consume_fresh(db, "retry_old")
+    advance_server(db, 60)
+    state = await fresh_oauth_state(db, "retry_new")
+    expected = {}
+    def mutate(txn):
+        ref = db.collection("contractors").document("contractor")
+        now = db.get_server_time().timestamp()
+        if race in ("renew", "start", "replace"):
+            updates = {"jobber_operation_intent_expires_at": now + 60.0}
+            if race == "start": updates["jobber_operation_intent_phase"] = "provider_request_started"
+            if race == "replace": updates["jobber_operation_intent_id"] = "winning_other_owner"
+            ref.update(updates)
+        elif race == "reconnect":
+            replacement = binding(db)
+            ref.update({"jobber_generation": replacement["jobber_generation"] + 1,
+                        "jobber_lifecycle_epoch": replacement["jobber_lifecycle_epoch"] + 1})
+        else: admit(db)
+        expected.update(data(db))
+    db.before_commit = mutate
+    with pytest.raises(HTTPException): await mutations.consume_jobber_oauth_state(db=db, state=state)
+    assert data(db) == expected
+    assert not db.collection("jobber_oauth_states").document(state).get().exists
+    if race not in ("reconnect", "receipt"):
+        assert data(db)["jobber_operation_intent_id"] == ("winning_other_owner" if race == "replace" else old["claim_id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous", [False, True])
+@pytest.mark.parametrize("mutation", ["floor", "replacement", "authority", "state_restored", "claim_or_quarantine_dropped"])
+@pytest.mark.parametrize("phase", ["reserved", "provider_request_started"])
+async def test_expired_claim_readback_checks_full_binding(monkeypatch, ambiguous, mutation, phase):
+    db = active_db(); binding(db)
+    _, obs, _ = await consume_fresh(db, "postcommit_old")
+    if phase == "provider_request_started":
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=obs["claim_id"], kind="connect", db=db)
+    advance_server(db, 60)
+    state = await fresh_oauth_state(db, "postcommit_new")
+    state_ref = db.collection("jobber_oauth_states").document(state)
+    original_state = state_ref.get().to_dict()
+    factory = db.jobber_transaction_factory
+    fired = []
+    def changed_factory(**kwargs):
+        txn = factory(**kwargs); commit = txn._commit
+        def finish():
+            writes = bool(txn.writes)
+            value = commit()
+            if writes and not fired:
+                fired.append(True)
+                ref = db.collection("contractors").document("contractor")
+                if mutation == "floor": ref.update({"jobber_token_envelope_required": False})
+                elif mutation == "replacement": binding(db)
+                elif mutation == "authority": admit(db)
+                elif mutation == "state_restored": state_ref.set(original_state)
+                elif phase == "provider_request_started":
+                    ref.update({"jobber_refresh_outcome_unknown": DELETE_FIELD, "jobber_reauthorization_required": DELETE_FIELD})
+                else: ref.update({key: DELETE_FIELD for key in admission.ORDINARY_CLAIM_KEYS})
+                if ambiguous: raise RuntimeError("fictional response lost")
+            return value
+        txn._commit = finish
+        return txn
+    monkeypatch.setattr(db, "jobber_transaction_factory", changed_factory)
+    with pytest.raises(IntegrationTokenCASConflict):
+        await mutations.consume_jobber_oauth_state(db=db, state=state)
+    assert fired == [True]
+    if mutation == "replacement": assert data(db)["jobber_connected"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", ["unrelated", "account", "destination"])
+async def test_postbarrier_state_recovery_only_fences_relevant_receipts(event):
+    from app.services.jobber_disconnect_recovery import acquire_work_lease_atomic, process_work_batch
+    db = active_db(); binding(db); admit(db)
+    work = acquire_work_lease_atomic(db, "worker")
+    _, obs, proof = await consume_fresh(db, "event_owned")
+    admit(db, account=event, admission="adm_event")
+    if event == "account":
+        before = data(db)
+        with pytest.raises(Exception): process_work_batch(db, work, work["lease_id"])
+        assert data(db) == before
+        with pytest.raises(IntegrationTokenCASConflict):
+            await mutations.transition_provider_operation_intent_to_started_cas(
+                contractor_id="contractor", provider="jobber", claim_id=obs["claim_id"], kind="connect", db=db)
+    else:
+        assert process_work_batch(db, work, work["lease_id"])[0] == 0
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=obs["claim_id"], kind="connect", db=db)
+        bound = mutations.finalize_jobber_binding_proof(proof, "destination", "new-access", "new-refresh")
+        if event == "destination":
+            with pytest.raises(IntegrationTokenCASConflict): await complete(db, obs, bound, destination="destination")
+        else:
+            await complete(db, obs, bound, destination="destination")
+            assert data(db)["jobber_account_id"] == "destination"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous", [False, True])
+@pytest.mark.parametrize("mutation", ["audit_missing", "floor", "receipt", "new_owner"])
+async def test_state_suspension_postcommit_readback_is_exact(monkeypatch, ambiguous, mutation):
+    db = active_db(); binding(db); admit(db)
+    factory = db.jobber_transaction_factory
+    fired = []
+    def altered_factory(**kwargs):
+        txn = factory(**kwargs); commit = txn._commit
+        def finish():
+            writes = bool(txn.writes)
+            result = commit()
+            if writes and not fired:
+                fired.append(True)
+                ref = db.collection("contractors").document("contractor")
+                if mutation == "audit_missing":
+                    key = next(k for k in db._data if k.startswith("jobber_provider_suspension_audit/"))
+                    db.collection("jobber_provider_suspension_audit").document(key.split("/")[1]).delete()
+                elif mutation == "floor": ref.update({"jobber_token_envelope_required": False})
+                elif mutation == "receipt": admit(db, admission="adm_after_state")
+                else:
+                    current = data(db)
+                    context = admission.JobberAdmissionContext("oauth", "enforced", "app", "account", 1)
+                    ref.update(admission._claim_updates(current, "winning_after_commit", "connect",
+                        db.get_server_time().timestamp(), 60.0, context))
+                if ambiguous: raise RuntimeError("fictional response lost")
+            return result
+        txn._commit = finish
+        return txn
+    monkeypatch.setattr(db, "jobber_transaction_factory", altered_factory)
+    # Audit validator errors and lifecycle conflicts both fail closed; neither
+    # authorizes a callback or repairs a new owner's record.
+    from app.db.jobber_disconnect_receipts import JobberDisconnectError
+    with pytest.raises((IntegrationTokenCASConflict, JobberDisconnectError)):
+        await fresh_oauth_state(db, "postwrite_state")
+    assert fired == [True]
+    if mutation == "new_owner": assert data(db)["jobber_operation_intent_id"] == "winning_after_commit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["business", "refresh"])
+async def test_expired_reserved_ordinary_aliases_are_cleared_before_oauth_owner(kind):
+    db = active_db(); binding(db)
+    _, old = await reserved(db, kind)
+    advance_server(db, 60)
+    _, obs, _ = await consume_fresh(db, "ordinary_" + kind)
+    current = data(db)
+    assert obs["claim_id"] != old and current["jobber_operation_intent_kind"] == "connect"
+    assert not any(k.startswith("jobber_refresh_claim_") for k in current)
+    assert parse_provider_operation_intent(current, "jobber")[0] == "valid"
+
+
+@pytest.mark.asyncio
+async def test_invalid_server_clock_cannot_clear_expired_claim(monkeypatch):
+    import datetime
+    db = active_db(); binding(db)
+    await consume_fresh(db, "clock_old")
+    advance_server(db, 60)
+    state = await fresh_oauth_state(db, "clock_new")
+    before = copy.deepcopy(db._data)
+    monkeypatch.setattr(db, "get_server_time", lambda: datetime.datetime(2026, 10, 11))
+    with pytest.raises(IntegrationTokenCASConflict): await mutations.consume_jobber_oauth_state(db=db, state=state)
+    assert db._data == before

@@ -190,3 +190,135 @@ def test_poison_cursor_tracks_only_examined_boundary_with_small_page(monkeypatch
     assert acquire_work_lease_atomic(db, "worker") is None
     assert db._data["jobber_disconnect_scan_cursor/current"]["cursor_work_id"] == "! poison"
     assert acquire_work_lease_atomic(db, "worker")["work_id"] == compute_work_doc_id("app", "account")
+
+
+async def suspended_owner(phase="reserved"):
+    from app.services import integration_token_mutations as mutations
+    db, original, work = setup_one()
+    state = "audited_worker_oauth_state"
+    await mutations.create_oauth_state(db=db, collection_name="jobber_oauth_states", state=state,
+        contractor_id="contractor", provider="jobber")
+    _, obs, proof = await mutations.consume_jobber_oauth_state(db=db, state=state)
+    if phase == "provider_request_started":
+        await mutations.transition_provider_operation_intent_to_started_cas(
+            contractor_id="contractor", provider="jobber", claim_id=obs["claim_id"], kind="connect", db=db)
+    return db, original, work, obs, proof
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["ordinary", "missing_context", "foreign_app", "foreign_source", "future", "generation", "fingerprint", "missing_audit", "malformed_audit", "audit_time", "unaudited"])
+async def test_worker_rejects_hostile_postbarrier_owner_or_audit_without_writes(corruption):
+    from google.cloud.firestore_v1 import DELETE_FIELD
+    from app.services.jobber_disconnect_recovery import _readback_binding
+    db, _, work, _, _ = await suspended_owner()
+    ref = db.collection("contractors").document("contractor")
+    data = clone(db._data[ref.path]); prefix = "jobber_operation_intent_"
+    audit_path = next(k for k in db._data if k.startswith("jobber_provider_suspension_audit/"))
+    audit_ref = db.collection("jobber_provider_suspension_audit").document(audit_path.split("/")[1])
+    if corruption == "ordinary":
+        context = dict(data[prefix + "context"])
+        context.update(purpose="ordinary", account_id=context.pop("source_account_id"), barrier=context.pop("receipt_counter_at_start"))
+        ref.update({prefix + "kind": "business", prefix + "context": context})
+    elif corruption == "missing_context": ref.update({prefix + "context": DELETE_FIELD})
+    elif corruption in ("foreign_app", "foreign_source"):
+        context = dict(data[prefix + "context"])
+        context["app_id" if corruption == "foreign_app" else "source_account_id"] = "other"
+        ref.update({prefix + "context": context})
+    elif corruption == "future": ref.update({prefix + "acquired_at": db.get_server_time().timestamp() + 1.0})
+    elif corruption == "generation": ref.update({prefix + "generation": 999})
+    elif corruption == "fingerprint": ref.update({prefix + "credentials_fingerprint": "0" * 64})
+    elif corruption == "missing_audit": audit_ref.delete()
+    elif corruption == "malformed_audit": audit_ref.update({"credentials_retained": False})
+    elif corruption == "audit_time": audit_ref.update({"timestamp": data["jobber_disconnected_at"] - 1.0, "created_at": data["jobber_disconnected_at"] - 1.0})
+    else:
+        ref.update({"jobber_disconnect_state": DELETE_FIELD, "jobber_disconnect_processed_barrier": DELETE_FIELD})
+        audit_ref.delete()
+    before, version = clone(db._data), db.version
+    with pytest.raises(JobberDisconnectError): process_work_batch(db, work, work["lease_id"])
+    assert db._data == before and db.version == version
+    with pytest.raises(JobberDisconnectError):
+        run_transaction(db, lambda txn: _readback_binding(txn, db, "contractor", work), read_only=True)
+    assert db._data == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["reserved", "provider_request_started"])
+async def test_worker_preserves_expired_postbarrier_owner_for_consume_recovery(phase):
+    from fastapi import HTTPException
+    from app.services import integration_token_mutations as mutations
+    from app.services.integration_tokens import parse_provider_operation_intent
+    db, original, work, old, _ = await suspended_owner(phase)
+    db.set_server_time(db.get_server_time() + dt.timedelta(seconds=60))
+    work = acquire_work_lease_atomic(db, "worker_again")
+    before = clone(db._data["contractors/contractor"])
+    assert process_work_batch(db, work, work["lease_id"])[0] == 0
+    assert db._data["contractors/contractor"] == before
+    state = "expired_postbarrier_fresh_state"
+    await mutations.create_oauth_state(db=db, collection_name="jobber_oauth_states", state=state,
+        contractor_id="contractor", provider="jobber")
+    if phase == "provider_request_started":
+        with pytest.raises(HTTPException): await mutations.consume_jobber_oauth_state(db=db, state=state)
+        assert parse_provider_operation_intent(db._data["contractors/contractor"], "jobber")[0] == "quarantined"
+        assert process_work_batch(db, work, work["lease_id"])[0] == 0
+        state += "_retry"
+        await mutations.create_oauth_state(db=db, collection_name="jobber_oauth_states", state=state,
+            contractor_id="contractor", provider="jobber")
+    _, obs, _ = await mutations.consume_jobber_oauth_state(db=db, state=state)
+    assert obs["claim_id"] != old["claim_id"]
+    assert process_work_batch(db, work, work["lease_id"])[0] == 0
+    current = db._data["contractors/contractor"]
+    for key in ("jobber_access_token", "jobber_refresh_token", "jobber_token_envelope_required"):
+        assert current[key] == original[key]
+    assert current["jobber_connected"] is False and current["jobber_lead_capture_enabled"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["missing_work", "work_mismatch", "audit_collision"])
+async def test_state_creation_cannot_invent_suspension_evidence(fault):
+    from app.services import integration_token_mutations as mutations
+    from app.services.integration_tokens import IntegrationTokenCASConflict
+    from app.db.jobber_disconnect_receipts import compute_suspension_audit_doc_id
+    db, _, work = setup_one()
+    work_ref = db.collection("jobber_disconnect_work").document(work["work_id"])
+    if fault == "missing_work": work_ref.delete()
+    elif fault == "work_mismatch": work_ref.update({"last_receipt_id": "different_receipt"})
+    else:
+        audit_id = compute_suspension_audit_doc_id("contractor", "app", "account", 1, 3, 4)
+        db.collection("jobber_provider_suspension_audit").document(audit_id).set({"schema_version": 1})
+    before, version = clone(db._data), db.version
+    with pytest.raises(IntegrationTokenCASConflict):
+        await mutations.create_oauth_state(db=db, collection_name="jobber_oauth_states", state="evidence_missing_state",
+            contractor_id="contractor", provider="jobber")
+    assert db._data == before and db.version == version
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["claim", "binding", "receipt"])
+async def test_worker_postcommit_readback_preserves_replacement(monkeypatch, replacement):
+    from app.services.jobber_disconnect_recovery import _readback_binding
+    db, _, work, _, _ = await suspended_owner()
+    original_factory = db.jobber_transaction_factory
+    changed = []
+    def factory(**kwargs):
+        txn = original_factory(**kwargs); commit = txn._commit
+        def finish():
+            result = commit()
+            if not kwargs["read_only"] and not changed:
+                changed.append(True)
+                if replacement == "claim":
+                    # A malformed replacement cannot be accepted as audited ownership.
+                    db.collection("contractors").document("contractor").update({"jobber_operation_intent_context": {}})
+                elif replacement == "binding": binding(db, accepted=1)
+                else: admit(db, admission="adm_superseding")
+            return result
+        txn._commit = finish
+        return txn
+    monkeypatch.setattr(db, "jobber_transaction_factory", factory)
+    if replacement == "binding":
+        assert process_work_batch(db, work, work["lease_id"])[0] == 0
+        assert db._data["contractors/contractor"]["jobber_connected"] is True
+    else:
+        with pytest.raises(JobberDisconnectError): process_work_batch(db, work, work["lease_id"])
+        if replacement == "claim": assert db._data["contractors/contractor"]["jobber_operation_intent_context"] == {}
+        else: assert db._data["jobber_disconnect_work/" + work["work_id"]]["barrier"] == 2
+    assert changed == [True]

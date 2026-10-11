@@ -4173,8 +4173,10 @@ def test_strict_ast_token_field_inventory():
         ("app/services/jobber_admissions.py", "jobber_refresh_token"): 7,
         ("app/services/jobber_disconnect_barriers.py", "jobber_access_token"): 1,
         ("app/services/jobber_disconnect_barriers.py", "jobber_refresh_token"): 1,
-        ("app/services/jobber_disconnect_recovery.py", "jobber_access_token"): 1,
-        ("app/services/jobber_disconnect_recovery.py", "jobber_refresh_token"): 1,
+        # Recovery also checks the raw fingerprint of retained credentials to
+        # validate post-barrier OAuth ownership; it never grants provider access.
+        ("app/services/jobber_disconnect_recovery.py", "jobber_access_token"): 2,
+        ("app/services/jobber_disconnect_recovery.py", "jobber_refresh_token"): 2,
     }
 
     actual_counts: Counter = Counter()

@@ -26,6 +26,8 @@ from app.db.jobber_disconnect_transactions import (
 )
 from app.services.integration_tokens import (
     get_provider_operation_intent_keys, parse_durable_lifecycle_counters,
+    parse_provider_operation_intent, parse_jobber_admission_context,
+    compute_raw_credentials_fingerprint,
 )
 from app.utils.logging import get_logger
 
@@ -224,8 +226,6 @@ def _binding_state(data, expected_barrier):
                 or data.get("jobber_lead_capture_enabled") is not False):
             raise JobberDisconnectWorkError("Malformed suspended binding")
         if processed == expected_barrier:
-            if any(key in data for key in get_provider_operation_intent_keys("jobber")):
-                raise JobberDisconnectWorkError("Suspended binding retains stale claims")
             return "already_processed", gen, epoch
     elif accepted == expected_barrier:
         return "fresh_reconnected", gen, epoch
@@ -241,10 +241,101 @@ def _audit_payload(cid, app, account, barrier, gen, epoch, now):
             "created_at": now, "timestamp": now}
 
 
+def post_barrier_oauth_owner(data, control, barrier, now):
+    """Validate retained ownership without granting provider or token access.
+
+    Expired owners remain expired and are left for consume-time CAS recovery.
+    Clean quarantine has no owner and must survive the two-step recovery flow.
+    """
+    status, parsed, _ = parse_provider_operation_intent(data, "jobber")
+    if status in ("absent", "quarantined"):
+        return None
+    if status not in ("valid", "quarantined_reauthorizing") or parsed is None:
+        raise JobberDisconnectWorkError("Malformed post-suspension claim")
+    ok, gen, epoch, present, _ = parse_durable_lifecycle_counters(data, "jobber")
+    try:
+        context = parse_jobber_admission_context(parsed.get("jobber_context"), purpose="oauth")
+    except Exception:
+        raise JobberDisconnectWorkError("Missing post-suspension OAuth context") from None
+    if (not ok or not present or parsed.get("is_legacy")
+            or parsed["kind"] not in ("connect", "reconnect")
+            or parsed["phase"] not in ("reserved", "provider_request_started")
+            or (parsed["generation"], parsed["lifecycle_epoch"]) != (gen, epoch)
+            or parsed["credentials_fingerprint"] != compute_raw_credentials_fingerprint(
+                data.get("jobber_access_token"), data.get("jobber_refresh_token"))
+            or context.mode != "enforced" or context.app_id != control["expected_app_id"]
+            or data.get("jobber_app_id") != context.app_id
+            or context.account_id != data.get("jobber_account_id")
+            or not barrier <= context.counter <= control["receipt_counter"]
+            or not parsed["acquired_at"] <= now
+            or not parsed["acquired_at"] < parsed["expires_at"]):
+        raise JobberDisconnectWorkError("Post-suspension OAuth owner mismatch")
+    return parsed
+
+
+def read_suspension_account_in_txn(txn, db, app, account):
+    cs = read_document(_control_ref(db), txn)
+    bs = read_document(db.collection(BARRIERS_COLLECTION).document(compute_account_barrier_key(app, account)), txn)
+    ws = read_document(db.collection(WORK_COLLECTION).document(compute_work_doc_id(app, account)), txn)
+    control, barrier, work = validate_account_records(_data(cs), _data(bs), _data(ws), app_id=app, account_id=account)
+    return control, barrier, work, extract_snapshot_time(cs)
+
+
+def verify_suspension_audit_in_txn(txn, db, cid, data, app, account, barrier, gen, epoch, now):
+    expected = _audit_payload(cid, app, account, barrier, gen, epoch, now)
+    ref = db.collection(SUSPENSION_AUDIT_COLLECTION).document(expected["audit_id"])
+    actual = validate_suspension_audit_record(_data(read_document(ref, txn)), expected["audit_id"])
+    if (any(type(actual[k]) is not type(expected[k]) or actual[k] != expected[k]
+            for k in expected if k not in ("created_at", "timestamp"))
+            or type(data.get("jobber_disconnected_at")) is not float
+            or actual["created_at"] != data["jobber_disconnected_at"]
+            or actual["timestamp"] != data["jobber_disconnected_at"]
+            or actual["created_at"] > now):
+        raise JobberSuspensionAuditError("Suspension evidence mismatch")
+    return ref, actual
+
+
+def prepare_suspension_in_txn(txn, db, cid, data, control, barrier, now):
+    """Read and prepare the shared transition; callers stage all writes later."""
+    app, account = control["expected_app_id"], barrier["account_id"]
+    if data.get("jobber_app_id") != app or data.get("jobber_account_id") != account:
+        raise JobberDisconnectWorkError("Suspension binding membership changed")
+    state, gen, epoch = _binding_state(data, barrier["barrier"])
+    if state == "fresh_reconnected":
+        return {}, None, None, state
+    if state == "already_processed":
+        audit_ref, audit = verify_suspension_audit_in_txn(txn, db, cid, data, app, account,
+            barrier["barrier"], gen, epoch, now)
+        post_barrier_oauth_owner(data, control, barrier["barrier"], now)
+        return {}, audit_ref, audit, state
+    status, owner, _ = parse_provider_operation_intent(data, "jobber")
+    context = owner.get("jobber_context") if owner else None
+    if (status in ("valid", "quarantined_reauthorizing") and owner is not None
+            and owner["kind"] in ("connect", "reconnect") and context is not None
+            and context.counter >= barrier["barrier"]):
+        post_barrier_oauth_owner(data, control, barrier["barrier"], now)
+        raise JobberDisconnectWorkError("Unaudited post-barrier OAuth owner")
+    if gen >= MAX_KEY_VERSION or epoch >= MAX_KEY_VERSION:
+        raise JobberLifecycleOverflowError("Lifecycle overflow")
+    payload = _audit_payload(cid, app, account, barrier["barrier"], gen + 1, epoch + 1, now)
+    audit_ref = db.collection(SUSPENSION_AUDIT_COLLECTION).document(payload["audit_id"])
+    if read_document(audit_ref, txn).exists:
+        raise JobberSuspensionAuditError("Conflicting suspension audit")
+    updates = {key: DELETE_FIELD for key in get_provider_operation_intent_keys("jobber")}
+    updates.update({"jobber_generation": gen + 1, "jobber_lifecycle_epoch": epoch + 1,
+                    "jobber_connected": False, "jobber_lead_capture_enabled": False,
+                    "jobber_disconnect_state": "reauthorization_required",
+                    "jobber_disconnect_processed_barrier": barrier["barrier"],
+                    "jobber_disconnected_at": now, "jobber_disconnect_pending": False})
+    validate_suspension_audit_record(payload, payload["audit_id"])
+    return updates, audit_ref, payload, "advanced"
+
+
 def advance_contractor_disconnect_in_txn(txn, db, contractor_id, work_id, expected_worker_id,
                                         expected_barrier, expected_app_id, expected_account_id):
-    _, _, now = _leased_context(txn, db, work_id, expected_worker_id, expected_barrier,
-                                expected_app_id, expected_account_id)
+    _leased_context(txn, db, work_id, expected_worker_id, expected_barrier,
+                    expected_app_id, expected_account_id)
+    control, barrier, _, now = read_suspension_account_in_txn(txn, db, expected_app_id, expected_account_id)
     ref = db.collection("contractors").document(contractor_id)
     snap = read_document(ref, txn)
     if not snap.exists:
@@ -254,36 +345,12 @@ def advance_contractor_disconnect_in_txn(txn, db, contractor_id, work_id, expect
         raise JobberDisconnectWorkError("Malformed contractor")
     if data.get("jobber_app_id") != expected_app_id or data.get("jobber_account_id") != expected_account_id:
         return False, "membership_changed"
-    state, gen, epoch = _binding_state(data, expected_barrier)
-    if state == "fresh_reconnected":
-        return False, state
-    if state == "already_processed":
-        expected = _audit_payload(contractor_id, expected_app_id, expected_account_id, expected_barrier, gen, epoch, now)
-        audit = read_document(db.collection(SUSPENSION_AUDIT_COLLECTION).document(expected["audit_id"]), txn)
-        actual = validate_suspension_audit_record(_data(audit), expected["audit_id"])
-        if any(actual[k] != expected[k] for k in expected if k not in ("created_at", "timestamp")):
-            raise JobberSuspensionAuditError("Suspension evidence mismatch")
-        return False, state
-    if gen >= MAX_KEY_VERSION or epoch >= MAX_KEY_VERSION:
-        raise JobberLifecycleOverflowError("Lifecycle overflow")
-    payload = _audit_payload(contractor_id, expected_app_id, expected_account_id,
-                             expected_barrier, gen + 1, epoch + 1, now)
-    audit_ref = db.collection(SUSPENSION_AUDIT_COLLECTION).document(payload["audit_id"])
-    audit_snap = read_document(audit_ref, txn)
-    if audit_snap.exists:
-        validate_suspension_audit_record(audit_snap.to_dict(), payload["audit_id"])
-        # No audit may preexist without its atomic contractor transition.
-        raise JobberSuspensionAuditError("Conflicting suspension audit")
-    updates = {key: DELETE_FIELD for key in get_provider_operation_intent_keys("jobber")}
-    updates.update({"jobber_generation": gen + 1, "jobber_lifecycle_epoch": epoch + 1,
-                    "jobber_connected": False, "jobber_lead_capture_enabled": False,
-                    "jobber_disconnect_state": "reauthorization_required",
-                    "jobber_disconnect_processed_barrier": expected_barrier,
-                    "jobber_disconnected_at": now, "jobber_disconnect_pending": False})
-    validate_suspension_audit_record(payload, payload["audit_id"])
-    txn.create(audit_ref, payload)
-    txn.update(ref, updates)
-    return True, "advanced"
+    updates, audit_ref, audit, state = prepare_suspension_in_txn(
+        txn, db, contractor_id, data, control, barrier, now)
+    if updates:
+        txn.create(audit_ref, audit)
+        txn.update(ref, updates)
+    return bool(updates), state
 
 
 def _readback_binding(txn, db, cid, work, retained=None):
@@ -292,7 +359,7 @@ def _readback_binding(txn, db, cid, work, retained=None):
     bs = read_document(db.collection(BARRIERS_COLLECTION).document(
         compute_account_barrier_key(work["app_id"], work["account_id"])), txn)
     ws = read_document(db.collection(WORK_COLLECTION).document(work["work_id"]), txn)
-    validate_account_records(_data(cs), _data(bs), _data(ws), app_id=work["app_id"], account_id=work["account_id"])
+    control, _, _ = validate_account_records(_data(cs), _data(bs), _data(ws), app_id=work["app_id"], account_id=work["account_id"])
     snap = read_document(db.collection("contractors").document(cid), txn)
     if not snap.exists:
         return
@@ -306,11 +373,9 @@ def _readback_binding(txn, db, cid, work, retained=None):
     processed = data.get("jobber_disconnect_processed_barrier")
     if not _bounded(processed) or processed < work["barrier"]:
         raise JobberDisconnectWorkError("Suspension postcondition missing")
-    expected = _audit_payload(cid, work["app_id"], work["account_id"], processed, gen, epoch, extract_snapshot_time(cs))
-    audit = read_document(db.collection(SUSPENSION_AUDIT_COLLECTION).document(expected["audit_id"]), txn)
-    actual = validate_suspension_audit_record(_data(audit), expected["audit_id"])
-    if any(actual[k] != expected[k] for k in expected if k not in ("created_at", "timestamp")):
-        raise JobberSuspensionAuditError("Suspension postcondition mismatch")
+    now = extract_snapshot_time(cs)
+    verify_suspension_audit_in_txn(txn, db, cid, data, work["app_id"], work["account_id"], processed, gen, epoch, now)
+    post_barrier_oauth_owner(data, control, current_barrier, now)
     if retained is not None and gen == retained["generation"] and epoch == retained["epoch"]:
         for key, (was_present, value) in retained["fields"].items():
             if (key in data) != was_present or (was_present and (type(data[key]) is not type(value) or data[key] != value)):

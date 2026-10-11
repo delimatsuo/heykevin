@@ -128,7 +128,8 @@ def _jobber_summary(status_snapshot) -> dict:
     return {"connected": status_snapshot.connected,
             "connection_status": status_snapshot.connection_status,
             "connected_at": status_snapshot.connected_at,
-            "lead_capture_enabled": status_snapshot.lead_capture_enabled}
+            "lead_capture_enabled": status_snapshot.lead_capture_enabled,
+            "lead_capture_updated_at": status_snapshot.lead_capture_updated_at}
 
 
 def _device_summary(device_doc) -> dict:

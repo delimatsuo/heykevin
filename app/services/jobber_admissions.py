@@ -737,6 +737,7 @@ class JobberConnectionStatusSnapshot:
     connected: bool
     lead_capture_enabled: bool
     connected_at: float | None
+    lead_capture_updated_at: float | None = None
 
 
 async def load_jobber_connection_status(contractor_id, *, db):
@@ -745,9 +746,16 @@ async def load_jobber_connection_status(contractor_id, *, db):
         _, data, _ = _contractor(db, txn, contractor_id)
         status = _status_in_txn(db, txn, data, contractor_id)
         connected = status == "connected"
+        historical_update = data.get("jobber_lead_capture_updated_at")
+        try:
+            updated_at = float(historical_update) if type(historical_update) in (int, float) else None
+        except OverflowError:
+            updated_at = None
+        if updated_at is not None and (not math.isfinite(updated_at) or updated_at <= 0):
+            updated_at = None
         return JobberConnectionStatusSnapshot(status, connected,
             connected and data.get("jobber_lead_capture_enabled") is True,
-            _mutations().extract_safe_connected_at(data, "jobber") if connected else None)
+            _mutations().extract_safe_connected_at(data, "jobber") if connected else None, updated_at)
     return await _run(db, body)
 
 

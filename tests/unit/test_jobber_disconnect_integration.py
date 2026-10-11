@@ -347,7 +347,7 @@ async def test_status_endpoint_and_admin_use_authoritative_snapshot(monkeypatch)
     monkeypatch.setattr(integrations, "require_contractor_access", lambda *args: None)
     response = await integrations.jobber_status(contractor_id="contractor", request=None)
     assert response == dict(connected=False, connected_at=None, lead_capture_enabled=False, connection_status="disconnect_pending")
-    assert admin._jobber_summary(await mutations.load_jobber_connection_status("contractor", db=db)) == response
+    assert admin._jobber_summary(await mutations.load_jobber_connection_status("contractor", db=db)) == {**response, "lead_capture_updated_at": None}
 
 
 @pytest.mark.asyncio
@@ -775,3 +775,32 @@ def test_legacy_transaction_retains_stable_document_identity_for_transient_wrapp
     assert set(transaction._touched) == {id(first), id(second)}
     assert transaction._touched[id(first)][1]["value"] == "audit-payload"
     assert [target for target, _ in inner.writes] == [first, first, second]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["connected", "disconnect_pending", "reauthorization_required", "disconnected"])
+@pytest.mark.parametrize("stamp,expected", [(456, 456.0), (456.5, 456.5), (True, None),
+    (False, None), (None, None), (0, None), (-1.0, None), (float("nan"), None),
+    (float("inf"), None), ("456", None), (10 ** 400, None)])
+async def test_capture_update_history_is_safe_and_independent_of_connection_status(phase, stamp, expected):
+    from app.api import admin
+    from app.services.jobber_disconnect_recovery import run_jobber_disconnect_recovery_once
+    db = active_db(); binding(db)
+    db.collection("contractors").document("contractor").update({
+        "jobber_lead_capture_updated_at": stamp, "jobber_connected_at": 123.0})
+    if phase in ("disconnect_pending", "reauthorization_required"):
+        admit(db)
+        if phase == "reauthorization_required":
+            await run_jobber_disconnect_recovery_once(db=db)
+    elif phase == "disconnected":
+        await mutations.disconnect_provider_envelope_cas(contractor_id="contractor", provider="jobber", db=db)
+    snapshot = await mutations.load_jobber_connection_status("contractor", db=db)
+    assert snapshot.connection_status == phase
+    assert snapshot.connected is (phase == "connected")
+    assert snapshot.lead_capture_enabled is (phase == "connected")
+    assert snapshot.connected_at == (123.0 if phase == "connected" else None)
+    assert snapshot.lead_capture_updated_at == expected
+    summary = admin._jobber_summary(snapshot)
+    assert summary["lead_capture_updated_at"] == expected
+    assert summary["connection_status"] == phase
+    assert set(summary) == {"connection_status", "connected", "connected_at", "lead_capture_enabled", "lead_capture_updated_at"}

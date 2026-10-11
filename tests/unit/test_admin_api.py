@@ -252,8 +252,30 @@ async def test_admin_contractor_detail_includes_jobber_status_without_tokens(mon
         "connected": True,
         "connected_at": 123.0,
         "lead_capture_enabled": True,
+        "lead_capture_updated_at": 456.0,
         "connection_status": "connected",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paused", [False, True])
+@pytest.mark.parametrize("stamp,expected", [(456, 456.0), (True, None), (float("nan"), None),
+    (float("inf"), None), ("456", None), (0, None), (-1, None), (None, None)])
+async def test_admin_jobber_capture_history_uses_safe_authoritative_timestamp(monkeypatch, paused, stamp, expected):
+    contractor = {"active": True, "jobber_access_token": "fictional-access",
+        "jobber_refresh_token": "fictional-refresh", "jobber_connected_at": 123.0,
+        "jobber_lead_capture_enabled": True, "jobber_lead_capture_updated_at": stamp}
+    if paused:
+        contractor.update(jobber_refresh_outcome_unknown=True, jobber_reauthorization_required=True)
+    db = _FakeFirestore([_FakeDoc("contractor-1", contractor)])
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: db)
+    response = await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+    assert response["jobber"] == {
+        "connection_status": "reauthorization_required" if paused else "connected",
+        "connected": not paused, "lead_capture_enabled": not paused,
+        "connected_at": None if paused else 123.0, "lead_capture_updated_at": expected}
+    assert "jobber_access_token" not in response["contractor"]
+    assert "jobber_refresh_token" not in response["contractor"]
 
 
 @pytest.mark.asyncio

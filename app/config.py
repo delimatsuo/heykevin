@@ -146,6 +146,12 @@ class Settings(DotenvProtectedBaseSettings):
     # Jobber (FSM integration)
     jobber_client_id: str = ""
     jobber_client_secret: str = ""
+    jobber_webhook_secret: str = ""
+    jobber_disconnect_receiver_enabled: bool = False
+    jobber_disconnect_recovery_enabled: bool = False
+    jobber_disconnect_expected_app_id: str = ""
+    jobber_disconnect_enforce: bool = False
+    jobber_disconnect_enforcement_mode: str = "off"
 
     # Google Calendar (fallback scheduling for non-Jobber contractors)
     google_calendar_client_id: str = ""

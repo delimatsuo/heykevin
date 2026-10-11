@@ -22,6 +22,8 @@ import json
 import math
 import re
 import secrets
+import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -89,6 +91,72 @@ VALID_INTENT_PHASES = frozenset({"reserved", "provider_request_started", "provid
 _CANONICAL_STATE_REGEX = re.compile(r"^[0-9a-zA-Z_-]{1,128}\Z")
 
 
+@dataclass(frozen=True)
+class JobberAdmissionContext:
+    """Immutable local claim context; authoritative validation lives in admissions."""
+    purpose: str
+    mode: str
+    app_id: str | None
+    account_id: str | None
+    counter: int
+
+    def as_dict(self) -> dict[str, Any]:
+        source = "account_id" if self.purpose == "ordinary" else "source_account_id"
+        counter = "barrier" if self.purpose == "ordinary" else "receipt_counter_at_start"
+        return {"schema_version": 1, "purpose": self.purpose, "mode": self.mode,
+                "app_id": self.app_id, source: self.account_id, counter: self.counter}
+
+
+def parse_jobber_admission_context(value: Any, *, purpose: str | None = None) -> JobberAdmissionContext:
+    if type(value) is JobberAdmissionContext:
+        value = value.as_dict()
+    if type(value) is not dict or type(value.get("purpose")) is not str or value.get("purpose") not in ("ordinary", "oauth"):
+        raise IntegrationTokenEnvelopeError("Invalid Jobber admission context")
+    kind = value["purpose"]
+    source = "account_id" if kind == "ordinary" else "source_account_id"
+    counter = "barrier" if kind == "ordinary" else "receipt_counter_at_start"
+    if (any(type(k) is not str for k in value) or set(value) != {"schema_version", "purpose", "mode", "app_id", source, counter}
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or (purpose is not None and kind != purpose)
+            or type(value["mode"]) is not str or value["mode"] not in ("preactivation", "enforced")
+            or type(value[counter]) is not int or not 0 <= value[counter] <= 2147483647):
+        raise IntegrationTokenEnvelopeError("Invalid Jobber admission context")
+    app, account = value["app_id"], value[source]
+    for identity in (app, account):
+        if identity is not None:
+            validate_token_string(identity, name="Jobber identity")
+            if len(identity) > 1024 or any(c.isspace() or unicodedata.category(c) == "Cc" for c in identity):
+                raise IntegrationTokenEnvelopeError("Invalid Jobber identity")
+    if value["mode"] == "preactivation":
+        if app is not None or value[counter] != 0:
+            raise IntegrationTokenEnvelopeError("Invalid preactivation context")
+    elif app is None or (kind == "ordinary" and account is None):
+        raise IntegrationTokenEnvelopeError("Missing enforced identity")
+    return JobberAdmissionContext(kind, value["mode"], app, account, value[counter])
+
+
+def jobber_local_metadata_usable(data: dict[str, Any]) -> bool:
+    """Advisory only; never establishes authority without a datastore transaction."""
+    if any(k in data for k in ("jobber_disconnect_state", "jobber_disconnect_processed_barrier",
+            "jobber_disconnect_pending", "jobber_disconnect_pending_barrier",
+            "jobber_disconnect_pending_at", "jobber_disconnect_pending_receipt_id")):
+        return False
+    if "jobber_account_id" in data:
+        account = data["jobber_account_id"]
+        if type(account) is not str or not 1 <= len(account) <= 1024 or any(c.isspace() or unicodedata.category(c) == "Cc" for c in account):
+            return False
+    keys = {"jobber_app_id", "jobber_accepted_disconnect_barrier"}
+    if keys.intersection(data):
+        try:
+            parse_jobber_admission_context({"schema_version": 1, "purpose": "ordinary",
+                "mode": "enforced", "app_id": data.get("jobber_app_id"),
+                "account_id": data.get("jobber_account_id"),
+                "barrier": data.get("jobber_accepted_disconnect_barrier")})
+        except Exception:
+            return False
+    return True
+
+
 def get_provider_operation_intent_keys(provider: str) -> frozenset[str]:
 
     """Return all operation-intent, legacy claim, quarantine, and reauthorization attempt field names for a provider."""
@@ -96,15 +164,51 @@ def get_provider_operation_intent_keys(provider: str) -> frozenset[str]:
     keys.update({f"{provider}_{k}" for k in LEGACY_CLAIM_BASE_KEYS})
     keys.update({f"{provider}_{k}" for k in QUARANTINE_BASE_KEYS})
     keys.update({f"{provider}_{k}" for k in REAUTHORIZATION_ATTEMPT_BASE_KEYS})
+    if provider == "jobber":
+        keys.update({"jobber_operation_intent_context", "jobber_reauthorization_attempt_context"})
     return frozenset(keys)
 
 
 def get_provider_reauthorization_attempt_keys(provider: str) -> frozenset[str]:
     """Return all reauthorization attempt field names for a provider."""
-    return frozenset({f"{provider}_{k}" for k in REAUTHORIZATION_ATTEMPT_BASE_KEYS})
+    keys = {f"{provider}_{k}" for k in REAUTHORIZATION_ATTEMPT_BASE_KEYS}
+    if provider == "jobber":
+        keys.add("jobber_reauthorization_attempt_context")
+    return frozenset(keys)
 
 
-def parse_provider_reauthorization_attempt(
+def parse_provider_reauthorization_attempt(data, provider):
+    status, parsed, error = _parse_provider_reauthorization_attempt(data, provider)
+    if provider == "jobber" and type(data) is dict and "jobber_reauthorization_attempt_context" in data:
+        if status != "valid":
+            return "malformed", None, "Unowned Jobber attempt context"
+        try:
+            parsed["jobber_context"] = parse_jobber_admission_context(
+                data["jobber_reauthorization_attempt_context"], purpose="oauth")
+        except Exception:
+            return "malformed", None, "Invalid Jobber attempt context"
+    return status, parsed, error
+
+
+def parse_provider_operation_intent(data, provider):
+    status, parsed, error = _parse_provider_operation_intent(data, provider)
+    if provider != "jobber" or type(data) is not dict:
+        return status, parsed, error
+    if "jobber_reauthorization_attempt_context" in data and status != "quarantined_reauthorizing":
+        return "malformed", None, "Unowned Jobber attempt context"
+    if "jobber_operation_intent_context" in data:
+        if status != "valid" or parsed is None:
+            return "malformed", None, "Unowned Jobber operation context"
+        try:
+            purpose = "ordinary" if parsed["kind"] in ("business", "refresh") else "oauth"
+            parsed["jobber_context"] = parse_jobber_admission_context(
+                data["jobber_operation_intent_context"], purpose=purpose)
+        except Exception:
+            return "malformed", None, "Invalid Jobber operation context"
+    return status, parsed, error
+
+
+def _parse_provider_reauthorization_attempt(
     data: Any,
     provider: str,
 ) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -182,7 +286,7 @@ def parse_provider_reauthorization_attempt(
     return "valid", parsed, None
 
 
-def parse_provider_operation_intent(
+def _parse_provider_operation_intent(
     data: Any,
     provider: str,
 ) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -1051,6 +1155,9 @@ def resolve_usable_token_pair(
             return None, None
         if effective_id is None:
             return None, None
+
+    if provider == "jobber" and not jobber_local_metadata_usable(contractor):
+        return None, None
 
     # Lifecycle triple check: all 3 absent (legacy) OR all 3 exact valid present
     lifecycle_ok, gen_val, epoch_val, lifecycle_present, _ = parse_durable_lifecycle_counters(contractor, provider)

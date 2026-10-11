@@ -77,6 +77,29 @@ def _setup_keyring(monkeypatch, keys: dict[str, str] | None = None, active: str 
     monkeypatch.setattr(settings, "integration_token_active_key_version", active)
 
 
+def _jobber_boundary_proof(data, claim_id, access, refresh, account="jobber-acc-1"):
+    """Synthetic already-consumed proof for isolated mutation-boundary tests.
+
+    OAuth flow tests consume a real state instead. This helper supplies the new
+    independent context/proof factor, so a hostile phase/fingerprint/audit remains
+    the only failing condition in older direct-CAS tests.
+    """
+    from app.services.jobber_admissions import JobberConsumedStateProof, finalize_jobber_binding_proof
+    from app.services.integration_tokens import JobberAdmissionContext
+    context = JobberAdmissionContext("oauth", "preactivation", None, data.get("jobber_account_id"), 0)
+    prefix = "jobber_reauthorization_attempt" if "jobber_reauthorization_attempt_id" in data else "jobber_operation_intent"
+    data[prefix + "_context"] = context.as_dict()
+    consumed = JobberConsumedStateProof("fixture_consumed_state_123456", data["contractor_id"], claim_id,
+        data["jobber_generation"], data["jobber_lifecycle_epoch"],
+        it_mutations.compute_raw_credentials_fingerprint(data.get("jobber_access_token"), data.get("jobber_refresh_token")), context)
+    return finalize_jobber_binding_proof(consumed, account, access, refresh)
+
+
+def _existing_docs(collection):
+    # Constructing a missing document reference is not a persisted write.
+    return {key: ref for key, ref in collection.docs.items() if ref.exists}
+
+
 def _patch_firestore(monkeypatch, db):
     import app.db.firestore_client as firestore_mod
     import app.services.calendar as calendar_svc
@@ -679,7 +702,7 @@ def test_absent_key_permits_legacy_read_but_fails_encrypted_read_and_new_write(m
 
 class _FakeDocRef:
     def __init__(self, data=None, doc_id="fake-id"):
-        self.id = (data or {}).get("contractor_id") or doc_id
+        self.id = doc_id
         self.data = dict(data) if data is not None else None
         self.deleted = False
         self.updates = []
@@ -862,6 +885,7 @@ class _FakeFirestore:
 
             def document(self, doc_id):
                 if doc_id in self.docs:
+                    self.docs[doc_id].id = doc_id
                     return self.docs[doc_id]
                 if self.coll_name == "contractors":
                     doc = _FakeDocRef({"contractor_id": doc_id, "active": True}, doc_id=doc_id)
@@ -876,6 +900,10 @@ class _FakeFirestore:
         tx = _FakeTransaction(self)
         self.last_transaction = tx
         return tx
+
+    def jobber_transaction_factory(self, *, deadline, read_only):
+        from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+        return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
 
 class _FakeResponse:
@@ -1263,29 +1291,26 @@ async def test_disconnect_with_revoke_error_still_deletes_firestore_fields(monke
 # 9. Admin Summary Regression Test
 # ---------------------------------------------------------------------------
 
-def test_admin_jobber_summary_with_encrypted_token(monkeypatch):
+@pytest.mark.asyncio
+async def test_admin_jobber_summary_with_encrypted_token(monkeypatch):
+    """Admin formatting consumes the authoritative, AAD-checked status snapshot."""
+    from app.services.integration_token_mutations import load_jobber_connection_status
     _setup_keyring(monkeypatch)
-    contractor_id = "c-admin-summary-1"
-    enc_access = encrypt_integration_token("jobber-valid-secret", contractor_id=contractor_id, provider="jobber", token_kind="access")
-    enc_refresh = encrypt_integration_token("jobber-valid-refresh", contractor_id=contractor_id, provider="jobber", token_kind="refresh")
-
-    # Raw contractor data from Firestore (which doesn't have "contractor_id" in dict)
-    raw_contractor_data = {
-        "jobber_access_token": enc_access,
-        "jobber_refresh_token": enc_refresh,
-        "jobber_connected_at": 1700000000.0,
-        "jobber_lead_capture_enabled": True,
+    cid = "c-admin-summary-1"
+    raw = {
+        "active": True,
+        "jobber_access_token": encrypt_integration_token("jobber-valid-secret", contractor_id=cid, provider="jobber", token_kind="access"),
+        "jobber_refresh_token": encrypt_integration_token("jobber-valid-refresh", contractor_id=cid, provider="jobber", token_kind="refresh"),
+        "jobber_connected_at": 1700000000.0, "jobber_lead_capture_enabled": True,
     }
+    db = _FakeFirestore({"contractors": {cid: _FakeDocRef(raw, doc_id=cid),
+                                        "wrong-id": _FakeDocRef(raw, doc_id="wrong-id")}})
+    summary = admin_api._jobber_summary(await load_jobber_connection_status(cid, db=db))
+    assert summary["connected"] is True and summary["lead_capture_enabled"] is True
+    wrong = admin_api._jobber_summary(await load_jobber_connection_status("wrong-id", db=db))
+    assert wrong["connected"] is False and wrong["lead_capture_enabled"] is False
+    assert wrong["connection_status"] == "reauthorization_required"
 
-    # Calling with contractor_id correctly reports connected
-    summary = admin_api._jobber_summary(raw_contractor_data, contractor_id=contractor_id)
-    assert summary["connected"] is True
-    assert summary["lead_capture_enabled"] is True
-
-    # Calling with wrong contractor_id fails safe (reports disconnected)
-    wrong_summary = admin_api._jobber_summary(raw_contractor_data, contractor_id="wrong-id")
-    assert wrong_summary["connected"] is False
-    assert wrong_summary["lead_capture_enabled"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1510,6 +1535,8 @@ async def test_oauth_state_one_time_consumption(monkeypatch):
     now = time.time()
     fp = compute_raw_credentials_fingerprint(None, None)
     state_doc = _FakeDocRef({
+                                "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": "c-oauth-1",
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -1589,10 +1616,16 @@ async def test_durable_cas_ambiguous_commit_recovery(monkeypatch):
         def transaction(self):
             class _AmbigTx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     super().commit()
                     raise ConnectionResetError("Simulated network drop on commit confirmation")
 
             return _AmbigTx(self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     db_success = _AmbigSucceededFirestore({"contractors": {cid: doc_ref}})
     _patch_firestore(monkeypatch, db_success)
@@ -1623,10 +1656,16 @@ async def test_durable_cas_ambiguous_commit_recovery(monkeypatch):
         def transaction(self):
             class _AmbigFailTx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     # Drops update and raises
                     raise ConnectionResetError("Simulated uncommitted network failure")
 
             return _AmbigFailTx(self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     claim_id_b = secrets.token_hex(16)
     doc_ref_uncommitted = _FakeDocRef({
@@ -1949,6 +1988,8 @@ async def test_ambiguous_commit_fails_closed_on_partial_match(monkeypatch):
         def transaction(self):
             class _PartialTx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     # Tamper with the update: change refresh token to corrupted value
                     for doc_ref, updates in self._staged_updates:
                         tampered = dict(updates)
@@ -1958,6 +1999,10 @@ async def test_ambiguous_commit_fails_closed_on_partial_match(monkeypatch):
                     raise ConnectionResetError("Simulated drop")
 
             return _PartialTx(self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     claim_id_partial = secrets.token_hex(16)
     doc_ref = _FakeDocRef({
@@ -2011,10 +2056,16 @@ async def test_ambiguous_commit_connect_and_disconnect(monkeypatch):
         def transaction(self):
             class _AmbigDropTx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     super().commit()
                     raise ConnectionResetError("Commit drop")
 
             return _AmbigDropTx(self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     db = _AmbigDropFirestore({"contractors": {cid: doc_ref}})
     _patch_firestore(monkeypatch, db)
@@ -2105,85 +2156,29 @@ def test_sanitized_error_messages_contain_no_sentinels(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_regression_transaction_missing_update_fails_without_doc_ref_mutation(monkeypatch):
-    """Codex Regression 1: A transaction object missing update() must fail closed without calling doc_ref.update outside txn."""
-    from app.services.integration_token_mutations import persist_refreshed_tokens_cas
-    from app.services.integration_tokens import (
-        IntegrationTokenEnvelopeError,
-    )
+    """A started bounded transaction without callable update must never bypass it."""
+    from tests.unit.jobber_disconnect_test_support import active_db, binding, clone
+    from tests.unit.test_jobber_disconnect_integration import started
     _setup_keyring(monkeypatch)
-    cid = "c-reg-1-no-txn-update"
-
-    mutations_outside_txn = []
-
-    class _DocRefWithUpdate:
-        def __init__(self):
-            self.exists = True
-            self.data = {
-                "contractor_id": cid,
-                "active": True,
-                "jobber_lifecycle_epoch": 0,
-                "jobber_generation": 0,
-                "jobber_connected": True,
-                "jobber_access_token": "legacy-acc",
-                "jobber_refresh_token": "legacy-ref",
-                "jobber_refresh_claim_id": "cl-reg",
-                "jobber_refresh_claim_expires_at": time.time() + 60,
-                "jobber_refresh_claim_generation": 0,
-            }
-
-        def to_dict(self):
-            return dict(self.data)
-
-        def update(self, updates):
-            mutations_outside_txn.append(updates)
-            self.data.update(updates)
-
-    doc_ref = _DocRefWithUpdate()
-
-    class _TxnWithoutUpdate:
-        def __init__(self):
-            self._id = b"test"
-            self._max_attempts = 1
-            self._read_only = False
-        def get(self, ref):
-            return doc_ref
-        def _clean_up(self):
-            pass
-        def _begin(self, *args, **kwargs):
-            pass
-        def _rollback(self):
-            pass
-        def _commit(self):
-            pass
-
-    class _Db:
-        def collection(self, name):
-            return self
-
-        def document(self, doc_id):
-            return doc_ref
-
-        def transaction(self):
-            return _TxnWithoutUpdate()
-
-    _patch_firestore(monkeypatch, _Db())
-
+    db = active_db()
+    binding(db)
+    snapshot, claim = await started(db)
+    before = clone(db._data)
+    factory = db.jobber_transaction_factory
+    def missing_update(**kwargs):
+        txn = factory(**kwargs)
+        if not kwargs["read_only"]:
+            txn.update = None
+        return txn
+    monkeypatch.setattr(db, "jobber_transaction_factory", missing_update)
     with pytest.raises((IntegrationTokenEnvelopeError, IntegrationTokenCASConflict)):
-        await persist_refreshed_tokens_cas(
-            contractor_id=cid,
-            provider="jobber",
-            new_access_token="new-acc",
-            new_refresh_token="new-ref",
-            observed_generation=0,
-            observed_access_raw="legacy-acc",
-            observed_refresh_raw="legacy-ref",
-            claim_id="cl-reg",
-            db=_Db(),
-        )
+        await persist_refreshed_tokens_cas(contractor_id="contractor", provider="jobber",
+            new_access_token="new-access", new_refresh_token="new-refresh",
+            observed_generation=snapshot["generation"], observed_lifecycle_epoch=snapshot["lifecycle_epoch"],
+            observed_access_raw=snapshot["access_token_raw"], observed_refresh_raw=snapshot["refresh_token_raw"],
+            claim_id=claim, db=db)
+    assert db._data == before
 
-    # Invariant: Zero mutations outside the transaction!
-    assert len(mutations_outside_txn) == 0
-    assert doc_ref.data["jobber_generation"] == 0
 
 
 @pytest.mark.asyncio
@@ -2479,11 +2474,17 @@ async def test_consume_oauth_state_strict_validations(monkeypatch):
         def transaction(self):
             return _StateFakeTx(self)
 
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
     now = time.time()
     fp = compute_raw_credentials_fingerprint(None, None)
 
     states_db = {
         "valid-state-1234567890": _StateFakeDocRef({
+                                                       "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                                       "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
             "contractor_id": "c-valid",
             "provider": "jobber",
             "lifecycle_epoch": 0,
@@ -2495,6 +2496,8 @@ async def test_consume_oauth_state_strict_validations(monkeypatch):
             "pkce_code_verifier": "a" * 43,
         }),
         "expired-state-1234567890": _StateFakeDocRef({
+                                                         "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                                         "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
             "contractor_id": "c-expired",
             "provider": "jobber",
             "lifecycle_epoch": 0,
@@ -2631,7 +2634,7 @@ async def test_jobber_lead_capture_toggle_allows_disable_when_disconnected(monke
         )
     assert exc.value.status_code == 409
     audit_col = db.collection("admin_audit_events")
-    assert len(audit_col.docs) == 0
+    assert not any(doc.exists for doc in audit_col.docs.values())
 
     # Disabling when disconnected -> Succeeds!
     res = await jobber_update_lead_capture(
@@ -2644,7 +2647,7 @@ async def test_jobber_lead_capture_toggle_allows_disable_when_disconnected(monke
     assert doc_ref.data["jobber_lead_capture_enabled"] is False
 
     # Assert exact deterministic audit record written transactionally in db
-    audit_docs = list(audit_col.docs.values())
+    audit_docs = [doc for doc in audit_col.docs.values() if doc.exists]
     assert len(audit_docs) == 1
     audit_record = audit_docs[0].data
     assert audit_record["action"] == "jobber_lead_capture_update"
@@ -2725,49 +2728,35 @@ def test_doc_ref_get_in_txn_rejects_generator_and_uses_exact_kwargs():
 
 @pytest.mark.asyncio
 async def test_mutation_postcondition_fails_on_uncommitted_transaction(monkeypatch):
+    """A syntactically successful dropped write must fail exact readback."""
+    from tests.unit.jobber_disconnect_test_support import active_db, binding, clone
+    from tests.unit.test_jobber_disconnect_integration import started
     _setup_keyring(monkeypatch)
-    cid = "c-uncommitted-postcond"
-
-    class _UncommittedTxn:
-        def __init__(self):
-            self.committed = False
-        def update(self, *args):
-            pass
-        def commit(self):
-            pass
-
-    class _NoCommitDB:
-        def collection(self, name):
-            class _Coll:
-                def document(self, doc_id):
-                    return _FakeDocRef({
-                        "contractor_id": doc_id,
-                        "active": True,
-                        "jobber_connected": True,
-                        "jobber_lifecycle_epoch": 0,
-                        "jobber_generation": 0,
-                        "jobber_access_token": "a",
-                        "jobber_refresh_token": "r",
-                        "jobber_refresh_claim_id": "cl-uncommitted",
-                        "jobber_refresh_claim_expires_at": time.time() + 60,
-                        "jobber_refresh_claim_generation": 0,
-                    }, doc_id=doc_id)
-            return _Coll()
-        def transaction(self):
-            return _UncommittedTxn()
-
+    db = active_db()
+    binding(db)
+    snapshot, claim = await started(db)
+    before = clone(db._data)
+    factory = db.jobber_transaction_factory
+    dropped = []
+    def no_commit(**kwargs):
+        txn = factory(**kwargs)
+        if not kwargs["read_only"]:
+            def drop_write_ack():
+                dropped.append(bool(txn.writes))
+                txn._clean_up()
+                return []
+            txn._commit = drop_write_ack
+        return txn
+    monkeypatch.setattr(db, "jobber_transaction_factory", no_commit)
     with pytest.raises((IntegrationTokenEnvelopeError, IntegrationTokenCASConflict)):
-        await persist_refreshed_tokens_cas(
-            contractor_id=cid,
-            provider="jobber",
-            new_access_token="new-acc",
-            new_refresh_token="new-ref",
-            observed_generation=0,
-            observed_access_raw="a",
-            observed_refresh_raw="r",
-            claim_id="cl-uncommitted",
-            db=_NoCommitDB(),
-        )
+        await persist_refreshed_tokens_cas(contractor_id="contractor", provider="jobber",
+            new_access_token="new-access", new_refresh_token="new-refresh",
+            observed_generation=snapshot["generation"], observed_lifecycle_epoch=snapshot["lifecycle_epoch"],
+            observed_access_raw=snapshot["access_token_raw"], observed_refresh_raw=snapshot["refresh_token_raw"],
+            claim_id=claim, db=db)
+    assert dropped == [True]
+    assert db._data == before
+
 
 
 @pytest.mark.asyncio
@@ -3164,6 +3153,8 @@ async def test_callback_contractor_inactive_aborts_before_provider_exchange(monk
     fp = compute_raw_credentials_fingerprint(None, None)
 
     state_doc = _FakeDocRef({
+                                "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -3410,7 +3401,7 @@ async def test_acquire_refresh_claim_fails_closed_on_malformed_claim_states(monk
         doc_ref = _FakeDocRef(base_doc, doc_id=cid)
         db = _FakeFirestore({"contractors": {cid: doc_ref}})
 
-        with pytest.raises(IntegrationTokenCASConflict, match="Malformed existing refresh claim record"):
+        with pytest.raises(IntegrationTokenCASConflict, match="Malformed or quarantined Jobber operation"):
             await acquire_refresh_claim_cas(
                 contractor_id=cid,
                 provider="jobber",
@@ -3668,6 +3659,8 @@ async def test_oauth_state_invalid_contractor_id_rejected(monkeypatch):
     db = _FakeFirestore({
         "jobber_oauth_states": {
             state: _FakeDocRef({
+                                   "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                   "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
                 "contractor_id": "   ",
                 "provider": "jobber",
                 "lifecycle_epoch": 0,
@@ -3695,7 +3688,7 @@ async def test_oauth_state_invalid_contractor_id_rejected(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await jobber_callback(code="test-code", state=state, request=None)
     assert exc.value.status_code == 400
-    assert "Invalid contractor" in exc.value.detail
+    assert exc.value.detail == "Restart Jobber authorization"
 
 
 def test_compute_aad_fails_closed_on_invalid_contractor_id():
@@ -4169,8 +4162,19 @@ def test_strict_ast_token_field_inventory():
         ("app/services/integration_token_mutations.py", "google_calendar_refresh_token"): 1,
         ("app/services/integration_token_mutations.py", "jobber_access_token"): 1,
         ("app/services/integration_token_mutations.py", "jobber_refresh_token"): 1,
-        ("app/services/jobber.py", "jobber_access_token"): 11,
-        ("app/services/jobber.py", "jobber_refresh_token"): 6,
+        ("app/services/jobber.py", "jobber_access_token"): 7,
+        ("app/services/jobber.py", "jobber_refresh_token"): 2,
+        # Local deletion checks envelope presence only; recovery verifies retention.
+        ("app/db/jobber_local_removals.py", "jobber_access_token"): 1,
+        ("app/db/jobber_local_removals.py", "jobber_refresh_token"): 1,
+        # Bounded admission: fingerprints, observed equality, encrypted write mode,
+        # OAuth proof, account status and reconnect audit classification.
+        ("app/services/jobber_admissions.py", "jobber_access_token"): 8,
+        ("app/services/jobber_admissions.py", "jobber_refresh_token"): 7,
+        ("app/services/jobber_disconnect_barriers.py", "jobber_access_token"): 1,
+        ("app/services/jobber_disconnect_barriers.py", "jobber_refresh_token"): 1,
+        ("app/services/jobber_disconnect_recovery.py", "jobber_access_token"): 1,
+        ("app/services/jobber_disconnect_recovery.py", "jobber_refresh_token"): 1,
     }
 
     actual_counts: Counter = Counter()
@@ -4349,6 +4353,8 @@ async def test_oauth_preflight_generation_validation(monkeypatch):
         fake_db.collections["contractors"] = {cid: doc_ref}
         fake_db.collections["jobber_oauth_states"] = {
             state_token: _FakeDocRef({
+                                         "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                         "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
                 "contractor_id": cid,
                 "provider": "jobber",
                 "lifecycle_epoch": 0,
@@ -5068,7 +5074,7 @@ async def test_persist_refreshed_tokens_cas_lease_enforcement_boundary(monkeypat
     valid_claim_id = secrets.token_hex(16)
 
     # 1. Calling persist on document without claim fields fails closed
-    with pytest.raises(IntegrationTokenCASConflict, match="(Missing or invalid operation intent|Missing refresh lease claim record)"):
+    with pytest.raises(IntegrationTokenCASConflict, match="Malformed Jobber claim"):
         await persist_refreshed_tokens_cas(
             contractor_id=cid,
             provider="jobber",
@@ -5088,7 +5094,7 @@ async def test_persist_refreshed_tokens_cas_lease_enforcement_boundary(monkeypat
     doc_ref.data["jobber_refresh_claim_generation"] = 1
 
     # Calling with mismatched claim ID fails closed
-    with pytest.raises(IntegrationTokenCASConflict, match="Refresh lease claim ID mismatch"):
+    with pytest.raises(IntegrationTokenCASConflict, match="Jobber claim ID mismatch"):
         await persist_refreshed_tokens_cas(
             contractor_id=cid,
             provider="jobber",
@@ -5103,7 +5109,7 @@ async def test_persist_refreshed_tokens_cas_lease_enforcement_boundary(monkeypat
 
     # Calling with expired claim fails closed
     doc_ref.data["jobber_refresh_claim_expires_at"] = time.time() - 10.0
-    with pytest.raises(IntegrationTokenCASConflict, match="Refresh lease expired"):
+    with pytest.raises(IntegrationTokenCASConflict, match="Jobber claim changed or expired"):
         await persist_refreshed_tokens_cas(
             contractor_id=cid,
             provider="jobber",
@@ -5119,7 +5125,7 @@ async def test_persist_refreshed_tokens_cas_lease_enforcement_boundary(monkeypat
     # Calling with claim generation mismatch fails closed
     doc_ref.data["jobber_refresh_claim_expires_at"] = time.time() + 60.0
     doc_ref.data["jobber_refresh_claim_generation"] = 0
-    with pytest.raises(IntegrationTokenCASConflict, match="Refresh lease generation/epoch mismatch on commit"):
+    with pytest.raises(IntegrationTokenCASConflict, match="Jobber claim lifecycle changed"):
         await persist_refreshed_tokens_cas(
             contractor_id=cid,
             provider="jobber",
@@ -5601,7 +5607,7 @@ async def test_retry_time_leases_fresh_clock_per_transaction_attempt(monkeypatch
             claim_id=claim_id,
             db=db,
         )
-    assert ("Refresh lease expired" in str(exc_info.value) or "Operation intent expired" in str(exc_info.value) or "Missing or invalid operation intent" in str(exc_info.value))
+    assert str(exc_info.value) == "Malformed Jobber claim"
     # Stored tokens must remain untouched
     assert doc_ref.data["jobber_access_token"] == "acc"
 
@@ -6167,15 +6173,30 @@ async def test_phased_refresh_claim_and_quarantine_state_machine(monkeypatch, pr
             db=db,
         )
 
-    # 4. Reconnecting via OAuth reauthorization fence clears quarantine and advances lifecycle epoch
-    doc_ref.data[f"{provider}_reauthorization_attempt_id"] = "reauth_claim_12345"
-    doc_ref.data[f"{provider}_reauthorization_attempt_kind"] = "reconnect"
-    doc_ref.data[f"{provider}_reauthorization_attempt_phase"] = "provider_request_started"
-    doc_ref.data[f"{provider}_reauthorization_attempt_expires_at"] = time.time() + 300.0
-    doc_ref.data[f"{provider}_reauthorization_attempt_acquired_at"] = time.time()
-    doc_ref.data[f"{provider}_reauthorization_attempt_generation"] = 1
-    doc_ref.data[f"{provider}_reauthorization_attempt_lifecycle_epoch"] = 1
-    doc_ref.data[f"{provider}_reauthorization_attempt_credentials_fingerprint"] = it_mutations.compute_raw_credentials_fingerprint("acc-1", "ref-1")
+    # Jobber requires an actually consumed versioned OAuth state and started claim.
+    binding_proof = None
+    reconnect_claim_id = "reauth_claim_12345"
+    if provider == "jobber":
+        state = "phased_reauth_state_123456"
+        await it_mutations.create_oauth_state(db=db, collection_name="jobber_oauth_states",
+            state=state, contractor_id=cid, provider="jobber")
+        _, observation, consumed = await it_mutations.consume_jobber_oauth_state(db=db, state=state)
+        reconnect_claim_id = observation["claim_id"]
+        await it_mutations.transition_provider_reauthorization_attempt_to_started_cas(
+            contractor_id=cid, provider="jobber", claim_id=reconnect_claim_id,
+            observed_generation=1, observed_lifecycle_epoch=1,
+            observed_access_raw="acc-1", observed_refresh_raw="ref-1", db=db)
+        binding_proof = it_mutations.finalize_jobber_binding_proof(
+            consumed, "jobber-acc-1", "acc-reauth", "ref-reauth")
+    else:
+        doc_ref.data[f"{provider}_reauthorization_attempt_id"] = "reauth_claim_12345"
+        doc_ref.data[f"{provider}_reauthorization_attempt_kind"] = "reconnect"
+        doc_ref.data[f"{provider}_reauthorization_attempt_phase"] = "provider_request_started"
+        doc_ref.data[f"{provider}_reauthorization_attempt_expires_at"] = time.time() + 300.0
+        doc_ref.data[f"{provider}_reauthorization_attempt_acquired_at"] = time.time()
+        doc_ref.data[f"{provider}_reauthorization_attempt_generation"] = 1
+        doc_ref.data[f"{provider}_reauthorization_attempt_lifecycle_epoch"] = 1
+        doc_ref.data[f"{provider}_reauthorization_attempt_credentials_fingerprint"] = it_mutations.compute_raw_credentials_fingerprint("acc-1", "ref-1")
 
     updates, new_gen, _ = await connect_provider_cas(
         contractor_id=cid,
@@ -6187,7 +6208,8 @@ async def test_phased_refresh_claim_and_quarantine_state_machine(monkeypatch, pr
         observed_lifecycle_epoch=1,
         observed_access_raw="acc-1",
         observed_refresh_raw="ref-1",
-        claim_id="reauth_claim_12345",
+        claim_id=reconnect_claim_id,
+        jobber_binding_proof=binding_proof,
         db=db,
     )
     assert new_gen == 2
@@ -6327,6 +6349,10 @@ class _FakeDB:
 
     def transaction(self):
         return _FakeDBTx(self)
+
+    def jobber_transaction_factory(self, *, deadline, read_only):
+        from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+        return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
 
 @pytest.mark.asyncio
@@ -6782,6 +6808,19 @@ async def test_claim_int_expires_at_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("duration", [600.0001, 605.0, 3600.0, True, False, float("nan"), float("inf"), None, "600"])
+async def test_jobber_oauth_creation_rejects_invalid_or_long_ttl_before_store(duration):
+    class NoStoreAccess:
+        def __getattr__(self, name):
+            raise AssertionError("Invalid OAuth TTL must not access the datastore")
+    with pytest.raises(HTTPException) as error:
+        await it_mutations.create_oauth_state(db=NoStoreAccess(), collection_name="jobber_oauth_states",
+            state="state-creation-ttl-123456", contractor_id="fictional-contractor", provider="jobber", ttl_seconds=duration)
+    assert error.value.status_code == 400
+    assert error.value.detail == "Invalid ttl_seconds: must be finite between 1 and 600 seconds"
+
+
+@pytest.mark.asyncio
 async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
     """OAuth state requires exact finite float created_at/expires_at, created_at < expires_at, and TTL <= 605s."""
     cid = "cid-oauth-schema"
@@ -6820,10 +6859,18 @@ async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
     )
     assert data["contractor_id"] == cid
 
+    # Remove the independently valid claim from the earlier positive consume.
+    # Each following negative must fail on its state time, not held ownership.
+    baseline = {"contractor_id": cid, "active": True, "jobber_connected": False,
+                "jobber_generation": 0, "jobber_lifecycle_epoch": 0}
+    db.collection("contractors").document(cid).set(baseline)
+
     # 3. Reject integer timestamps in state document
     from app.services.integration_tokens import compute_raw_credentials_fingerprint
     fp = compute_raw_credentials_fingerprint(None, None)
     db.collection("jobber_oauth_states").document("state-int-timestamps").set({
+                                                                                  "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                                                                  "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -6841,10 +6888,13 @@ async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
             state="state-int-timestamps",
         )
     assert exc.value.status_code == 400
-    assert "malformed" in str(exc.value.detail).lower()
+    assert db.collection("contractors").document(cid).get().to_dict() == baseline
+    assert exc.value.detail == "Invalid Jobber OAuth time"
 
     # 4. Reject reversed timestamps (created_at >= expires_at)
     db.collection("jobber_oauth_states").document("state-reversed-timestamps").set({
+                                                                                       "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                                                                       "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -6862,9 +6912,12 @@ async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
             state="state-reversed-timestamps",
         )
     assert exc.value.status_code == 400
+    assert db.collection("contractors").document(cid).get().to_dict() == baseline
 
     # 5. Reject excessive TTL (> 605s)
     db.collection("jobber_oauth_states").document("state-excessive-ttl").set({
+                                                                                 "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                                                                                 "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "lifecycle_epoch": 0,
@@ -6882,6 +6935,26 @@ async def test_oauth_state_exact_float_schema_and_ttl(monkeypatch):
             state="state-excessive-ttl",
         )
     assert exc.value.status_code == 400
+    assert db.collection("contractors").document(cid).get().to_dict() == baseline
+
+    for duration in (605.0001, 605.0):
+        db.collection("contractors").document(cid).set(baseline)
+        state_id = "state-ttl-boundary-" + ("invalid" if duration > 605.0 else "valid")
+        payload = dict(state_payload, expires_at=state_payload["created_at"] + duration)
+        state_ref = db.collection("jobber_oauth_states").document(state_id)
+        state_ref.set(payload)
+        if duration > 605.0:
+            with pytest.raises(HTTPException) as error:
+                await it_mutations.consume_jobber_oauth_state(db=db, state=state_id)
+            assert error.value.status_code == 400
+            assert error.value.detail == "Invalid Jobber OAuth time"
+            assert db.collection("contractors").document(cid).get().to_dict() == baseline
+        else:
+            consumed, observation, proof = await it_mutations.consume_jobber_oauth_state(db=db, state=state_id)
+            assert consumed == payload
+            assert proof.claim_id == observation["claim_id"]
+            assert proof.contractor_id == cid
+        assert state_ref.get().exists is False
 
 
 # ---------------------------------------------------------------------------
@@ -7125,7 +7198,7 @@ async def test_repair_18a1_refresh_claim_rejects_integer_expires_at(monkeypatch)
     assert "malformed" in str(exc.value).lower()
 
     # transition_refresh_claim_to_started_cas with int expires_at -> fails lease error
-    with pytest.raises(it_mutations.IntegrationTokenLeaseError):
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Malformed Jobber claim"):
         await it_mutations.transition_refresh_claim_to_started_cas(
             contractor_id=cid,
             provider="jobber",
@@ -7243,7 +7316,7 @@ async def test_repair_18a1b_postread_hostile_objects_and_int_expiry(monkeypatch)
         def get(self, *args, transaction=None, **kwargs):
             snap = super().get(*args, transaction=transaction, **kwargs)
             # Inject hostile val into post-transaction get() return snapshot for postread verification
-            if transaction is None and self._hostile_field:
+            if (transaction is None or getattr(transaction, "_read_only", False)) and self._hostile_field:
                 snap._d = dict(self.data)
                 snap._d[self._hostile_field] = self._hostile_val
             return snap
@@ -7261,7 +7334,7 @@ async def test_repair_18a1b_postread_hostile_objects_and_int_expiry(monkeypatch)
     # Test acquire postread when claim_id in snapshot is a hostile object
     doc1 = _BadPostreadDocRef(base_data, doc_id=cid, hostile_field="jobber_refresh_claim_id", hostile_val=_HostileComparisonObject())
     db1 = _FakeFirestore({"contractors": {cid: doc1}})
-    with pytest.raises(it_mutations.IntegrationTokenLeaseError):
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict):
         await it_mutations.acquire_refresh_claim_cas(
             contractor_id=cid, provider="jobber", observed_generation=0,
             observed_access_raw="acc", observed_refresh_raw="ref", db=db1,
@@ -7270,7 +7343,7 @@ async def test_repair_18a1b_postread_hostile_objects_and_int_expiry(monkeypatch)
     # Test acquire postread when expires_at in snapshot is an int (e.g. 5000)
     doc2 = _BadPostreadDocRef(base_data, doc_id=cid, hostile_field="jobber_refresh_claim_expires_at", hostile_val=5000)
     db2 = _FakeFirestore({"contractors": {cid: doc2}})
-    with pytest.raises(it_mutations.IntegrationTokenLeaseError):
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict):
         await it_mutations.acquire_refresh_claim_cas(
             contractor_id=cid, provider="jobber", observed_generation=0,
             observed_access_raw="acc", observed_refresh_raw="ref", db=db2,
@@ -7280,7 +7353,7 @@ async def test_repair_18a1b_postread_hostile_objects_and_int_expiry(monkeypatch)
     claim_data = dict(base_data, jobber_refresh_claim_id="claim1234567890abcdef", jobber_refresh_claim_phase="reserved", jobber_refresh_claim_expires_at=time.time()+60, jobber_refresh_claim_generation=0)
     doc3 = _BadPostreadDocRef(claim_data, doc_id=cid, hostile_field="jobber_refresh_claim_phase", hostile_val=_HostileComparisonObject())
     db3 = _FakeFirestore({"contractors": {cid: doc3}})
-    with pytest.raises(it_mutations.IntegrationTokenLeaseError):
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict):
         await it_mutations.transition_refresh_claim_to_started_cas(
             contractor_id=cid, provider="jobber", claim_id="claim1234567890abcdef",
             observed_generation=0, observed_access_raw="acc", observed_refresh_raw="ref", db=db3,
@@ -7581,6 +7654,10 @@ async def test_18b1_lead_capture_and_disconnect_races(monkeypatch):
 
             return _Tx(self)
 
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
     db1 = _Ordering1Firestore()
 
     async def run_enable_1():
@@ -7635,7 +7712,7 @@ async def test_18b1_lead_capture_and_disconnect_races(monkeypatch):
         import sys
         f = sys._getframe()
         while f:
-            if f.f_code.co_name == "_lead_capture_txn":
+            if f.f_code.co_name == "_lead_capture_txn" or (f.f_code.co_name == "body" and f.f_code.co_filename.endswith("jobber_admissions.py") and "enabled" in f.f_locals):
                 return True
             f = f.f_back
         return False
@@ -7653,7 +7730,7 @@ async def test_18b1_lead_capture_and_disconnect_races(monkeypatch):
                     self._is_enable = False
 
                 def _record_read(self, doc_ref, snap):
-                    if doc_ref is not doc2 and getattr(doc_ref, "id", None) != cid:
+                    if self._read_only or (doc_ref is not doc2 and getattr(doc_ref, "id", None) != cid):
                         return
                     if _is_in_lead_capture_txn():
                         self._is_enable = True
@@ -7680,11 +7757,15 @@ async def test_18b1_lead_capture_and_disconnect_races(monkeypatch):
                             trace2.append("enable_occ_conflict")
                             raise Aborted(f"OCC conflict: read v{self._read_version}, current v{doc2.version}")
                         super().commit()
-                        if not self._is_enable:
+                        if not self._is_enable and self._staged_updates:
                             trace2.append("disconnect_committed")
                             disconnect_committed_2.set()
 
             return _Tx(self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     db2 = _Ordering2Firestore()
 
@@ -7741,9 +7822,15 @@ async def test_18b1_lead_capture_ambiguous_recovery_and_exact_projection(monkeyp
         def transaction(self):
             class _Tx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     super().commit()
                     raise ConnectionResetError("Simulated network drop on commit confirmation")
             return _Tx(self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     db_match = _AmbigMatchFirestore({"contractors": {cid: doc_match}})
     res = await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid, enabled=True, db=db_match)
@@ -7766,13 +7853,19 @@ async def test_18b1_lead_capture_ambiguous_recovery_and_exact_projection(monkeyp
         def transaction(self):
             class _Tx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     super().commit()
                     doc_bad_ts.data["jobber_lead_capture_updated_at"] = 99999.0
                     raise ConnectionResetError("Simulated network drop on commit confirmation")
             return _Tx(self)
 
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
     db_bad_ts = _AmbigBadTsFirestore({"contractors": {cid: doc_bad_ts}})
-    with pytest.raises(it_mutations.IntegrationTokenCASConflict):
+    with pytest.raises(it_mutations.IntegrationTokenPostconditionError):
         await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid, enabled=True, db=db_bad_ts)
 
     # 3. Altered generation -> recovery fails
@@ -7791,13 +7884,19 @@ async def test_18b1_lead_capture_ambiguous_recovery_and_exact_projection(monkeyp
         def transaction(self):
             class _Tx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     super().commit()
                     doc_bad_gen.data["jobber_generation"] = 5
                     raise ConnectionResetError("Simulated network drop on commit confirmation")
             return _Tx(self)
 
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
     db_bad_gen = _AmbigBadGenFirestore({"contractors": {cid: doc_bad_gen}})
-    with pytest.raises(it_mutations.IntegrationTokenCASConflict):
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Capture mutation superseded"):
         await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid, enabled=True, db=db_bad_gen)
 
     # 4. Zero write happened -> recovery fails
@@ -7816,11 +7915,17 @@ async def test_18b1_lead_capture_ambiguous_recovery_and_exact_projection(monkeyp
         def transaction(self):
             class _Tx(_FakeTransaction):
                 def _commit(self):
+                    if self._read_only:
+                        return super()._commit()
                     raise ConnectionResetError("Simulated network drop before write")
             return _Tx(self)
 
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
     db_no_write = _AmbigNoWriteFirestore({"contractors": {cid: doc_no_write}})
-    with pytest.raises(it_mutations.IntegrationTokenCASConflict):
+    with pytest.raises(it_mutations.IntegrationTokenPostconditionError):
         await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid, enabled=True, db=db_no_write)
 
 
@@ -8009,6 +8114,7 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
     tx_lock = threading.Lock()
     read_versions = []
     http_call_count = [0]
+    occ_conflicts = []
 
     class _CountingHttp:
         async def post(self, *args, **kwargs):
@@ -8037,8 +8143,8 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
                         self._contractor_read_version = doc.version
                         self._tx_snapshot = {
                             "contractor": dict(doc.data) if doc.data is not None else None,
-                            "outbox": dict(outbox_store),
-                            "audit": dict(audit_store),
+                            "outbox": {key: dict(ref.data) if ref.exists else None for key, ref in outbox_store.items()},
+                            "audit": {key: dict(ref.data) if ref.exists else None for key, ref in audit_store.items()},
                         }
 
                 def get_snapshot(self, coll_name, doc_id, default_snap):
@@ -8076,7 +8182,13 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
                     return default_snap
 
                 def _record_read(self, doc_ref, snap):
-                    if doc_ref is doc or (hasattr(doc_ref, "id") and doc_ref.id == cid):
+                    import sys
+                    frame = sys._getframe()
+                    normal_disconnect = False
+                    while frame:
+                        normal_disconnect = normal_disconnect or frame.f_code.co_name == "_disconnect_txn"
+                        frame = frame.f_back
+                    if not self._read_only and normal_disconnect and (doc_ref is doc or (hasattr(doc_ref, "id") and doc_ref.id == cid)):
                         with tx_lock:
                             read_versions.append(self._contractor_read_version)
                         if len(read_versions) <= 2:
@@ -8088,6 +8200,7 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
                 def _commit(self):
                     with tx_lock:
                         if self._contractor_read_version is not None and self._contractor_read_version != doc.version:
+                            occ_conflicts.append((self._contractor_read_version, doc.version))
                             raise Aborted(f"OCC conflict: read v{self._contractor_read_version}, current v{doc.version}")
                         return super()._commit()
 
@@ -8116,7 +8229,8 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
                             return self.real_ref.deleted
 
                         def get(self, *args, transaction=None, **kwargs):
-                            if transaction is not None and hasattr(transaction, "get_snapshot"):
+                            if (transaction is not None and hasattr(transaction, "get_snapshot")
+                                    and self.coll_name in ("contractors", "integration_revocation_outbox", "integration_lifecycle_audit")):
                                 return transaction.get_snapshot(self.coll_name, self.id, None)
                             return self.real_ref.get(*args, transaction=transaction, **kwargs)
 
@@ -8142,6 +8256,10 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
                     return _TxAwareDocRef(self.coll_name, doc_id, real, self.db)
 
             return _ConcurrentColl(name, self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     db = _ConcurrentDiscFakeFirestore()
 
@@ -8175,6 +8293,9 @@ async def test_18b2_concurrent_disconnect_single_revocation_owner(monkeypatch):
 
     # 1. Both first attempts read initial contractor version 1
     assert read_versions[:2] == [1, 1]
+    assert (1, 2) in occ_conflicts  # a same-snapshot writer actually retried
+
+    assert any(isinstance(result, dict) for result in results), [type(result).__name__ for result in results]
 
     # 2. Exactly one HTTP revocation call across both orchestrations
     assert http_call_count[0] == 1
@@ -8397,6 +8518,10 @@ async def test_18b2_ambiguous_outcome_persistence_leaves_started_state(monkeypat
                         raise ConnectionResetError("Simulated DB write failure during outcome commit")
                     super().commit()
             return _Tx(self)
+
+        def jobber_transaction_factory(self, *, deadline, read_only):
+            from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+            return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
 
     db = _FailingOutcomeFirestore()
     http_count = [0]
@@ -10919,7 +11044,7 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
     updated_at_1 = doc_contractor.data.get("jobber_lead_capture_updated_at")
     assert updated_at_1 is not None
 
-    audit_docs1 = db.collection("admin_audit_events").docs
+    audit_docs1 = _existing_docs(db.collection("admin_audit_events"))
     assert len(audit_docs1) == 1
     audit_id_1 = list(audit_docs1.keys())[0]
     payload1 = audit_docs1[audit_id_1].data
@@ -10939,7 +11064,7 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
     # Step 2: No-Op True -> True
     res_noop = await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid, enabled=True, db=db)
     assert res_noop.enabled is True
-    assert len(db.collection("admin_audit_events").docs) == 1
+    assert len(_existing_docs(db.collection("admin_audit_events"))) == 1
     assert doc_contractor.data.get("jobber_lead_capture_updated_at") == updated_at_1
 
     # Step 3: True -> False (Mutation 2)
@@ -10947,9 +11072,9 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
     assert res2.enabled is False
     assert doc_contractor.data["jobber_lead_capture_enabled"] is False
     updated_at_2 = doc_contractor.data.get("jobber_lead_capture_updated_at")
-    assert len(db.collection("admin_audit_events").docs) == 2
-    audit_id_2 = [k for k in db.collection("admin_audit_events").docs.keys() if k != audit_id_1][0]
-    payload2 = db.collection("admin_audit_events").docs[audit_id_2].data
+    assert len(_existing_docs(db.collection("admin_audit_events"))) == 2
+    audit_id_2 = [k for k in _existing_docs(db.collection("admin_audit_events")).keys() if k != audit_id_1][0]
+    payload2 = _existing_docs(db.collection("admin_audit_events"))[audit_id_2].data
     assert payload2["before"] == {"jobber_lead_capture_enabled": True}
     assert payload2["after"] == {"jobber_lead_capture_enabled": False}
     assert payload2["created_at"] == updated_at_2
@@ -10959,9 +11084,9 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
     assert res3.enabled is True
     assert doc_contractor.data["jobber_lead_capture_enabled"] is True
     updated_at_3 = doc_contractor.data.get("jobber_lead_capture_updated_at")
-    assert len(db.collection("admin_audit_events").docs) == 3
-    audit_id_3 = [k for k in db.collection("admin_audit_events").docs.keys() if k not in (audit_id_1, audit_id_2)][0]
-    payload3 = db.collection("admin_audit_events").docs[audit_id_3].data
+    assert len(_existing_docs(db.collection("admin_audit_events"))) == 3
+    audit_id_3 = [k for k in _existing_docs(db.collection("admin_audit_events")).keys() if k not in (audit_id_1, audit_id_2)][0]
+    payload3 = _existing_docs(db.collection("admin_audit_events"))[audit_id_3].data
     assert payload3["before"] == {"jobber_lead_capture_enabled": False}
     assert payload3["after"] == {"jobber_lead_capture_enabled": True}
     assert payload3["created_at"] == updated_at_3
@@ -10989,6 +11114,8 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
     attempts = [0]
     class _AbortedOnceTransaction(_FakeTransaction):
         def commit(self):
+            if self._read_only:
+                return super().commit()
             attempts[0] += 1
             if attempts[0] == 1:
                 from google.api_core.exceptions import Aborted
@@ -11009,12 +11136,12 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
     assert res_ret1.enabled is True
     assert attempts[0] == 2  # Proves 1 retry attempt occurred
     assert hex_calls[0] == 1  # Proves candidate ID was pre-minted once and reused
-    assert len(db_retry.collection("admin_audit_events").docs) == 1
+    assert len(_existing_docs(db_retry.collection("admin_audit_events"))) == 1
 
     res_ret2 = await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid_retry, enabled=False, db=db_retry)
     assert res_ret2.enabled is False
     assert hex_calls[0] == 2  # Proves 2nd invocation minted a new candidate ID
-    assert len(db_retry.collection("admin_audit_events").docs) == 2
+    assert len(_existing_docs(db_retry.collection("admin_audit_events"))) == 2
 
     # Step 6: Fault injection - contractor write dropped raises exact IntegrationTokenPostconditionError
     class _FakeTxnDroppedContractor(_FakeTransaction):
@@ -11024,7 +11151,7 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
             super().update(doc_ref, updates)
 
     monkeypatch.setattr(db, "transaction", lambda: _FakeTxnDroppedContractor(db))
-    with pytest.raises(it_mutations.IntegrationTokenPostconditionError, match="Postcondition verification failed"):
+    with pytest.raises(it_mutations.IntegrationTokenPostconditionError, match="Postcondition"):
         await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid, enabled=False, db=db)
 
     # Step 7: Fault injection - audit create dropped raises exact IntegrationTokenPostconditionError
@@ -11035,7 +11162,7 @@ async def test_18j_jobber_lead_capture_audit_lifecycle_and_fault_injections(monk
             super().create(doc_ref, data)
 
     monkeypatch.setattr(db, "transaction", lambda: _FakeTxnDroppedAudit(db))
-    with pytest.raises(it_mutations.IntegrationTokenPostconditionError, match="Admin audit event missing after lead capture mutation"):
+    with pytest.raises(it_mutations.IntegrationTokenPostconditionError, match="Admin audit event missing or mismatched after lead capture mutation"):
         await it_mutations.update_jobber_lead_capture_cas(contractor_id=cid, enabled=False, db=db)
 
 
@@ -11192,12 +11319,18 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
             "expires_at": time.time() + 300.0,
         }
         if provider == "jobber":
+            from app.services.integration_tokens import JobberAdmissionContext
+            state_doc_data.update(schema_version=1, source_account_id=None, receipt_counter_at_start=0,
+                enforcement_context=JobberAdmissionContext("oauth", "preactivation", None, None, 0).as_dict())
             state_doc_data["pkce_method"] = "S256"
             state_doc_data["pkce_code_verifier"] = "a" * 43
         state_doc = _FakeDocRef(state_doc_data, doc_id=state_id)
         db.collections[col_name][state_id] = state_doc
 
-        st_data, c_obs = await it_mutations.consume_oauth_state(db=db, collection_name=col_name, state=state_id)
+        if provider == "jobber":
+            st_data, c_obs, consumed_proof = await it_mutations.consume_jobber_oauth_state(db=db, state=state_id)
+        else:
+            st_data, c_obs = await it_mutations.consume_oauth_state(db=db, collection_name=col_name, state=state_id)
         assert state_doc.deleted is True
         claim_id = c_obs["claim_id"]
 
@@ -11209,11 +11342,16 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
         assert post_c[f"{provider}_reauthorization_attempt_phase"] == "reserved"
         assert post_c[f"{provider}_reauthorization_attempt_id"] == claim_id
 
+        from app.services.jobber_admissions import finalize_jobber_binding_proof
+        proof = finalize_jobber_binding_proof(consumed_proof, "jobber-acc-1", "new_acc_ok", "new_ref_ok") if provider == "jobber" else None
+
+        rejected_pair_proof = finalize_jobber_binding_proof(consumed_proof, "jobber-acc-1", "new_acc", "new_ref") if provider == "jobber" else None
         # 3. Wrong claim or claimless connect fails and preserves quarantine
         with pytest.raises(IntegrationTokenCASConflict):
             await connect_provider_cas(
                 contractor_id=cid,
                 provider=provider,
+                jobber_binding_proof=rejected_pair_proof,
                 access_token="new_acc",
                 refresh_token="new_ref",
                 jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
@@ -11226,6 +11364,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
             await connect_provider_cas(
                 contractor_id=cid,
                 provider=provider,
+                jobber_binding_proof=rejected_pair_proof,
                 access_token="new_acc",
                 refresh_token="new_ref",
                 jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
@@ -11250,6 +11389,7 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
         updates, res_gen, audit_id = await connect_provider_cas(
             contractor_id=cid,
             provider=provider,
+            jobber_binding_proof=proof,
             access_token="new_acc_ok",
             refresh_token="new_ref_ok",
             jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
@@ -11271,6 +11411,8 @@ async def test_repair_18o_oauth_reauthorization_under_quarantine(monkeypatch):
 async def test_repair_18o_expired_started_refresh_preflight(monkeypatch):
     """Prove expired-started refresh intent is recovered by preflight to exact True/True quarantine with 0 HTTP."""
     _setup_keyring(monkeypatch)
+    monkeypatch.setattr(settings, "jobber_client_id", "fictional-client")
+    monkeypatch.setattr(settings, "jobber_client_secret", "fictional-secret")
     monkeypatch.setattr(settings, "google_calendar_client_id", "fake-client-id")
     monkeypatch.setattr(settings, "google_calendar_client_secret", "fake-client-secret")
     for provider in ("jobber", "google_calendar"):
@@ -11430,7 +11572,7 @@ async def test_repair_18o_lead_capture_noop_durable_timestamp(monkeypatch):
     assert res.previous_enabled is True
     assert res.enabled is True
     assert res.updated_at == durable_ts
-    assert len(db.collections["admin_audit_events"]) == 0
+    assert len(_existing_docs(db.collection("admin_audit_events"))) == 0
 
 
 @pytest.mark.asyncio
@@ -11457,16 +11599,20 @@ async def test_repair_18o_connect_collision_proof_and_http_ambiguity_matrix(monk
         doc_id=cid,
     )
 
+    doc.data["jobber_operation_intent_credentials_fingerprint"] = it_mutations.compute_raw_credentials_fingerprint(None, None)
+    proof = _jobber_boundary_proof(doc.data, "c" * 32, "acc", "ref")
+    before = dict(doc.data)
     audit_id = it_mutations.format_audit_doc_id(contractor_id=cid, provider="jobber", generation=1, action="connected")
     audit_doc = _FakeDocRef({"contractor_id": cid}, doc_id=audit_id)
     db = _FakeFirestore({"contractors": {cid: doc}, "integration_lifecycle_audit": {audit_id: audit_doc}})
     _patch_firestore(monkeypatch, db)
 
     # Collision test: pre-existing audit doc raises IntegrationTokenCASConflict
-    with pytest.raises(IntegrationTokenCASConflict):
+    with pytest.raises(IntegrationTokenCASConflict, match="already exists"):
         await connect_provider_cas(
             contractor_id=cid,
             provider="jobber",
+            jobber_binding_proof=proof,
             access_token="acc",
             refresh_token="ref",
             jobber_account_id="jobber-acc-1",
@@ -11474,6 +11620,7 @@ async def test_repair_18o_connect_collision_proof_and_http_ambiguity_matrix(monk
             db=db,
         )
 
+    assert doc.data == before
 
 @pytest.mark.asyncio
 async def test_repair_18p_quarantine_oauth_attempt_flow(monkeypatch):
@@ -11496,6 +11643,8 @@ async def test_repair_18p_quarantine_oauth_attempt_flow(monkeypatch):
     fp = it_mutations.compute_raw_credentials_fingerprint("old_acc", "old_ref")
     now_ts = time.time()
     state_data = {
+                     "schema_version": 1, "source_account_id": None, "receipt_counter_at_start": 0,
+                     "enforcement_context": {"schema_version": 1, "purpose": "oauth", "mode": "preactivation", "app_id": None, "source_account_id": None, "receipt_counter_at_start": 0},
         "contractor_id": cid,
         "provider": "jobber",
         "generation": 1,
@@ -11561,7 +11710,7 @@ async def test_repair_18p_quarantine_oauth_attempt_flow(monkeypatch):
     s_doc2 = _FakeDocRef(dict(state_data), doc_id=state_id2)
     db.collections["jobber_oauth_states"][state_id2] = s_doc2
 
-    _, c_obs2 = await consume_oauth_state(db=db, collection_name="jobber_oauth_states", state=state_id2)
+    _, c_obs2, consumed_proof = await it_mutations.consume_jobber_oauth_state(db=db, state=state_id2)
     claim_id2 = c_obs2["claim_id"]
 
     await it_mutations.transition_provider_reauthorization_attempt_to_started_cas(
@@ -11575,9 +11724,12 @@ async def test_repair_18p_quarantine_oauth_attempt_flow(monkeypatch):
         db=db,
     )
 
+    from app.services.jobber_admissions import finalize_jobber_binding_proof
+    proof = finalize_jobber_binding_proof(consumed_proof, "jobber-acc-1", "new_acc_123", "new_ref_123")
     updates, new_gen, audit_id = await connect_provider_cas(
         contractor_id=cid,
         provider="jobber",
+        jobber_binding_proof=proof,
         access_token="new_acc_123",
         refresh_token="new_ref_123",
         jobber_account_id="jobber-acc-1",
@@ -11674,6 +11826,8 @@ async def test_repair_18p_commit_time_audit_collision(monkeypatch):
         "jobber_operation_intent_generation": 0,
         "jobber_operation_intent_lifecycle_epoch": 0,
     }
+    initial_doc_data["jobber_operation_intent_credentials_fingerprint"] = it_mutations.compute_raw_credentials_fingerprint(None, None)
+    proof = _jobber_boundary_proof(initial_doc_data, "c" * 32, "acc", "ref")
     c_doc = _FakeDocRef(dict(initial_doc_data), doc_id=cid)
     audit_id = it_mutations.format_audit_doc_id(contractor_id=cid, provider="jobber", generation=1, action="connected")
     audit_doc = _FakeDocRef({"contractor_id": cid, "pre_existing": True}, doc_id=audit_id)
@@ -11681,10 +11835,11 @@ async def test_repair_18p_commit_time_audit_collision(monkeypatch):
     _patch_firestore(monkeypatch, db)
 
     # Collision test: pre-existing audit doc causes transaction.create to raise IntegrationTokenCASConflict
-    with pytest.raises(IntegrationTokenCASConflict):
+    with pytest.raises(IntegrationTokenCASConflict, match="already exists"):
         await connect_provider_cas(
             contractor_id=cid,
             provider="jobber",
+            jobber_binding_proof=proof,
             access_token="acc",
             refresh_token="ref",
             jobber_account_id="jobber-acc-1",
@@ -11728,6 +11883,7 @@ async def test_18q_exclusive_reauthorization_fence(monkeypatch):
             f"{provider}_reauthorization_attempt_lifecycle_epoch": 1,
             f"{provider}_reauthorization_attempt_credentials_fingerprint": fp,
         }
+        proof = _jobber_boundary_proof(base_data, claim_id, "new_acc", "new_ref") if provider == "jobber" else None
         c_doc = _FakeDocRef(dict(base_data), doc_id=cid)
         db = _FakeFirestore({"contractors": {cid: c_doc}, "integration_lifecycle_audit": {}})
         _patch_firestore(monkeypatch, db)
@@ -11740,6 +11896,7 @@ async def test_18q_exclusive_reauthorization_fence(monkeypatch):
                 access_token="new_acc",
                 refresh_token="new_ref",
                 jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
+                jobber_binding_proof=proof,
                 claim_id=claim_id,
                 observed_generation=1,
                 observed_lifecycle_epoch=1,
@@ -11787,10 +11944,15 @@ async def test_18q_exclusive_reauthorization_fence(monkeypatch):
             )
         assert c_doc.data == started_data
 
-        # 5. connect_provider_cas in "provider_request_started" phase succeeds, clearing quarantine and attempt
+        # 5. The final account lookup binds the successful HTTP candidate pair.
+        if provider == "jobber":
+            from app.services.jobber_admissions import finalize_jobber_binding_proof
+            proof = finalize_jobber_binding_proof(proof.consumed, "jobber-acc-1", "new_acc_ok", "new_ref_ok")
+        # connect succeeds, clearing quarantine and attempt.
         updates, new_gen, audit_id = await connect_provider_cas(
             contractor_id=cid,
             provider=provider,
+            jobber_binding_proof=proof,
             access_token="new_acc_ok",
             refresh_token="new_ref_ok",
             jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
@@ -11993,7 +12155,7 @@ async def test_18qc_unconditional_fingerprint_checks_in_mutations(monkeypatch):
             f"{provider}_operation_intent_credentials_fingerprint": wrong_fp,
         }, doc_id=cid)
         db = _FakeFirestore({"contractors": {cid: c_doc}})
-        with pytest.raises(it_mutations.IntegrationTokenLeaseError, match="credentials fingerprint mismatch"):
+        with pytest.raises(it_mutations.IntegrationTokenCASConflict if provider == "jobber" else it_mutations.IntegrationTokenLeaseError, match="credentials fingerprint mismatch"):
             await it_mutations.transition_provider_operation_intent_to_started_cas(
                 contractor_id=cid,
                 provider=provider,
@@ -12056,6 +12218,7 @@ async def test_18qc_connect_audit_collision_ordering_and_rollback(monkeypatch):
         "jobber_operation_intent_lifecycle_epoch": 0,
         "jobber_operation_intent_credentials_fingerprint": it_mutations.compute_raw_credentials_fingerprint(None, None),
     }
+    proof = _jobber_boundary_proof(initial_doc_data, "c" * 32, "acc_new_val", "ref_new_val")
     c_doc = _FakeDocRef(dict(initial_doc_data), doc_id=cid)
     audit_id = it_mutations.format_audit_doc_id(contractor_id=cid, provider="jobber", generation=1, action="connected")
     competing_audit = {"contractor_id": cid, "competing_audit_written_first": True}
@@ -12070,6 +12233,7 @@ async def test_18qc_connect_audit_collision_ordering_and_rollback(monkeypatch):
             access_token="acc_new_val",
             refresh_token="ref_new_val",
             jobber_account_id="jobber-acc-1",
+            jobber_binding_proof=proof,
             claim_id="c" * 32,
             db=db,
         )
@@ -12102,7 +12266,7 @@ async def test_18qc_sentinel_non_disclosure_in_oauth_and_preflight(monkeypatch, 
             db=fake_db,
         )
         assert status == "blocked"
-        assert reason == "contractor_inactive"
+        assert reason == ("jobber_admission_unavailable" if provider == "jobber" else "contractor_inactive")
         assert secret_sentinel not in (reason or "")
         assert cid not in (reason or "")
 
@@ -12126,8 +12290,10 @@ async def test_18qc_sentinel_non_disclosure_in_oauth_and_preflight(monkeypatch, 
                     contractor_id=cid,
                     provider=provider,
                 )
-            assert exc_info.value.status_code in (400, 500)
-            assert "Invalid contractor lifecycle metadata" in exc_info.value.detail or "Failed" in exc_info.value.detail
+            assert exc_info.value.status_code == 400
+            assert exc_info.value.detail == "Invalid contractor lifecycle metadata"
+            assert exc_info.value.__cause__ is None
+            assert not any(ref.exists for ref in db.collections.get(it_mutations.OAUTH_PROVIDER_COLLECTIONS[provider], {}).values())
             assert secret_sentinel not in exc_info.value.detail
             assert cid not in exc_info.value.detail
             assert secret_sentinel not in caplog.text
@@ -12169,7 +12335,7 @@ async def test_18qd_both_provider_acquire_intent_fails_on_malformed_credentials_
         db = _FakeFirestore({"contractors": {cid: c_doc}})
         _patch_firestore(monkeypatch, db)
 
-        with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Failed to compute credentials fingerprint"):
+        with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Jobber credentials unavailable" if provider == "jobber" else "Failed to compute credentials fingerprint"):
             await it_mutations.acquire_provider_operation_intent_cas(
                 contractor_id=cid,
                 provider=provider,
@@ -12235,7 +12401,7 @@ async def test_18qd_isolated_single_factor_mutation_fences(monkeypatch):
     cid = "cid_18qd_isolated_fence"
 
     for provider in ("jobber", "google_calendar"):
-        base_exp = 2000.0
+        base_exp = time.time() + 300.0
         valid_fp = it_mutations.compute_raw_credentials_fingerprint(None, None)
         claim_id = "c" * 32
         initial_doc = {
@@ -12247,12 +12413,15 @@ async def test_18qd_isolated_single_factor_mutation_fences(monkeypatch):
             f"{provider}_operation_intent_id": claim_id,
             f"{provider}_operation_intent_kind": "connect",
             f"{provider}_operation_intent_phase": "reserved",
-            f"{provider}_operation_intent_acquired_at": 500.0,
+            f"{provider}_operation_intent_acquired_at": time.time(),
             f"{provider}_operation_intent_expires_at": base_exp,
             f"{provider}_operation_intent_generation": 0,
             f"{provider}_operation_intent_lifecycle_epoch": 0,
             f"{provider}_operation_intent_credentials_fingerprint": valid_fp,
         }
+
+        if provider == "jobber":
+            _jobber_boundary_proof(initial_doc, claim_id, "new_acc", "new_ref")
 
         # Factor 1: observed_generation mismatch
         c_doc = _FakeDocRef(dict(initial_doc), doc_id=cid)
@@ -12288,7 +12457,7 @@ async def test_18qd_isolated_single_factor_mutation_fences(monkeypatch):
         c_doc = _FakeDocRef(dict(initial_doc), doc_id=cid)
         db = _FakeFirestore({"contractors": {cid: c_doc}})
         _patch_firestore(monkeypatch, db)
-        with pytest.raises(it_mutations.IntegrationTokenLeaseError, match="claim ID mismatch"):
+        with pytest.raises(it_mutations.IntegrationTokenCASConflict if provider == "jobber" else it_mutations.IntegrationTokenLeaseError, match="claim ID mismatch"):
             await it_mutations.transition_provider_operation_intent_to_started_cas(
                 contractor_id=cid,
                 provider=provider,
@@ -12342,6 +12511,7 @@ async def test_18qd_commit_time_audit_collision_rollback(monkeypatch):
         "jobber_operation_intent_credentials_fingerprint": valid_fp,
     }
 
+    proof = _jobber_boundary_proof(initial_doc, claim_id, "acc_new_123", "ref_new_123")
     c_doc = _FakeDocRef(dict(initial_doc), doc_id=cid)
     db = _FakeFirestore({"contractors": {cid: c_doc}})
     _patch_firestore(monkeypatch, db)
@@ -12368,13 +12538,14 @@ async def test_18qd_commit_time_audit_collision_rollback(monkeypatch):
 
     monkeypatch.setattr(db, "transaction", _colliding_transaction)
 
-    with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Connect transaction failed|already exists"):
+    with pytest.raises(it_mutations.IntegrationTokenCASConflict, match="Jobber transaction failed|already exists|Postcondition"):
         await it_mutations.connect_provider_cas(
             contractor_id=cid,
             provider="jobber",
             access_token="acc_new_123",
             refresh_token="ref_new_123",
             jobber_account_id="jobber-acc-1",
+            jobber_binding_proof=proof,
             claim_id=claim_id,
             db=db,
         )
@@ -12401,13 +12572,13 @@ async def test_18qe_disconnect_untrusted_runtime_error_sentinel_privacy(monkeypa
     c_doc = _FakeDocRef(dict(initial_doc), doc_id=cid)
     db = _FakeFirestore({"contractors": {cid: c_doc}})
 
+    attempted = []
     def _failing_transaction():
-        txn = _FakeTransaction()
-        def _failing_get(ref):
-            if ref == c_doc:
-                return c_doc.get()
+        txn = _FakeTransaction(db)
+        def _failing_begin(*args, **kwargs):
+            attempted.append(True)
             raise RuntimeError("SECRET_DB_PASSWORD_12345")
-        txn.get = _failing_get
+        txn._begin = _failing_begin
         return txn
 
     monkeypatch.setattr(db, "transaction", _failing_transaction)
@@ -12420,7 +12591,8 @@ async def test_18qe_disconnect_untrusted_runtime_error_sentinel_privacy(monkeypa
         )
 
     err = exc_info.value
-    assert str(err) == "Disconnect transaction failed with ambiguous state"
+    assert attempted == [True]
+    assert str(err) == "Jobber transaction failed"
     assert err.__cause__ is None
     assert "SECRET" not in str(err)
 
@@ -12888,7 +13060,7 @@ async def test_18qg_fingerprint_guard_transition_intent_to_started(monkeypatch):
 
         monkeypatch.setattr(db, "transaction", _tracking_transaction)
 
-        with pytest.raises(it_mutations.IntegrationTokenLeaseError) as exc_info:
+        with pytest.raises(it_mutations.IntegrationTokenCASConflict if provider == "jobber" else it_mutations.IntegrationTokenLeaseError) as exc_info:
             await it_mutations.transition_provider_operation_intent_to_started_cas(
                 contractor_id=cid,
                 provider=provider,
@@ -13061,6 +13233,7 @@ async def test_18qg_fingerprint_guard_connect_provider(monkeypatch):
             f"{provider}_operation_intent_lifecycle_epoch": 0,
             f"{provider}_operation_intent_credentials_fingerprint": mismatched_fp,
         }
+        proof = _jobber_boundary_proof(doc_data, claim_id, "new_conn_acc", "new_conn_ref") if provider == "jobber" else None
         doc_copy = dict(doc_data)
         c_doc = _FakeDocRef(dict(doc_data), doc_id=cid)
         db = _FakeFirestore({"contractors": {cid: c_doc}})
@@ -13085,11 +13258,12 @@ async def test_18qg_fingerprint_guard_connect_provider(monkeypatch):
                 access_token="new_conn_acc",
                 refresh_token="new_conn_ref",
                 jobber_account_id="jobber-acc-1" if provider == "jobber" else None,
+                jobber_binding_proof=proof,
                 claim_id=claim_id,
                 db=db,
             )
 
-        assert "Connect operation intent credentials fingerprint mismatch" in str(exc_info.value)
+        assert "credentials fingerprint mismatch" in str(exc_info.value)
         assert staged_writes == {"update": 0, "set": 0, "create": 0, "delete": 0}
         assert c_doc.get().to_dict() == doc_copy
 
@@ -13125,6 +13299,8 @@ async def test_18qg_fingerprint_guard_transition_reauth_attempt_to_started(monke
             f"{provider}_reauthorization_attempt_lifecycle_epoch": 0,
             f"{provider}_reauthorization_attempt_credentials_fingerprint": mismatched_fp,
         }
+        if provider == "jobber":
+            _jobber_boundary_proof(doc_data, claim_id, "new_acc", "new_ref")
         doc_copy = dict(doc_data)
         c_doc = _FakeDocRef(dict(doc_data), doc_id=cid)
         db = _FakeFirestore({"contractors": {cid: c_doc}})
@@ -13142,7 +13318,7 @@ async def test_18qg_fingerprint_guard_transition_reauth_attempt_to_started(monke
 
         monkeypatch.setattr(db, "transaction", _tracking_transaction)
 
-        with pytest.raises(it_mutations.IntegrationTokenLeaseError) as exc_info:
+        with pytest.raises(it_mutations.IntegrationTokenCASConflict if provider == "jobber" else it_mutations.IntegrationTokenLeaseError) as exc_info:
             await it_mutations.transition_provider_reauthorization_attempt_to_started_cas(
                 contractor_id=cid,
                 provider=provider,
@@ -13154,7 +13330,7 @@ async def test_18qg_fingerprint_guard_transition_reauth_attempt_to_started(monke
                 db=db,
             )
 
-        assert "Reauthorization attempt credentials fingerprint mismatch" in str(exc_info.value)
+        assert "credentials fingerprint mismatch" in str(exc_info.value)
         assert staged_writes == {"update": 0, "set": 0, "create": 0, "delete": 0}
         assert c_doc.get().to_dict() == doc_copy
 
@@ -13297,7 +13473,7 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
             f"{provider}_operation_intent_acquired_at": 100.0,
             f"{provider}_operation_intent_generation": 0,
             f"{provider}_operation_intent_lifecycle_epoch": 0,
-            f"{provider}_operation_intent_credentials_fingerprint": "a" * 64,
+            f"{provider}_operation_intent_credentials_fingerprint": it_mutations.compute_raw_credentials_fingerprint("acc_token_123", "ref_token_123"),
         }
 
         replacement_intent_fields = {
@@ -13308,7 +13484,7 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
             f"{provider}_operation_intent_acquired_at": 200.0,
             f"{provider}_operation_intent_generation": 0,
             f"{provider}_operation_intent_lifecycle_epoch": 0,
-            f"{provider}_operation_intent_credentials_fingerprint": "b" * 64,
+            f"{provider}_operation_intent_credentials_fingerprint": it_mutations.compute_raw_credentials_fingerprint("acc_token_123", "ref_token_123"),
         }
 
         # 1. Success case: Valid replacement intent appears strictly after commit and before post-read.
@@ -13333,6 +13509,8 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
 
                 def _commit_with_race():
                     orig_commit()
+                    if txn._read_only:
+                        return
                     for k, v in inject_fields.items():
                         c_doc.data[k] = v
 
@@ -13365,6 +13543,8 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
 
                 def _commit_with_same_claim():
                     orig_commit()
+                    if txn._read_only:
+                        return
                     for k, v in initial_intent_fields.items():
                         c_doc_same.data[k] = v
 
@@ -13398,6 +13578,8 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
 
                 def _commit_with_malformed():
                     orig_commit()
+                    if txn._read_only:
+                        return
                     for k, v in malformed_fields.items():
                         c_doc_malformed.data[k] = v
 
@@ -13424,7 +13606,7 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
         orig_none_get = c_doc_none.get
         def _get_with_none_dict(*args, transaction=None, **kwargs):
             snap = orig_none_get(*args, transaction=transaction, **kwargs)
-            if transaction is None:
+            if transaction is None or getattr(transaction, "_read_only", False):
                 class _ExistingNoneSnap:
                     exists = True
                     read_time = snap.read_time
@@ -13452,7 +13634,7 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
         orig_nondict_get = c_doc_nondict.get
         def _get_with_nondict(*args, transaction=None, **kwargs):
             snap = orig_nondict_get(*args, transaction=transaction, **kwargs)
-            if transaction is None:
+            if transaction is None or getattr(transaction, "_read_only", False):
                 class _ExistingNonDictSnap:
                     exists = True
                     read_time = snap.read_time
@@ -13480,7 +13662,7 @@ async def test_terminalize_provider_operation_intent_allows_newer_replacement_in
         orig_missing_get = c_doc_missing.get
         def _get_with_missing(*args, transaction=None, **kwargs):
             snap = orig_missing_get(*args, transaction=transaction, **kwargs)
-            if transaction is None:
+            if transaction is None or getattr(transaction, "_read_only", False):
                 class _MissingSnap:
                     exists = False
                     read_time = snap.read_time
@@ -13518,7 +13700,7 @@ def test_parse_provider_operation_intent_bound_operation_id_and_uncertain_phase(
             f"{provider}_operation_intent_acquired_at": now,
             f"{provider}_operation_intent_generation": 1,
             f"{provider}_operation_intent_lifecycle_epoch": 1,
-            f"{provider}_operation_intent_credentials_fingerprint": "a" * 64,
+            f"{provider}_operation_intent_credentials_fingerprint": it_mutations.compute_raw_credentials_fingerprint("acc_token_123", "ref_token_123"),
         }
         if bound_id is not None:
             doc[f"{provider}_operation_intent_bound_operation_id"] = bound_id
@@ -15163,6 +15345,8 @@ async def test_jobber_retry_recomputes_identity_and_capture_flag(monkeypatch):
     attempt_count = [0]
     class _RetryTransaction(_FakeTransaction):
         def commit(self):
+            if self._read_only:
+                return super().commit()
             attempt_count[0] += 1
             if attempt_count[0] == 1:
                 # On first attempt, update document in background to matching account ID and trigger retry

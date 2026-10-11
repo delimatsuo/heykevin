@@ -45,18 +45,35 @@ enum JobberManagementError: Error, LocalizedError, Equatable {
 enum JobberConnectionState: Equatable, Sendable {
     case unknown
     case notReady
+    case disconnectPending
+    case reauthorizationRequired
     case connected(leadCaptureEnabled: Bool)
+}
+
+enum JobberConnectionStatus: String, Equatable, Sendable {
+    case connected = "connected"
+    case disconnected = "disconnected"
+    case disconnectPending = "disconnect_pending"
+    case reauthorizationRequired = "reauthorization_required"
+    case unknown = "unknown"
 }
 
 struct JobberStatusPayload: Equatable, Sendable {
     let connected: Bool
     let leadCaptureEnabled: Bool
     let connectedAt: Double?
+    let connectionStatus: JobberConnectionStatus
 
-    init(connected: Bool, leadCaptureEnabled: Bool, connectedAt: Double? = nil) {
+    init(
+        connected: Bool,
+        leadCaptureEnabled: Bool,
+        connectedAt: Double? = nil,
+        connectionStatus: JobberConnectionStatus? = nil
+    ) {
         self.connected = connected
         self.leadCaptureEnabled = leadCaptureEnabled
         self.connectedAt = connectedAt
+        self.connectionStatus = connectionStatus ?? (connected ? .connected : .disconnected)
     }
 }
 
@@ -84,19 +101,48 @@ enum JobberStatusParser {
         }
 
         var connectedAt: Double? = nil
-        if let rawConnectedAt = json["connected_at"] {
-            if let num = rawConnectedAt as? NSNumber, CFGetTypeID(num) != CFBooleanGetTypeID() {
-                let d = num.doubleValue
-                if d.isFinite && d > 0 {
-                    connectedAt = d
-                }
+        if let rawConnectedAt = json["connected_at"], !(rawConnectedAt is NSNull) {
+            guard let num = rawConnectedAt as? NSNumber,
+                  CFGetTypeID(num) != CFBooleanGetTypeID(),
+                  num.doubleValue.isFinite, num.doubleValue > 0 else {
+                throw JobberManagementError.malformedResponse
             }
+            connectedAt = num.doubleValue
+        }
+        if !connected && connectedAt != nil {
+            throw JobberManagementError.malformedResponse
+        }
+
+        let connectionStatus: JobberConnectionStatus
+        if json.keys.contains("connection_status") {
+            guard let rawStatus = json["connection_status"] as? String,
+                  let parsed = JobberConnectionStatus(rawValue: rawStatus), parsed != .unknown else {
+                throw JobberManagementError.malformedResponse
+            }
+            connectionStatus = parsed
+        } else {
+            connectionStatus = connected ? .connected : .disconnected
+        }
+
+        // Validate consistency between connection_status and connected
+        switch connectionStatus {
+        case .connected:
+            if !connected {
+                throw JobberManagementError.malformedResponse
+            }
+        case .disconnected, .disconnectPending, .reauthorizationRequired:
+            if connected {
+                throw JobberManagementError.malformedResponse
+            }
+        case .unknown:
+            break
         }
 
         return JobberStatusPayload(
             connected: connected,
             leadCaptureEnabled: leadCaptureEnabled,
-            connectedAt: connectedAt
+            connectedAt: connectedAt,
+            connectionStatus: connectionStatus
         )
     }
 
@@ -115,6 +161,7 @@ enum JobberRevocationStatus: String, Equatable, Sendable {
     case providerRejected = "provider_rejected"
     case transportErrorUnknown = "transport_error_unknown"
     case notAttemptedUnavailableToken = "not_attempted_unavailable_token"
+    case notAttemptedLocalOnly = "not_attempted_local_only"
     case unknown = "unknown"
 }
 
@@ -191,6 +238,19 @@ enum JobberDisconnectParser {
 
         let rawTopLevelStatus = json["revocation_status"] as? String
 
+        // A local-only claim must be complete at both levels; malformed nested
+        // evidence must not downgrade a contradictory claim to legacy unknown.
+        if rawNestedStatus == "not_attempted_local_only" || rawTopLevelStatus == "not_attempted_local_only" {
+            guard rawNestedStatus == "not_attempted_local_only",
+                  rawTopLevelStatus == "not_attempted_local_only",
+                  credDelStatus == "executed",
+                  let revocation = json["provider_revocation"] as? [String: Any],
+                  let attempted = revocation["attempted"] as? NSNumber,
+                  CFGetTypeID(attempted) == CFBooleanGetTypeID(), !attempted.boolValue else {
+                throw JobberManagementError.malformedResponse
+            }
+        }
+
         if let nested = rawNestedStatus, let top = rawTopLevelStatus {
             if nested != top {
                 throw JobberManagementError.malformedResponse
@@ -208,6 +268,14 @@ enum JobberDisconnectParser {
                 revStatus = .transportErrorUnknown
             case "not_attempted_unavailable_token":
                 revStatus = .notAttemptedUnavailableToken
+            case "not_attempted_local_only":
+                guard credDelStatus == "executed",
+                      let revocation = json["provider_revocation"] as? [String: Any],
+                      let attempted = revocation["attempted"] as? NSNumber,
+                      CFGetTypeID(attempted) == CFBooleanGetTypeID(), !attempted.boolValue else {
+                    throw JobberManagementError.malformedResponse
+                }
+                revStatus = .notAttemptedLocalOnly
             default:
                 revStatus = .unknown
             }
@@ -383,6 +451,9 @@ final class JobberManagementModel: ObservableObject {
     static let fixedUnconfirmedRevocationNotice = String(
         localized: "Jobber access was removed from Kevin, but could not be confirmed with Jobber. Please check your Installed Apps in Jobber to ensure access is removed."
     )
+    static let fixedLocalRemovalNotice = String(
+        localized: "Jobber credentials were removed from Kevin. No request to revoke access was sent to Jobber."
+    )
     static let fixedStatusErrorMessage = String(
         localized: "Couldn't refresh Jobber status. Please check your connection and try again."
     )
@@ -468,10 +539,20 @@ final class JobberManagementModel: ObservableObject {
             if let currentLiveOnCompletion = normalizedLiveOnCompletion,
                currentLiveOnCompletion == lease.auth,
                activeLease?.id == lease.id {
-                connectionState = payload.connected
-                    ? .connected(leadCaptureEnabled: payload.leadCaptureEnabled)
-                    : .notReady
-                lastConnectedAt = payload.connectedAt
+                switch payload.connectionStatus {
+                case .connected:
+                    connectionState = .connected(leadCaptureEnabled: payload.leadCaptureEnabled)
+                    lastConnectedAt = payload.connectedAt
+                case .disconnectPending:
+                    connectionState = .disconnectPending
+                    lastConnectedAt = nil
+                case .reauthorizationRequired:
+                    connectionState = .reauthorizationRequired
+                    lastConnectedAt = nil
+                case .disconnected, .unknown:
+                    connectionState = .notReady
+                    lastConnectedAt = nil
+                }
                 statusErrorMessage = nil
             }
         } catch {
@@ -670,7 +751,9 @@ final class JobberManagementModel: ObservableObject {
                activeLease?.id == lease.id {
                 connectionState = .notReady
                 lastConnectedAt = nil
-                if payload.isProviderConfirmed {
+                if payload.revocationStatus == .notAttemptedLocalOnly {
+                    unconfirmedRevocationNotice = Self.fixedLocalRemovalNotice
+                } else if payload.isProviderConfirmed {
                     unconfirmedRevocationNotice = nil
                 } else {
                     unconfirmedRevocationNotice = Self.fixedUnconfirmedRevocationNotice

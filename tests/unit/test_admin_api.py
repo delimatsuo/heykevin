@@ -17,6 +17,8 @@ from app.api import admin as admin_api
 
 class _FakeDoc:
     def __init__(self, doc_id: str, data: dict):
+        import datetime
+        self.read_time = datetime.datetime.now(datetime.UTC)
         self.id = doc_id
         self._data = data
         self.exists = True
@@ -34,7 +36,8 @@ class _MissingDoc:
 
 
 class _FakeDocumentRef:
-    def __init__(self, doc: _FakeDoc | None):
+    def __init__(self, doc: _FakeDoc | None, doc_id="missing"):
+        self.id = doc.id if doc is not None else doc_id
         self._doc = doc
         self._subcollections = {}
 
@@ -43,7 +46,13 @@ class _FakeDocumentRef:
         return self
 
     def get(self):
-        return self._doc or _MissingDoc()
+        if self._doc is not None:
+            return self._doc
+        import datetime
+        missing = _MissingDoc()
+        missing.id = self.id
+        missing.read_time = datetime.datetime.now(datetime.UTC)
+        return missing
 
     def update(self, updates: dict):
         if self._doc is None:
@@ -82,7 +91,7 @@ class _FakeCollection:
         for doc in self._docs:
             if doc.id == doc_id:
                 return _FakeDocumentRef(doc).with_subcollections(self._subcollections.get(doc_id, {}))
-        return _FakeDocumentRef(None)
+        return _FakeDocumentRef(None, doc_id)
 
     def where(self, *args, **kwargs):
         return _FakeQuery(self._docs).where(*args, **kwargs)
@@ -107,8 +116,21 @@ class _FakeFirestore:
         for name, collection_docs in (collections or {}).items():
             self._collections[name] = _FakeCollection(collection_docs)
 
+    def jobber_transaction_factory(self, *, deadline, read_only):
+        assert read_only is True or read_only is False
+        class ReadTransaction:
+            jobber_deadline = deadline
+            id = b"admin-read-only"
+            def _begin(self, retry_id=None): deadline.timeout()
+            def _commit(self): deadline.timeout()
+            def _rollback(self): pass
+            def get(self, ref, *, retry, timeout):
+                assert retry is None and 0 < timeout <= 2
+                return iter([ref.get()])
+        return ReadTransaction()
+
     def collection(self, name: str):
-        return self._collections[name]
+        return self._collections.setdefault(name, _FakeCollection([]))
 
 
 def _admin_request():
@@ -230,7 +252,7 @@ async def test_admin_contractor_detail_includes_jobber_status_without_tokens(mon
         "connected": True,
         "connected_at": 123.0,
         "lead_capture_enabled": True,
-        "lead_capture_updated_at": 456.0,
+        "connection_status": "connected",
     }
 
 

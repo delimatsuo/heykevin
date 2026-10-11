@@ -88,7 +88,7 @@ class DisconnectProviderResult:
     generation: int
     lifecycle_epoch: int
     audit_id: str
-    outbox_id: str
+    outbox_id: str | None
     credential_deletion: str
     revocation_status: str
     claim_id: str | None = field(default=None, repr=False)
@@ -98,6 +98,9 @@ class DisconnectProviderResult:
     updated_at: float = 0.0
     expected_disconnected_at: float = 0.0
     expected_floor: Any = None
+    jobber_context: Any = field(default=None, repr=False)
+    local_only: bool = False
+    local_deletion_attempted: bool = False
 
 
 from app.services.oauth_pkce import (
@@ -123,6 +126,7 @@ OAUTH_STATE_KEYS = frozenset({
 })
 
 JOBBER_OAUTH_STATE_KEYS = frozenset({
+    "schema_version", "receipt_counter_at_start", "enforcement_context", "source_account_id",
     "contractor_id",
     "provider",
     "lifecycle_epoch",
@@ -158,6 +162,9 @@ def _build_deleted_credential_keys(provider: str) -> set[str]:
         f"{provider}_reauthorization_required",
     }
     keys.update(get_provider_operation_intent_keys(provider))
+    if provider == "jobber":
+        from app.services.jobber_admissions import ENFORCEMENT_FIELDS
+        keys.update(ENFORCEMENT_FIELDS)
     if provider == "google_calendar":
         keys.add("google_calendar_scope")
     return keys
@@ -225,6 +232,9 @@ def _get_doc_snapshot_in_txn(doc_ref: Any, transaction: Any) -> Any:
     - Rejects generator objects and non-snapshot returns
     - Fails closed if doc_ref.get does not return a DocumentSnapshot
     """
+    if getattr(transaction, "jobber_deadline", None) is not None:
+        from app.services.jobber_admissions import _read
+        return _read(doc_ref, transaction)
     doc_snap = doc_ref.get(transaction=transaction)
     if hasattr(doc_snap, "__next__") or hasattr(doc_snap, "__iter__") and not hasattr(doc_snap, "to_dict"):
         raise IntegrationTokenEnvelopeError("doc_ref.get returned a generator instead of DocumentSnapshot")
@@ -632,6 +642,57 @@ def _classify_durable_provider_record(
     return "valid_legacy_unnormalized", None, legacy_info
 
 
+def _validate_jobber_public_inputs(arguments, *, required_claim=False, required_observation=False):
+    """Validate public inputs before routing or opening a datastore connection."""
+    validate_token_string(arguments["contractor_id"], name="contractor_id")
+    if "provider" in arguments and type(arguments["provider"]) is not str:
+        raise IntegrationTokenEnvelopeError("Invalid provider")
+    for name in ("new_access_token", "new_refresh_token", "access_token", "refresh_token"):
+        if name in arguments:
+            validate_token_string(arguments[name], name=name)
+    for name in ("observed_generation", "observed_lifecycle_epoch"):
+        value = arguments.get(name)
+        if required_observation or value is not None:
+            if type(value) is not int or not 0 <= value <= MAX_KEY_VERSION:
+                raise IntegrationTokenEnvelopeError("Invalid " + name)
+    claim = arguments.get("claim_id")
+    if required_claim or claim is not None:
+        if type(claim) is not str or not _CANONICAL_STATE_REGEX.fullmatch(claim):
+            raise IntegrationTokenEnvelopeError("Invalid claim_id")
+        validate_token_string(claim, name="claim_id")
+    kind = arguments.get("kind")
+    if kind is not None and (type(kind) is not str or kind not in ("business", "refresh", "connect")):
+        raise IntegrationTokenEnvelopeError("Invalid operation intent kind")
+    if arguments.get("bound_operation_id") is not None:
+        raise IntegrationTokenEnvelopeError("Jobber bound_operation_id is not supported")
+    if arguments.get("scope") is not None:
+        raise IntegrationTokenEnvelopeError("scope is not allowed for provider")
+    if "jobber_account_id" in arguments:
+        if arguments["jobber_account_id"] is None:
+            raise IntegrationTokenEnvelopeError("jobber_account_id is required for Jobber connect")
+        from app.services.jobber import validate_jobber_account_id
+        try:
+            validate_jobber_account_id(arguments["jobber_account_id"])
+        except Exception:
+            raise IntegrationTokenEnvelopeError("Invalid jobber_account_id") from None
+    for name, validator in (("expires_at", validate_token_expires_at), ("expires_in", validate_token_expires_in)):
+        if arguments.get(name) is not None:
+            validator(arguments[name])
+    if "lease_duration" in arguments:
+        value = arguments["lease_duration"]
+        if type(value) not in (int, float) or not math.isfinite(value) or not 1 <= value <= 3600:
+            raise IntegrationTokenEnvelopeError("Invalid lease_duration")
+    updates = arguments.get("extra_updates")
+    if updates is not None:
+        if type(updates) is not dict:
+            raise IntegrationTokenEnvelopeError("extra_updates must be an exact dict")
+        for key, value in updates.items():
+            if type(key) is not str or key not in ALLOWED_EXTRA_UPDATES["jobber"]:
+                raise IntegrationTokenEnvelopeError("Disallowed field in extra_updates")
+            if key == "jobber_lead_capture_enabled" and type(value) is not bool:
+                raise IntegrationTokenEnvelopeError("Invalid value for jobber_lead_capture_enabled")
+
+
 async def check_and_recover_expired_intent_preflight_cas(
     *,
     contractor_id: str,
@@ -645,6 +706,12 @@ async def check_and_recover_expired_intent_preflight_cas(
     - ("quarantined", msg): Expired started intent transitioned to exact True/True quarantine.
     - ("blocked", msg): Active intent, active quarantine, or malformed state blocks refresh.
     """
+    if type(provider) is str and provider == "jobber":
+        from app.services.jobber_admissions import preflight
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("preflight", None)
+        return await preflight(**arguments)
     valid_cid = validate_token_string(contractor_id, name="contractor_id")
     if valid_cid is None:
         return "blocked", "invalid_contractor_id"
@@ -737,6 +804,9 @@ async def load_durable_provider_snapshot(
     db: Any = None,
 ) -> dict[str, Any] | None:
     """Load fresh durable provider snapshot directly from Firestore immediately before provider call."""
+    if type(provider) is str and provider == "jobber":
+        from app.services.jobber_admissions import load_snapshot
+        return await load_snapshot(contractor_id, db=db)
     if type(provider) is not str or provider not in VALID_PROVIDERS:
         return None
 
@@ -896,6 +966,7 @@ async def acquire_provider_operation_intent_cas(
     observed_access_raw: Any = None,
     observed_refresh_raw: Any = None,
     lease_duration: float = LEASE_DURATION_SECONDS,
+    observed_jobber_context: Any = None,
     db: Any = None,
 ) -> tuple[str, float]:
     """Acquire a lifecycle-bound durable provider operation intent in Firestore.
@@ -903,6 +974,13 @@ async def acquire_provider_operation_intent_cas(
     Kinds supported: 'business', 'refresh', 'connect'.
     Starts in phase 'reserved'.
     """
+    if type(provider) is str and provider == "jobber":
+        _validate_jobber_public_inputs(locals(), required_claim=False, required_observation=False)
+        from app.services.jobber_admissions import acquire
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("acquire", None)
+        return await acquire(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -1118,6 +1196,7 @@ async def acquire_refresh_claim_cas(
     observed_access_raw: Any,
     observed_refresh_raw: Any,
     lease_duration: float = LEASE_DURATION_SECONDS,
+    observed_jobber_context: Any = None,
     db: Any = None,
 ) -> tuple[str, float]:
     """Acquire a cross-process multi-instance refresh lease claim in Firestore."""
@@ -1129,6 +1208,7 @@ async def acquire_refresh_claim_cas(
         observed_access_raw=observed_access_raw,
         observed_refresh_raw=observed_refresh_raw,
         lease_duration=lease_duration,
+        observed_jobber_context=observed_jobber_context,
         db=db,
     )
 
@@ -1148,6 +1228,13 @@ async def transition_provider_operation_intent_to_started_cas(
     db: Any = None,
 ) -> tuple[str, float]:
     """Atomically transition a live reserved provider operation intent to provider_request_started before HTTP."""
+    if type(provider) is str and provider == "jobber":
+        _validate_jobber_public_inputs(locals(), required_claim=True, required_observation=False)
+        from app.services.jobber_admissions import start
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("start", None)
+        return await start(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -1319,6 +1406,12 @@ async def release_provider_operation_intent_cas(
     db: Any = None,
 ) -> bool:
     """Atomically release an unexpired reserved provider operation intent."""
+    if type(provider) is str and provider == "jobber":
+        from app.services.jobber_admissions import clear_claim
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("clear_claim", None)
+        return await clear_claim(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -1403,6 +1496,13 @@ async def terminalize_provider_operation_intent_cas(
     db: Any = None,
 ) -> bool:
     """Atomically terminalize (clear) a provider operation intent in any phase."""
+    if type(provider) is str and provider == "jobber":
+        from app.services.jobber_admissions import clear_claim
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("clear_claim", None)
+        arguments["terminal"] = True
+        return await clear_claim(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -1933,6 +2033,13 @@ async def transition_provider_reauthorization_attempt_to_started_cas(
     - Reauthorization attempt valid, matching claim_id, phase='reserved', generation=current_gen, epoch=current_epoch
     - Reauthorization attempt credentials fingerprint equals recomputation of current stored raw credentials
     """
+    if type(provider) is str and provider == "jobber":
+        _validate_jobber_public_inputs(locals(), required_claim=True, required_observation=True)
+        from app.services.jobber_admissions import start
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("start", None)
+        return await start(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -2065,6 +2172,13 @@ async def terminalize_provider_reauthorization_attempt_cas(
 
     RETAINS exact True/True quarantine.
     """
+    if provider == "jobber":
+        from app.services.jobber_admissions import clear_claim
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("clear_claim", None)
+        arguments.update(terminal=True, attempt=True)
+        return await clear_claim(**arguments)
     if type(contractor_id) is not str or type(provider) is not str or provider not in VALID_PROVIDERS:
         return False
 
@@ -2139,6 +2253,12 @@ async def quarantine_provider_reauth_cas(
     db: Any = None,
 ) -> bool:
     """Atomically establish durable unknown-outcome quarantine and clear active claim after started failure."""
+    if provider == "jobber":
+        from app.services.jobber_admissions import quarantine
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("quarantine", None)
+        return await quarantine(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -2263,6 +2383,13 @@ async def persist_refreshed_tokens_cas(
     db: Any = None,
 ) -> tuple[dict[str, Any], int]:
     """Atomically persist refreshed integration tokens under a strict CAS precondition and postverify."""
+    if type(provider) is str and provider == "jobber":
+        _validate_jobber_public_inputs(locals(), required_claim=True, required_observation=True)
+        from app.services.jobber_admissions import persist
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("persist", None)
+        return await persist(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -2559,6 +2686,9 @@ def _build_tombstone_forbidden_fields(provider: str) -> frozenset[str]:
     keys.update(get_provider_operation_intent_keys(provider))
     if provider == "google_calendar":
         keys.add("google_calendar_scope")
+    if provider == "jobber":
+        from app.services.jobber_admissions import ENFORCEMENT_FIELDS
+        keys.update(ENFORCEMENT_FIELDS)
     return frozenset(keys)
 
 
@@ -2876,6 +3006,14 @@ async def disconnect_provider_envelope_cas(
     db: Any = None,
 ) -> DisconnectProviderResult:
     """Atomically disconnect a provider: advances generation and lifecycle epoch, tombstones credentials, records audit event and revocation outbox."""
+    if type(provider) is str and provider == "jobber":
+        _validate_jobber_public_inputs(locals())
+        if candidate_claim_id is not None and (type(candidate_claim_id) is not str or not candidate_claim_id):
+            raise IntegrationTokenEnvelopeError("Invalid candidate_claim_id")
+        from app.db.jobber_local_removals import remove_if_blocked
+        local = await remove_if_blocked(contractor_id=contractor_id, actor=actor, db=db)
+        if local is not None:
+            return local
     if db is None:
         try:
             db = get_firestore_client()
@@ -2899,6 +3037,7 @@ async def disconnect_provider_envelope_cas(
     else:
         claim_candidate = secrets.token_urlsafe(32)
 
+    jobber_context_box = [None]
     doc_ref = db.collection("contractors").document(valid_cid)
 
     disposition_box: list[str] = [""]
@@ -2948,6 +3087,13 @@ async def disconnect_provider_envelope_cas(
         for k in d_data.keys():
             if type(k) is not str:
                 raise IntegrationTokenCASConflict("Contractor document contains non-string keys")
+
+        if provider == "jobber":
+            from app.services.jobber_admissions import _authority, _ordinary, _with_cid
+            if is_durable_provider_tombstone(d_data, provider, valid_cid):
+                _authority(db, transaction, d_data)
+            else:
+                jobber_context_box[0] = _ordinary(db, transaction, _with_cid(d_data, valid_cid), claim=True, credentials=False)
 
         # Check operation intent on contractor: disconnect may preempt ONLY a valid reserved intent or absent intent
         intent_status, parsed_intent, err_msg = parse_provider_operation_intent(d_data, provider)
@@ -3068,6 +3214,8 @@ async def disconnect_provider_envelope_cas(
             audit_snap = _get_doc_snapshot_in_txn(audit_ref, transaction)
             outbox_snap = _get_doc_snapshot_in_txn(outbox_ref, transaction)
             if getattr(audit_snap, "exists", False) or getattr(outbox_snap, "exists", False):
+                if provider == "jobber":
+                    raise IntegrationTokenCASConflict("Deterministic audit/outbox document already exists")
                 from google.api_core.exceptions import Aborted
                 raise Aborted("Deterministic audit/outbox document already exists for new generation")
 
@@ -3271,6 +3419,27 @@ async def disconnect_provider_envelope_cas(
                 # Lone audit record exists without outbox: impossible to reconstruct outbox unambiguously -> FAIL CLOSED
                 raise IntegrationTokenCASConflict("Cannot reconstruct outbox from lone audit record")
 
+    if provider == "jobber":
+        from app.services.jobber_admissions import run_normal_disconnect
+        def jobber_result():
+            return DisconnectProviderResult(
+                contractor_id=valid_cid, provider=provider, generation=tombstone_gen_box[0],
+                lifecycle_epoch=next_epoch_box[0], audit_id=audit_event_id_box[0],
+                outbox_id=outbox_id_box[0], credential_deletion=disposition_box[0],
+                revocation_status=revocation_status_box[0], claim_id=claim_id_box[0],
+                access_token_for_revocation=access_token_for_revoke_box[0],
+                audit_finalized=audit_finalized_box[0], created_at=created_at_box[0],
+                updated_at=updated_at_box[0], expected_disconnected_at=final_disconnected_at_box[0],
+                expected_floor=expected_env_req_box[0], jobber_context=jobber_context_box[0])
+        def jobber_verification():
+            return dict(contractor_id=valid_cid, provider=provider,
+                expected_generation=tombstone_gen_box[0], expected_lifecycle_epoch=next_epoch_box[0],
+                expected_disconnected_at=final_disconnected_at_box[0], expected_floor=expected_env_req_box[0],
+                outbox_id=outbox_id_box[0], expected_outbox=outbox_event_box[0],
+                audit_id=audit_event_id_box[0], expected_audit=audit_event_box[0])
+        return await run_normal_disconnect(db=db, callback=_disconnect_txn.to_wrap,
+            result_factory=jobber_result, verification=jobber_verification)
+
     loop = asyncio.get_running_loop()
     try:
         transaction = db.transaction()
@@ -3311,6 +3480,7 @@ async def disconnect_provider_envelope_cas(
                     updated_at=updated_at_box[0],
                     expected_disconnected_at=final_disconnected_at_box[0],
                     expected_floor=expected_env_req_box[0],
+                    jobber_context=jobber_context_box[0],
                 )
             except Exception:
                 pass
@@ -3351,6 +3521,7 @@ async def disconnect_provider_envelope_cas(
         updated_at=updated_at_box[0],
         expected_disconnected_at=final_disconnected_at_box[0],
         expected_floor=expected_env_req_box[0],
+        jobber_context=jobber_context_box[0],
     )
 
 
@@ -3445,6 +3616,13 @@ async def record_revocation_outcome_cas(
         new_data = dict(val_o)
         new_data.update(updates)
         updated_outbox_box[0] = new_data
+
+    if provider == "jobber":
+        from app.services.jobber_admissions import run_audit_mutation
+        result = await run_audit_mutation(db=db, contractor_id=valid_cid,
+            callback=_outcome_txn.to_wrap, outbox_id=outbox_id,
+            expected_outbox=lambda: updated_outbox_box[0])
+        return result
 
     loop = asyncio.get_running_loop()
     try:
@@ -3571,6 +3749,14 @@ async def finalize_revocation_audit_cas(
         new_outbox = dict(val_o)
         new_outbox.update(outbox_updates)
         expected_outbox_box[0] = new_outbox
+
+    if provider == "jobber":
+        from app.services.jobber_admissions import run_audit_mutation
+        result = await run_audit_mutation(db=db, contractor_id=valid_cid,
+            callback=_finalize_txn.to_wrap, outbox_id=outbox_id,
+            expected_outbox=lambda: expected_outbox_box[0],
+            audit_id=audit_id, expected_audit=lambda: expected_audit_box[0])
+        return True
 
     loop = asyncio.get_running_loop()
     try:
@@ -3710,12 +3896,21 @@ async def disconnect_and_revoke_provider_orchestration(
         db=db,
     )
 
+    if disc_res.local_only:
+        from app.db.jobber_local_removals import orchestration_response
+        return orchestration_response(disc_res)
+
     attempted_http = False
     durable_status = disc_res.revocation_status
     is_finalized = disc_res.audit_finalized
     finalization_attempted = False
 
-    if disc_res.claim_id and disc_res.access_token_for_revocation:
+    revocation_admitted = True
+    if provider == "jobber" and disc_res.claim_id and disc_res.access_token_for_revocation:
+        from app.services.jobber_admissions import admit_revocation
+        revocation_admitted = await admit_revocation(disc_res, db=db)
+
+    if revocation_admitted and disc_res.claim_id and disc_res.access_token_for_revocation:
         attempted_http = True
         outcome_status = REVOCATION_STATUS_TRANSPORT_ERROR
         try:
@@ -3787,8 +3982,12 @@ async def disconnect_and_revoke_provider_orchestration(
             durable_status = outbox_data.get("status", outcome_status)
         except Exception:
             # Independent reread of BOTH outbox and audit records: fail closed unless durable terminal truth is confirmed
-            o_snap = db.collection(REVOCATION_OUTBOX_COLLECTION).document(disc_res.outbox_id).get()
-            a_snap = db.collection(AUDIT_COLLECTION).document(disc_res.audit_id).get()
+            if provider == "jobber":
+                from app.services.jobber_admissions import read_disconnect_lifecycle
+                _, a_snap, o_snap = await read_disconnect_lifecycle(db=db, result=disc_res)
+            else:
+                o_snap = db.collection(REVOCATION_OUTBOX_COLLECTION).document(disc_res.outbox_id).get()
+                a_snap = db.collection(AUDIT_COLLECTION).document(disc_res.audit_id).get()
             if not getattr(o_snap, "exists", False) or not getattr(a_snap, "exists", False):
                 raise IntegrationTokenCASConflict("Revocation outcome persistence unconfirmed after HTTP request") from None
             try:
@@ -3841,7 +4040,11 @@ async def disconnect_and_revoke_provider_orchestration(
                 pass
 
     # Final independent proof of contractor tombstone state
-    c_snap = db.collection("contractors").document(disc_res.contractor_id).get()
+    if provider == "jobber":
+        from app.services.jobber_admissions import read_disconnect_lifecycle
+        c_snap, a_snap, o_snap = await read_disconnect_lifecycle(db=db, result=disc_res)
+    else:
+        c_snap = db.collection("contractors").document(disc_res.contractor_id).get()
     if not getattr(c_snap, "exists", False):
         raise IntegrationTokenCASConflict("Contractor document not found during final orchestration verification")
     c_data = c_snap.to_dict()
@@ -3866,8 +4069,9 @@ async def disconnect_and_revoke_provider_orchestration(
         raise IntegrationTokenCASConflict("Google calendar scope not removed on contractor tombstone")
 
     # Final independent verification of durable lifecycle pair
-    a_snap = db.collection(AUDIT_COLLECTION).document(disc_res.audit_id).get()
-    o_snap = db.collection(REVOCATION_OUTBOX_COLLECTION).document(disc_res.outbox_id).get()
+    if provider != "jobber":
+        a_snap = db.collection(AUDIT_COLLECTION).document(disc_res.audit_id).get()
+        o_snap = db.collection(REVOCATION_OUTBOX_COLLECTION).document(disc_res.outbox_id).get()
     if not getattr(a_snap, "exists", False) or not getattr(o_snap, "exists", False):
         raise IntegrationTokenCASConflict("Lifecycle audit/outbox records unreadable during final verification")
     val_a, val_o = validate_disconnect_lifecycle_pair(
@@ -3882,7 +4086,7 @@ async def disconnect_and_revoke_provider_orchestration(
     )
     is_finalized = val_o["audit_finalized"]
     durable_status = val_o["status"]
-    if durable_status not in TERMINAL_REVOCATION_STATUSES:
+    if durable_status not in TERMINAL_REVOCATION_STATUSES and not (provider == "jobber" and not revocation_admitted):
         raise IntegrationTokenCASConflict(f"Revocation status {durable_status} is non-terminal during final verification")
 
     return {
@@ -3947,9 +4151,18 @@ async def connect_provider_cas(
     scope: str | None = None,
     extra_updates: dict[str, Any] | None = None,
     actor: str = "oauth_state",
+    jobber_binding_proof: Any = None,
+    receipt_counter_at_start: int | None = None,
     db: Any = None,
 ) -> tuple[dict[str, Any], int, str]:
     """Atomically connect/reconnect a provider: advances generation and lifecycle epoch, persists encrypted credentials, writes audit event."""
+    if type(provider) is str and provider == "jobber":
+        _validate_jobber_public_inputs(locals(), required_claim=False, required_observation=False)
+        from app.services.jobber_admissions import connect
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("connect", None)
+        return await connect(**arguments)
     if db is None:
         try:
             db = get_firestore_client()
@@ -4340,6 +4553,12 @@ async def create_oauth_state(
     ttl_seconds: float = 600.0,
 ) -> dict[str, Any]:
     """Atomically generate and store an OAuth state document bound to contractor lifecycle and credentials."""
+    if type(provider) is str and provider == "jobber":
+        from app.services.jobber_admissions import create_state
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("create_state", None)
+        return await create_state(**arguments)
     if type(provider) is not str or provider not in OAUTH_PROVIDER_COLLECTIONS:
         raise HTTPException(status_code=400, detail="Invalid provider")
 
@@ -4452,6 +4671,10 @@ async def consume_oauth_state(
     Performs ALL reads before any staged mutations. Atomically reserves connect intent
     on contractor before deleting state.
     """
+    if collection_name == "jobber_oauth_states":
+        from app.services.jobber_admissions import consume_jobber_oauth_state
+        state_data, observation, _ = await consume_jobber_oauth_state(db=db, state=state)
+        return state_data, observation
     if type(collection_name) is not str or collection_name not in VALID_OAUTH_COLLECTIONS:
         raise HTTPException(status_code=400, detail="Invalid OAuth state collection")
 
@@ -4783,6 +5006,12 @@ async def update_jobber_lead_capture_cas(
     db: Any = None,
 ) -> JobberLeadCaptureMutationResult:
     """Transactionally update Jobber lead capture setting and admin audit event with CAS verification."""
+    if True:
+        from app.services.jobber_admissions import update_capture
+        arguments = dict(locals())
+        arguments.pop("provider", None)
+        arguments.pop("update_capture", None)
+        return await update_capture(**arguments)
     if type(enabled) is not bool:
         raise IntegrationTokenEnvelopeError("enabled must be an exact boolean")
 
@@ -5010,3 +5239,29 @@ async def update_jobber_lead_capture_cas(
         lifecycle_epoch=lifecycle_epoch_box[0],
         updated_at=updated_at_box[0],
     )
+
+
+# Public Jobber-only APIs keep the generic OAuth two-tuple contract unchanged.
+async def consume_jobber_oauth_state(*, db, state):
+    from app.services.jobber_admissions import consume_jobber_oauth_state as consume
+    return await consume(db=db, state=state)
+
+
+def finalize_jobber_binding_proof(consumed_proof, verified_account_id, access_token, refresh_token):
+    from app.services.jobber_admissions import finalize_jobber_binding_proof as finalize
+    return finalize(consumed_proof, verified_account_id, access_token, refresh_token)
+
+
+async def load_jobber_connection_status(contractor_id, *, db):
+    from app.services.jobber_admissions import load_jobber_connection_status as load
+    return await load(contractor_id, db=db)
+
+
+def classify_jobber_connection_status(data, contractor_id=""):
+    """Advisory local classification; endpoints use the authoritative loader."""
+    if type(data) is not dict:
+        return "reauthorization_required"
+    from app.services.integration_tokens import jobber_local_metadata_usable
+    if not jobber_local_metadata_usable(data) or data.get("jobber_reauthorization_required") is True:
+        return "reauthorization_required"
+    return "connected" if is_durable_provider_connected(data, "jobber", contractor_id) else "disconnected"

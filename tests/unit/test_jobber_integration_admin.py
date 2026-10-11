@@ -31,6 +31,7 @@ class _FakeSnapshot:
 
 class _FakeDocRef:
     def __init__(self, doc_id: str, data: dict | None):
+        self.id = doc_id
         self.doc_id = doc_id
         self.data = dict(data) if data is not None else None
         self.updates = []
@@ -137,6 +138,10 @@ class _FakeFirestore:
 
         return _Tx()
 
+    def jobber_transaction_factory(self, *, deadline, read_only):
+        from tests.unit.test_jobber_disconnect_integration import BoundedLegacyTestTransaction
+        return BoundedLegacyTestTransaction(self, deadline=deadline, read_only=read_only)
+
 
 def _request(*, is_admin: bool):
     return SimpleNamespace(
@@ -185,6 +190,7 @@ async def test_jobber_status_includes_lead_capture_flag(monkeypatch):
         "connected": True,
         "connected_at": 123.0,
         "lead_capture_enabled": True,
+        "connection_status": "connected",
     }
 
 

@@ -185,3 +185,69 @@ async def test_actual_startup_shutdown_track_single_recovery_task(monkeypatch):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_receiver_and_recovery_queue_together_and_ack_only_same_durable_admission(monkeypatch):
+    from app.db import jobber_disconnect_transactions as pool
+    from app.services import jobber_disconnect_recovery as recovery
+    from app.db.jobber_disconnect_receipts import RECEIPTS_COLLECTION
+    db = active_db()
+    release, persist_entered, allow_persist = Event(), Event(), Event()
+    holders_entered = [Event(), Event()]
+    admission_ids = []
+    real_persist = receiver.record_disconnect_admission_atomic
+    real_recovery = recovery._sync_run_recovery_once
+    recovered = []
+    def holder(i):
+        def run(deadline):
+            holders_entered[i].set()
+            assert release.wait(3)
+        return run
+    def persist(**kwargs):
+        admission_ids.append(kwargs["admission_id"])
+        persist_entered.set()
+        assert allow_persist.wait(3)
+        return real_persist(**kwargs)
+    def recover(*args):
+        recovered.append(True)
+        return real_recovery(*args)
+    monkeypatch.setattr(receiver, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(receiver, "record_disconnect_admission_atomic", persist)
+    monkeypatch.setattr(recovery, "_sync_run_recovery_once", recover)
+    async def until(predicate):
+        for _ in range(1000):
+            if predicate(): return
+            await asyncio.sleep(.002)
+        pytest.fail("shared pool condition did not become true")
+    def waiting_count():
+        with pool._OUTSTANDING_LOCK: return len(pool._WAITING)
+    tasks = [asyncio.create_task(run_bounded_async(holder(i), seconds=4)) for i in range(2)]
+    try:
+        await until(lambda: all(e.is_set() for e in holders_entered))
+        received = asyncio.create_task(receiver.jobber_webhook_receiver(request()))
+        tasks.append(received)
+        await until(lambda: waiting_count() == 1)
+        recovered_task = asyncio.create_task(recovery.run_jobber_disconnect_recovery_once(db=db))
+        tasks.append(recovered_task)
+        await until(lambda: waiting_count() == 2)
+        assert not admission_ids and not recovered and not received.done()
+        release.set()
+        await until(persist_entered.is_set)
+        assert len(admission_ids) == 1 and not received.done()
+        assert not list(db.collection(RECEIPTS_COLLECTION).stream())
+        # Ambiguous write acknowledgement must read back this admission, not
+        # mint another one or acknowledge a background-only receipt.
+        await recovered_task
+        db.commit_then_raise = True
+        allow_persist.set()
+        assert (await received).status_code == 200
+        assert len(admission_ids) == 1
+        assert db.collection(RECEIPTS_COLLECTION).document(admission_ids[0]).get().exists
+        assert db._data["jobber_disconnect_control/current"]["receipt_counter"] == 1
+        await recovered_task
+        assert recovered == [True]
+    finally:
+        release.set(); allow_persist.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await drain_jobber_operations()

@@ -3906,6 +3906,7 @@ async def disconnect_and_revoke_provider_orchestration(
     finalization_attempted = False
 
     revocation_admitted = True
+    cancelled_lifecycle = None
     if provider == "jobber" and disc_res.claim_id and disc_res.access_token_for_revocation:
         from app.services.jobber_admissions import admit_revocation
         revocation_admitted = await admit_revocation(disc_res, db=db)
@@ -4024,7 +4025,14 @@ async def disconnect_and_revoke_provider_orchestration(
                 pass
 
     else:
-        # Zero provider HTTP
+        # Zero provider HTTP. Only this original dispatch owner can certify a
+        # locally cancelled request; historical started records remain unknown.
+        if provider == "jobber" and not revocation_admitted:
+            from app.services.jobber_admissions import cancel_denied_revocation
+            cancelled_lifecycle = await cancel_denied_revocation(disc_res, db=db)
+            durable_status = cancelled_lifecycle[1]["status"]
+            is_finalized = cancelled_lifecycle[1]["audit_finalized"]
+            finalization_attempted = True
         if durable_status in TERMINAL_REVOCATION_STATUSES and not is_finalized:
             try:
                 finalization_attempted = True
@@ -4042,7 +4050,8 @@ async def disconnect_and_revoke_provider_orchestration(
     # Final independent proof of contractor tombstone state
     if provider == "jobber":
         from app.services.jobber_admissions import read_disconnect_lifecycle
-        c_snap, a_snap, o_snap = await read_disconnect_lifecycle(db=db, result=disc_res)
+        c_snap, a_snap, o_snap = await read_disconnect_lifecycle(
+            db=db, result=disc_res, cancelled_dispatch=cancelled_lifecycle)
     else:
         c_snap = db.collection("contractors").document(disc_res.contractor_id).get()
     if not getattr(c_snap, "exists", False):
@@ -4086,7 +4095,7 @@ async def disconnect_and_revoke_provider_orchestration(
     )
     is_finalized = val_o["audit_finalized"]
     durable_status = val_o["status"]
-    if durable_status not in TERMINAL_REVOCATION_STATUSES and not (provider == "jobber" and not revocation_admitted):
+    if durable_status not in TERMINAL_REVOCATION_STATUSES:
         raise IntegrationTokenCASConflict(f"Revocation status {durable_status} is non-terminal during final verification")
 
     return {

@@ -804,3 +804,266 @@ async def test_capture_update_history_is_safe_and_independent_of_connection_stat
     assert summary["lead_capture_updated_at"] == expected
     assert summary["connection_status"] == phase
     assert set(summary) == {"connection_status", "connected", "connected_at", "lead_capture_enabled", "lead_capture_updated_at"}
+
+
+async def cancellation_owner(db):
+    binding(db)
+    owner = await mutations.disconnect_provider_envelope_cas(
+        contractor_id="contractor", provider="jobber", candidate_claim_id="original_dispatch_owner", db=db)
+    assert owner.claim_id == "original_dispatch_owner" and owner.access_token_for_revocation
+    admit(db)
+    return owner
+
+
+def cancellation_pair(db, owner):
+    from app.db.integration_lifecycle_audit import (
+        AUDIT_COLLECTION, REVOCATION_OUTBOX_COLLECTION, validate_disconnect_lifecycle_pair,
+    )
+    a = db.collection(AUDIT_COLLECTION).document(owner.audit_id).get().to_dict()
+    o = db.collection(REVOCATION_OUTBOX_COLLECTION).document(owner.outbox_id).get().to_dict()
+    return validate_disconnect_lifecycle_pair(a, o, expected_contractor_id=owner.contractor_id,
+        expected_provider="jobber", expected_generation=owner.generation,
+        expected_lifecycle_epoch=owner.lifecycle_epoch, expected_audit_id=owner.audit_id,
+        expected_outbox_id=owner.outbox_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_ack", [False, True])
+async def test_receipt_before_dispatch_cancels_and_finalizes_zero_http_with_stable_repeat(monkeypatch, lost_ack):
+    db = active_db(); binding(db)
+    forbid_http(monkeypatch)
+    real_admit = admission.admit_revocation
+    owners = []
+    async def receipt_before_dispatch(result, **kwargs):
+        owners.append(result)
+        admit(db)
+        allowed = await real_admit(result, **kwargs)
+        db.commit_then_raise = lost_ack
+        return allowed
+    monkeypatch.setattr(admission, "admit_revocation", receipt_before_dispatch)
+    first = await mutations.disconnect_and_revoke_provider_orchestration(contractor_id="contractor", provider="jobber", db=db)
+    assert len(owners) == 1
+    a, o = cancellation_pair(db, owners[0])
+    assert a["revocation_status"] == o["status"] == "not_attempted_unavailable_token"
+    assert o["claim_id"] is None and o["audit_finalized"] is True
+    assert a["revocation_completed_at"] == o["updated_at"] == o["audit_finalized_at"]
+    assert first["provider_revocation"] == {"status": o["status"], "attempted": False, "attempted_by_this_request": False}
+    assert first["audit_finalization"] == {"status": "finalized", "finalized": True, "attempted_by_this_request": True}
+    before, version = copy.deepcopy(db._data), db.version
+    second = await mutations.disconnect_and_revoke_provider_orchestration(contractor_id="contractor", provider="jobber", db=db)
+    assert second["audit_id"] == first["audit_id"] and second["generation"] == first["generation"]
+    assert second["provider_revocation"] == first["provider_revocation"]
+    assert second["credential_deletion"]["attempted_by_this_request"] is False
+    assert second["audit_finalization"] == {"status": "finalized", "finalized": True, "attempted_by_this_request": False}
+    assert db._data == before and db.version == version
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous", [False, True])
+async def test_zero_http_cancellation_dropped_writes_never_return_success(ambiguous):
+    db = active_db(); owner = await cancellation_owner(db)
+    before = copy.deepcopy(db._data)
+    def drop(txn):
+        assert len(txn.writes) == 2
+        txn.writes.clear()
+        if ambiguous: raise RuntimeError("fictional missing acknowledgement without commit")
+    db.before_commit = drop
+    with pytest.raises(IntegrationTokenCASConflict):
+        await admission.cancel_denied_revocation(owner, db=db)
+    assert db._data == before
+    assert cancellation_pair(db, owner)[1]["status"] == "provider_request_started"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", [
+    "claim", "generation", "epoch", "floor", "disconnected_at", "capture", "credential",
+    "source", "audit_extra", "pair_disposition", "outbox_created", "control_missing",
+    "control_malformed", "barrier_malformed", "barrier_beyond_control", "barrier_missing",
+    "app_changed", "replacement",
+])
+async def test_cancellation_rejects_hostile_records_without_writes(corruption):
+    from app.db.integration_lifecycle_audit import AUDIT_COLLECTION, REVOCATION_OUTBOX_COLLECTION
+    from app.db.jobber_disconnect_receipts import BARRIERS_COLLECTION, compute_account_barrier_key
+    from app.services.integration_tokens import IntegrationTokenError
+    db = active_db(); owner = await cancellation_owner(db)
+    c = db.collection("contractors").document("contractor")
+    a = db.collection(AUDIT_COLLECTION).document(owner.audit_id)
+    o = db.collection(REVOCATION_OUTBOX_COLLECTION).document(owner.outbox_id)
+    control = db.collection("jobber_disconnect_control").document("current")
+    barrier = db.collection(BARRIERS_COLLECTION).document(compute_account_barrier_key("app", "account"))
+    if corruption == "claim": o.update({"claim_id": "different_owner"})
+    elif corruption == "generation": c.update({"jobber_generation": owner.generation + 1})
+    elif corruption == "epoch": c.update({"jobber_lifecycle_epoch": owner.lifecycle_epoch + 1})
+    elif corruption == "floor": c.update({"jobber_token_envelope_required": False})
+    elif corruption == "disconnected_at": c.update({"jobber_disconnected_at": owner.expected_disconnected_at + 1.0})
+    elif corruption == "capture": c.update({"jobber_lead_capture_enabled": True})
+    elif corruption == "credential": c.update({"jobber_refresh_token": "fictional-stale"})
+    elif corruption == "source": c.update({"jobber_account_id": "other"})
+    elif corruption == "audit_extra": a.update({"unexpected": "payload-safe"})
+    elif corruption == "pair_disposition": a.update({"credential_deletion_disposition": "legacy_reconciled"})
+    elif corruption == "outbox_created": o.update({"created_at": owner.created_at + 1.0})
+    elif corruption == "control_missing": control.delete()
+    elif corruption == "control_malformed": control.update({"receipt_counter": True})
+    elif corruption == "barrier_malformed": barrier.update({"barrier": True})
+    elif corruption == "barrier_beyond_control": barrier.update({"barrier": 2})
+    elif corruption == "barrier_missing": barrier.delete()
+    elif corruption == "app_changed": control.update({"expected_app_id": "different-app"})
+    elif corruption == "replacement": binding(db, accepted=1)
+    before, version = copy.deepcopy(db._data), db.version
+    with pytest.raises(IntegrationTokenError):
+        await admission.cancel_denied_revocation(owner, db=db)
+    assert db._data == before and db.version == version
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("claim_id", None), ("access_token_for_revocation", None), ("jobber_context", None),
+    ("claim_id", "wrong_owner"), ("created_at", 1.0), ("updated_at", 1.0),
+])
+async def test_cancellation_requires_original_token_owner_and_context(field, value):
+    db = active_db(); owner = await cancellation_owner(db)
+    before = copy.deepcopy(db._data)
+    with pytest.raises(IntegrationTokenCASConflict):
+        await admission.cancel_denied_revocation(replace(owner, **{field: value}), db=db)
+    assert db._data == before
+
+
+@pytest.mark.asyncio
+async def test_false_dispatch_admission_is_not_itself_proof_of_cancellation(monkeypatch):
+    db = active_db(); binding(db)
+    forbid_http(monkeypatch)
+    async def denied(*args, **kwargs): return False
+    monkeypatch.setattr(admission, "admit_revocation", denied)
+    with pytest.raises(IntegrationTokenCASConflict):
+        await mutations.disconnect_and_revoke_provider_orchestration(contractor_id="contractor", provider="jobber", db=db)
+    records = [v for k, v in db._data.items() if k.startswith("integration_revocation_outbox/")]
+    assert len(records) == 1 and records[0]["status"] == "provider_request_started"
+    assert records[0]["claim_id"] and records[0]["audit_finalized"] is False
+
+
+@pytest.mark.asyncio
+async def test_ownerless_historical_started_is_never_relabelled_zero_http(monkeypatch):
+    db = active_db(); owner = await cancellation_owner(db)
+    forbid_http(monkeypatch)
+    before = copy.deepcopy(db._data)
+    with pytest.raises(IntegrationTokenCASConflict, match="non-terminal"):
+        await mutations.disconnect_and_revoke_provider_orchestration(contractor_id="contractor", provider="jobber", db=db)
+    assert db._data == before
+    assert cancellation_pair(db, owner)[1]["claim_id"] == owner.claim_id
+
+
+@pytest.mark.asyncio
+async def test_cancellation_commit_conflict_preserves_new_binding():
+    db = active_db(); owner = await cancellation_owner(db)
+    replacement = {}
+    def reconnect(txn):
+        assert len(txn.writes) == 2
+        replacement.update(binding(db, accepted=1))
+    db.before_commit = reconnect
+    with pytest.raises(IntegrationTokenCASConflict):
+        await admission.cancel_denied_revocation(owner, db=db)
+    assert data(db) == replacement
+    assert cancellation_pair(db, owner)[1]["status"] == "provider_request_started"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous", [False, True])
+@pytest.mark.parametrize("mutation", ["replacement", "control", "barrier", "pair"])
+async def test_cancellation_normal_and_ambiguous_readbacks_recheck_every_authority(monkeypatch, ambiguous, mutation):
+    from app.db.integration_lifecycle_audit import REVOCATION_OUTBOX_COLLECTION
+    from app.db.jobber_disconnect_receipts import BARRIERS_COLLECTION, compute_account_barrier_key
+    from app.services.integration_tokens import IntegrationTokenError
+    db = active_db(); owner = await cancellation_owner(db)
+    original_factory = db.jobber_transaction_factory
+    changed = []
+    def factory(**kwargs):
+        txn = original_factory(**kwargs)
+        commit = txn._commit
+        def altered_commit():
+            writes = bool(txn.writes)
+            result = commit()
+            if writes and not changed:
+                changed.append(True)
+                if mutation == "replacement": binding(db, accepted=1)
+                elif mutation == "control": db.collection("jobber_disconnect_control").document("current").update({"receipt_counter": True})
+                elif mutation == "barrier":
+                    db.collection(BARRIERS_COLLECTION).document(compute_account_barrier_key("app", "account")).delete()
+                else: db.collection(REVOCATION_OUTBOX_COLLECTION).document(owner.outbox_id).update({"updated_at": owner.created_at + 1.0})
+                if ambiguous: raise RuntimeError("fictional lost commit acknowledgement")
+            return result
+        txn._commit = altered_commit
+        return txn
+    monkeypatch.setattr(db, "jobber_transaction_factory", factory)
+    with pytest.raises((IntegrationTokenError, ValueError)):
+        await admission.cancel_denied_revocation(owner, db=db)
+    assert changed == [True]
+    if mutation == "replacement": assert data(db)["jobber_connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_preactivation_dispatch_cancelled_by_valid_control_activation():
+    db = FakeFirestoreDb()
+    db.collection("contractors").document("contractor").set({
+        "active": True, "jobber_connected": True, "jobber_generation": 2, "jobber_lifecycle_epoch": 3,
+        "jobber_access_token": "fictional-access", "jobber_refresh_token": "fictional-refresh",
+        "jobber_account_id": "account", "jobber_lead_capture_enabled": True,
+    })
+    owner = await mutations.disconnect_provider_envelope_cas(contractor_id="contractor", provider="jobber", db=db)
+    assert owner.jobber_context.mode == "preactivation"
+    control = active_db().collection("jobber_disconnect_control").document("current").get().to_dict()
+    db.collection("jobber_disconnect_control").document("current").set(control)
+    assert await admission.admit_revocation(owner, db=db) is False
+    _, result = await admission.cancel_denied_revocation(owner, db=db)
+    assert result["status"] == "not_attempted_unavailable_token" and result["audit_finalized"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["jobber", "google_calendar"])
+async def test_unchanged_admitted_disconnect_has_one_provider_attempt(provider):
+    db = active_db()
+    if provider == "jobber": binding(db)
+    else:
+        db.collection("contractors").document("contractor").set({
+            "active": True, "google_calendar_connected": True, "google_calendar_generation": 2,
+            "google_calendar_lifecycle_epoch": 3, "google_calendar_access_token": "fictional-access",
+            "google_calendar_refresh_token": "fictional-refresh",
+        })
+    class HTTP:
+        calls = 0
+        async def post(self, *args, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(status_code=200, json=lambda: {"data": {"appDisconnect": {"userErrors": []}}})
+    http = HTTP()
+    first = await mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id="contractor", provider=provider, db=db, http_client=http)
+    second = await mutations.disconnect_and_revoke_provider_orchestration(
+        contractor_id="contractor", provider=provider, db=db, http_client=http)
+    assert http.calls == 1
+    assert first["revocation_status"] == second["revocation_status"] == "provider_confirmed"
+    assert first["provider_revocation"]["attempted"] is True
+    assert second["provider_revocation"]["attempted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["pair", "replacement", "authority"])
+async def test_orchestration_rechecks_cancelled_pair_after_cas_returns(monkeypatch, mutation):
+    from app.db.integration_lifecycle_audit import AUDIT_COLLECTION
+    db = active_db(); binding(db)
+    forbid_http(monkeypatch)
+    real_admit, real_cancel = admission.admit_revocation, admission.cancel_denied_revocation
+    async def deny(owner, **kwargs):
+        admit(db)
+        return await real_admit(owner, **kwargs)
+    async def cancel_then_replace(owner, **kwargs):
+        result = await real_cancel(owner, **kwargs)
+        if mutation == "pair":
+            # Still a valid canonical pair, but no longer the verified pair.
+            db.collection(AUDIT_COLLECTION).document(owner.audit_id).update({"actor": "system_reconciliation"})
+        elif mutation == "replacement": binding(db, accepted=1)
+        else: db.collection("jobber_disconnect_control").document("current").delete()
+        return result
+    monkeypatch.setattr(admission, "admit_revocation", deny)
+    monkeypatch.setattr(admission, "cancel_denied_revocation", cancel_then_replace)
+    with pytest.raises(IntegrationTokenCASConflict):
+        await mutations.disconnect_and_revoke_provider_orchestration(contractor_id="contractor", provider="jobber", db=db)
+    if mutation == "replacement": assert data(db)["jobber_connected"] is True

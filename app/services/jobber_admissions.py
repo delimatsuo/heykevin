@@ -1089,6 +1089,106 @@ async def admit_revocation(result, *, db):
         return False
 
 
+def _denied_revocation_tombstone(db, txn, result):
+    try:
+        return _prove_denied_revocation_tombstone(db, txn, result)
+    except IntegrationTokenCASConflict:
+        raise
+    except Exception:
+        # Unavailable or malformed authority is not evidence of a cancelled
+        # dispatch, and diagnostics must not expose stored record contents.
+        raise IntegrationTokenCASConflict("Jobber cancellation authority unconfirmed") from None
+
+
+def _prove_denied_revocation_tombstone(db, txn, result):
+    """Prove a current authority change, never infer it from a failed read."""
+    context = parse_jobber_admission_context(result.jobber_context, purpose="ordinary")
+    ref = db.collection("contractors").document(result.contractor_id)
+    snap = _read(ref, txn)
+    _mutations()._verify_complete_disconnect_postcondition(
+        _SnapshotReference(snap), contractor_id=result.contractor_id, provider="jobber",
+        expected_generation=result.generation, expected_lifecycle_epoch=result.lifecycle_epoch,
+        expected_disconnected_at=result.expected_disconnected_at, expected_floor=result.expected_floor)
+    data = snap.to_dict()
+    if data.get("jobber_lead_capture_enabled") is not False or _source(data) != context.account_id:
+        raise IntegrationTokenCASConflict("Jobber cancellation tombstone changed")
+    control = _authority(db, txn, data)
+    if control is None:
+        raise IntegrationTokenCASConflict("Jobber dispatch denial is unproven")
+    # Activation itself invalidates a preactivation dispatch. Validate the known
+    # source account too; an accountless legacy binding has no account to probe.
+    barrier = _barrier(db, txn, control, context.account_id) if context.account_id is not None else None
+    if context.mode == "enforced" and (
+        context.app_id != control["expected_app_id"] or barrier is None
+        or context.counter >= barrier
+    ):
+        raise IntegrationTokenCASConflict("Jobber dispatch denial is unproven")
+    return snap
+
+
+async def cancel_denied_revocation(result, *, db):
+    """Only the original, still-local dispatch owner can certify zero HTTP.
+
+    The canonical unavailable-token status has no claim. This is deliberately a
+    separate atomic audit/outbox transition from outcomes of attempted HTTP.
+    """
+    from app.db.integration_lifecycle_audit import (
+        AUDIT_COLLECTION, REVOCATION_OUTBOX_COLLECTION, validate_disconnect_lifecycle_pair,
+        REVOCATION_STATUS_REQUEST_STARTED, REVOCATION_STATUS_NOT_ATTEMPTED_UNAVAILABLE,
+    )
+    if (type(result) is not _mutations().DisconnectProviderResult or result.provider != "jobber"
+            or result.local_only or result.revocation_status != REVOCATION_STATUS_REQUEST_STARTED
+            or result.audit_finalized is not False or type(result.claim_id) is not str or not result.claim_id
+            or type(result.access_token_for_revocation) is not str or not result.access_token_for_revocation
+            or type(result.jobber_context) is not JobberAdmissionContext):
+        raise IntegrationTokenCASConflict("Jobber cancellation requires original dispatch owner")
+    audit_ref = db.collection(AUDIT_COLLECTION).document(result.audit_id)
+    outbox_ref = db.collection(REVOCATION_OUTBOX_COLLECTION).document(result.outbox_id)
+
+    def read_pair(txn):
+        a, o = _read(audit_ref, txn), _read(outbox_ref, txn)
+        if not a.exists or not o.exists:
+            raise IntegrationTokenCASConflict("Jobber cancellation lifecycle missing")
+        try:
+            pair = validate_disconnect_lifecycle_pair(a.to_dict(), o.to_dict(),
+                expected_contractor_id=result.contractor_id, expected_provider="jobber",
+                expected_generation=result.generation, expected_lifecycle_epoch=result.lifecycle_epoch,
+                expected_audit_id=result.audit_id, expected_outbox_id=result.outbox_id)
+        except Exception:
+            raise IntegrationTokenCASConflict("Jobber cancellation lifecycle invalid") from None
+        return pair
+
+    def body(txn, box):
+        snap = _denied_revocation_tombstone(db, txn, result)
+        a, o = read_pair(txn)
+        if (o["status"] != REVOCATION_STATUS_REQUEST_STARTED or o["claim_id"] != result.claim_id
+                or not _mutations()._exact_scalar_or_composite_equal(o["created_at"], result.created_at)
+                or not _mutations()._exact_scalar_or_composite_equal(o["updated_at"], result.updated_at)
+                or o["created_at"] != result.expected_disconnected_at
+                or o["credential_deletion_disposition"] != result.credential_deletion):
+            raise IntegrationTokenCASConflict("Jobber cancellation owner changed")
+        now = max(extract_snapshot_time(snap), o["updated_at"])
+        expected_o = {**o, "status": REVOCATION_STATUS_NOT_ATTEMPTED_UNAVAILABLE,
+                      "claim_id": None, "updated_at": now,
+                      "audit_finalized": True, "audit_finalized_at": now}
+        expected_a = {**a, "revocation_status": REVOCATION_STATUS_NOT_ATTEMPTED_UNAVAILABLE,
+                      "revocation_completed_at": now}
+        validate_disconnect_lifecycle_pair(expected_a, expected_o)
+        box.update(audit=expected_a, outbox=expected_o)
+        txn.set(audit_ref, expected_a)
+        txn.set(outbox_ref, expected_o)
+        return expected_a, expected_o
+
+    def verify(txn, box):
+        _denied_revocation_tombstone(db, txn, result)
+        a, o = read_pair(txn)
+        if (not _mutations()._exact_scalar_or_composite_equal(a, box["audit"])
+                or not _mutations()._exact_scalar_or_composite_equal(o, box["outbox"])):
+            raise IntegrationTokenCASConflict("Jobber cancellation persistence unconfirmed")
+        return a, o
+    return await _run(db, body, verify)
+
+
 class _TransactionReadDB:
     """Read-only adapter for existing exact audit validators inside one snapshot."""
     def __init__(self, db, txn):
@@ -1153,14 +1253,21 @@ async def run_audit_mutation(*, db, contractor_id, callback, outbox_id, expected
     return await _run(db, body, verify)
 
 
-async def read_disconnect_lifecycle(*, db, result):
+async def read_disconnect_lifecycle(*, db, result, cancelled_dispatch=None):
     from app.db.integration_lifecycle_audit import AUDIT_COLLECTION, REVOCATION_OUTBOX_COLLECTION
     def body(txn, box):
-        c = _read(db.collection("contractors").document(result.contractor_id), txn)
+        c = (_denied_revocation_tombstone(db, txn, result) if cancelled_dispatch is not None else
+             _read(db.collection("contractors").document(result.contractor_id), txn))
         if not c.exists:
             raise IntegrationTokenContractorNotFound("Contractor missing")
         _authority(db, txn, c.to_dict())
         a = _read(db.collection(AUDIT_COLLECTION).document(result.audit_id), txn)
         o = _read(db.collection(REVOCATION_OUTBOX_COLLECTION).document(result.outbox_id), txn)
+        if cancelled_dispatch is not None:
+            expected_a, expected_o = cancelled_dispatch
+            if (not a.exists or not o.exists
+                    or not _mutations()._exact_scalar_or_composite_equal(a.to_dict(), expected_a)
+                    or not _mutations()._exact_scalar_or_composite_equal(o.to_dict(), expected_o)):
+                raise IntegrationTokenCASConflict("Jobber cancellation lifecycle changed after verification")
         return c, a, o
     return await _run(db, body)

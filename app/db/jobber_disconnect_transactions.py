@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import math
+from collections import deque
+from dataclasses import dataclass
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from threading import Event, Lock
@@ -49,6 +51,12 @@ class JobberDeadlineError(TimeoutError):
 
 class Deadline:
     def __init__(self, seconds: float = 6.0):
+        try:
+            valid = type(seconds) in (int, float) and math.isfinite(seconds) and seconds > 0
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise JobberDeadlineError("Jobber datastore deadline must be finite and positive")
         self.ends = time.monotonic() + seconds
         self.cancelled = Event()
 
@@ -168,41 +176,121 @@ def stream_query(query: Any, deadline: Deadline) -> list:
     return rows
 
 
-# Shared finite capacity; a cancelled await never makes a running thread disappear.
+# Waiting tickets never enter the executor's unbounded work-item queue. All
+# state uses a thread lock, so callers on independent event loops share one FIFO.
 _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jobber-store")
 _OUTSTANDING: set[Future] = set()
 _OUTSTANDING_LOCK = Lock()
+_MAX_WAITING = 128
+_POLL_SECONDS = 0.02
+_DRAINERS = 0
+
+
+@dataclass(eq=False)
+class _WaitingTicket:
+    deadline: Deadline
+    owner: asyncio.Task | None = None
+    rejected: bool = False
+
+
+_WAITING: deque[_WaitingTicket] = deque()
+
+
+def _prune_waiting() -> None:
+    # Called under the lock; do not depend on a ticket's event loop resuming.
+    now = time.monotonic()
+    live = []
+    for ticket in _WAITING:
+        if (ticket.rejected or ticket.deadline.cancelled.is_set() or ticket.deadline.ends <= now
+                or (ticket.owner is not None and (ticket.owner.cancelled() or ticket.owner.cancelling()))):
+            ticket.rejected = True
+        else:
+            live.append(ticket)
+    _WAITING.clear()
+    _WAITING.extend(live)
 
 
 def _finished(future: Future) -> None:
     with _OUTSTANDING_LOCK:
         _OUTSTANDING.discard(future)
+        _prune_waiting()
+
+
+def _observe_future(future):
+    # Consume late errors without cancelling the underlying concurrent Future.
+    if not future.cancelled():
+        future.exception()
+
+
+def _invoke(callback, deadline, owner):
+    # Cancellation/expiry can occur after submit but before this worker starts,
+    # even before the owning event loop resumes its exception handler.
+    if owner is not None and (owner.cancelled() or owner.cancelling()):
+        deadline.cancelled.set()
+    deadline.timeout()
+    return callback(deadline)
 
 
 async def run_bounded_async(callback: Callable[[Deadline], T], *, seconds: float) -> T:
     deadline = Deadline(seconds)
-    with _OUTSTANDING_LOCK:
-        if len(_OUTSTANDING) >= 2:
-            raise JobberDeadlineError("Jobber datastore capacity exhausted")
-        future = _EXECUTOR.submit(callback, deadline)
-        _OUTSTANDING.add(future)
-    future.add_done_callback(_finished)
-    wrapped = asyncio.wrap_future(future)
-    # Retrieve exceptions even if its caller is cancelled.
-    wrapped.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+    ticket = _WaitingTicket(deadline, asyncio.current_task())
+    future = None
     try:
-        return await asyncio.wait_for(asyncio.shield(wrapped), timeout=seconds + 0.5)
+        with _OUTSTANDING_LOCK:
+            _prune_waiting()
+            if _DRAINERS or len(_WAITING) >= _MAX_WAITING:
+                raise JobberDeadlineError("Jobber datastore capacity unavailable")
+            _WAITING.append(ticket)
+        while future is None:
+            deadline.timeout()
+            with _OUTSTANDING_LOCK:
+                _prune_waiting()
+                if _DRAINERS or ticket.rejected:
+                    raise JobberDeadlineError("Jobber datastore admission unavailable")
+                if _WAITING[0] is ticket and len(_OUTSTANDING) < 2:
+                    deadline.timeout()
+                    _WAITING.popleft()
+                    future = _EXECUTOR.submit(_invoke, callback, deadline, ticket.owner)
+                    _OUTSTANDING.add(future)
+            if future is None:
+                await asyncio.sleep(min(_POLL_SECONDS, deadline.timeout()))
+        # An already-completed Future invokes its callback synchronously. Never
+        # register it while holding the lock acquired by _finished.
+        future.add_done_callback(_finished)
+        wrapped = asyncio.wrap_future(future)
+        wrapped.add_done_callback(_observe_future)
+        deadline.timeout()
+        return await asyncio.wait_for(asyncio.shield(wrapped),
+                                      timeout=max(0.0, deadline.ends - time.monotonic()))
     except BaseException:
         deadline.cancelled.set()
         raise
+    finally:
+        with _OUTSTANDING_LOCK:
+            if ticket in _WAITING:
+                _WAITING.remove(ticket)
 
 
 async def drain_jobber_operations() -> None:
+    global _DRAINERS
     with _OUTSTANDING_LOCK:
+        _DRAINERS += 1
+        for ticket in _WAITING:
+            ticket.rejected = True
+        _WAITING.clear()
         pending = list(_OUTSTANDING)
-    if pending:
-        await asyncio.wait_for(
-            asyncio.gather(*(asyncio.shield(asyncio.wrap_future(f)) for f in pending),
-                           return_exceptions=True),
-            timeout=22.0,
-        )
+    try:
+        if pending:
+            wrapped = [asyncio.wrap_future(future) for future in pending]
+            for future in wrapped:
+                future.add_done_callback(_observe_future)
+            await asyncio.wait_for(
+                asyncio.gather(*(asyncio.shield(future) for future in wrapped),
+                               return_exceptions=True),
+                timeout=22.0,
+            )
+    finally:
+        # Each drain owns one registration, even when cancelled or timed out.
+        # Actual running futures remain tracked until their completion callback.
+        with _OUTSTANDING_LOCK:
+            _DRAINERS -= 1

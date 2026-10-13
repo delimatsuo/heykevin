@@ -363,6 +363,7 @@ async def test_capture_jobber_lead_success_existing_customer(monkeypatch):
     }]
     assert notes[0][0] == "request-1"
     assert "Source: Hey Kevin" in notes[0][1]
+    assert "Call SID: CA123" in notes[0][1]
     assert "Caller: Maya Patel" in notes[0][1]
     assert "Phone: ***4567" in notes[0][1]
     assert "Callback: ***4321" in notes[0][1]
@@ -392,6 +393,14 @@ def test_jobber_note_masks_phone_like_transcript_text():
     assert "65042 8556" not in note
     assert "6-5-0, 4-2-2, 8-5-5-6" not in note
     assert "***8556" in note
+
+
+def test_jobber_note_keeps_call_sid_when_transcript_is_truncated():
+    note = post_call._format_jobber_lead_note(_lead_job_data(transcript="x" * 6000))
+
+    assert "Call SID: CA123" in note
+    assert len(note) <= post_call.JOBBER_NOTE_LIMIT
+    assert note.endswith("...")
 
 
 @pytest.mark.asyncio

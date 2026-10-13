@@ -404,7 +404,7 @@ def _install_in_memory_contractor_store(monkeypatch, state: dict):
             return dict(state)
 
     class _Ref:
-        def get(self, transaction=None, timeout=None):
+        def get(self, transaction=None, retry=None, timeout=None):
             return _Snapshot()
 
         def update(self, updates):
@@ -417,13 +417,13 @@ def _install_in_memory_contractor_store(monkeypatch, state: dict):
             return ref
 
     class _FirestoreApi:
-        def begin_transaction(self, *, request, metadata, timeout):
+        def begin_transaction(self, *, request, metadata, retry, timeout):
             return SimpleNamespace(transaction=b"in-memory-release")
 
-        def commit(self, *, request, metadata, timeout):
+        def commit(self, *, request, metadata, retry, timeout):
             return SimpleNamespace(write_results=(), commit_time=None)
 
-        def rollback(self, *, request, metadata, timeout):
+        def rollback(self, *, request, metadata, retry, timeout):
             return SimpleNamespace()
 
     class _FirestoreClient:
@@ -487,18 +487,18 @@ class _BoundedInboundFirestoreApi:
         self.rollback_calls = []
         self.commit_error = commit_error
 
-    def begin_transaction(self, *, request, metadata, timeout):
-        self.begin_calls.append((request, metadata, timeout))
+    def begin_transaction(self, *, request, metadata, retry, timeout):
+        self.begin_calls.append((request, metadata, retry, timeout))
         return SimpleNamespace(transaction=b"bounded-inbound-safety")
 
-    def commit(self, *, request, metadata, timeout):
-        self.commit_calls.append((request, metadata, timeout))
+    def commit(self, *, request, metadata, retry, timeout):
+        self.commit_calls.append((request, metadata, retry, timeout))
         if self.commit_error is not None:
             raise self.commit_error
         return SimpleNamespace(write_results=(), commit_time=Timestamp())
 
-    def rollback(self, *, request, metadata, timeout):
-        self.rollback_calls.append((request, metadata, timeout))
+    def rollback(self, *, request, metadata, retry, timeout):
+        self.rollback_calls.append((request, metadata, retry, timeout))
         return SimpleNamespace()
 
 
@@ -514,8 +514,8 @@ def _real_inbound_safety_client(api):
 
 
 def _patch_inbound_safety_document_reads(monkeypatch, calls):
-    def get(_self, transaction=None, timeout=None):
-        calls.append((transaction, timeout))
+    def get(_self, transaction=None, retry=None, timeout=None):
+        calls.append((transaction, retry, timeout))
         if transaction is not None:
             assert transaction.in_progress
         return _InboundSafetySnapshot({
@@ -544,9 +544,10 @@ async def test_inbound_evidence_starts_real_transaction_with_bounded_wire_rpcs(m
     assert len(api.commit_calls) == 1
     assert api.commit_calls[0][0]["transaction"] == b"bounded-inbound-safety"
     assert api.rollback_calls == []
-    for _request, _metadata, timeout in [*api.begin_calls, *api.commit_calls]:
+    for _request, _metadata, retry, timeout in [*api.begin_calls, *api.commit_calls]:
+        assert retry is None
         assert 0 < timeout <= 0.1
-    assert all(0 < timeout <= 0.1 for _transaction, timeout in document_reads)
+    assert all(retry is None and 0 < timeout <= 0.1 for _transaction, retry, timeout in document_reads)
 
 
 @pytest.mark.asyncio
@@ -563,7 +564,8 @@ async def test_inbound_evidence_does_not_retry_an_uncertain_commit(monkeypatch):
     assert len(api.commit_calls) == 1
     assert len(api.rollback_calls) == 1
     assert api.rollback_calls[0][0]["transaction"] == b"bounded-inbound-safety"
-    for _request, _metadata, timeout in [*api.begin_calls, *api.commit_calls, *api.rollback_calls]:
+    for _request, _metadata, retry, timeout in [*api.begin_calls, *api.commit_calls, *api.rollback_calls]:
+        assert retry is None
         assert 0 < timeout <= 0.1
 
 

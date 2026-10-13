@@ -843,8 +843,10 @@ async def record_inbound_call_evidence(
             read API, but its public transaction decorator begins and commits
             with service-default timeouts. The webhook must bound all three
             RPCs, so use the pinned client's transaction wire shape directly.
-            This is deliberately single-attempt: an uncertain state-changing
-            outcome goes to direct ring-through, never AI screening.
+            ``timeout`` alone does not disable GAPIC's default retry wrapper,
+            so every wire call below also passes ``retry=None``. This is
+            deliberately single-attempt: an uncertain state-changing outcome
+            goes to direct ring-through, never AI screening.
             """
             if transaction.in_progress:
                 raise ValueError("Inbound call safety transaction already in progress")
@@ -855,6 +857,7 @@ async def record_inbound_call_evidence(
                     "options": transaction._options_protobuf(None),
                 },
                 metadata=client._rpc_metadata,
+                retry=None,
                 timeout=_remaining_timeout(),
             )
             transaction._id = response.transaction
@@ -870,6 +873,7 @@ async def record_inbound_call_evidence(
                     "transaction": transaction._id,
                 },
                 metadata=client._rpc_metadata,
+                retry=None,
                 timeout=_remaining_timeout(),
             )
             transaction._clean_up()
@@ -891,6 +895,7 @@ async def record_inbound_call_evidence(
                         "transaction": transaction._id,
                     },
                     metadata=client._rpc_metadata,
+                    retry=None,
                     timeout=rollback_timeout,
                 )
             finally:
@@ -900,7 +905,7 @@ async def record_inbound_call_evidence(
         # path. A recent committed stamp already makes any quiet-number claim
         # fail its guard; if release state is present, proceed to the
         # transaction so this specific call can cancel or hold it.
-        preflight = doc_ref.get(timeout=_remaining_timeout())
+        preflight = doc_ref.get(retry=None, timeout=_remaining_timeout())
         if not preflight.exists:
             return False
         preflight_data = preflight.to_dict() or {}
@@ -922,6 +927,7 @@ async def record_inbound_call_evidence(
             _begin(transaction)
             snapshot = doc_ref.get(
                 transaction=transaction,
+                retry=None,
                 timeout=_remaining_timeout(),
             )
             if not snapshot.exists:

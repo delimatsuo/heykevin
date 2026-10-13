@@ -2,15 +2,8 @@ import Foundation
 import XCTest
 @testable import Kevin
 
-/// Forwarding-code contract for the iOS client.
-///
-/// Carrier dial codes are keyed by the country of the phone being forwarded
-/// (the user's own SIM), not by the Kevin number. NANP (US/CA) keeps the
-/// existing Verizon/GSM behaviour unchanged; every other country takes its
-/// codes from GET /api/forwarding-instructions. A response that is not the
-/// new shape — in particular one without `disable_unanswered` — is rejected
-/// outright: the older backend's generic `disable` is `##21#`, which erases
-/// unconditional forwarding and leaves a no-reply forward in place.
+/// US retains its local carrier choices. Canada is always nonactionable until
+/// a carrier, specific plan and restoration baseline are independently qualified.
 final class ForwardingInstructionsTests: XCTestCase {
     private func httpResponse(status: Int) throws -> HTTPURLResponse {
         try XCTUnwrap(HTTPURLResponse(
@@ -220,16 +213,44 @@ final class ForwardingInstructionsTests: XCTestCase {
         XCTAssertEqual(tenDigitCodes?.activate, "*61*4155551234#")
     }
 
-    func testCanadaIsTreatedAsNANP() {
-        let codes = ForwardingDialCodes.codes(
-            countryCode: "CA",
-            instructions: gsmInstructions(for: "CA"),
-            number: "14165551234",
-            isVerizon: false
-        )
-        XCTAssertNotNil(codes)
-        XCTAssertEqual(codes?.activate, "*61*14165551234#")
-        XCTAssertFalse(codes?.isServerDriven ?? true)
+    func testCanadaNeverGeneratesActivationOrRestorationCodes() {
+        for carrier in [false, true] {
+            for instructions in [nil, gsmInstructions(for: "CA"), gsmInstructions(for: "US")] {
+                let codes = ForwardingDialCodes.codes(countryCode: "CA", instructions: instructions,
+                                                       number: "+14165551234", isVerizon: carrier)
+                XCTAssertNil(codes)
+                XCTAssertNil(ForwardingDialCodes.telURL(codes?.activate))
+                XCTAssertNil(ForwardingDialCodes.telURL(codes?.deactivate))
+                XCTAssertNil(ForwardingDialCodes.telURL(codes?.clearAll))
+            }
+        }
+    }
+
+    func testCanadaUnknownOrFullyRecordedBaselineCannotQualifyCarrier() {
+        let unknown = CanadaForwardingBaseline()
+        XCTAssertFalse(unknown.isComplete)
+        XCTAssertFalse(unknown.permitsActivationOrRestoration)
+        let off = CanadaForwardingBaseline.Route(enabled: false, destination: nil)
+        let full = CanadaForwardingBaseline(carrier: "Synthetic carrier", specificPlan: "Synthetic plan",
+            planEligibilityConfirmed: true, unconditional: off,
+            noAnswer: .init(enabled: true, destination: "+14165550000"), busy: off, unreachable: off,
+            noAnswerTimerSeconds: 20, voicemail: true, callWaiting: true, liveVoicemail: false)
+        XCTAssertTrue(full.isComplete)
+        XCTAssertFalse(full.permitsActivationOrRestoration)
+        let incomplete = CanadaForwardingBaseline.Route(enabled: true, destination: nil)
+        XCTAssertFalse(incomplete.isRecorded)
+    }
+
+    func testCanadianAndMismatchedServerTemplatesAreRejected() throws {
+        var canadian = brazil
+        canadian["country_code"] = "CA"
+        XCTAssertNil(ForwardingInstructionsParser.parse(response: try httpResponse(status: 200),
+            data: try json(canadian), expectedCountry: "CA"))
+        XCTAssertNil(ForwardingInstructionsParser.parse(response: try httpResponse(status: 200),
+            data: try json(brazil), expectedCountry: "CA"))
+        canadian["country_code"] = "C1"
+        XCTAssertNil(ForwardingInstructionsParser.parse(response: try httpResponse(status: 200),
+            data: try json(canadian)))
     }
 
     func testNANPCountriesRejectForeignAndMalformedDestinations() {

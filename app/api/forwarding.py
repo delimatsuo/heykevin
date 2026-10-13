@@ -22,14 +22,8 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api", dependencies=[Depends(verify_api_token)])
 
-# Standard GSM/carrier forwarding codes per country.
-#
-# NANP (US/CA) rows reflect CDMA/Verizon-style forwarding (*71/*72/*73)
-# and deliberately carry only the legacy ``disable``. Granular and standard GSM
-# forwarding codes (e.g. GSM MMI ``*61*``/``##61#`` on T-Mobile/AT&T) differ across
-# carriers, so the server table does not assert a single universal code for NANP.
-# Per owner decision ("keep client, fix notes"), the iOS client continues to handle
-# the Verizon vs GSM carrier split locally (ForwardingCountry.isNANP).
+# US legacy forwarding remains local-carrier dependent. Canada requires
+# carrier/plan qualification and a captured baseline; no CA profiles are qualified.
 FORWARDING_CODES = {
     "US": {
         "forward_all": "*72{number}",
@@ -39,16 +33,6 @@ FORWARDING_CODES = {
             "CDMA/Verizon-style forwarding (*71/*72/*73). US carriers differ "
             "(T-Mobile and AT&T use GSM MMI codes); the iOS client handles "
             "the Verizon vs GSM carrier split locally."
-        ),
-        "recommended": "forward_unanswered",
-    },
-    "CA": {
-        "forward_all": "*72{number}",
-        "forward_unanswered": "*71{number}",
-        "disable": "*73",
-        "notes": (
-            "CDMA-style forwarding (*71/*72/*73). Canadian carriers differ; "
-            "the iOS client handles carrier forwarding locally."
         ),
         "recommended": "forward_unanswered",
     },
@@ -139,6 +123,21 @@ async def record_dial_in_pin_failure(
 async def get_forwarding_instructions(country_code: str = Query("US", max_length=2)):
     """Return call forwarding instructions for a country."""
     normalized_code = (country_code or "US").strip().upper()
+    if normalized_code == "CA":
+        return {
+            "supported": False,
+            "status": "carrier_setup_required",
+            "country_code": "CA",
+            "message": (
+                "Carrier-specific setup is required in Canada. Ask your existing carrier "
+                "to confirm your specific plan supports conditional forwarding. Before "
+                "changing anything, record existing unconditional, no-answer, busy and "
+                "unreachable forwarding settings and destinations, the no-answer timer, "
+                "voicemail, call waiting and Live Voicemail. Ask the carrier how to "
+                "restore that exact baseline. A +1 number does not qualify a carrier or plan."
+            ),
+            "fallback_message": "Contact your existing carrier for setup and restoration.",
+        }
     instructions = FORWARDING_CODES.get(normalized_code)
     if not instructions:
         status = get_country_status(normalized_code)

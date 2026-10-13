@@ -1,13 +1,7 @@
 import Foundation
 
-/// Per-country carrier dial codes as served by `GET /api/forwarding-instructions`.
-///
-/// Only the backend's *new* response shape is accepted — the one that carries
-/// `disable_unanswered`. The older shape's generic `disable` is `##21#`, which
-/// erases unconditional forwarding (GSM service code 21) and leaves a no-reply
-/// forward (service code 61) in place, so a client that trusted it could not
-/// turn Kevin off. Anything else is treated as "no instructions" and the app
-/// falls back to the codes it has always dialed.
+/// Validated server shape for future carrier instructions. Canadian templates
+/// are always rejected; code generation currently retains only US local profiles.
 struct ForwardingInstructions: Equatable {
     let countryCode: String
     /// Contains the literal `{number}` placeholder.
@@ -18,7 +12,7 @@ struct ForwardingInstructions: Equatable {
 }
 
 enum ForwardingInstructionsParser {
-    static func parse(response: URLResponse?, data: Data?) -> ForwardingInstructions? {
+    static func parse(response: URLResponse?, data: Data?, expectedCountry: String? = nil) -> ForwardingInstructions? {
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else {
             return nil
@@ -32,6 +26,13 @@ enum ForwardingInstructionsParser {
               let disableUnanswered = nonEmpty(json["disable_unanswered"]),
               let disableAll = nonEmpty(json["disable_all"]),
               let disableEverything = nonEmpty(json["disable_everything"]) else {
+            return nil
+        }
+        let normalizedCountry = country.uppercased()
+        guard normalizedCountry != "CA",
+              normalizedCountry.count == 2,
+              normalizedCountry.allSatisfy({ $0.isASCII && $0.isLetter }),
+              expectedCountry.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == normalizedCountry }) ?? true else {
             return nil
         }
         return ForwardingInstructions(
@@ -58,14 +59,12 @@ struct ForwardingCodes: Equatable {
     /// Erases every forwarding type at once; nil where no such code exists.
     let clearAll: String?
     /// True when the codes came from the server for the resolved country.
-    /// Informational: screens gate the US carrier picker on
-    /// `ForwardingCountry.isNANP`, not on this flag.
+    /// Informational; the carrier picker is available only for US accounts.
     let isServerDriven: Bool
 }
 
 enum ForwardingCountry {
-    /// Countries where the app keeps its existing Verizon/GSM behaviour and
-    /// never consults the server.
+    /// Geographic membership only; this does not qualify a carrier or plan.
     static let nanp: Set<String> = ["US", "CA"]
 
     static func isNANP(_ countryCode: String) -> Bool {
@@ -164,8 +163,9 @@ enum ForwardingDialCodes {
     ) -> ForwardingCodes? {
         let country = countryCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
 
-        // Explicitly unavailable for ALL non-US/CA until a later carrier contract exists
-        guard ForwardingCountry.isNANP(country) else {
+        // Only US has legacy local profiles. Canadian +1 numbers and server
+        // templates never qualify Canadian forwarding or baseline restoration.
+        guard country == "US" else {
             return nil
         }
 
@@ -175,7 +175,7 @@ enum ForwardingDialCodes {
 
         let destinationDigits = number.filter { $0.isASCII && $0.isNumber }
 
-        // Built-in codes for NANP (US/CA)
+        // Existing US carrier behavior.
         if isVerizon {
             // Verizon: *71<number> forwards on no-answer; *73 cancels it.
             return ForwardingCodes(
@@ -203,4 +203,42 @@ enum ForwardingDialCodes {
         guard let code, !code.isEmpty else { return nil }
         return URL(string: "tel:\(code.replacingOccurrences(of: "#", with: "%23"))")
     }
+}
+
+
+/// A recorded baseline is necessary for future Canadian carrier qualification,
+/// but cannot itself authorize a dial code. No Canadian carrier profile is qualified.
+struct CanadaForwardingBaseline: Equatable {
+    struct Route: Equatable {
+        let enabled: Bool
+        let destination: String?
+        var isRecorded: Bool { !enabled || destination?.isEmpty == false }
+    }
+    var carrier: String? = nil
+    var specificPlan: String? = nil
+    var planEligibilityConfirmed = false
+    var unconditional: Route? = nil
+    var noAnswer: Route? = nil
+    var busy: Route? = nil
+    var unreachable: Route? = nil
+    var noAnswerTimerSeconds: Int? = nil
+    var voicemail: Bool? = nil
+    var callWaiting: Bool? = nil
+    var liveVoicemail: Bool? = nil
+
+    var isComplete: Bool {
+        carrier?.isEmpty == false && specificPlan?.isEmpty == false && planEligibilityConfirmed
+            && [unconditional, noAnswer, busy, unreachable].allSatisfy { $0?.isRecorded == true }
+            && noAnswerTimerSeconds.map { $0 > 0 } == true
+            && voicemail != nil && callWaiting != nil && liveVoicemail != nil
+    }
+    // Capturing a baseline or tapping a button is not carrier/device evidence.
+    var permitsActivationOrRestoration: Bool { false }
+}
+
+enum CanadaForwardingGuidance {
+    static let title = String(localized: "Carrier-specific setup required")
+    static let setup = String(localized: "Ask your existing carrier to confirm that your specific plan supports conditional forwarding to your Kevin number. A Canadian +1 number alone does not confirm eligibility.")
+    static let baseline = String(localized: "Before changing anything, record the current state and destination for unconditional, no-answer, busy and unreachable forwarding, the no-answer timer, voicemail, call waiting and Live Voicemail. Ask your carrier how to restore those exact settings. Kevin cannot verify forwarding from a setup request.")
+    static let restoration = String(localized: "To stop forwarding or restore voicemail, contact your existing carrier with your recorded settings. Kevin has no qualified Canadian activation or restoration codes yet.")
 }

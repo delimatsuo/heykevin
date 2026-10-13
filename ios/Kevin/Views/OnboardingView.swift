@@ -871,10 +871,10 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
 
             // Carrier choice comes FIRST: the dial buttons below derive their
-            // codes from it. Outside North America the picker has no meaning.
+            // codes from it. The existing carrier picker is available only in the US.
             Group {
-                if !ForwardingCountry.isNANP(forwardingCountry) {
-                    Text(String(localized: "Using the call forwarding codes for \(forwardingCountryName)"))
+                if forwardingCountry != "US" {
+                    Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Carrier setup in preparation"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -953,12 +953,17 @@ struct OnboardingView: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
+                    Label(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.blue)
-                    Text(String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
+                    Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.setup : String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if forwardingCountry == "CA" {
+                        Text(CanadaForwardingGuidance.baseline)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
@@ -971,18 +976,20 @@ struct OnboardingView: View {
             // guidance is to turn it off when carrier forwarding misbehaves.
             // There is no URL scheme that deep-links here — Settings can only be
             // opened to our own app's pane — so these are plain instructions.
-            VStack(alignment: .leading, spacing: 6) {
-                Label(String(localized: "Turn off Live Voicemail first"), systemImage: "exclamationmark.triangle.fill")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.orange)
-                Text(String(localized: "If Live Voicemail is on, your iPhone answers before Kevin can. Open Settings, find Phone, then Live Voicemail, and switch it off."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if forwardingCountry != "CA" {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(String(localized: "Turn off Live Voicemail first"), systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.orange)
+                    Text(String(localized: "If Live Voicemail is on, your iPhone answers before Kevin can. Open Settings, find Phone, then Live Voicemail, and switch it off."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(Color.orange.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(Color.orange.opacity(0.10))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
 
             Text(String(localized: "Your Kevin number: \(kevinNumber)"))
                 .font(.subheadline.monospacedDigit())
@@ -994,7 +1001,7 @@ struct OnboardingView: View {
                 recordForwardingOutcome(didSetUp: true)
                 completeOnboarding()
             } label: {
-                Text(String(localized: "I'm All Set"))
+                Text(forwardingCountry == "CA" ? String(localized: "Continue — set up with my carrier later") : String(localized: "I'm All Set"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)

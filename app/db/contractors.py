@@ -167,6 +167,7 @@ PROTECTED_FIELDS = frozenset({
     "apple_user_id",
     # Owner SMS carrier/provider opt-out fields — server-owned, mutated strictly
     # through signed consent webhooks and status callbacks.
+    "owner_sms_consent",
     "owner_sms_opted_out",
     "owner_sms_opt_out_revision",
     "owner_sms_opt_out_source",
@@ -554,7 +555,9 @@ async def create_contractor(data: dict) -> str:
     data.setdefault("number_provider", None)
     data.setdefault("number_type", None)
     data.setdefault("number_capabilities", None)
-    data.setdefault("owner_sms_enabled", True)
+    # Express consent can only be collected by the dedicated transaction.
+    data.pop("owner_sms_consent", None)
+    data.setdefault("owner_sms_enabled", effective_country != "CA")
     data.setdefault("owner_sms_opted_out", False)
     data.setdefault("owner_sms_opt_out_revision", 0)
     data.setdefault("owner_sms_opt_out_source", None)
@@ -715,6 +718,9 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
             await ensure_sms_sender_membership(contractor_id, existing_number)
         except Exception:
             logger.warning("SMS sender enrollment check failed on existing number return")
+        if contractor.get("country_code") == "CA":
+            from app.services.canada_sms_enrollment import ensure_canada_sms_sender_membership
+            await ensure_canada_sms_sender_membership(contractor_id, existing_number)
         return existing_number
 
     from app.services.country_policy import (
@@ -850,6 +856,10 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
         await ensure_sms_sender_membership(contractor_id, purchased.phone_number)
     except Exception:
         logger.warning("SMS sender enrollment failed on new number provisioning")
+
+    if effective_country == "CA":
+        from app.services.canada_sms_enrollment import ensure_canada_sms_sender_membership
+        await ensure_canada_sms_sender_membership(contractor_id, purchased.phone_number)
 
     logger.info(f"Provisioned {redact_phone(purchased.phone_number)} ({effective_country}) for contractor {contractor_id}")
     return purchased.phone_number

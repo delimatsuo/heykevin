@@ -238,3 +238,119 @@ async def apply_owner_sms_consent_transition(
         return _apply(transaction)
 
     return await loop.run_in_executor(None, _txn)
+
+
+async def collect_canada_owner_sms_consent(
+    contractor_id: str, *, disclosure_version: str, owner_phone_e164: str,
+    twilio_number: str, expected_revision: int,
+) -> tuple[bool, dict]:
+    """Bind express consent to fresh server identities without clearing STOP or revision."""
+    from datetime import datetime, timezone
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from app.services.canada_sms_consent import (
+        DISCLOSURE_VERSION, canadian_assignment_valid, valid_canada_consent,
+    )
+
+    if (not isinstance(contractor_id, str) or not contractor_id.strip()
+            or disclosure_version != DISCLOSURE_VERSION
+            or type(expected_revision) is not int or expected_revision < 0):
+        return False, {"error": "invalid_consent_request"}
+    db = get_firestore_client()
+    ref = db.collection("contractors").document(contractor_id)
+
+    def run():
+        @firestore.transactional
+        def apply(tx):
+            snap = ref.get(transaction=tx)
+            if not snap.exists:
+                return False, {"error": "contractor_not_found"}
+            data = snap.to_dict() or {}
+            owner, sender = resolve_contractor_owner_sms_identities(data)
+            if (owner_phone_e164 != owner or twilio_number != sender
+                    or expected_revision != data.get("owner_sms_opt_out_revision")):
+                return False, {"error": "stale_consent_snapshot"}
+            if not canadian_assignment_valid(data, require_enabled=False):
+                return False, {"error": "consent_not_eligible"}
+            # Duplicate assignment protection is in the same serializable transaction.
+            query = db.collection("contractors").where(
+                filter=FieldFilter("twilio_number", "==", sender)
+            ).limit(2)
+            assignments = list(query.stream(transaction=tx))
+            if len(assignments) != 1 or assignments[0].id != contractor_id:
+                return False, {"error": "assignment_ambiguous"}
+            data["contractor_id"] = contractor_id
+            if valid_canada_consent(data):
+                # A retry preserves the original express-consent facts and collection time.
+                consent = dict(data["owner_sms_consent"])
+            else:
+                consent = {
+                    "contractor_id": contractor_id,
+                    "disclosure_version": DISCLOSURE_VERSION,
+                    "owner_phone_e164": owner, "twilio_number": sender,
+                    "source": "ios_settings", "collected_at": datetime.now(timezone.utc),
+                    "opt_out_revision": expected_revision,
+                }
+            consent["delivery_state"] = "pending"
+            tx.update(ref, {"owner_sms_enabled": True, "owner_sms_consent": consent})
+            return True, {"status": "pending", "accepted_consent": dict(consent)}
+        return apply(db.transaction())
+
+    return await asyncio.get_running_loop().run_in_executor(None, run)
+
+
+async def verify_canada_owner_sms_delivery(
+    contractor_id: str, *, accepted_consent: dict, account_sid: str, messaging_service_sid: str,
+) -> tuple[bool, dict]:
+    """Promote only the exact accepted consent after independent enrollment readback.
+
+    This function receives pinned enrollment configuration, and never contacts Twilio.
+    A newer consent, STOP epoch, recipient, sender or configuration invalidates promotion.
+    """
+    from datetime import datetime, timezone
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from app.config import PRODUCTION_GCP_PROJECT_ID, settings
+    from app.services.canada_sms_consent import (
+        canada_configuration_valid, canadian_assignment_valid, valid_canada_consent,
+    )
+
+    def config_matches():
+        return (canada_configuration_valid() and settings.twilio_account_sid == account_sid
+                and settings.canada_messaging_service_sid == messaging_service_sid)
+
+    if not config_matches() or not isinstance(accepted_consent, dict):
+        return False, {"error": "consent_delivery_unavailable"}
+    db = get_firestore_client()
+    if db.project != PRODUCTION_GCP_PROJECT_ID:
+        return False, {"error": "consent_delivery_unavailable"}
+    ref = db.collection("contractors").document(contractor_id)
+
+    def run():
+        @firestore.transactional
+        def apply(tx):
+            if not config_matches():
+                return False, {"error": "consent_delivery_unavailable"}
+            snap = ref.get(transaction=tx)
+            if not snap.exists:
+                return False, {"error": "consent_state_changed"}
+            data = snap.to_dict() or {}
+            data["contractor_id"] = contractor_id
+            if (data.get("owner_sms_consent") != accepted_consent
+                    or accepted_consent.get("delivery_state") != "pending"
+                    or not canadian_assignment_valid(data) or not valid_canada_consent(data)):
+                return False, {"error": "consent_state_changed"}
+            query = db.collection("contractors").where(filter=FieldFilter(
+                "twilio_number", "==", accepted_consent["twilio_number"],
+            )).limit(2)
+            assignments = list(query.stream(transaction=tx))
+            if len(assignments) != 1 or assignments[0].id != contractor_id:
+                return False, {"error": "assignment_ambiguous"}
+            consent = dict(accepted_consent)
+            consent.update({"delivery_state": "verified", "account_sid": account_sid,
+                "messaging_service_sid": messaging_service_sid, "verified_at": datetime.now(timezone.utc)})
+            if not config_matches():
+                return False, {"error": "consent_delivery_unavailable"}
+            tx.update(ref, {"owner_sms_consent": consent})
+            return True, {"status": "verified"}
+        return apply(db.transaction())
+
+    return await asyncio.get_running_loop().run_in_executor(None, run)

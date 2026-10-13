@@ -364,6 +364,15 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         return URLSession(configuration: config)
     }()
 
+    private lazy var ownerSMSConsentSession: URLSession = {
+        // Enrollment alone can take 15 seconds; consent transactions need headroom.
+        // Keep the longer budget separate from short profile and call requests.
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 90
+        return URLSession(configuration: config)
+    }()
+
     private var session: URLSession {
         customSession ?? defaultSession
     }
@@ -1537,12 +1546,13 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 10
+        request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(snapshot.auth.bearerToken)", forHTTPHeaderField: "Authorization")
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: snapshot.requestBody)
-            let (data, response) = try await retryRequest(request, maxRetries: 0, signalReauth: false)
+            // Consent is a single attempt: an ambiguous response must not replay it.
+            let (data, response) = try await (customSession ?? ownerSMSConsentSession).data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return .failure(String(localized: "Invalid server response."))
             }

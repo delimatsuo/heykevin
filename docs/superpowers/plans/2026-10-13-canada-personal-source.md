@@ -61,14 +61,22 @@ outside this slice.
   macOS, including canonical phone identity and stale confirmation checks.
 - Six focused guard mutations were detected by the tests, covering backend
   consent/enrollment guards and the native Canadian dial-code guard.
+- A loopback HTTP probe of the actual consent method, session configuration
+  and response models confirmed a delayed response after 16.2 seconds. Restoring
+  the old request or resource timeout made the same probe fail. HTTP errors and
+  cancellation each produced one attempt and an unconfirmed result. Consent
+  now uses a dedicated 60-second request and 90-second resource budget; ordinary
+  API budgets remain unchanged. Datastore latency is not universally bounded,
+  so a client timeout still requires refresh rather than an assumption of rollback.
 - The final app and unit-test targets compiled for generic iOS Simulator with
   signing disabled through `xcodebuild-external`. The result bundle reports
-  `succeeded`, zero errors and one existing acquisition warning. No simulator
+  `succeeded`, zero errors and five existing warnings. No simulator
   was booted; this was compilation, not iOS test execution or device evidence.
 - Fresh independent review found and verified corrections for final-read
   cancellation, stale consent acknowledgment after STOP, and canonical owner
   phone hydration. Hosted review subsequently identified missing enrollment
-  recovery and overbroad Canadian consent gating. Consent now stays pending
+  recovery, overbroad Canadian consent gating and premature native transport
+  timeouts. Consent now stays pending
   until verified membership and conditional promotion, with an explicit retry
   path; legacy and non-Canadian profiles retain ordinary preference controls.
   Independent re-review of those corrections is clean. Fatal Ruff selectors

@@ -807,16 +807,16 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
 
     // MARK: - Markets
 
-    func getMarkets() async -> MarketsResponse? {
+    func getMarkets() async -> MarketsFetchResult {
         do {
             let url = URL(string: "\(baseURL)/api/markets")!
             var request = URLRequest(url: url)
             request.timeoutInterval = 10
             let (data, response) = try await session.data(for: request)
-            return MarketsParser.parse(data: data, response: response)
+            return MarketsParser.parseFetchResult(data: data, response: response)
         } catch {
             debugLog("Markets fetch failed: \(error.localizedDescription)")
-            return nil
+            return .failed
         }
     }
 

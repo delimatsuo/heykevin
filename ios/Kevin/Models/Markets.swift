@@ -45,6 +45,19 @@ struct MarketsResponse: Codable, Equatable, Sendable {
     }
 }
 
+/// The outcome of fetching the server-owned market catalog during onboarding.
+///
+/// Production releases before the market catalog was introduced have no
+/// `/api/markets` route. A route-level 404 is therefore an explicit legacy
+/// compatibility signal, not a successful market lookup. The caller may admit
+/// only the historical US flow in that case; every other failure remains
+/// fail-closed.
+enum MarketsFetchResult: Equatable, Sendable {
+    case catalog(MarketsResponse)
+    case legacyUSOnly
+    case failed
+}
+
 enum MarketsParser {
     static func parse(data: Data?, response: URLResponse?) -> MarketsResponse? {
         guard let http = response as? HTTPURLResponse,
@@ -70,6 +83,24 @@ enum MarketsParser {
             seenCodes.insert(code)
         }
         return decoded
+    }
+
+    static func parseFetchResult(data: Data?, response: URLResponse?) -> MarketsFetchResult {
+        guard let http = response as? HTTPURLResponse else {
+            return .failed
+        }
+
+        // Do not broaden this compatibility path to transport failures, 5xx,
+        // malformed 200 responses, or other status codes. A legacy backend
+        // returns 404 because it has no market-catalog route at all.
+        if http.statusCode == 404 {
+            return .legacyUSOnly
+        }
+
+        guard let markets = parse(data: data, response: response) else {
+            return .failed
+        }
+        return .catalog(markets)
     }
 }
 

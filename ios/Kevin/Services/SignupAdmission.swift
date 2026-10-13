@@ -42,37 +42,56 @@ struct SignupAdmissionSnapshot: Equatable, Sendable {
 }
 
 enum SignupAdmission {
+    private static let availabilityCheckFailed = String(localized: "Could not check availability. Try again.")
+
+    private static func unavailableMessage(for country: String) -> String {
+        if country == "BR" {
+            return String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
+        }
+        if country == "GB" {
+            return String(localized: "Kevin is not yet available in the United Kingdom. We are preparing the service.")
+        }
+        return String(localized: "Kevin is not yet available in this country. We are preparing the service.")
+    }
+
     static func evaluate(countryCode: String, markets: MarketsResponse?) -> SignupAdmissionStatus {
         guard let markets else {
-            return .checkFailed(message: String(localized: "Could not check availability. Try again."))
+            return .checkFailed(message: availabilityCheckFailed)
         }
         let country = countryCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard let status = markets.status(for: country) else {
-            return .checkFailed(message: String(localized: "Could not check availability. Try again."))
+            return .checkFailed(message: availabilityCheckFailed)
         }
 
         switch status {
         case .available:
             return .allowed
         case .qualificationRequired, .unsupported:
-            let message: String
-            if country == "BR" {
-                message = String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
-            } else if country == "GB" {
-                message = String(localized: "Kevin is not yet available in the United Kingdom. We are preparing the service.")
-            } else {
-                message = String(localized: "Kevin is not yet available in this country. We are preparing the service.")
-            }
-            return .unavailable(message: message)
+            return .unavailable(message: unavailableMessage(for: country))
+        }
+    }
+
+    static func evaluate(countryCode: String, result: MarketsFetchResult) -> SignupAdmissionStatus {
+        switch result {
+        case .catalog(let markets):
+            return evaluate(countryCode: countryCode, markets: markets)
+        case .legacyUSOnly:
+            let country = countryCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            // This preserves the only onboarding path supported by the backend
+            // before market admission existed. It is deliberately not a generic
+            // fallback for a failed availability check.
+            return country == "US" ? .allowed : .unavailable(message: unavailableMessage(for: country))
+        case .failed:
+            return .checkFailed(message: availabilityCheckFailed)
         }
     }
 
     static func checkAvailability(
         countryCode: String,
-        fetcher: () async -> MarketsResponse? = { await APIClient.shared.getMarkets() }
+        fetcher: () async -> MarketsFetchResult = { await APIClient.shared.getMarkets() }
     ) async -> SignupAdmissionStatus {
-        let markets = await fetcher()
-        return evaluate(countryCode: countryCode, markets: markets)
+        let result = await fetcher()
+        return evaluate(countryCode: countryCode, result: result)
     }
 
     @MainActor

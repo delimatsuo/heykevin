@@ -585,10 +585,12 @@ final class MarketsAdmissionTests: XCTestCase {
         }
 
         let client = makeClient()
-        let markets = await client.getMarkets()
-        XCTAssertNotNil(markets)
-        XCTAssertTrue(markets?.isAvailable(countryCode: "US") ?? false)
-        XCTAssertFalse(markets?.isAvailable(countryCode: "BR") ?? true)
+        let result = await client.getMarkets()
+        guard case .catalog(let markets) = result else {
+            return XCTFail("A valid 200 catalog must remain a catalog result")
+        }
+        XCTAssertTrue(markets.isAvailable(countryCode: "US"))
+        XCTAssertFalse(markets.isAvailable(countryCode: "BR"))
     }
 
     func testAPIClientGetMarketsFailureCannotAuthorize() async {
@@ -603,8 +605,73 @@ final class MarketsAdmissionTests: XCTestCase {
         }
 
         let client = makeClient()
-        let markets = await client.getMarkets()
-        XCTAssertNil(markets, "Failure must return nil, preventing accidental admission authorization")
+        let result = await client.getMarkets()
+        XCTAssertEqual(result, .failed, "A 5xx must not enter the legacy compatibility path")
+        XCTAssertEqual(
+            SignupAdmission.evaluate(countryCode: "US", result: result),
+            .checkFailed(message: "Could not check availability. Try again."),
+            "A 5xx must not authorize even the US"
+        )
+    }
+
+    func testAPIClientGetMarketsTransportFailureCannotAuthorize() async {
+        MockURLProtocol.requestHandler = { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+
+        let result = await makeClient().getMarkets()
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(
+            SignupAdmission.evaluate(countryCode: "US", result: result),
+            .checkFailed(message: "Could not check availability. Try again."),
+            "A transport failure must not restore legacy US admission"
+        )
+    }
+
+    func testAPIClientGetMarketsMalformedSuccessCannotAuthorize() async {
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data("not-json".utf8))
+        }
+
+        let result = await makeClient().getMarkets()
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(
+            SignupAdmission.evaluate(countryCode: "US", result: result),
+            .checkFailed(message: "Could not check availability. Try again."),
+            "A malformed successful response must not restore legacy US admission"
+        )
+    }
+
+    func testAPIClientMarketsRouteNotFoundAllowsOnlyLegacyUSOnboarding() async {
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 404,
+                httpVersion: "HTTP/1.1",
+                headerFields: nil
+            )!
+            return (response, Data())
+        }
+
+        let result = await makeClient().getMarkets()
+        XCTAssertEqual(result, .legacyUSOnly)
+        XCTAssertEqual(SignupAdmission.evaluate(countryCode: "US", result: result), .allowed)
+        XCTAssertEqual(
+            SignupAdmission.evaluate(countryCode: "CA", result: result),
+            .unavailable(message: "Kevin is not yet available in this country. We are preparing the service."),
+            "The legacy route fallback must not open Canadian onboarding"
+        )
+        XCTAssertEqual(
+            SignupAdmission.evaluate(countryCode: "BR", result: result),
+            .unavailable(message: "Kevin is not yet available in Brazil. We are preparing the service."),
+            "The legacy route fallback must not open Brazilian onboarding"
+        )
     }
 
     func testAPIClientCreateContractorTransmitsCountryCode() async throws {

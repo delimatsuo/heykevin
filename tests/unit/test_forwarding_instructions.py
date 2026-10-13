@@ -1,18 +1,4 @@
-"""Unit tests for GET /api/forwarding-instructions.
-
-The endpoint is the single source of truth for per-country carrier dial codes
-the iOS app should present during onboarding and in Settings.
-
-NANP (US/CA) rows reflect CDMA/Verizon-style forwarding (*71/*72/*73)
-and deliberately carry only the legacy ``disable``. Granular and standard GSM
-forwarding codes (e.g. GSM MMI ``*61*``/``##61#`` on T-Mobile/AT&T) differ across
-carriers, so the server table does not assert a single universal code for NANP.
-
-All non-US/CA countries (such as BR, GB, DE, FR, IT, ES, PT) return
-``supported: False`` with status ``qualification_required`` (for BR, GB) or
-``unsupported`` (for DE, FR, IT, ES, PT) and do not provide activation/deactivation
-templates.
-"""
+"""Synthetic forwarding guidance contracts; only US has legacy dial templates."""
 
 import os
 
@@ -32,11 +18,11 @@ from app.api.forwarding import FORWARDING_CODES, get_forwarding_instructions
 QUALIFICATION_REQUIRED_COUNTRIES = ["BR", "GB"]
 UNSUPPORTED_GSM_COUNTRIES = ["DE", "FR", "IT", "ES", "PT"]
 ALL_NON_NANP_COUNTRIES = QUALIFICATION_REQUIRED_COUNTRIES + UNSUPPORTED_GSM_COUNTRIES
-NANP_COUNTRIES = ["US", "CA"]
+NANP_COUNTRIES = ["US"]
 GRANULAR_DISABLE_KEYS = ("disable_all", "disable_unanswered", "disable_everything")
 
 
-def test_table_covers_only_nanp_countries():
+def test_table_covers_only_us():
     assert set(FORWARDING_CODES) == set(NANP_COUNTRIES)
 
 
@@ -92,8 +78,9 @@ async def test_forward_templates_carry_placeholder_and_disable_codes_do_not(coun
 
 async def test_country_code_is_case_insensitive_nanp():
     body = await get_forwarding_instructions(country_code="ca")
-    assert body["supported"] is True
+    assert body["supported"] is False
     assert body["country_code"] == "CA"
+    assert body["status"] == "carrier_setup_required"
 
 
 async def test_country_code_is_case_insensitive_non_nanp():
@@ -172,3 +159,24 @@ async def test_route_rejects_country_code_longer_than_two_characters():
         response = await client.get("/api/forwarding-instructions", params={"country_code": "BRA"})
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("country", ["CA", "ca", "Ca"])
+async def test_canada_never_supplies_generic_activation_or_erasure_codes(country):
+    body = await get_forwarding_instructions(country_code=country)
+    assert body["supported"] is False
+    assert body["status"] == "carrier_setup_required"
+    assert body["country_code"] == "CA"
+    assert not set(body).intersection({"forward_all", "forward_unanswered", "disable", *GRANULAR_DISABLE_KEYS})
+    assert "specific plan" in body["message"]
+    assert "restore that exact baseline" in body["message"]
+    assert all(code not in str(body) for code in ("*71", "*73", "##002#", "##61#"))
+
+
+async def test_canada_nonactionable_guidance_over_http():
+    transport = httpx.ASGITransport(app=_app_with_auth_bypassed())
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/forwarding-instructions", params={"country_code": "CA"})
+    assert response.status_code == 200
+    assert response.json()["supported"] is False
+    assert response.json()["status"] == "carrier_setup_required"

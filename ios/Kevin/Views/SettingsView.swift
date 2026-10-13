@@ -97,6 +97,8 @@ struct SettingsHost<Root: View>: View {
     @State private var isSavingSmartInterruption = false
     @State private var smartInterruptionSaveError = ""
     @State private var ownerSMSPreference = OwnerSMSPreferenceState()
+    @State private var ownerSMSConsentConfirmation: OwnerSMSConsentSnapshot?
+    @State private var isPreparingSMSConsent = false
 
     // Fences
     @State private var urgentPreferenceFence = PreferenceWriteFence()
@@ -206,6 +208,33 @@ struct SettingsHost<Root: View>: View {
                     accountSheetView
                 }
             }
+            .sheet(item: $ownerSMSConsentConfirmation) { snapshot in
+                NavigationStack {
+                    Form {
+                        Section {
+                            Text(snapshot.disclosure)
+                            Link(String(localized: "Terms"), destination: URL(string: "https://heykevin.one/terms")!)
+                            Link(String(localized: "Privacy Policy"), destination: URL(string: "https://heykevin.one/privacy")!)
+                        }
+                        Section {
+                            Button(String(localized: "I agree — enable SMS notifications")) {
+                                confirmOwnerSMSConsent(snapshot)
+                            }
+                            .accessibilityIdentifier("settings.smsConsent.confirm")
+                            Button(String(localized: "Not now"), role: .cancel) {
+                                ownerSMSConsentConfirmation = nil
+                            }
+                        }
+                    }
+                    .navigationTitle(String(localized: "SMS notifications"))
+                }
+            }
+            .onChange(of: appState.kevinNumber) { _, _ in
+                ownerSMSConsentConfirmation = nil
+                isPreparingSMSConsent = false
+                ownerSMSPreference.reset(auth: appState.currentAuthContext())
+                Task { await coalesceLoad(isForegroundOrTabSwitch: true) }
+            }
             .task {
                 await coalesceLoad()
             }
@@ -277,6 +306,8 @@ struct SettingsHost<Root: View>: View {
         activePaywallDestination = nil
         cancelPendingDeleteConfirmation()
         loadCoordinator.handleAuthChange(newAuth: newAuth)
+        ownerSMSConsentConfirmation = nil
+        isPreparingSMSConsent = false
         ownerSMSPreference.reset(auth: newAuth)
         jobberModel.handleAuthChange(newAuth: newAuth)
 
@@ -486,7 +517,7 @@ struct SettingsHost<Root: View>: View {
         let numberOK = !appState.kevinNumber.isEmpty
         let pushOK = pushPermission == .authorized || pushPermission == .provisional
         let subOK = appState.subscriptionStatus == "trial" || appState.subscriptionStatus == "active"
-        let allGood = numberOK && pushOK && subOK && appState.forwardingActivated
+        let allGood = numberOK && pushOK && subOK && appState.forwardingActivated && forwardingCountry != "CA"
 
         return Section {
             if allGood {
@@ -534,16 +565,16 @@ struct SettingsHost<Root: View>: View {
 
             if !allGood {
                 HStack(spacing: 12) {
-                    Image(systemName: appState.forwardingActivated ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .foregroundStyle(appState.forwardingActivated ? Color.green : Color.orange)
+                    Image(systemName: (forwardingCountry != "CA" && appState.forwardingActivated) ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.green : Color.orange)
                         .font(.title3)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(localized: "Call Forwarding"))
                             .font(.subheadline)
-                        Text(appState.forwardingActivated ? String(localized: "Activation requested") : String(localized: "Missed calls must route to Kevin"))
+                        Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : (appState.forwardingActivated ? String(localized: "Activation requested") : String(localized: "Missed calls must route to Kevin")))
                             .font(.caption)
-                            .foregroundStyle(appState.forwardingActivated ? Color.secondary : Color.orange)
+                            .foregroundStyle((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.secondary : Color.orange)
                     }
                     Spacer()
                     Button {
@@ -558,12 +589,12 @@ struct SettingsHost<Root: View>: View {
                             appState.forwardingActivated = true
                         }
                     } label: {
-                        Text(appState.forwardingActivated ? String(localized: "Re-activate") : String(localized: "Set up forwarding"))
+                        Text((forwardingCountry != "CA" && appState.forwardingActivated) ? String(localized: "Re-activate") : String(localized: "Set up forwarding"))
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(forwardingCodes == nil ? Color.secondary : (appState.forwardingActivated ? Color.blue : Color.orange))
+                            .foregroundStyle(forwardingCodes == nil ? Color.secondary : ((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.blue : Color.orange))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background((appState.forwardingActivated ? Color.blue : Color.orange).opacity(forwardingCodes == nil ? 0.05 : 0.15))
+                            .background(((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.blue : Color.orange).opacity(forwardingCodes == nil ? 0.05 : 0.15))
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.borderless)
@@ -656,17 +687,32 @@ struct SettingsHost<Root: View>: View {
             }
 
             if ownerSMSPreference.isLoaded && !ownerSMSPreference.isUnsupportedBackend {
-                Toggle(isOn: smsNotificationsBinding) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(String(localized: "SMS notifications"))
+                if ownerSMSPreference.consentRequired {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(String(localized: "Choose SMS notifications"))
                             .font(.subheadline.weight(.medium))
-                        Text(OwnerSMSPreferenceState.summaryDescription)
+                        Text(String(localized: "Opt in to receive Hey Kevin call summaries, voicemail and account notices by text. Your existing app preference does not provide SMS consent."))
                             .font(.caption)
                             .foregroundStyle(Color.secondary)
+                        Button(String(localized: "Review and opt in")) {
+                            prepareOwnerSMSConsent()
+                        }
+                        .disabled(ownerSMSPreference.isSaving || isPreparingSMSConsent || ownerSMSPreference.isCarrierBlocked || isFixtureMode)
+                        .accessibilityIdentifier("settings.smsConsent.review")
                     }
+                } else {
+                    Toggle(isOn: smsNotificationsBinding) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(localized: "SMS notifications"))
+                                .font(.subheadline.weight(.medium))
+                            Text(OwnerSMSPreferenceState.summaryDescription)
+                                .font(.caption)
+                                .foregroundStyle(Color.secondary)
+                        }
+                    }
+                    .disabled(ownerSMSPreference.isSaving || isFixtureMode)
+                    .accessibilityIdentifier("settings.smsNotifications")
                 }
-                .disabled(ownerSMSPreference.isSaving || isFixtureMode)
-                .accessibilityIdentifier("settings.smsNotifications")
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "SMS notifications"))
@@ -703,7 +749,9 @@ struct SettingsHost<Root: View>: View {
                             .font(.caption2)
                             .foregroundStyle(Color.secondary)
                     }
-                    Text(OwnerSMSPreferenceState.appSwitchRequiredNotice)
+                    Text(ownerSMSPreference.consentRequired
+                         ? String(localized: "After replying START, refresh settings and review the SMS opt-in above. START does not replace your app consent.")
+                         : OwnerSMSPreferenceState.appSwitchRequiredNotice)
                         .font(.caption2)
                         .foregroundStyle(Color.secondary)
                 }
@@ -1168,11 +1216,11 @@ struct SettingsHost<Root: View>: View {
     private var callForwardingSection: some View {
         Section {
             Group {
-                if !ForwardingCountry.isNANP(forwardingCountry) {
+                if forwardingCountry != "US" {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(String(localized: "Carrier codes"))
+                        Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Carrier setup in preparation"))
                             .font(.subheadline.weight(.medium))
-                        Text(String(localized: "Using the call forwarding codes for \(forwardingCountryName)"))
+                        Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.setup : String(localized: "Carrier-specific instructions are not available yet."))
                             .font(.caption)
                             .foregroundStyle(Color.secondary)
                     }
@@ -1254,14 +1302,20 @@ struct SettingsHost<Root: View>: View {
                 .disabled(codes.clearAll == nil || isFixtureMode)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
+                    Label(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.blue)
-                    Text(String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
+                    Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.baseline : String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
                         .font(.caption)
                         .foregroundStyle(Color.secondary)
                 }
                 .padding(.vertical, 4)
+                if forwardingCountry == "CA" {
+                    Text(CanadaForwardingGuidance.restoration)
+                        .font(.caption)
+                    Text(String(localized: "Your Kevin number: \(kevinNumber)"))
+                        .font(.subheadline.monospacedDigit())
+                }
             }
         } header: {
             Text(String(localized: "Call Forwarding"))
@@ -1269,10 +1323,10 @@ struct SettingsHost<Root: View>: View {
             if appState.kevinNumber.isEmpty {
                 Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
                     .foregroundStyle(.orange)
-            } else if ForwardingCountry.isNANP(forwardingCountry) {
+            } else if forwardingCountry == "US" {
                 Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used."))
             } else {
-                Text(String(localized: "Call forwarding in your country does not use carrier dialing codes yet."))
+                Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.restoration : String(localized: "Carrier-specific setup instructions are not available yet."))
             }
         }
         .disabled(appState.kevinNumber.isEmpty)
@@ -1707,6 +1761,43 @@ struct SettingsHost<Root: View>: View {
         }
     }
 
+    private func prepareOwnerSMSConsent() {
+        guard !isFixtureMode, !isPreparingSMSConsent else { return }
+        let auth = appState.currentAuthContext()
+        let number = appState.kevinNumber
+        guard auth.isValid, let token = ownerSMSPreference.captureLoadToken(auth: auth) else { return }
+        isPreparingSMSConsent = true
+        Task { @MainActor in
+            defer { if appState.currentAuthContext() == auth { isPreparingSMSConsent = false } }
+            guard let profile = await APIClient.shared.getContractorProfile(contractorId: auth.contractorId, bearerToken: auth.bearerToken),
+                  appState.currentAuthContext() == auth, appState.kevinNumber == number else {
+                if appState.currentAuthContext() == auth { ownerSMSPreference.recordLoadFailure(token: token, auth: auth) }
+                return
+            }
+            ownerSMSPreference.applyHydration(dict: profile, token: token, auth: auth)
+            guard ownerSMSPreference.senderNumber == number else {
+                ownerSMSPreference.saveError = String(localized: "Your Kevin number changed. Refresh settings and try again.")
+                return
+            }
+            ownerSMSConsentConfirmation = ownerSMSPreference.consentSnapshot(auth: auth)
+            if ownerSMSConsentConfirmation == nil {
+                ownerSMSPreference.saveError = String(localized: "SMS consent is unavailable. Refresh settings and check your texting status.")
+            }
+        }
+    }
+
+    private func confirmOwnerSMSConsent(_ snapshot: OwnerSMSConsentSnapshot) {
+        ownerSMSConsentConfirmation = nil
+        let auth = appState.currentAuthContext()
+        guard !isFixtureMode, appState.kevinNumber == snapshot.twilioNumber,
+              let token = ownerSMSPreference.beginConsent(snapshot, auth: auth) else { return }
+        Task { @MainActor in
+            let result = await APIClient.shared.recordOwnerSMSConsent(snapshot: snapshot)
+            guard appState.currentAuthContext() == auth, appState.kevinNumber == snapshot.twilioNumber else { return }
+            ownerSMSPreference.finishConsent(result: result, snapshot: snapshot, operationToken: token, auth: auth)
+        }
+    }
+
     private var smsNotificationsBinding: Binding<Bool> {
         Binding(
             get: { ownerSMSPreference.displayedEnabled },
@@ -1719,7 +1810,7 @@ struct SettingsHost<Root: View>: View {
 
     private func saveOwnerSMSPreference(_ newValue: Bool) {
         let auth = appState.currentAuthContext()
-        guard auth.isValid, !ownerSMSPreference.isSaving else { return }
+        guard auth.isValid, !ownerSMSPreference.isSaving, !isPreparingSMSConsent else { return }
         guard let (token, _) = ownerSMSPreference.beginSave(targetEnabled: newValue, auth: auth) else { return }
 
         Task { @MainActor in

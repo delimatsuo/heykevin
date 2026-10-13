@@ -460,7 +460,11 @@ async def test_external_notification_failure_holds_estimate_and_raises(monkeypat
     })
 
     async def contractor(_contractor_id):
-        return {"contractor_id": "c1", "active": True}
+        return {
+            "contractor_id": "c1",
+            "active": True,
+            "sms_compliance_status": "approved",
+        }
 
     async def uncertain_notification(**kwargs):
         assert kwargs["strict"] is True
@@ -486,6 +490,7 @@ async def test_external_notification_failure_holds_estimate_and_raises(monkeypat
     ("c1", None),
     ("c1", {"contractor_id": "other", "active": True}),
     ("c1", {"contractor_id": "c1", "active": False}),
+    ("c1", {"contractor_id": "c1", "active": True, "sms_compliance_status": "pending"}),
     ("", {"contractor_id": "c1", "active": True}),
 ])
 async def test_strict_notification_holds_when_contractor_identity_is_not_current(
@@ -524,6 +529,72 @@ async def test_strict_notification_holds_when_contractor_identity_is_not_current
 
     held = doc_ref.get().to_dict()
     assert held["status"] == "failed"
+    assert held["notification_state"] == "needs_attention"
+    assert not held.get("notified_at")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_change", [
+    {"active": False},
+    {"sms_compliance_status": "pending"},
+])
+async def test_strict_notification_rereads_contractors_after_analysis(
+    monkeypatch, fresh_change,
+):
+    """A policy change during model I/O must fence the later SMS boundary."""
+    db = FakeDB()
+    monkeypatch.setattr(estimate_worker, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    doc_ref = db.collection("estimates").document("tok-fresh-owner")
+    doc_ref.set({
+        "status": "processing",
+        "media_id": "m-fresh-owner",
+        "media_object_path": "estimate/m-fresh-owner.mp4",
+        "media_content_type": "video/mp4",
+        "attempts": estimate_worker.MAX_ANALYSIS_ATTEMPTS - 1,
+        "lease_expires_at": 0.0,
+        "caller_phone": "",
+        "contractor_id": "c1",
+    })
+
+    current = {
+        "contractor_id": "c1",
+        "active": True,
+        "sms_compliance_status": "approved",
+        "services": [],
+        "business_name": "Acme",
+    }
+    reads = 0
+
+    async def fake_get_contractor(_contractor_id):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            current.update(fresh_change)
+        return dict(current)
+
+    async def analyze_then_finish(**_kwargs):
+        return {"diagnosis": "Done", "confidence": "high"}
+
+    async def notification_must_not_run(**_kwargs):
+        raise AssertionError("stale contractor policy must not reach the SMS provider")
+
+    monkeypatch.setattr(estimate_worker, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(estimate_worker, "read_media", lambda _path: b"media")
+    monkeypatch.setattr(estimate_worker, "analyze_media", analyze_then_finish)
+    monkeypatch.setattr(estimate_worker, "send_estimate_notifications", notification_must_not_run)
+
+    with pytest.raises(
+        estimate_notifications.EstimateNotificationOutcomeUncertain,
+        match="identity is uncertain",
+    ):
+        await estimate_worker.run_pending_estimates_once(
+            now=100.0, page_size=25, max_analyses=1, continuation={},
+        )
+
+    assert reads == 2
+    held = doc_ref.get().to_dict()
+    assert held["status"] == "complete"
     assert held["notification_state"] == "needs_attention"
     assert not held.get("notified_at")
 

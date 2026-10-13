@@ -85,12 +85,38 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
   part of that action. Its pre-release notice describes processing rather
   than claiming success. An empty lookup or unconfirmed delete result in
   this strict path records an anomaly but preserves the active profile and
-  number for operator reconciliation. Before strict Twilio deletion it writes
-  a durable, single-use claim and captures that transaction's exact committed
-  Firestore version. The version and claim nonce are reread in the same owned
-  executor operation as the final provider DELETE, so any intervening profile
-  write fences deletion and leaves the account for reconciliation. A
-  quarantined post-call item does not
+  number for operator reconciliation. Before strict Twilio deletion it reserves
+  a nonce-owned state machine: `reserved → deleting → finalized`, with
+  `cancelled` and `needs_attention` as terminal safe holds. A live-call
+  stamp, device re-registration, subscription change, trial change, or other
+  release-aware profile write made during `reserved` is retained and
+  atomically cancels the release. The `deleting` transition atomically
+  rechecks the exact number binding and full strict guard snapshot before one
+  provider DELETE. A release-aware mutation after that boundary records a
+  durable conflict and changes the claim to `needs_attention`; a narrow,
+  server-owned copy of subscription entitlement or call-safety values is
+  retained with that conflict so an App Store renewal is not lost behind an
+  acknowledged webhook. Deferred entitlement observations retain a bounded,
+  ordered history as well as the current summary, so delayed terminal events
+  cannot erase a renewal. A `reserved` claim is a five-minute lease before an
+  irreversible provider DELETE: if its worker crashes before crossing
+  `deleting`, a fresh eligible worker can replace it; `deleting` is never
+  retried automatically. Admin
+  contractor views expose a sanitized
+  reconciliation summary without the nonce, number binding, or receipt ID.
+  A direct verified StoreKit purchase held at this boundary returns retryable
+  HTTP 503 with a Retry-After header, leaving its StoreKit transaction unfinished
+  instead of treating it as malformed. Finalization then cannot clear the number or
+  deactivate the profile. A successful release clears the exact binding and
+  applies any deactivation in one nonce- and
+  phase-conditional Firestore transaction. Manual account deletion, manual
+  number release, the embedded cleanup, and the strict external worker all use
+  this same provider-release primitive, so a competing entrypoint cannot issue
+  a second DELETE. Inbound calls use a 0.75-second Firestore RPC deadline and
+  a one-second webhook guard for their release-aware safety stamp. If storage
+  cannot acknowledge that stamp, the webhook direct-rings the account owner
+  without starting AI screening, rather than consuming Twilio's deadline.
+  A quarantined post-call item does not
   stop the global scan.
 - Pending/in-progress post-call cursors and estimate cursors are persisted
   across requests. Cold starts cannot repeatedly starve later documents.
@@ -308,10 +334,14 @@ configuration, admission, subprocess execution, completion and cleanup. It
 does not log exception messages, provider payloads, caller identifiers or
 tracebacks. Child output remains bounded at 4 KiB and stderr is discarded.
 It also adds the durable generation/lease handoff, a verified embedded
-baseline, external claim fencing, bounded Firestore/RTDB pages, and a runtime
-refusal for unmigrated optional loops. It has not run in hosted CI or staging.
-It does not resolve the historical estimates failure or authorize another
-pilot. See the [diagnostic validation receipt](audits/2026-10-13-background-worker-diagnostics.json)
+baseline, nonce-owned number-release fencing, bounded Firestore/RTDB pages,
+and a runtime refusal for unmigrated optional loops. The strict estimate path
+fresh-reads the contractor immediately before an SMS boundary and requires the
+same active, compliance-approved owner. The new local hardening includes
+release-aware inbound RPC deadlines, direct-ring fallback, deferred
+entitlement reconciliation, and retryable client verification. It has not run in
+hosted CI or staging. It does not resolve the historical estimates failure or
+authorize another pilot. See the [diagnostic validation receipt](audits/2026-10-13-background-worker-diagnostics.json)
 for the earlier diagnostics-specific source review and deliberate
 guard-removal checks.
 

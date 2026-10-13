@@ -1150,6 +1150,55 @@ async def test_generic_notification_never_selects_or_replaces_original_transacti
         assert "subscription_original_transaction_id" not in upd
 
 
+@pytest.mark.asyncio
+async def test_deferred_expiry_does_not_send_subscription_ended_push(monkeypatch):
+    """A release-held expiry has not changed the profile and must not notify it."""
+    contractor = {
+        "contractor_id": "c1",
+        "active": True,
+        "subscription_uuid": "uuid-1",
+        "subscription_original_transaction_id": "otx-1",
+    }
+
+    async def fake_lookup(_uuid, include_inactive=False):
+        assert include_inactive is False
+        return contractor
+
+    async def fake_claim(**_kwargs):
+        return True, "c1"
+
+    async def fake_update(_cid, _updates):
+        return False
+
+    async def fail_device_token(**_kwargs):
+        raise AssertionError("held expiry must not read or notify a device")
+
+    async def fail_send_push(**_kwargs):
+        raise AssertionError("held expiry must not send a terminal push")
+
+    monkeypatch.setattr(
+        "app.db.contractors.get_contractor_by_subscription_uuid",
+        fake_lookup,
+    )
+    monkeypatch.setattr("app.db.apple_transactions.claim_transaction", fake_claim)
+    monkeypatch.setattr("app.db.contractors.update_contractor", fake_update)
+    monkeypatch.setattr(
+        sub_service,
+        "_decode_jws_payload",
+        lambda _jwt: _tx_info(),
+    )
+    from app.services import push_notification
+    monkeypatch.setattr(push_notification, "get_device_token", fail_device_token)
+    monkeypatch.setattr(push_notification, "send_regular_push", fail_send_push)
+
+    handled = await sub_service.handle_appstore_notification({
+        "notificationType": "EXPIRED",
+        "data": {"signedTransactionInfo": "signed-tx-jwt"},
+    })
+
+    assert handled is True
+
+
 # ===========================================================================
 # Section 3.1: Truthful nonexistent documents representation
 # ===========================================================================

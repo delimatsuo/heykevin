@@ -127,7 +127,9 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
             "active": True,
         }
 
-    async def fake_activate_subscription_entitlement(contractor_id, tier, expires_ts, original_transaction_id, expected_subscription_uuid):
+    async def fake_activate_subscription_entitlement(
+        contractor_id, tier, expires_ts, original_transaction_id, expected_subscription_uuid
+    ):
         updates["contractor_id"] = contractor_id
         updates["body"] = {
             "subscription_tier": tier,
@@ -142,7 +144,11 @@ async def test_update_subscription_from_decoded_transaction(monkeypatch):
         return True, "contractor-1"
 
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_db, "activate_subscription_entitlement", fake_activate_subscription_entitlement)
+    monkeypatch.setattr(
+        contractors_db,
+        "activate_subscription_entitlement",
+        fake_activate_subscription_entitlement,
+    )
     monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
     monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
 
@@ -363,3 +369,52 @@ class _FakeAsyncClient:
     async def get(self, url: str, headers: dict, timeout: float):
         self.calls.append(url)
         return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_update_subscription_returns_retryable_when_release_holds_entitlement(monkeypatch):
+    """A paid StoreKit transaction stays unfinished when release reconciliation owns it."""
+    async def fake_get_contractor(contractor_id):
+        return {
+            "contractor_id": contractor_id,
+            "subscription_uuid": "subscription-uuid",
+            "active": True,
+        }
+
+    async def fake_claim_transaction(**_kwargs):
+        return True, "contractor-1"
+
+    async def fake_activate(**_kwargs):
+        return False
+
+    activation_outcomes = iter([
+        None,
+        contractors_db.SubscriptionEntitlementActivationOutcome.RELEASE_CONFLICT,
+    ])
+
+    def fake_take_outcome():
+        return next(activation_outcomes)
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(apple_transactions_db, "claim_transaction", fake_claim_transaction)
+    monkeypatch.setattr(contractors_db, "activate_subscription_entitlement", fake_activate)
+    monkeypatch.setattr(
+        contractors_db,
+        "take_subscription_entitlement_activation_outcome",
+        fake_take_outcome,
+    )
+    monkeypatch.setattr(subscription.time, "time", lambda: 1700000000)
+
+    result = await subscription.update_subscription_from_transaction(
+        "contractor-1",
+        {
+            "productId": "com.kevin.callscreen.personal.monthly",
+            "appAccountToken": "subscription-uuid",
+            "expiresDate": 1770000000000,
+            "transactionId": "tx-held",
+            "originalTransactionId": "orig-held",
+        },
+    )
+
+    assert result.outcome is subscription.SubscriptionUpdateOutcome.RETRYABLE
+    assert result.reason == "number_release_reconciliation"

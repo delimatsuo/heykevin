@@ -324,6 +324,7 @@ class SubscriptionUpdateOutcome(str, Enum):
     OWNERSHIP_MISMATCH = "ownership_mismatch"
     UNKNOWN_PRODUCT = "unknown_product"
     MALFORMED_TRANSACTION = "malformed_transaction"
+    RETRYABLE = "retryable"
 
 
 @dataclass(frozen=True)
@@ -920,16 +921,37 @@ async def update_subscription_from_transaction(
             reason="expired",
         )
 
-    from app.db.contractors import activate_subscription_entitlement
+    from app.db.contractors import (
+        SubscriptionEntitlementActivationOutcome,
+        activate_subscription_entitlement,
+        take_subscription_entitlement_activation_outcome,
+    )
 
-    ok = await activate_subscription_entitlement(
+    # Clear a prior outcome in this task before using the boolean compatibility
+    # helper. This lets older callers and test doubles retain their contract.
+    take_subscription_entitlement_activation_outcome()
+    activated = await activate_subscription_entitlement(
         contractor_id=contractor_id,
         tier=tier,
         expires_ts=expires_ts,
         original_transaction_id=original_id,
         expected_subscription_uuid=app_account_token,
     )
-    if not ok:
+    activation_outcome = take_subscription_entitlement_activation_outcome()
+    if (
+        not activated
+        and activation_outcome
+        is SubscriptionEntitlementActivationOutcome.RELEASE_CONFLICT
+    ):
+        logger.warning(
+            "Verified subscription entitlement held for number-release reconciliation: %s",
+            contractor_id,
+        )
+        return SubscriptionUpdateResult(
+            SubscriptionUpdateOutcome.RETRYABLE,
+            reason="number_release_reconciliation",
+        )
+    if not activated:
         logger.error(f"Failed to activate subscription entitlement for contractor {contractor_id}")
         return SubscriptionUpdateResult(
             SubscriptionUpdateOutcome.MALFORMED_TRANSACTION,
@@ -1385,16 +1407,22 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     fwd_expires = _active_subscription_expires_ts(transaction_info)
                     if fwd_tier and fwd_expires:
                         try:
-                            await update_contractor(rebound["contractor_id"], {
+                            forwarded = await update_contractor(rebound["contractor_id"], {
                                 "subscription_status": "active",
                                 "subscription_tier": fwd_tier,
                                 "subscription_expires": fwd_expires,
                                 "subscription_forwarded_from": cid,
                             })
-                            logger.info(
-                                "Rebound entitlement forwarded: %s -> %s tier=%s",
-                                cid, rebound["contractor_id"], fwd_tier,
-                            )
+                            if forwarded:
+                                logger.info(
+                                    "Rebound entitlement forwarded: %s -> %s tier=%s",
+                                    cid, rebound["contractor_id"], fwd_tier,
+                                )
+                            else:
+                                logger.warning(
+                                    "Rebound entitlement deferred for release reconciliation: %s -> %s",
+                                    cid, rebound["contractor_id"],
+                                )
                         except Exception as fwd_err:
                             logger.error(
                                 "Rebound entitlement forward failed: %s -> %s err=%s",
@@ -1405,13 +1433,19 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     and rebound.get("subscription_forwarded_from") == cid
                 ):
                     try:
-                        await update_contractor(rebound["contractor_id"], {
+                        forwarded = await update_contractor(rebound["contractor_id"], {
                             "subscription_status": "expired",
                         })
-                        logger.info(
-                            "Forwarded entitlement expired: %s -> %s type=%s",
-                            cid, rebound["contractor_id"], notification_type,
-                        )
+                        if forwarded:
+                            logger.info(
+                                "Forwarded entitlement expired: %s -> %s type=%s",
+                                cid, rebound["contractor_id"], notification_type,
+                            )
+                        else:
+                            logger.warning(
+                                "Forwarded entitlement expiry deferred for release reconciliation: %s -> %s",
+                                cid, rebound["contractor_id"],
+                            )
                     except Exception as fwd_err:
                         logger.error(
                             "Forwarded entitlement expiry failed: %s -> %s err=%s",
@@ -1474,28 +1508,42 @@ async def handle_appstore_notification(payload: dict) -> bool:
                     schedule_payment_measurement(contractor_id, tier, transaction_info)
                 except Exception as e:
                     logger.warning(f"Failed to schedule payment measurement: {type(e).__name__}")
+            else:
+                logger.warning(
+                    "Subscription renewal deferred for number-release reconciliation: %s",
+                    contractor_id,
+                )
         else:
             logger.warning(f"Rejected active subscription notification: {contractor_id} product={product_id}")
             return False
 
     elif notification_type in ("EXPIRED", "DID_FAIL_TO_RENEW", "REFUND", "REVOKE"):
-        await update_contractor(contractor_id, {
+        updated = await update_contractor(contractor_id, {
             "subscription_status": "expired",
         })
-        logger.info(f"Subscription expired/cancelled: {contractor_id} type={notification_type}")
+        if updated:
+            logger.info(f"Subscription expired/cancelled: {contractor_id} type={notification_type}")
+        else:
+            logger.warning(
+                "Subscription expiry deferred for number-release reconciliation: %s type=%s",
+                contractor_id,
+                notification_type,
+            )
 
-        # Send push so the user knows their trial/subscription ended
-        try:
-            from app.services.push_notification import send_regular_push, get_device_token
-            device_token = await get_device_token(contractor_id=contractor_id)
-            if device_token:
-                await send_regular_push(
-                    device_token=device_token,
-                    title="Your Kevin subscription has ended",
-                    body="Subscribe to keep Kevin screening your calls.",
-                    contractor_id=contractor_id,
-                )
-        except Exception as push_err:
-            logger.warning(f"Expiry push failed (non-critical): {push_err}")
+        # Only notify after the terminal profile mutation commits. A held
+        # mutation may belong to a paid account that raced number deletion.
+        if updated:
+            try:
+                from app.services.push_notification import send_regular_push, get_device_token
+                device_token = await get_device_token(contractor_id=contractor_id)
+                if device_token:
+                    await send_regular_push(
+                        device_token=device_token,
+                        title="Your Kevin subscription has ended",
+                        body="Subscribe to keep Kevin screening your calls.",
+                        contractor_id=contractor_id,
+                    )
+            except Exception as push_err:
+                logger.warning(f"Expiry push failed (non-critical): {push_err}")
 
     return True

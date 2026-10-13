@@ -18,6 +18,7 @@ contract:
 """
 
 import os
+import time
 
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-account-sid")
 os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
@@ -29,8 +30,6 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from google.api_core.datetime_helpers import DatetimeWithNanoseconds
-from google.protobuf.timestamp_pb2 import Timestamp
 
 from app.api import contractors as contractors_api
 from app.db import contractors as contractors_db
@@ -265,6 +264,29 @@ async def test_release_number_with_no_number_is_idempotent_ok(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_release_number_false_result_rereads_completed_concurrent_release(monkeypatch):
+    """A parallel completion is idempotent success, not a stale conflict."""
+    reads = [
+        _contractor(contractor_id="c1", twilio_number="+15559999999"),
+        _contractor(contractor_id="c1", twilio_number=""),
+    ]
+
+    async def fake_get_contractor(_cid):
+        return reads.pop(0)
+
+    async def fake_release(_cid):
+        return False
+
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_api, "release_twilio_number", fake_release)
+
+    response = await contractors_api.api_release_number("c1", _owner_request())
+
+    assert response == {"status": "ok", "released": False}
+    assert reads == []
+
+
+@pytest.mark.asyncio
 async def test_cross_tenant_delete_is_refused_before_any_work(monkeypatch):
     calls = []
 
@@ -325,10 +347,114 @@ class _FakeTwilioClient:
 
 @pytest.fixture
 def fake_twilio(monkeypatch):
+    """Twilio plus an in-memory stand-in for the release state machine."""
     _FakeTwilioClient.log = []
     _FakeTwilioClient.lookup_result = []
     monkeypatch.setattr("twilio.rest.Client", _FakeTwilioClient)
+
+    async def fake_claim(_cid, *, strict_precondition):
+        return contractors_db.StrictNumberReleaseClaim("claim-nonce")
+
+    async def fake_begin(_cid, claim, *, strict_precondition):
+        assert claim.state == contractors_db.NUMBER_RELEASE_CLAIM_RESERVED
+        return contractors_db.StrictNumberReleaseClaim(
+            claim.nonce,
+            state=contractors_db.NUMBER_RELEASE_CLAIM_DELETING,
+        )
+
+    async def fake_hold(cid, _claim, *, anomaly=None):
+        if anomaly is not None:
+            await contractors_db.update_contractor(cid, {"number_release_anomaly": anomaly})
+        return True
+
+    async def fake_finalize(
+        cid,
+        _claim,
+        release_updates,
+        *,
+        strict_precondition,
+        deactivate_profile,
+        deactivation_updates=None,
+    ):
+        updates = dict(release_updates)
+        if deactivate_profile:
+            updates.update({"active": False, "deactivated_at": 1})
+            updates.update(deactivation_updates or {})
+        return await contractors_db.update_contractor(cid, updates)
+
+    monkeypatch.setattr(contractors_db, "claim_strict_number_release", fake_claim)
+    monkeypatch.setattr(contractors_db, "begin_strict_number_release_delete", fake_begin)
+    monkeypatch.setattr(contractors_db, "hold_strict_number_release", fake_hold)
+    monkeypatch.setattr(contractors_db, "finalize_strict_number_release", fake_finalize)
     return _FakeTwilioClient
+
+
+
+def _install_in_memory_contractor_store(monkeypatch, state: dict):
+    """Give release-lock helpers a transaction-shaped local contractor doc."""
+    class _Snapshot:
+        exists = True
+        id = "c1"
+
+        def to_dict(self):
+            return dict(state)
+
+    class _Ref:
+        def get(self, transaction=None, timeout=None):
+            return _Snapshot()
+
+        def update(self, updates):
+            state.update(updates)
+
+    ref = _Ref()
+
+    class _Collection:
+        def document(self, _contractor_id):
+            return ref
+
+    class _Transaction:
+        write_results = ()
+
+        def update(self, doc_ref, updates):
+            doc_ref.update(updates)
+
+        def commit(self, timeout=None):
+            return []
+
+    class _Db:
+        def collection(self, _collection):
+            return _Collection()
+
+        def transaction(self):
+            return _Transaction()
+
+    monkeypatch.setattr(contractors_db, "get_firestore_client", _Db)
+    monkeypatch.setattr(contractors_db.firestore, "transactional", lambda fn: fn)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_inbound_evidence_transaction_cancels_reserved_release(monkeypatch):
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "last_inbound_call_at": None,
+    })
+    claim = await contractors_db.claim_strict_number_release(
+        "c1",
+        strict_precondition=lambda candidate: candidate["last_inbound_call_at"] is None,
+    )
+    assert claim is not None
+
+    recorded = await contractors_db.record_inbound_call_evidence(
+        "c1",
+        123.0,
+        rpc_timeout=0.1,
+    )
+
+    assert recorded is True
+    assert state["last_inbound_call_at"] == 123.0
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_CANCELLED
 
 
 @pytest.mark.asyncio
@@ -434,166 +560,385 @@ async def test_strict_release_reports_unconfirmed_delete_result(monkeypatch, fak
 
 
 @pytest.mark.asyncio
-async def test_strict_release_fences_changed_profile_before_provider_delete(monkeypatch, fake_twilio):
-    """An external worker must stop before Twilio when its final fence fails."""
-    updates = []
-    reads = 0
-    fake_twilio.lookup_result = [_FakeNumber(fake_twilio.log)]
-
-    async def fake_get_contractor(cid):
-        nonlocal reads
-        reads += 1
-        return _contractor(
-            contractor_id=cid,
-            last_inbound_call_at=None if reads == 1 else 123,
-        )
-
-    async def fake_update(cid, fields):
-        updates.append((cid, fields))
-        return True
-
-    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
-
-    confirmed = await contractors_db.release_twilio_number(
-        "c1",
-        require_confirmed=True,
-        strict_precondition=lambda candidate: candidate.get("last_inbound_call_at") is None,
-    )
-
-    assert confirmed is False
-    assert reads == 2
-    assert fake_twilio.log == []
-    assert updates == []
-
-
-@pytest.mark.asyncio
-async def test_strict_release_claim_fences_mutation_after_final_profile_read(monkeypatch, fake_twilio):
-    """The durable claim is checked in the provider executor immediately before DELETE."""
-    updates = []
+async def test_strict_release_does_not_delete_when_begin_rejects_safety_change(monkeypatch, fake_twilio):
+    """The Firestore phase transition is the only path to Twilio DELETE."""
     fake_twilio.lookup_result = [_FakeNumber(fake_twilio.log)]
 
     async def fake_get_contractor(cid):
         return _contractor(contractor_id=cid, last_inbound_call_at=None)
 
-    async def fake_update(cid, fields):
-        updates.append((cid, fields))
-        return True
-
-    claim = contractors_db.StrictNumberReleaseClaim("claim-nonce", object())
-    mutation_observed = []
-
-    def claim_changed_after_final_read(cid, supplied_claim):
-        assert cid == "c1" and supplied_claim == claim
-        mutation_observed.append(True)
-        return False
+    async def rejected_begin(_cid, _claim, *, strict_precondition):
+        return None
 
     monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
-    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
-    monkeypatch.setattr(
-        contractors_db, "strict_number_release_claim_is_current", claim_changed_after_final_read,
-    )
+    monkeypatch.setattr(contractors_db, "begin_strict_number_release_delete", rejected_begin)
 
     confirmed = await contractors_db.release_twilio_number(
         "c1",
         require_confirmed=True,
         strict_precondition=lambda candidate: candidate.get("last_inbound_call_at") is None,
-        strict_release_claim=claim,
     )
 
     assert confirmed is False
-    assert mutation_observed == [True]
     assert fake_twilio.log == []
-    assert updates == []
 
 
 @pytest.mark.asyncio
-async def test_strict_release_claim_uses_its_transaction_commit_version(monkeypatch):
-    """The fence must use the claim write's version, never a later reread."""
-    state = {"active": True, "number_release_claim": None}
-    write_time = Timestamp(seconds=1_700_000_000, nanos=123_456_789)
-
-    class _Snapshot:
-        exists = True
-
-        def to_dict(self):
-            return dict(state)
-
-    class _Ref:
-        def get(self, transaction=None):
-            return _Snapshot()
-
-        def update(self, data):
-            state.update(data)
-
-    ref = _Ref()
-
-    class _Collection:
-        def document(self, _contractor_id):
-            return ref
-
-    class _Transaction:
-        write_results = ()
-
-        def update(self, doc_ref, data):
-            doc_ref.update(data)
-
-    class _Db:
-        def collection(self, _collection):
-            return _Collection()
-
-        def transaction(self):
-            return _Transaction()
-
-    def immediate_transactional(fn):
-        def run(transaction):
-            result = fn(transaction)
-            transaction.write_results = [SimpleNamespace(update_time=write_time)]
-            return result
-        return run
-
-    monkeypatch.setattr(contractors_db, "get_firestore_client", _Db)
-    monkeypatch.setattr(contractors_db.firestore, "transactional", immediate_transactional)
-
+async def test_reserved_inbound_mutation_is_retained_and_cancels_release(monkeypatch):
+    """A live call before deleting both persists its stamp and stops release."""
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "last_inbound_call_at": None,
+    })
     claim = await contractors_db.claim_strict_number_release(
-        "c1", strict_precondition=lambda candidate: candidate.get("active") is True,
+        "c1", strict_precondition=lambda candidate: candidate["last_inbound_call_at"] is None,
+    )
+    assert claim is not None
+
+    assert await contractors_db.update_contractor("c1", {"last_inbound_call_at": 123})
+    assert state["last_inbound_call_at"] == 123
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_CANCELLED
+    assert await contractors_db.begin_strict_number_release_delete(
+        "c1",
+        claim,
+        strict_precondition=lambda candidate: candidate["last_inbound_call_at"] is None,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_deleting_inbound_mutation_holds_and_prevents_finalization(monkeypatch):
+    """A safety event after the boundary leaves the profile intact for review."""
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "last_inbound_call_at": None,
+    })
+    predicate = lambda candidate: candidate["last_inbound_call_at"] is None
+    claim = await contractors_db.claim_strict_number_release("c1", strict_precondition=predicate)
+    deleting = await contractors_db.begin_strict_number_release_delete(
+        "c1", claim, strict_precondition=predicate,
+    )
+    assert deleting is not None
+
+    assert not await contractors_db.update_contractor("c1", {"last_inbound_call_at": 456})
+    assert state["last_inbound_call_at"] is None
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION
+    finalized = await contractors_db.finalize_strict_number_release(
+        "c1",
+        deleting,
+        {"twilio_number": "", "number_released_at": 1},
+        strict_precondition=predicate,
+        deactivate_profile=True,
+    )
+    assert finalized is False
+    assert state["active"] is True
+    assert state["twilio_number"] == "+15559999999"
+
+
+@pytest.mark.asyncio
+async def test_direct_entitlement_hold_returns_typed_retry_signal(monkeypatch):
+    """A direct paid purchase can distinguish a release hold from invalid input."""
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "subscription_uuid": "uuid-1",
+        "subscription_status": "expired",
+    })
+    guard = lambda candidate: candidate["active"] is True
+    claim = await contractors_db.claim_strict_number_release(
+        "c1",
+        strict_precondition=guard,
+    )
+    deleting = await contractors_db.begin_strict_number_release_delete(
+        "c1",
+        claim,
+        strict_precondition=guard,
+    )
+    assert deleting is not None
+
+    activated = await contractors_db.activate_subscription_entitlement(
+        "c1",
+        "personal",
+        4_102_444_800.0,
+        "otx-1",
+        "uuid-1",
     )
 
-    assert claim is not None
-    assert claim.update_time == DatetimeWithNanoseconds.from_timestamp_pb(write_time)
-    assert state["number_release_claim"]["nonce"] == claim.nonce
+    assert activated is False
+    assert (
+        contractors_db.take_subscription_entitlement_activation_outcome()
+        is contractors_db.SubscriptionEntitlementActivationOutcome.RELEASE_CONFLICT
+    )
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION
+    assert state["number_release_conflict"]["deferred_updates"]["subscription_status"] == "active"
 
 
-def test_strict_release_claim_requires_its_exact_committed_document_version(monkeypatch):
-    """A later profile write must invalidate a claim even if the nonce remains."""
-    claim_version = object()
-    state = {
-        "update_time": claim_version,
-        "data": {"number_release_claim": {"nonce": "claim-nonce"}},
+@pytest.mark.asyncio
+async def test_deleting_subscription_renewal_is_retained_for_reconciliation(monkeypatch):
+    """A post-boundary App Store renewal cannot be discarded behind a 200 webhook."""
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "subscription_status": "expired",
+        "subscription_tier": "none",
+        "subscription_expires": 0,
+    })
+    claim = await contractors_db.claim_strict_number_release(
+        "c1", strict_precondition=lambda candidate: candidate["active"] is True,
+    )
+    deleting = await contractors_db.begin_strict_number_release_delete(
+        "c1", claim, strict_precondition=lambda candidate: candidate["active"] is True,
+    )
+    assert deleting is not None
+    renewal = {
+        "subscription_status": "active",
+        "subscription_tier": "personal",
+        "subscription_expires": 4_102_444_800.0,
     }
 
-    class _Ref:
-        def get(self):
-            return SimpleNamespace(
-                exists=True,
-                update_time=state["update_time"],
-                to_dict=lambda: dict(state["data"]),
-            )
+    assert not await contractors_db.update_contractor("c1", renewal)
+    assert state["subscription_status"] == "expired"
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION
+    conflict = state["number_release_conflict"]
+    assert isinstance(conflict["at"], int)
+    assert conflict["phase"] == contractors_db.NUMBER_RELEASE_CLAIM_DELETING
+    assert conflict["kind"] == "profile_mutation"
+    assert conflict["fields"] == sorted(renewal)
+    assert conflict["deferred_updates"] == renewal
 
-    class _Collection:
-        def document(self, _contractor_id):
-            return _Ref()
+    # A later safety signal must add to the reconciliation record, not erase
+    # the entitlement that prompted it.
+    assert not await contractors_db.update_contractor("c1", {"last_inbound_call_at": 123})
+    conflict = state["number_release_conflict"]
+    assert conflict["phase"] == contractors_db.NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION
+    assert conflict["fields"] == ["last_inbound_call_at"]
+    assert conflict["deferred_updates"] == {
+        **renewal,
+        "last_inbound_call_at": 123,
+    }
+    assert conflict["deferred_subscription_events"] == [{
+        "at": conflict["deferred_subscription_events"][0]["at"],
+        "updates": renewal,
+    }]
 
-    class _Db:
-        def collection(self, _collection):
-            return _Collection()
+    # A delayed terminal event cannot overwrite the renewal evidence. The
+    # current summary reflects the latest hold, while the ordered event history
+    # keeps both observations for reconciliation.
+    assert not await contractors_db.update_contractor(
+        "c1",
+        {"subscription_status": "expired"},
+    )
+    conflict = state["number_release_conflict"]
+    assert conflict["deferred_updates"]["subscription_status"] == "expired"
+    events = conflict["deferred_subscription_events"]
+    assert [event["updates"]["subscription_status"] for event in events] == [
+        "active",
+        "expired",
+    ]
 
-    monkeypatch.setattr(contractors_db, "get_firestore_client", _Db)
-    claim = contractors_db.StrictNumberReleaseClaim("claim-nonce", claim_version)
 
-    assert contractors_db.strict_number_release_claim_is_current("c1", claim)
-    state["update_time"] = object()  # a post-claim profile mutation
-    assert not contractors_db.strict_number_release_claim_is_current("c1", claim)
+@pytest.mark.asyncio
+async def test_claim_records_expected_number_and_allows_reclaim_after_cancel(monkeypatch):
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+    })
+    first = await contractors_db.claim_strict_number_release(
+        "c1", strict_precondition=lambda candidate: candidate["active"] is True,
+    )
+    assert first is not None
+    assert state["number_release_claim"]["expected_twilio_number"] == "+15559999999"
+
+    assert await contractors_db.update_contractor("c1", {"subscription_status": "active"})
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_CANCELLED
+    second = await contractors_db.claim_strict_number_release(
+        "c1", strict_precondition=lambda candidate: candidate["active"] is True,
+    )
+    assert second is not None
+    assert second.nonce != first.nonce
+
+
+@pytest.mark.asyncio
+async def test_stale_reserved_claim_is_reclaimed_without_provider_delete(monkeypatch):
+    """A crash before ``deleting`` cannot pin a quiet number indefinitely."""
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "number_release_claim": {
+            "nonce": "abandoned-reservation",
+            "state": contractors_db.NUMBER_RELEASE_CLAIM_RESERVED,
+            "claimed_at": (
+                int(time.time())
+                - contractors_db.NUMBER_RELEASE_RESERVATION_TTL_SECONDS
+                - 1
+            ),
+            "expected_twilio_number": "+15559999999",
+        },
+    })
+
+    replacement = await contractors_db.claim_strict_number_release(
+        "c1", strict_precondition=lambda candidate: candidate["active"] is True,
+    )
+
+    assert replacement is not None
+    assert replacement.nonce != "abandoned-reservation"
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_RESERVED
+    stale = contractors_db.StrictNumberReleaseClaim("abandoned-reservation")
+    assert await contractors_db.begin_strict_number_release_delete(
+        "c1", stale, strict_precondition=lambda _candidate: True,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_success_after_deleting_safety_event_holds_profile(monkeypatch):
+    """Twilio may succeed after a concurrent call; finalization must not lie."""
+    import asyncio
+    import threading
+
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "last_inbound_call_at": None,
+    })
+    entered = threading.Event()
+    proceed = threading.Event()
+    deletes: list[str] = []
+
+    class _BlockingNumber:
+        def delete(self):
+            entered.set()
+            assert proceed.wait(timeout=2)
+            deletes.append("delete")
+            return True
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @property
+        def incoming_phone_numbers(self):
+            class _Numbers:
+                def list(self, **_kwargs):
+                    return [_BlockingNumber()]
+            return _Numbers()
+
+    monkeypatch.setattr("twilio.rest.Client", _Client)
+    predicate = lambda candidate: candidate["last_inbound_call_at"] is None
+    task = asyncio.create_task(contractors_db.release_twilio_number(
+        "c1", require_confirmed=True, strict_precondition=predicate,
+    ))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert not await contractors_db.update_contractor("c1", {"last_inbound_call_at": 999})
+        proceed.set()
+        assert await task is False
+    finally:
+        proceed.set()
+        if not task.done():
+            await task
+
+    assert deletes == ["delete"]
+    assert state["number_release_claim"]["state"] == contractors_db.NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION
+    assert state["active"] is True
+    assert state["twilio_number"] == "+15559999999"
+
+
+@pytest.mark.asyncio
+async def test_two_release_entrypoints_produce_one_provider_delete(monkeypatch):
+    """A manual and an embedded path cannot both cross the provider boundary."""
+    import asyncio
+    import threading
+
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+    })
+    entered = threading.Event()
+    proceed = threading.Event()
+    deletes: list[str] = []
+
+    class _BlockingNumber:
+        def delete(self):
+            entered.set()
+            assert proceed.wait(timeout=2)
+            deletes.append("delete")
+            return True
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @property
+        def incoming_phone_numbers(self):
+            class _Numbers:
+                def list(self, **_kwargs):
+                    return [_BlockingNumber()]
+            return _Numbers()
+
+    monkeypatch.setattr("twilio.rest.Client", _Client)
+    first = asyncio.create_task(contractors_db.release_twilio_number("c1"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert await contractors_db.deactivate_contractor("c1") is False
+        proceed.set()
+        assert await first is True
+    finally:
+        proceed.set()
+        if not first.done():
+            await first
+
+    assert deletes == ["delete"]
+    assert state["twilio_number"] == ""
+
+
+@pytest.mark.asyncio
+async def test_deleting_claim_blocks_an_automatic_second_attempt(monkeypatch):
+    _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+    })
+    claim = await contractors_db.claim_strict_number_release(
+        "c1", strict_precondition=lambda _candidate: True,
+    )
+    deleting = await contractors_db.begin_strict_number_release_delete(
+        "c1", claim, strict_precondition=lambda _candidate: True,
+    )
+    assert deleting is not None
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @property
+        def incoming_phone_numbers(self):
+            raise AssertionError("a deleting claim must block a second Twilio lookup")
+
+    monkeypatch.setattr("twilio.rest.Client", _Client)
+    assert await contractors_db.release_twilio_number("c1") is False
+
+
+def test_finalizer_rejects_stale_or_wrong_phase_claim(monkeypatch):
+    state = _install_in_memory_contractor_store(monkeypatch, {
+        "active": True,
+        "twilio_number": "+15559999999",
+        "number_release_claim": {"nonce": "live", "state": "reserved"},
+    })
+
+    async def run():
+        return await contractors_db.finalize_strict_number_release(
+            "c1",
+            contractors_db.StrictNumberReleaseClaim(
+                "other", state=contractors_db.NUMBER_RELEASE_CLAIM_DELETING,
+            ),
+            {"twilio_number": ""},
+            strict_precondition=lambda _candidate: True,
+            deactivate_profile=True,
+        )
+
+    import asyncio
+    assert asyncio.run(run()) is False
+    assert state["twilio_number"] == "+15559999999"
 
 
 @pytest.mark.asyncio
@@ -615,54 +960,55 @@ async def test_release_twilio_failure_propagates_without_touching_profile(
 
     with pytest.raises(RuntimeError):
         await contractors_db.release_twilio_number("c1")
-    assert updates == [], "profile must stay intact so a retry can heal"
+    assert updates[0][1]["number_release_anomaly"]["number"] == "+15559999999"
 
 
 @pytest.mark.asyncio
-async def test_deactivate_stamps_deactivated_at(monkeypatch):
-    updates = []
+async def test_deactivate_asks_release_finalizer_to_stamp_deactivation(monkeypatch):
+    calls = []
 
-    async def fake_release(cid):
+    async def fake_get(cid):
+        return _contractor(contractor_id=cid)
+
+    async def fake_release(cid, **kwargs):
+        calls.append((cid, kwargs))
         return True
 
-    async def fake_update(cid, fields):
-        updates.append((cid, fields))
-        return True
-
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get)
     monkeypatch.setattr(contractors_db, "release_twilio_number", fake_release)
-    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
 
     ok = await contractors_db.deactivate_contractor("c1")
 
     assert ok is True
-    assert len(updates) == 1
-    _cid, fields = updates[0]
-    assert fields["active"] is False
-    assert fields.get("deactivated_at"), "deactivation must be stamped for audit"
+    assert calls == [("c1", {
+        "require_confirmed": False,
+        "deactivate_profile": True,
+        "deactivation_updates": {},
+    })]
 
 
 @pytest.mark.asyncio
 async def test_strict_deactivation_surfaces_an_unconfirmed_release(monkeypatch):
     """The strict worker preserves account routing until reconciliation."""
-    updates = []
+    calls = []
 
-    async def fake_release(cid, *, require_confirmed=False):
-        assert require_confirmed is True
+    async def fake_get(cid):
+        return _contractor(contractor_id=cid)
+
+    async def fake_release(cid, **kwargs):
+        calls.append((cid, kwargs))
+        assert kwargs["require_confirmed"] is True
         return False
 
-    async def fake_update(cid, fields):
-        updates.append((cid, fields))
-        return True
-
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get)
     monkeypatch.setattr(contractors_db, "release_twilio_number", fake_release)
-    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
 
     confirmed = await contractors_db.deactivate_contractor(
         "c1", require_confirmed_number_release=True,
     )
 
     assert confirmed is False
-    assert updates == []
+    assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -807,14 +1153,14 @@ async def test_deactivate_invalidates_token_cache(monkeypatch):
     auth_middleware._token_cache[token_hash] = "c1"
     auth_middleware._token_cache["other-hash"] = "c2"
 
-    async def fake_release(cid):
+    async def fake_get(cid):
+        return _contractor(contractor_id=cid)
+
+    async def fake_release(cid, **kwargs):
         return True
 
-    async def fake_update(cid, fields):
-        return True
-
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get)
     monkeypatch.setattr(contractors_db, "release_twilio_number", fake_release)
-    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
 
     try:
         await contractors_db.deactivate_contractor("c1")
@@ -850,7 +1196,9 @@ async def test_gate_refusal_detail_carries_the_reason(monkeypatch):
 
 
 def test_new_lifecycle_stamps_are_protected_fields():
-    assert {"number_released_at", "number_release_anomaly", "deactivated_at"} <= set(PROTECTED_FIELDS)
+    assert {
+        "number_released_at", "number_release_anomaly", "number_release_conflict", "deactivated_at",
+    } <= set(PROTECTED_FIELDS)
 
 
 @pytest.mark.parametrize(

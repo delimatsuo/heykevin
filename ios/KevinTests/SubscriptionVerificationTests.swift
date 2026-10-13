@@ -120,6 +120,24 @@ final class SubscriptionVerificationTests: XCTestCase {
         )
     }
 
+
+    func testReleaseReconciliation503IsRetryable() throws {
+        let response = try httpResponse(
+            status: 503,
+            headers: ["Retry-After": "60"]
+        )
+        let data = try JSONSerialization.data(withJSONObject: [
+            "status": "retryable",
+            "reason": "number_release_reconciliation",
+            "retry_after_seconds": 60,
+        ])
+
+        XCTAssertEqual(
+            SubscriptionVerificationResponseParser.parse(data: data, response: response),
+            .retryable(after: 60)
+        )
+    }
+
     func testOwnershipFailureIsRejected() throws {
         let response = try httpResponse(status: 409)
         let data = try JSONSerialization.data(withJSONObject: [

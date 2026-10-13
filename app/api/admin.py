@@ -8,12 +8,17 @@ import time
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from google.cloud import firestore
 from pydantic import BaseModel, Field
 
 from app.db import calls as call_db
 from app.db import post_call_handoffs as handoff_db
 from app.db.admin_audit import list_admin_audit_events, write_admin_audit_event
 from app.db.firestore_client import get_firestore_client
+from app.db.contractors import (
+    ReleaseAwareMutationResult,
+    apply_release_aware_contractor_update,
+)
 from app.middleware.auth import verify_api_token
 from app.services.admin_diagnostics import diagnose_contractor
 from app.services.admin_numbers import fetch_twilio_incoming_numbers, reconcile_number_inventory
@@ -49,7 +54,73 @@ SECRET_CONTRACTOR_FIELDS = {
     "google_calendar_access_token",
     "google_calendar_refresh_token",
     "token_hash",
+    # Internal release-state data includes nonces and raw provider binding
+    # details. Expose only the deliberate reconciliation summary below.
+    "number_release_claim",
+    "number_release_conflict",
 }
+
+_NUMBER_RELEASE_RECONCILIATION_FIELDS = frozenset({
+    "active",
+    "subscription_status",
+    "subscription_tier",
+    "subscription_expires",
+    "subscription_auto_renews",
+    "subscription_renewal_status_signed_at_ms",
+    "subscription_forwarded_from",
+    "deleted_app_detected_at",
+    "forwarding_last_seen_at",
+    "last_inbound_call_at",
+})
+
+
+def _number_release_reconciliation(data: dict) -> dict | None:
+    """Return a safe, read-only summary for an operator-held release conflict."""
+    claim = data.get("number_release_claim")
+    if not isinstance(claim, dict) or claim.get("state") != "needs_attention":
+        return None
+
+    conflict = data.get("number_release_conflict")
+    conflict = conflict if isinstance(conflict, dict) else {}
+    deferred = conflict.get("deferred_updates")
+    safe_deferred = {
+        field: deferred[field]
+        for field in _NUMBER_RELEASE_RECONCILIATION_FIELDS
+        if isinstance(deferred, dict) and field in deferred
+    }
+    events = []
+    raw_events = conflict.get("deferred_subscription_events")
+    if isinstance(raw_events, list):
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict):
+                continue
+            raw_updates = raw_event.get("updates")
+            if not isinstance(raw_updates, dict):
+                continue
+            safe_updates = {
+                field: raw_updates[field]
+                for field in _NUMBER_RELEASE_RECONCILIATION_FIELDS
+                if field in raw_updates
+            }
+            if safe_updates:
+                events.append({
+                    "at": raw_event.get("at"),
+                    "updates": safe_updates,
+                })
+
+    return {
+        "state": "needs_attention",
+        "claimed_at": claim.get("claimed_at"),
+        "deleting_at": claim.get("deleting_at"),
+        "held_at": claim.get("held_at"),
+        "conflict_at": conflict.get("at"),
+        "conflict_phase": conflict.get("phase"),
+        "conflict_kind": conflict.get("kind"),
+        "conflict_fields": conflict.get("fields", []),
+        "deferred_updates": safe_deferred,
+        "deferred_subscription_events": events,
+    }
+
 
 PostCallHandoffStatus = Literal[
     "pending",
@@ -72,7 +143,7 @@ class AcknowledgePostCallHandoffRequest(BaseModel):
 
 def _contractor_list_item(doc) -> dict:
     d = doc.to_dict()
-    return {
+    item = {
         "contractor_id": doc.id,
         "business_name": d.get("business_name", ""),
         "owner_name": d.get("owner_name", ""),
@@ -84,6 +155,10 @@ def _contractor_list_item(doc) -> dict:
         "deleted_app_detected_at": d.get("deleted_app_detected_at"),
         "twilio_number": d.get("twilio_number", ""),
     }
+    reconciliation = _number_release_reconciliation(d)
+    if reconciliation is not None:
+        item["number_release_reconciliation"] = reconciliation
+    return item
 
 
 def _matches_contractor_filters(
@@ -420,6 +495,9 @@ async def admin_get_contractor_detail(contractor_id: str, request: Request):
         device_doc = ref.collection("devices").document("primary").get()
         contractor_data = doc.to_dict() or {}
         contractor = _sanitize_contractor_profile(contractor_id, contractor_data)
+        reconciliation = _number_release_reconciliation(contractor_data)
+        if reconciliation is not None:
+            contractor["number_release_reconciliation"] = reconciliation
         device = _device_summary(device_doc)
         job_cards = _job_cards_by_call_sid(db)
         recent_calls = [
@@ -597,31 +675,35 @@ async def admin_extend_trial(contractor_id: str, body: ExtendTrialRequest, reque
 
     loop = asyncio.get_event_loop()
     db = get_firestore_client()
+    ref = db.collection("contractors").document(contractor_id)
 
-    def _extend():
-        ref = db.collection("contractors").document(contractor_id)
-        doc = ref.get()
+    @firestore.transactional
+    def _extend(transaction):
+        doc = ref.get(transaction=transaction)
         if not doc.exists:
             return None
-
-        d = doc.to_dict()
-        before = dict(d)
-        current_expires = d.get("subscription_expires") or time.time()
-        # If already expired, extend from now
+        data = doc.to_dict() or {}
+        before = dict(data)
+        current_expires = data.get("subscription_expires") or time.time()
         if current_expires < time.time():
             current_expires = time.time()
-
         new_expires = current_expires + body.days * 86400
         after = {
             "subscription_expires": new_expires,
             "subscription_status": "trial",
         }
-        ref.update(after)
+        outcome = apply_release_aware_contractor_update(
+            transaction, ref, data, after,
+        )
+        if outcome is ReleaseAwareMutationResult.HELD:
+            return "release_conflict"
         return before, after, new_expires
 
-    result = await loop.run_in_executor(None, _extend)
+    result = await loop.run_in_executor(None, lambda: _extend(db.transaction()))
     if result is None:
         raise HTTPException(status_code=404, detail="Contractor not found")
+    if result == "release_conflict":
+        raise HTTPException(status_code=409, detail="Number release requires reconciliation")
 
     before, after, new_expires = result
     await write_admin_audit_event(
@@ -653,22 +735,30 @@ async def admin_revoke_contractor(
 
     loop = asyncio.get_event_loop()
     db = get_firestore_client()
+    ref = db.collection("contractors").document(contractor_id)
 
-    def _revoke():
-        ref = db.collection("contractors").document(contractor_id)
-        doc = ref.get()
+    @firestore.transactional
+    def _revoke(transaction):
+        doc = ref.get(transaction=transaction)
         if not doc.exists:
             return None
-        before = doc.to_dict()
+        data = doc.to_dict() or {}
+        before = dict(data)
         after = {"subscription_status": "expired"}
         if body.mode == "disable_account":
             after["active"] = False
-        ref.update(after)
+        outcome = apply_release_aware_contractor_update(
+            transaction, ref, data, after,
+        )
+        if outcome is ReleaseAwareMutationResult.HELD:
+            return "release_conflict"
         return before, after
 
-    result = await loop.run_in_executor(None, _revoke)
+    result = await loop.run_in_executor(None, lambda: _revoke(db.transaction()))
     if result is None:
         raise HTTPException(status_code=404, detail="Contractor not found")
+    if result == "release_conflict":
+        raise HTTPException(status_code=409, detail="Number release requires reconciliation")
 
     before, after = result
     await write_admin_audit_event(

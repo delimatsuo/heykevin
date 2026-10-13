@@ -258,17 +258,37 @@ async def _send_claimed_estimate_notifications(
         await send_estimate_notifications(**notification_kwargs)
         return
 
-    contractor = notification_kwargs.get("contractor")
+    # The first contractor read happens before media I/O and model analysis.
+    # Do not use it across the external SMS boundary: a caller can have been
+    # deactivated, reassigned, or removed from compliant texting meanwhile.
+    # Re-read immediately before delivery and replace all owner/sender details
+    # supplied to the notification service with that authoritative profile.
+    if not isinstance(expected_contractor_id, str) or not expected_contractor_id:
+        await hold_for_reconciliation(
+            "Estimate notification contractor identity is uncertain"
+        )
+
+    try:
+        contractor = await get_contractor(expected_contractor_id)
+    except Exception as error:
+        try:
+            await hold_for_reconciliation(
+                "Estimate notification contractor identity is uncertain"
+            )
+        except EstimateNotificationOutcomeUncertain as held_error:
+            raise held_error from error
+
     if (
-        not isinstance(expected_contractor_id, str)
-        or not expected_contractor_id
-        or not isinstance(contractor, dict)
+        not isinstance(contractor, dict)
         or contractor.get("contractor_id") != expected_contractor_id
         or contractor.get("active") is not True
+        or contractor.get("sms_compliance_status") != "approved"
     ):
         await hold_for_reconciliation(
             "Estimate notification contractor identity is uncertain"
         )
+
+    notification_kwargs = {**notification_kwargs, "contractor": contractor}
 
     try:
         await send_estimate_notifications(**notification_kwargs, strict=True)

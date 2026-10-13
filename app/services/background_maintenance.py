@@ -84,6 +84,10 @@ async def lapsed_trials_once(
     *, strict: bool = False, continuation: dict | None = None, page_size: int | None = None,
 ) -> dict:
     from google.cloud import firestore
+    from app.db.contractors import (
+        ReleaseAwareMutationResult,
+        apply_release_aware_contractor_update,
+    )
     from app.db.firestore_client import get_firestore_client
     from app.services.subscription import should_expire_trial
 
@@ -117,10 +121,15 @@ async def lapsed_trials_once(
         @firestore.transactional
         def transaction_body(transaction):
             snapshot = ref.get(transaction=transaction)
-            if not snapshot.exists or not should_expire_trial(snapshot.to_dict() or {}, now):
+            if not snapshot.exists:
                 return False
-            transaction.update(ref, {"subscription_status": "expired"})
-            return True
+            data = snapshot.to_dict() or {}
+            if not should_expire_trial(data, now):
+                return False
+            outcome = apply_release_aware_contractor_update(
+                transaction, ref, data, {"subscription_status": "expired"},
+            )
+            return outcome is not ReleaseAwareMutationResult.HELD
 
         return transaction_body(db.transaction())
 

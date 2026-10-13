@@ -1231,7 +1231,12 @@ def _jobber_request_title(job_data: dict) -> str:
 
 def _format_jobber_lead_note(job_data: dict) -> str:
     """Format deterministic Hey Kevin call details for a Jobber Request note."""
-    lines = ["Source: Hey Kevin", "Lead captured from an AI-screened phone call."]
+    call_sid = str(job_data.get("call_sid") or "").strip()
+    lines = [
+        "Source: Hey Kevin",
+        "Lead captured from an AI-screened phone call.",
+        f"Call SID: {call_sid}",
+    ]
 
     fields = [
         ("Caller", job_data.get("caller_name")),

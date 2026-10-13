@@ -183,7 +183,7 @@ async def execute_once(job: str, continuation: dict) -> dict:
     if job == "orphan_calls":
         return await maintenance.orphan_calls_once(continuation=continuation, page_size=25)
     if job == "call_retention":
-        await maintenance.call_retention_once()
+        await maintenance.call_retention_once(strict=True)
     elif job == "lapsed_trials":
         return await maintenance.lapsed_trials_once(
             strict=True, continuation=continuation, page_size=25,

@@ -72,8 +72,9 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
   post-call and estimate claims remain authoritative. The external expired
   contractor sweep also propagates an uncertain release notice, Twilio lookup,
   or deactivation result, because Twilio or Firestore may already have
-  observed part of that action. A quarantined post-call item does not stop the
-  global scan.
+  observed part of that action. An empty Twilio lookup in this strict path
+  records an anomaly but preserves the active profile and number for operator
+  reconciliation. A quarantined post-call item does not stop the global scan.
 - Pending/in-progress post-call cursors and estimate cursors are persisted
   across requests. Cold starts cannot repeatedly starve later documents.
 - External orphan cleanup reads at most 25 RTDB keys plus its current boundary;

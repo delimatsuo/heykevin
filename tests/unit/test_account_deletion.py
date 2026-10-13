@@ -399,6 +399,7 @@ async def test_strict_release_reports_empty_twilio_lookup_as_unconfirmed(monkeyp
 
     assert confirmed is False
     assert updates[0][1]["number_release_anomaly"]["number"] == "+15559999999"
+    assert "twilio_number" not in updates[0][1]
 
 
 @pytest.mark.asyncio
@@ -448,7 +449,7 @@ async def test_deactivate_stamps_deactivated_at(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_strict_deactivation_surfaces_an_unconfirmed_release(monkeypatch):
-    """It still records deactivation, but the external caller must hold its job."""
+    """The strict worker preserves account routing until reconciliation."""
     updates = []
 
     async def fake_release(cid, *, require_confirmed=False):
@@ -467,7 +468,7 @@ async def test_strict_deactivation_surfaces_an_unconfirmed_release(monkeypatch):
     )
 
     assert confirmed is False
-    assert updates[0][1]["active"] is False
+    assert updates == []
 
 
 # ---------------------------------------------------------------------------

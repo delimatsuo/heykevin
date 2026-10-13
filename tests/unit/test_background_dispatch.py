@@ -97,6 +97,17 @@ async def test_disabled_job_performs_zero_imported_work(monkeypatch):
     assert not dispatch._CHILDREN
 
 
+@pytest.mark.asyncio
+async def test_external_call_retention_requests_strict_maintenance(monkeypatch):
+    from app.services import background_maintenance
+
+    retention = AsyncMock()
+    monkeypatch.setattr(background_maintenance, "call_retention_once", retention)
+
+    assert await dispatch.execute_once("call_retention", {}) == {}
+    retention.assert_awaited_once_with(strict=True)
+
+
 @pytest.mark.parametrize("job,cursor", [("orphan_calls", {"pending": "x"}),
     ("post_calls", {"pending": "x/y"}), ("post_calls", {"pending": "x" * 513}),
     ("estimates", {"processing": 1}), ("post_calls", {"pending": "x\n"})])

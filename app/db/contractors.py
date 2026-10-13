@@ -894,15 +894,15 @@ async def release_twilio_number(contractor_id: str, *, require_confirmed: bool =
 
     from twilio.base.exceptions import TwilioRestException
 
-    updates = {
-        "twilio_number": "",
-        "number_released_at": int(time.time()),
-        "provisioned_country_code": None,
-        "number_provider": None,
-        "number_type": None,
-        "number_capabilities": None,
-    }
     if numbers:
+        updates = {
+            "twilio_number": "",
+            "number_released_at": int(time.time()),
+            "provisioned_country_code": None,
+            "number_provider": None,
+            "number_type": None,
+            "number_capabilities": None,
+        }
         try:
             await loop.run_in_executor(
                 None,
@@ -925,19 +925,33 @@ async def release_twilio_number(contractor_id: str, *, require_confirmed: bool =
         # bills. Record it on the document so reconciliation can find it.
         logger.error(
             f"Twilio number {redact_phone(twilio_number)} for contractor {contractor_id} "
-            f"not found in Twilio account; clearing profile and recording anomaly"
+            f"not found in Twilio account; recording release anomaly"
         )
-        # The doc clears the number and the log redacts it, so the anomaly
-        # record itself must carry the number or reconciliation has no key.
-        # Server-only field (PROTECTED_FIELDS), same sensitivity as the
-        # twilio_number field it replaces.
-        updates["number_release_anomaly"] = {"at": int(time.time()), "number": twilio_number}
+        # The log redacts the number. The anomaly record therefore carries it
+        # so reconciliation has a key; it is server-only (PROTECTED_FIELDS).
+        anomaly = {"at": int(time.time()), "number": twilio_number}
+        if require_confirmed:
+            # Do not detach an active customer from a number whose provider
+            # outcome is unknown.  The external ledger will be held, while
+            # the profile retains both the live routing field and the
+            # reconciliation record for an operator to verify.
+            await update_contractor(contractor_id, {"number_release_anomaly": anomaly})
+            return False
+        updates = {
+            "twilio_number": "",
+            "number_released_at": int(time.time()),
+            "provisioned_country_code": None,
+            "number_provider": None,
+            "number_type": None,
+            "number_capabilities": None,
+            "number_release_anomaly": anomaly,
+        }
 
     # Clear the number from the contractor profile.  This preserves the
     # historical anomaly record and lets a human reconcile the original
     # number even though the normal profile field is cleared.
     await update_contractor(contractor_id, updates)
-    return bool(numbers) or not require_confirmed
+    return True
 
 
 async def deactivate_contractor(
@@ -956,6 +970,12 @@ async def deactivate_contractor(
         release_confirmed = await release_twilio_number(
             contractor_id, require_confirmed=True,
         )
+        if not release_confirmed:
+            # The strict worker owns a durable needs-attention ledger state.
+            # Preserve the account and its routing number until an operator
+            # verifies the provider outcome; otherwise a still-live forward
+            # could be disabled and disappear from the next safety sweep.
+            return False
     else:
         # Preserve the legacy call signature and best-effort behavior for
         # customer-initiated and embedded-system deactivations.

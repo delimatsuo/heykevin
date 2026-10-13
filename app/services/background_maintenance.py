@@ -68,11 +68,15 @@ async def orphan_calls_once(*, continuation: dict | None = None, page_size: int 
     return {"cursor": next_cursor}
 
 
-async def call_retention_once():
+async def call_retention_once(*, strict: bool = False):
     from app.db.calls import cleanup_old_calls
 
     for _ in range(4):
-        if await cleanup_old_calls() < 500:
+        if strict:
+            deleted = await cleanup_old_calls(strict=True)
+        else:
+            deleted = await cleanup_old_calls()
+        if deleted < 500:
             break
 
 

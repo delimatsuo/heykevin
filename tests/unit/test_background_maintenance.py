@@ -35,6 +35,33 @@ async def test_retention_preserves_four_batch_cap_and_short_batch_stop(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_external_retention_propagates_datastore_uncertainty(monkeypatch):
+    """A private worker must hold its ledger instead of treating this as zero rows."""
+    from app.db import calls
+    cleanup = AsyncMock(side_effect=RuntimeError("fictional firestore outage"))
+    monkeypatch.setattr(calls, "cleanup_old_calls", cleanup)
+
+    with pytest.raises(RuntimeError, match="fictional firestore outage"):
+        await maintenance.call_retention_once(strict=True)
+
+    cleanup.assert_awaited_once_with(strict=True)
+
+
+@pytest.mark.asyncio
+async def test_strict_call_cleanup_reraises_a_datastore_error(monkeypatch):
+    from app.db import calls
+
+    def unavailable():
+        raise RuntimeError("fictional firestore outage")
+
+    monkeypatch.setattr(calls, "get_firestore_client", unavailable)
+
+    with pytest.raises(RuntimeError, match="fictional firestore outage"):
+        await calls.cleanup_old_calls(strict=True)
+    assert await calls.cleanup_old_calls() == 0
+
+
+@pytest.mark.asyncio
 async def test_trial_transaction_does_not_clobber_paid_activation(monkeypatch):
     from google.cloud import firestore
     from app.db import firestore_client

@@ -147,22 +147,47 @@ def claim_notification_and_fail(
     return _tx(tx)
 
 
-async def run_pending_estimates_once(now: Optional[float] = None) -> None:
+async def run_pending_estimates_once(
+    now: Optional[float] = None, *, page_size: int | None = None,
+    max_analyses: int | None = None, continuation: dict | None = None,
+) -> dict | None:
     """Scan for processing estimates with expired leases, re-claim, and re-run analysis."""
+    bounded = page_size is not None
+    if bounded and (not 1 <= page_size <= 25 or max_analyses != 1):
+        raise ValueError("External estimate recovery requires page_size <= 25 and max_analyses=1")
+    cursor = (continuation or {}).get("processing") if bounded else None
+    next_cursor = cursor
+    admitted = 0
     current_time = now if now is not None else time.time()
     db = get_firestore_client()
 
     def _fetch_processing_docs():
         query = db.collection(COLLECTION).where("status", "==", "processing")
-        return list(query.stream())
+        if not bounded:
+            return list(query.stream())
+        query = query.order_by("__name__")
+        if cursor:
+            query = query.start_after({"__name__": db.collection(COLLECTION).document(cursor)})
+        docs = list(query.limit(page_size).stream())
+        if not docs and cursor:
+            docs = list(db.collection(COLLECTION).where("status", "==", "processing")
+                        .order_by("__name__").limit(page_size).stream())
+        return docs
 
     try:
         docs = await asyncio.get_running_loop().run_in_executor(None, _fetch_processing_docs)
     except Exception as e:
         logger.error("Error checking pending estimates: %s", type(e).__name__)
+        if bounded:
+            raise
         return
 
+    if bounded and not docs:
+        return {"processing": None}
     for doc in docs:
+        if bounded and admitted >= max_analyses:
+            break
+        next_cursor = doc.id
         token_hash = doc.id
         doc_ref = doc.reference
 
@@ -178,11 +203,15 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
             )
         except Exception as e:
             logger.error("Failed to execute claim transaction for %s: %s", token_hash[:8], type(e).__name__)
+            if bounded:
+                raise
             continue
 
         if action in ("noop", "failed_no_notify"):
             continue
 
+        if bounded:
+            admitted += 1
         media_id = claim_data.get("media_id", "")
         object_path = claim_data.get("media_object_path", "")
         contractor_id = claim_data.get("contractor_id", "")
@@ -292,6 +321,7 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
                         token_hash[:8],
                         type(e).__name__,
                     )
+    return {"processing": next_cursor} if bounded else None
 
 
 async def estimate_worker_loop() -> None:

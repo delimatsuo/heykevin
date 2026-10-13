@@ -4,7 +4,6 @@ FastAPI application entry point.
 """
 
 import asyncio
-from contextlib import suppress
 import os
 import signal
 
@@ -52,6 +51,7 @@ _post_call_worker_task: asyncio.Task | None = None
 _service_request_recovery_task: asyncio.Task | None = None
 _estimate_worker_task: asyncio.Task | None = None
 _jobber_disconnect_recovery_task: asyncio.Task | None = None
+_housekeeping_tasks: dict[str, asyncio.Task] = {}
 
 app = FastAPI(
     title="Kevin",
@@ -105,6 +105,7 @@ async def health():
     staging_live_safety = staging_native_live_safety_controls_enabled()
     return {
         "status": "ok",
+        "worker_mode": settings.background_worker_mode,
         "environment": settings.environment,
         "service": os.getenv("K_SERVICE", ""),
         "revision": os.getenv("K_REVISION", ""),
@@ -167,182 +168,38 @@ if settings.environment == "development":
         return {"numbers": result}
 
 
-async def _orphan_call_cleanup():
-    """Periodically clean up stale entries from RTDB /active_calls.
-
-    Runs every 5 minutes. Deletes any entry where state_updated_at
-    is more than 2 hours old.
-    """
-    import time
-    from app.db.cache import _init_firebase, ACTIVE_CALLS_PATH
-
-    MAX_AGE = 7200  # 2 hours in seconds
+async def _periodic_maintenance(name: str, interval: int, *, immediate: bool = False):
+    from app.services import background_maintenance
 
     while True:
-        await asyncio.sleep(300)  # every 5 minutes
+        if not immediate:
+            await asyncio.sleep(interval)
         try:
-            _init_firebase()
-            from firebase_admin import db as rtdb
+            await getattr(background_maintenance, name)()
+        except Exception as error:
+            logger.warning("Background maintenance failed: %s", type(error).__name__)
+        if immediate:
+            await asyncio.sleep(interval)
 
-            loop = asyncio.get_event_loop()
-            ref = rtdb.reference(ACTIVE_CALLS_PATH)
-            all_calls = await loop.run_in_executor(None, ref.get)
 
-            if not all_calls or not isinstance(all_calls, dict):
-                continue
-
-            now = time.time()
-            cleaned = 0
-            for call_sid, call_data in all_calls.items():
-                if not isinstance(call_data, dict):
-                    continue
-                updated_at = call_data.get("state_updated_at", 0)
-                if updated_at and now - updated_at > MAX_AGE:
-                    child_ref = rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}")
-                    await loop.run_in_executor(None, child_ref.delete)
-                    cleaned += 1
-
-            if cleaned:
-                logger.info(f"Orphan cleanup: removed {cleaned} stale active call(s)")
-
-        except Exception as e:
-            logger.warning(f"Orphan call cleanup error: {e}")
+async def _orphan_call_cleanup():
+    await _periodic_maintenance("orphan_calls_once", 300)
 
 
 async def _call_retention_sweep():
-    """Enforce the documented 90-day call-record retention. Runs every 6 hours.
-
-    `cleanup_old_calls` has always existed but was only reachable from a manual
-    admin endpoint, so nothing ever ran it — production accumulated call records
-    well past the retention window that CLAUDE.md states as a privacy property.
-
-    Each pass deletes at most MAX_BATCHES * 500 records so a large backlog drains
-    over several runs rather than in one long burst of Firestore writes.
-    """
-    from app.db.calls import cleanup_old_calls
-
-    MAX_BATCHES = 4
-
-    while True:
-        await asyncio.sleep(6 * 3600)
-        try:
-            total = 0
-            for _ in range(MAX_BATCHES):
-                deleted = await cleanup_old_calls()
-                total += deleted
-                # A short batch means the backlog is drained.
-                if deleted < 500:
-                    break
-            if total:
-                logger.info(f"Call retention sweep: deleted {total} expired record(s)")
-        except Exception as e:
-            logger.warning(f"Call retention sweep error: {e}")
-
-
-async def _data_purge_sweep():
-    """Purge accounts deactivated longer than the grace period ago.
-
-    No-op unless PURGE_ENABLED is set (owner-gated). Runs every 6 hours.
-    """
-    from app.db.purge import purge_sweep
-
-    while True:
-        try:
-            await purge_sweep()
-        except Exception as e:
-            logger.warning(f"Data purge sweep error: {type(e).__name__}")
-        await asyncio.sleep(6 * 3600)
+    await _periodic_maintenance("call_retention_once", 6 * 3600)
 
 
 async def _lapsed_trial_sweep():
-    """Transition lapsed trials from `trial` to `expired`. Runs every 6 hours.
-
-    Without this, nothing ever writes `expired` for a trial user: the only other
-    writer is the App Store notification handler, and a user who never subscribed
-    has no App Store transaction to generate one. Accounts therefore sat in
-    `trial` indefinitely, which left `_expired_contractor_cleanup` (which selects
-    on `subscription_status == "expired"`) with nothing to act on.
-
-    Only `trial` is swept. See `should_expire_trial` for why `active` is excluded.
-    """
-    import time
-    from google.cloud import firestore
-    from app.db.firestore_client import get_firestore_client
-    from app.services.subscription import should_expire_trial
-
-    while True:
-        await asyncio.sleep(6 * 3600)
-        try:
-            db = get_firestore_client()
-            loop = asyncio.get_event_loop()
-            now = time.time()
-
-            docs = await loop.run_in_executor(
-                None,
-                lambda: list(
-                    db.collection("contractors")
-                    .where("subscription_status", "==", "trial")
-                    .stream()
-                ),
-            )
-
-            def _expire_if_still_trial(doc_id: str) -> bool:
-                """Re-check status inside a transaction before writing.
-
-                StoreKit verification or an App Store notification can flip an
-                account from `trial` to `active` between the query above and this
-                write. An unconditional update would then clobber a freshly paid
-                subscription back to `expired` and expose it to the number-release
-                cleanup, so the status is re-read transactionally.
-                """
-                ref = db.collection("contractors").document(doc_id)
-
-                @firestore.transactional
-                def _txn(transaction):
-                    snapshot = ref.get(transaction=transaction)
-                    if not snapshot.exists:
-                        return False
-                    current = snapshot.to_dict() or {}
-                    if not should_expire_trial(current, now):
-                        return False
-                    transaction.update(ref, {"subscription_status": "expired"})
-                    return True
-
-                return _txn(db.transaction())
-
-            swept = 0
-            for doc in docs:
-                if not should_expire_trial(doc.to_dict() or {}, now):
-                    continue
-                try:
-                    if await loop.run_in_executor(None, lambda d=doc: _expire_if_still_trial(d.id)):
-                        swept += 1
-                except Exception as e:
-                    logger.warning(
-                        "Lapsed trial sweep failed for one contractor: %s", type(e).__name__
-                    )
-
-            if swept:
-                logger.info(f"Lapsed trial sweep: marked {swept} trial(s) expired")
-        except Exception as e:
-            logger.warning(f"Lapsed trial sweep error: {e}")
+    await _periodic_maintenance("lapsed_trials_once", 6 * 3600)
 
 
 async def _expired_contractor_cleanup():
-    """Release numbers from accounts that no longer need them. Runs every 6 hours.
+    await _periodic_maintenance("expired_contractors_once", 6 * 3600)
 
-    Two triggers, see app/services/number_release.py: deleted app for 14+
-    days (always on) and lapsed subscription for 30+ days
-    (LAPSED_NUMBER_RELEASE_ENABLED, owner-gated). Both require a quiet number.
-    """
-    from app.services.number_release import run_expired_contractor_cleanup_once
 
-    while True:
-        await asyncio.sleep(6 * 3600)  # Every 6 hours
-        try:
-            await run_expired_contractor_cleanup_once()
-        except Exception as e:
-            logger.warning(f"Expired contractor cleanup error: {e}")
+async def _data_purge_sweep():
+    await _periodic_maintenance("data_purge_once", 6 * 3600, immediate=True)
 
 
 @app.on_event("startup")
@@ -362,51 +219,53 @@ async def startup():
     if not settings.vapi_webhook_secret and settings.environment != "development":
         logger.critical("SECURITY WARNING: vapi_webhook_secret is not set — Vapi webhook is unauthenticated")
 
-    # Start orphan call cleanup background task
-    asyncio.create_task(_orphan_call_cleanup())
-    asyncio.create_task(_call_retention_sweep())
-    asyncio.create_task(_lapsed_trial_sweep())
-    asyncio.create_task(_expired_contractor_cleanup())
-    asyncio.create_task(_data_purge_sweep())
-    from app.services.post_call_handoff import post_call_worker_loop
+    if settings.background_worker_mode == "embedded":
+        for factory in (
+            _orphan_call_cleanup, _call_retention_sweep, _lapsed_trial_sweep,
+            _expired_contractor_cleanup, _data_purge_sweep,
+        ):
+            task = _housekeeping_tasks.get(factory.__name__)
+            if task is None or task.done():
+                _housekeeping_tasks[factory.__name__] = asyncio.create_task(factory())
+        from app.services.post_call_handoff import post_call_worker_loop
 
-    if _post_call_worker_task is None or _post_call_worker_task.done():
-        _post_call_worker_task = asyncio.create_task(post_call_worker_loop())
-    from app.services.estimate_worker import estimate_worker_loop
+        if _post_call_worker_task is None or _post_call_worker_task.done():
+            _post_call_worker_task = asyncio.create_task(post_call_worker_loop())
+        from app.services.estimate_worker import estimate_worker_loop
 
-    if _estimate_worker_task is None or _estimate_worker_task.done():
-        _estimate_worker_task = asyncio.create_task(estimate_worker_loop())
-    from app.services.service_request_recovery import (
-        service_request_recovery_worker_loop,
-    )
-
-    if (
-        settings.service_request_recovery_enabled is True
-        and (
-        _service_request_recovery_task is None
-        or _service_request_recovery_task.done()
-        )
-    ):
-        # Recovery processes only already-durable intents. Initiating new
-        # mutations remains gated per contractor at the voice-tool boundary.
-        _service_request_recovery_task = asyncio.create_task(
-            service_request_recovery_worker_loop()
+        if _estimate_worker_task is None or _estimate_worker_task.done():
+            _estimate_worker_task = asyncio.create_task(estimate_worker_loop())
+        from app.services.service_request_recovery import (
+            service_request_recovery_worker_loop,
         )
 
-    from app.services.jobber_disconnect_recovery import (
-        jobber_disconnect_recovery_worker_loop,
-    )
+        if (
+            settings.service_request_recovery_enabled is True
+            and (
+            _service_request_recovery_task is None
+            or _service_request_recovery_task.done()
+            )
+        ):
+            # Recovery processes only already-durable intents. Initiating new
+            # mutations remains gated per contractor at the voice-tool boundary.
+            _service_request_recovery_task = asyncio.create_task(
+                service_request_recovery_worker_loop()
+            )
 
-    if (
-        getattr(settings, "jobber_disconnect_recovery_enabled", False) is True
-        and (
-            _jobber_disconnect_recovery_task is None
-            or _jobber_disconnect_recovery_task.done()
+        from app.services.jobber_disconnect_recovery import (
+            jobber_disconnect_recovery_worker_loop,
         )
-    ):
-        _jobber_disconnect_recovery_task = asyncio.create_task(
-            jobber_disconnect_recovery_worker_loop()
-        )
+
+        if (
+            getattr(settings, "jobber_disconnect_recovery_enabled", False) is True
+            and (
+                _jobber_disconnect_recovery_task is None
+                or _jobber_disconnect_recovery_task.done()
+            )
+        ):
+            _jobber_disconnect_recovery_task = asyncio.create_task(
+                jobber_disconnect_recovery_worker_loop()
+            )
 
     # F-21: drop the redacted Twilio number from startup logs entirely. Even
     # the last 4 digits are unnecessary signal in centralised logs and the
@@ -418,26 +277,17 @@ async def startup():
 async def shutdown():
     global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task, _jobber_disconnect_recovery_task
 
-    if _post_call_worker_task is not None:
-        _post_call_worker_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _post_call_worker_task
-        _post_call_worker_task = None
-    if _estimate_worker_task is not None:
-        _estimate_worker_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _estimate_worker_task
-        _estimate_worker_task = None
-    if _service_request_recovery_task is not None:
-        _service_request_recovery_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _service_request_recovery_task
-        _service_request_recovery_task = None
-    if _jobber_disconnect_recovery_task is not None:
-        _jobber_disconnect_recovery_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _jobber_disconnect_recovery_task
-        _jobber_disconnect_recovery_task = None
+    tasks = list(_housekeeping_tasks.values()) + [
+        _post_call_worker_task, _estimate_worker_task,
+        _service_request_recovery_task, _jobber_disconnect_recovery_task,
+    ]
+    tasks = [task for task in tasks if task is not None]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _housekeeping_tasks.clear()
+    _post_call_worker_task = _estimate_worker_task = None
+    _service_request_recovery_task = _jobber_disconnect_recovery_task = None
 
     from app.db.jobber_disconnect_transactions import drain_jobber_operations
     await drain_jobber_operations()

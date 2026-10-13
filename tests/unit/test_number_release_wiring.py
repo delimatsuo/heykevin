@@ -32,15 +32,37 @@ def test_startup_and_shutdown_handlers_are_registered():
     assert [h.__name__ for h in app_main.app.router.on_shutdown] == ["shutdown"]
 
 
-def test_cleanup_loop_delegates_to_the_tested_sweep():
-    src = inspect.getsource(app_main._expired_contractor_cleanup)
-    assert "run_expired_contractor_cleanup_once" in src
-    assert "asyncio.sleep(6 * 3600)" in src
+@pytest.mark.asyncio
+async def test_cleanup_loop_delegates_to_the_tested_sweep(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import background_maintenance, number_release
+    run = AsyncMock()
+    monkeypatch.setattr(number_release, "run_expired_contractor_cleanup_once", run)
+    await background_maintenance.expired_contractors_once()
+    run.assert_awaited_once_with()
+    delegated = AsyncMock()
+    monkeypatch.setattr(app_main, "_periodic_maintenance", delegated)
+    await app_main._expired_contractor_cleanup()
+    delegated.assert_awaited_once_with("expired_contractors_once", 6 * 3600)
 
 
-def test_startup_schedules_the_cleanup_loop():
-    src = inspect.getsource(app_main.startup)
-    assert "_expired_contractor_cleanup()" in src
+@pytest.mark.asyncio
+async def test_startup_schedules_the_cleanup_loop(monkeypatch):
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(app_main.settings, "background_worker_mode", "embedded")
+    monkeypatch.setattr(app_main, "validate_runtime_safety", lambda: None)
+    for field in ("twilio_account_sid", "twilio_auth_token", "anthropic_api_key",
+                  "deepgram_api_key", "elevenlabs_api_key", "api_bearer_token"):
+        monkeypatch.setattr(app_main.settings, field, "fictional")
+    monkeypatch.setattr(app_main, "_housekeeping_tasks", {})
+    cleanup = AsyncMock()
+    cleanup.__name__ = "_expired_contractor_cleanup"
+    monkeypatch.setattr(app_main, "_expired_contractor_cleanup", cleanup)
+    try:
+        await app_main.startup()
+        assert "_expired_contractor_cleanup" in app_main._housekeeping_tasks
+    finally:
+        await app_main.shutdown()
 
 
 def test_incoming_call_stamps_inbound_evidence_before_the_subscription_gate():

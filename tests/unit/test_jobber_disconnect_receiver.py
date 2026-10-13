@@ -164,14 +164,18 @@ async def test_actual_startup_shutdown_track_single_recovery_task(monkeypatch):
     config = SimpleNamespace(**{key: "fictional" for key in [
         "twilio_account_sid", "twilio_auth_token", "anthropic_api_key", "deepgram_api_key", "elevenlabs_api_key", "api_bearer_token"]},
         vapi_webhook_secret="", environment="development", service_request_recovery_enabled=False,
-        jobber_disconnect_recovery_enabled=True)
-    namespace = {"asyncio": SimpleNamespace(create_task=create, CancelledError=asyncio.CancelledError),
+        jobber_disconnect_recovery_enabled=True, background_worker_mode="embedded")
+    namespace = {"asyncio": SimpleNamespace(create_task=create, CancelledError=asyncio.CancelledError, gather=asyncio.gather),
         "settings": config, "validate_runtime_safety": lambda: None,
         "logger": SimpleNamespace(info=lambda *args, **kwargs: None), "suppress": suppress}
     for name in ["_post_call_worker_task", "_service_request_recovery_task", "_estimate_worker_task", "_jobber_disconnect_recovery_task"]:
         namespace[name] = None
+    namespace["_housekeeping_tasks"] = {}
     for name in ["_orphan_call_cleanup", "_call_retention_sweep", "_lapsed_trial_sweep", "_expired_contractor_cleanup", "_data_purge_sweep"]:
-        namespace[name] = idle
+        async def housekeeping():
+            await idle()
+        housekeeping.__name__ = name
+        namespace[name] = housekeeping
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
     try:
         await namespace["startup"]()

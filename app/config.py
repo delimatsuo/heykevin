@@ -187,6 +187,18 @@ class Settings(DotenvProtectedBaseSettings):
     firestore_project_id: str = ""
     firebase_database_url: str = PRODUCTION_FIREBASE_DATABASE_URL
 
+    # Private staging background worker; embedded remains the production default.
+    background_worker_mode: str = "embedded"
+    background_worker_scheduler_audience: str = ""
+    background_worker_scheduler_service_account_email: str = ""
+
+    @field_validator("background_worker_mode")
+    @classmethod
+    def _validate_background_worker_mode(cls, value: str) -> str:
+        if value not in {"embedded", "external"}:
+            raise ValueError("BACKGROUND_WORKER_MODE must be embedded or external")
+        return value
+
     # App
     environment: str = "development"
     apns_sandbox: bool = True  # Use APNs sandbox endpoint; set to false for App Store builds
@@ -275,6 +287,14 @@ def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
     """Fail fast when an environment is pointed at the wrong runtime resources."""
     env = (settings.environment or "").strip().lower()
     errors: list[str] = []
+    if settings.background_worker_mode not in {"embedded", "external"}:
+        errors.append("BACKGROUND_WORKER_MODE must be embedded or external")
+    if settings.background_worker_mode == "external":
+        if env != "staging":
+            errors.append("External background workers require ENVIRONMENT=staging")
+        if settings.allow_production_resources_in_non_production:
+            errors.append("External background workers forbid production resource overrides")
+
 
     parent_breaker_fields = (
         settings.public_demo_breaker_twilio_parent_account_sid,

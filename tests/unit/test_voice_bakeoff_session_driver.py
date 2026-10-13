@@ -78,9 +78,11 @@ _EXPECTED_LIVE_HASHES = {
     # wiring and bounded shutdown drain.
     # Re-pinned 2026-10-13 for reviewed staging worker isolation; embedded
     # remains the default and call routing is unchanged.
+    # Re-pinned 2026-10-13 for reviewed durable external-worker cutover
+    # fencing and bounded maintenance scans; voice bakeoff isolation remains.
     # Voice bakeoff imports and activation remain prohibited.
     Path("app/main.py"):
-        "3f4723e73ea325b46ee223cfbb7b0721937d4b4a2488a92ef229cc642f946797",
+        "97ac5ed051ce02fc0ad2e227cb214d75f8e56d20d1a3ded9da9064a432e96750",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

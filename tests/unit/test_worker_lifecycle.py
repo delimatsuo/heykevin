@@ -154,25 +154,39 @@ def test_external_mode_forbidden_outside_staging(monkeypatch, environment):
         validate_runtime_safety()
 
 
+def _set_safe_staging_external(monkeypatch, *, environment="staging"):
+    key = base64.b64encode(b"x" * 32).decode()
+    for field, value in {
+        "background_worker_mode": "external",
+        "environment": environment,
+        "background_worker_cutover_generation": "staging-cutover-20261013",
+        "allow_production_resources_in_non_production": False,
+        "cloud_run_url": "https://kevin-staging.example.com",
+        "firestore_project_id": "kevin-staging",
+        "firebase_database_url": "https://kevin-staging.firebaseio.com",
+        "production_twilio_account_sid": "ACproduction",
+        "twilio_account_sid": "ACstaging",
+        "appstore_environment": "sandbox",
+        "apns_sandbox": True,
+        "transcript_encryption_key": key,
+        "integration_token_encryption_keys": f'{{"1": "{key}"}}',
+        "integration_token_active_key_version": "1",
+    }.items():
+        monkeypatch.setattr(main.settings, field, value)
+
+
+@pytest.mark.parametrize("environment", ["STAGING", " staging "])
+def test_external_mode_refuses_noncanonical_environment_aliases(monkeypatch, environment):
+    _set_safe_staging_external(monkeypatch, environment=environment)
+    with pytest.raises(RuntimeError, match="trimmed lower-case runtime name"):
+        validate_runtime_safety()
+
+
 @pytest.mark.parametrize("field", [
     "purge_enabled", "service_request_recovery_enabled", "jobber_disconnect_recovery_enabled",
 ])
 def test_external_mode_refuses_unmigrated_enabled_loops(monkeypatch, field):
-    key = base64.b64encode(b"x" * 32).decode()
-    monkeypatch.setattr(main.settings, "background_worker_mode", "external")
-    monkeypatch.setattr(main.settings, "environment", "staging")
-    monkeypatch.setattr(main.settings, "background_worker_cutover_generation", "staging-cutover-20261013")
-    monkeypatch.setattr(main.settings, "allow_production_resources_in_non_production", False)
-    monkeypatch.setattr(main.settings, "cloud_run_url", "https://kevin-staging.example.com")
-    monkeypatch.setattr(main.settings, "firestore_project_id", "kevin-staging")
-    monkeypatch.setattr(main.settings, "firebase_database_url", "https://kevin-staging.firebaseio.com")
-    monkeypatch.setattr(main.settings, "production_twilio_account_sid", "ACproduction")
-    monkeypatch.setattr(main.settings, "twilio_account_sid", "ACstaging")
-    monkeypatch.setattr(main.settings, "appstore_environment", "sandbox")
-    monkeypatch.setattr(main.settings, "apns_sandbox", True)
-    monkeypatch.setattr(main.settings, "transcript_encryption_key", key)
-    monkeypatch.setattr(main.settings, "integration_token_encryption_keys", f'{{"1": "{key}"}}')
-    monkeypatch.setattr(main.settings, "integration_token_active_key_version", "1")
+    _set_safe_staging_external(monkeypatch)
     monkeypatch.setattr(main.settings, field, True)
     with pytest.raises(RuntimeError, match="until its loop is separately migrated"):
         validate_runtime_safety()

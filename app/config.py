@@ -290,8 +290,14 @@ def decode_transcript_encryption_key(raw: str) -> bytes | None:
 
 def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
     """Fail fast when an environment is pointed at the wrong runtime resources."""
-    env = (settings.environment or "").strip().lower()
+    configured_env = settings.environment
+    env = (configured_env or "").strip().lower()
     errors: list[str] = []
+    # Runtime branches intentionally compare the configured value directly.
+    # Reject aliases rather than allowing validation to normalize one value
+    # while startup selects a different branch.
+    if configured_env != env:
+        errors.append("ENVIRONMENT must be a trimmed lower-case runtime name")
     if settings.background_worker_mode not in {"embedded", "external"}:
         errors.append("BACKGROUND_WORKER_MODE must be embedded or external")
     if settings.background_worker_mode == "external":

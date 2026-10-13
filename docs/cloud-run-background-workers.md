@@ -48,8 +48,10 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
   transactionally before it stops embedded loops; the worker transactionally
   refuses to claim business work until the matching `external_active` record
   exists. An incomplete, mismatched, or expired handoff fences external claims
-  and restores embedded processing only after any admitted worker job drains.
-  If the control datastore is unavailable, the API reports
+  and restores embedded processing only after every ledger record is
+  `completed`. A `running`, malformed, or `needs_attention` record holds the
+  API in draining state until an operator reconciles it. If the control
+  datastore is unavailable, the API reports
   `cutover_unavailable` and starts no loops rather than risk duplicate work.
 - `app.worker_main:app` recognizes the ledger's fixed job names but executes
   only the six jobs below. Requests for `data_purge`, `service_requests`, or
@@ -230,10 +232,11 @@ due time. No automated replay or repair endpoint is included in this slice.
 
 For API rollback, restore minimum one first; pause schedules and let the API
 move the control record to `external_draining`. The worker refuses new claims,
-and embedded loops start only after the admitted ledger work settles. Reconcile
-holds before starting any retained embedded revision. Never delete or manually
-clear the control record to bypass that fence. Retain the candidate image and
-rollback configuration through qualification; do not expand the earlier
+and embedded loops start only after every ledger record is completed. A held
+`needs_attention` record requires explicit operator reconciliation; it is
+never replayed automatically by fallback loops. Never delete or manually clear
+the control record to bypass that fence. Retain the candidate image and rollback
+configuration through qualification; do not expand the earlier
 one-time container cleanup approval to these images or other resources.
 
 ## Evidence

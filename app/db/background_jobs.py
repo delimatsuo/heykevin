@@ -100,6 +100,26 @@ def _valid_timestamp(value: object, now: float) -> bool:
     )
 
 
+def _authoritative_batch_snapshots(db, refs, *, transaction=None, error_message: str) -> list:
+    """Return batch reads in caller order, never trusting Firestore stream order."""
+    expected = {ref.path for ref in refs}
+    if len(expected) != len(refs):
+        raise ValueError(error_message)
+    kwargs = {"retry": None, "timeout": RPC_TIMEOUT_SECONDS}
+    if transaction is not None:
+        kwargs["transaction"] = transaction
+    by_path = {}
+    for snapshot in db.get_all(refs, **kwargs):
+        reference = getattr(snapshot, "reference", None)
+        path = getattr(reference, "path", None)
+        if snapshot is None or path not in expected or path in by_path:
+            raise ValueError(error_message)
+        by_path[path] = snapshot
+    if set(by_path) != expected:
+        raise ValueError(error_message)
+    return [by_path[ref.path] for ref in refs]
+
+
 class BackgroundWorkerCutoverStore:
     """Durable, staging-only handoff between embedded and external workers.
 
@@ -122,15 +142,12 @@ class BackgroundWorkerCutoverStore:
         return [self.db.collection(COLLECTION).document(job) for job in JOB_INTERVALS]
 
     def _snapshots(self, refs, transaction=None):
-        # DocumentReference.get can synthesize a local missing value. All
-        # admission and handoff decisions require the authoritative batch read.
-        kwargs = {"retry": None, "timeout": RPC_TIMEOUT_SECONDS}
-        if transaction is not None:
-            kwargs["transaction"] = transaction
-        snapshots = list(self.db.get_all(refs, **kwargs))
-        if len(snapshots) != len(refs) or any(snapshot is None for snapshot in snapshots):
-            raise ValueError("Missing authoritative background-worker snapshot")
-        return snapshots
+        # Firestore does not guarantee get_all() order. Match snapshots to their
+        # references before making any cutover decision.
+        return _authoritative_batch_snapshots(
+            self.db, refs, transaction=transaction,
+            error_message="Missing authoritative background-worker snapshot",
+        )
 
     @staticmethod
     def _active(data: dict, generation: str, now: float) -> bool:
@@ -234,11 +251,11 @@ class BackgroundWorkerCutoverStore:
         def body(transaction):
             control, *jobs = self._snapshots(refs, transaction)
             data = control.to_dict() or {}
-            running = any(
-                snapshot.exists and (snapshot.to_dict() or {}).get("status") == "running"
+            unsettled = any(
+                snapshot.exists and (snapshot.to_dict() or {}).get("status") != "completed"
                 for snapshot in jobs
             )
-            if running:
+            if unsettled:
                 if not control.exists or data.get("state") != "external_draining":
                     transaction.set(ref, {**data, "state": "external_draining"})
                 return False
@@ -299,12 +316,10 @@ class BackgroundJobStore:
         return snapshot
 
     def _snapshots(self, refs, transaction):
-        snapshots = list(self.db.get_all(
-            refs, transaction=transaction, retry=None, timeout=RPC_TIMEOUT_SECONDS,
-        ))
-        if len(snapshots) != len(refs) or any(snapshot is None for snapshot in snapshots):
-            raise ValueError("Missing authoritative admission snapshot")
-        return snapshots
+        return _authoritative_batch_snapshots(
+            self.db, refs, transaction=transaction,
+            error_message="Missing authoritative admission snapshot",
+        )
 
     @staticmethod
     def _admit_from_snapshot(job: str, ref, snapshot, transaction, now: float, nonce: str) -> Admission:

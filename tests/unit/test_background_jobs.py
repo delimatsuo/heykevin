@@ -64,12 +64,13 @@ class Reference:
     def __init__(self, db, collection, key):
         self.db = db
         self.key = key if collection == COLLECTION else (collection, key)
+        self.path = f"{collection}/{key}"
 
     def get(self, *, transaction=None, retry, timeout):
         assert retry is None and timeout == 2.0
         data = deepcopy(self.db.data.get(self.key))
         return SimpleNamespace(exists=data is not None, to_dict=lambda: data,
-            read_time=datetime.fromtimestamp(self.db.now, timezone.utc))
+            read_time=datetime.fromtimestamp(self.db.now, timezone.utc), reference=self)
 
 
 class Database:
@@ -80,7 +81,9 @@ class Database:
         return SimpleNamespace(document=lambda key: Reference(self, name, key))
 
     def get_all(self, refs, **kwargs):
-        return (ref.get(**kwargs) for ref in refs)
+        # Client.get_all() explicitly makes no ordering guarantee. Reverse the
+        # batch here so cutover decisions cannot accidentally use input order.
+        return (ref.get(**kwargs) for ref in reversed(list(refs)))
 
     def store(self, *, external_generation=None):
         return BackgroundJobStore(
@@ -277,3 +280,29 @@ def test_external_cutover_requires_a_verified_embedded_baseline():
         embedded_instances_drained=True,
         scheduler_delivery_verified=True,
     )
+
+
+def test_held_external_job_blocks_embedded_fallback_until_operator_reconciles_it():
+    db = Database()
+    cutover = db.cutover()
+    external = db.store(external_generation=_GENERATION)
+
+    assert cutover.begin_embedded()
+    cutover.prepare_external(
+        _GENERATION,
+        lease_seconds=300,
+        embedded_instances_drained=True,
+        scheduler_delivery_verified=True,
+    )
+    assert cutover.activate_external(_GENERATION)
+    claim = external.admit("estimates")
+    assert claim.status == "admitted"
+    assert external.finish("estimates", claim.nonce, completed=False)
+
+    assert not cutover.begin_embedded()
+    assert db.data[_CUTOVER_KEY]["state"] == "external_draining"
+    assert not cutover.begin_embedded()
+
+    # Human reconciliation is deliberately outside the worker protocol.
+    db.data["estimates"]["status"] = "completed"
+    assert cutover.begin_embedded()

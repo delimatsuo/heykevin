@@ -368,6 +368,41 @@ async def test_external_expired_sweep_uses_a_bounded_persisted_cursor(harness):
 
 
 @pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_uncertain_deactivation(harness, monkeypatch):
+    """A release may have reached Twilio before its profile update failed."""
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def uncertain_deactivate(contractor_id, user_requested=False):
+        harness.deactivated.append(contractor_id)  # provider boundary was crossed
+        raise RuntimeError("profile update timed out")
+
+    monkeypatch.setattr(number_release, "deactivate_contractor", uncertain_deactivate)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="deactivation outcome"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == ["gone1"]
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_unsuccessful_release_notice(harness, monkeypatch):
+    """A false SMS result can also follow an indeterminate provider request."""
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def unsuccessful_sms(contractor_id, body):
+        return False
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", unsuccessful_sms)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="SMS outcome"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == []
+
+
+@pytest.mark.asyncio
 async def test_forwarding_evidence_arriving_after_the_snapshot_blocks_release(harness):
     """The fresh re-read before acting must see evidence written since the query."""
     now = time.time()

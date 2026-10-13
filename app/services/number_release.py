@@ -81,6 +81,18 @@ LAPSED_NOTICE = (
 )
 
 
+class NumberReleaseOutcomeUncertain(RuntimeError):
+    """A bounded external sweep must stop after an uncertain provider outcome.
+
+    The legacy embedded loop has long treated release-notice and deactivation
+    failures as best-effort so it can continue evaluating other accounts.  The
+    external worker instead has a durable job ledger and can be retried after a
+    lease/cutover change.  Once it crosses a notification or number-release
+    boundary, an error or an explicit unsuccessful result leaves the provider
+    outcome unknown, so it must hold that ledger for operator reconciliation.
+    """
+
+
 async def _apple_subscription_statuses(original_transaction_id: str) -> list[int]:
     """Ask the App Store Server API for this receipt's statuses, in every environment
     this service may see: production first, then sandbox on the production service
@@ -165,8 +177,15 @@ async def _observation_window_elapsed(db, loop, now: float) -> bool:
     return True
 
 
-async def _process_expired_contractors(docs, *, db, loop, now: float) -> dict:
-    """Act on one already-bounded snapshot of expired contractors."""
+async def _process_expired_contractors(
+    docs, *, db, loop, now: float, strict_external: bool = False,
+) -> dict:
+    """Act on one already-bounded snapshot of expired contractors.
+
+    ``strict_external`` is only for the ledger-backed external worker.  It
+    turns uncertain notification/deactivation outcomes into a raised error so
+    the outer job becomes ``needs_attention`` instead of being replayed.
+    """
     counts = {"deleted_app_released": 0, "lapsed_released": 0, "skipped": 0}
 
     # The marker read must never take the always-on deleted-app path down with
@@ -213,14 +232,36 @@ async def _process_expired_contractors(docs, *, db, loop, now: float) -> dict:
             notice = LAPSED_NOTICE if reason == "lapsed" else DELETED_APP_NOTICE
             try:
                 from app.services.owner_sms import send_owner_sms
-                await send_owner_sms(contractor_id, notice)
+                sent = await send_owner_sms(contractor_id, notice)
             except Exception as sms_err:
                 logger.warning("Failed to send number release SMS to %s: %s", contractor_id, type(sms_err).__name__)
+                if strict_external:
+                    raise NumberReleaseOutcomeUncertain(
+                        "Number-release SMS outcome is uncertain"
+                    ) from sms_err
+            else:
+                if sent is False:
+                    logger.warning("Number release SMS outcome uncertain for %s", contractor_id)
+                    if strict_external:
+                        raise NumberReleaseOutcomeUncertain(
+                            "Number-release SMS outcome is uncertain"
+                        )
 
         try:
-            await deactivate_contractor(contractor_id)
+            deactivated = await deactivate_contractor(contractor_id)
         except Exception as e:
             logger.error(f"Deactivate failed for {contractor_id}: {e}")
+            if strict_external:
+                raise NumberReleaseOutcomeUncertain(
+                    "Number-release deactivation outcome is uncertain"
+                ) from e
+            continue
+        if deactivated is not True:
+            logger.error("Number release deactivation outcome uncertain for %s", contractor_id)
+            if strict_external:
+                raise NumberReleaseOutcomeUncertain(
+                    "Number-release deactivation outcome is uncertain"
+                )
             continue
 
         counts[f"{reason}_released"] += 1
@@ -277,5 +318,7 @@ async def run_bounded_expired_contractor_cleanup_once(
         return docs
 
     docs = await loop.run_in_executor(None, fetch_docs)
-    await _process_expired_contractors(docs, db=db, loop=loop, now=now)
+    await _process_expired_contractors(
+        docs, db=db, loop=loop, now=now, strict_external=True,
+    )
     return {"cursor": docs[-1].id if len(docs) == page_size else None}

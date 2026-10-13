@@ -231,6 +231,7 @@ async def _send_claimed_estimate_notifications(
     doc_ref,
     *,
     strict_external: bool,
+    expected_contractor_id: str,
     notification_kwargs: dict,
 ) -> None:
     """Send a claimed estimate notification and settle its strict state.
@@ -239,13 +240,7 @@ async def _send_claimed_estimate_notifications(
     a send or its subsequent Firestore confirmation is uncertain, the estimate
     and outer worker ledger both remain available for operator reconciliation.
     """
-    if not strict_external:
-        await send_estimate_notifications(**notification_kwargs)
-        return
-
-    try:
-        await send_estimate_notifications(**notification_kwargs, strict=True)
-    except Exception as error:
+    async def hold_for_reconciliation(message: str) -> None:
         try:
             held = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: hold_external_notification(db, doc_ref, time.time()),
@@ -257,9 +252,31 @@ async def _send_claimed_estimate_notifications(
                 "Failed to record external estimate notification hold: %s",
                 type(hold_error).__name__,
             )
-        raise EstimateNotificationOutcomeUncertain(
-            "Estimate notification outcome is uncertain"
-        ) from error
+        raise EstimateNotificationOutcomeUncertain(message)
+
+    if not strict_external:
+        await send_estimate_notifications(**notification_kwargs)
+        return
+
+    contractor = notification_kwargs.get("contractor")
+    if (
+        not isinstance(expected_contractor_id, str)
+        or not expected_contractor_id
+        or not isinstance(contractor, dict)
+        or contractor.get("contractor_id") != expected_contractor_id
+        or contractor.get("active") is not True
+    ):
+        await hold_for_reconciliation(
+            "Estimate notification contractor identity is uncertain"
+        )
+
+    try:
+        await send_estimate_notifications(**notification_kwargs, strict=True)
+    except Exception as error:
+        try:
+            await hold_for_reconciliation("Estimate notification outcome is uncertain")
+        except EstimateNotificationOutcomeUncertain as held_error:
+            raise held_error from error
 
     try:
         confirmed = await asyncio.get_running_loop().run_in_executor(
@@ -274,19 +291,9 @@ async def _send_claimed_estimate_notifications(
         return
 
     try:
-        held = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: hold_external_notification(db, doc_ref, time.time()),
-        )
-        if not held:
-            logger.error("Failed to record external estimate notification confirmation hold")
-    except Exception as hold_error:
-        logger.error(
-            "Failed to record external estimate notification confirmation hold: %s",
-            type(hold_error).__name__,
-        )
-    raise EstimateNotificationOutcomeUncertain(
-        "Estimate notification confirmation is uncertain"
-    ) from confirmation_error
+        await hold_for_reconciliation("Estimate notification confirmation is uncertain")
+    except EstimateNotificationOutcomeUncertain as held_error:
+        raise held_error from confirmation_error
 
 
 async def run_pending_estimates_once(
@@ -377,6 +384,7 @@ async def run_pending_estimates_once(
             await _send_claimed_estimate_notifications(
                 db, doc_ref,
                 strict_external=strict_external,
+                expected_contractor_id=contractor_id,
                 notification_kwargs={
                     "caller_phone": caller_phone,
                     "contractor": contractor,
@@ -410,6 +418,7 @@ async def run_pending_estimates_once(
                 await _send_claimed_estimate_notifications(
                     db, doc_ref,
                     strict_external=strict_external,
+                    expected_contractor_id=contractor_id,
                     notification_kwargs={
                         "caller_phone": caller_phone,
                         "contractor": contractor,
@@ -447,6 +456,7 @@ async def run_pending_estimates_once(
                 await _send_claimed_estimate_notifications(
                     db, doc_ref,
                     strict_external=strict_external,
+                    expected_contractor_id=contractor_id,
                     notification_kwargs={
                         "caller_phone": caller_phone,
                         "contractor": contractor,
@@ -478,6 +488,7 @@ async def run_pending_estimates_once(
                         await _send_claimed_estimate_notifications(
                             db, doc_ref,
                             strict_external=strict_external,
+                            expected_contractor_id=contractor_id,
                             notification_kwargs={
                                 "caller_phone": caller_phone,
                                 "contractor": contractor,

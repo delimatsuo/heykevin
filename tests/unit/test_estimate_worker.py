@@ -460,7 +460,7 @@ async def test_external_notification_failure_holds_estimate_and_raises(monkeypat
     })
 
     async def contractor(_contractor_id):
-        return {"contractor_id": "c1"}
+        return {"contractor_id": "c1", "active": True}
 
     async def uncertain_notification(**kwargs):
         assert kwargs["strict"] is True
@@ -478,6 +478,53 @@ async def test_external_notification_failure_holds_estimate_and_raises(monkeypat
     assert held["status"] == "failed"
     assert held["notification_state"] == "needs_attention"
     assert held["notification_uncertain_at"] >= now
+    assert not held.get("notified_at")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("claimed_contractor_id", "contractor"), [
+    ("c1", None),
+    ("c1", {"contractor_id": "other", "active": True}),
+    ("c1", {"contractor_id": "c1", "active": False}),
+    ("", {"contractor_id": "c1", "active": True}),
+])
+async def test_strict_notification_holds_when_contractor_identity_is_not_current(
+    monkeypatch, claimed_contractor_id, contractor,
+):
+    """A stale recovery claim must never deliver to an unverified owner."""
+    db = FakeDB()
+    monkeypatch.setattr(estimate_worker, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    doc_ref = db.collection("estimates").document("tok-identity-hold")
+    doc_ref.set({
+        "status": "processing",
+        "media_id": "m-identity-hold",
+        "attempts": estimate_worker.MAX_ANALYSIS_ATTEMPTS,
+        "lease_expires_at": 0.0,
+        "caller_phone": "+15551234567",
+        "contractor_id": claimed_contractor_id,
+    })
+
+    async def fake_get_contractor(_contractor_id):
+        return contractor
+
+    async def notification_must_not_run(**_kwargs):
+        raise AssertionError("notification provider must not run without a current owner")
+
+    monkeypatch.setattr(estimate_worker, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(estimate_worker, "send_estimate_notifications", notification_must_not_run)
+
+    with pytest.raises(
+        estimate_notifications.EstimateNotificationOutcomeUncertain,
+        match="identity is uncertain",
+    ):
+        await estimate_worker.run_pending_estimates_once(
+            now=100.0, page_size=25, max_analyses=1, continuation={},
+        )
+
+    held = doc_ref.get().to_dict()
+    assert held["status"] == "failed"
+    assert held["notification_state"] == "needs_attention"
     assert not held.get("notified_at")
 
 

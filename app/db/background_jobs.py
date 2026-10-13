@@ -137,7 +137,8 @@ def _settled_job_snapshot(job: str, snapshot) -> bool:
     if not isinstance(data, dict) or data.get("status") != "completed":
         return False
     due = data.get("next_due_at")
-    if not isinstance(due, (int, float)) or isinstance(due, bool) or not math.isfinite(due):
+    if (not isinstance(due, (int, float)) or isinstance(due, bool)
+            or not math.isfinite(due) or due < 0):
         return False
     continuation = data["continuation"] if "continuation" in data else {}
     try:
@@ -389,7 +390,8 @@ class BackgroundJobStore:
             if data.get("status") != "completed":
                 return Admission("needs_attention")
             due = data.get("next_due_at")
-            if not isinstance(due, (int, float)) or isinstance(due, bool) or not math.isfinite(due):
+            if (not isinstance(due, (int, float)) or isinstance(due, bool)
+                    or not math.isfinite(due) or due < 0):
                 return Admission("needs_attention")
             if now < due:
                 return Admission("not_due")

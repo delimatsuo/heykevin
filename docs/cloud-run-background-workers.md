@@ -73,13 +73,24 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
   worker records `pending_external` before notification, writes `notified_at`
   only after accepted sends and its own confirmation write, and marks the
   estimate `needs_attention` on an uncertain result; it never auto-resends
-  that ambiguous side effect. The external expired-contractor sweep also
+  that ambiguous side effect. Before a strict estimate send, it also requires
+  an active contractor whose ID still matches the claimed estimate; a missing,
+  mismatched, or inactive owner is held without calling an SMS provider.
+  A settled (`sent`) estimate notification is preserved in bounded attempt
+  history before a new video or photo retry resets its notification fields;
+  `pending_external` and `needs_attention` instead reject new uploads before
+  archival or analysis. The external expired-contractor sweep also
   propagates an uncertain release notice, Twilio lookup/delete result, or
   deactivation result, because Twilio or Firestore may already have observed
   part of that action. Its pre-release notice describes processing rather
   than claiming success. An empty lookup or unconfirmed delete result in
   this strict path records an anomaly but preserves the active profile and
-  number for operator reconciliation. A quarantined post-call item does not
+  number for operator reconciliation. Before strict Twilio deletion it writes
+  a durable, single-use claim and captures that transaction's exact committed
+  Firestore version. The version and claim nonce are reread in the same owned
+  executor operation as the final provider DELETE, so any intervening profile
+  write fences deletion and leaves the account for reconciliation. A
+  quarantined post-call item does not
   stop the global scan.
 - Pending/in-progress post-call cursors and estimate cursors are persisted
   across requests. Cold starts cannot repeatedly starve later documents.

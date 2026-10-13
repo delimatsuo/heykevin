@@ -42,7 +42,7 @@ import httpx
 
 from app.config import settings
 from app.db.calls import latest_call_timestamp
-from app.db.contractors import deactivate_contractor
+from app.db.contractors import claim_strict_number_release, deactivate_contractor
 from app.db.firestore_client import get_firestore_client
 from app.services.sms import send_sms
 from app.services.subscription import (
@@ -347,6 +347,22 @@ async def _process_expired_contractors(
                 raise NumberReleaseOutcomeUncertain(
                     "Number-release eligibility changed after notice"
                 )
+            try:
+                release_claim = await claim_strict_number_release(
+                    contractor_id,
+                    strict_precondition=(
+                        lambda candidate, expected=deletion_boundary_data:
+                        _same_strict_release_snapshot(expected, candidate)
+                    ),
+                )
+            except Exception as claim_error:
+                raise NumberReleaseOutcomeUncertain(
+                    "Number-release eligibility outcome is uncertain"
+                ) from claim_error
+            if release_claim is None:
+                raise NumberReleaseOutcomeUncertain(
+                    "Number-release eligibility changed before provider boundary"
+                )
 
         try:
             if strict_external:
@@ -357,6 +373,7 @@ async def _process_expired_contractors(
                         lambda candidate, expected=deletion_boundary_data:
                         _same_strict_release_snapshot(expected, candidate)
                     ),
+                    strict_number_release_claim=release_claim,
                 )
             else:
                 deactivated = await deactivate_contractor(contractor_id)

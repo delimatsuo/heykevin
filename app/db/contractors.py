@@ -5,8 +5,11 @@ import math
 import secrets
 import time
 import uuid as _uuid
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
+from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
@@ -14,6 +17,7 @@ from app.utils.logging import get_logger, redact_phone
 logger = get_logger(__name__)
 
 COLLECTION = "contractors"
+NUMBER_RELEASE_CLAIM_FIELD = "number_release_claim"
 
 PROTECTED_FIELDS = frozenset({
     # Subscription billing — written only by App Store webhook / subscription service
@@ -39,6 +43,10 @@ PROTECTED_FIELDS = frozenset({
     # trigger erasure of an account that never asked for it.
     "deletion_requested_at",
     "number_released_at",
+    # A strict external release reserves this server-owned fence before its
+    # irreversible provider boundary. Client writes must never create, clear,
+    # or disguise an in-flight release claim.
+    NUMBER_RELEASE_CLAIM_FIELD,
     # Reconciliation signal for a number Twilio no longer lists but we
     # believed we owned; a client that could clear it could hide a billing
     # anomaly.
@@ -607,6 +615,128 @@ async def update_contractor(contractor_id: str, updates: dict) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class StrictNumberReleaseClaim:
+    """Opaque fence for one strict Twilio release attempt.
+
+    ``update_time`` is the Firestore document version immediately after the
+    claim write. Any concurrent profile update changes that version, so the
+    provider boundary can reject stale eligibility without trusting a cached
+    Python dict.
+    """
+
+    nonce: str
+    update_time: Any
+
+
+def _claim_nonce_matches(data: dict, nonce: str) -> bool:
+    claim = data.get(NUMBER_RELEASE_CLAIM_FIELD)
+    return (
+        isinstance(claim, dict)
+        and isinstance(claim.get("nonce"), str)
+        and secrets.compare_digest(claim["nonce"], nonce)
+    )
+
+
+async def claim_strict_number_release(
+    contractor_id: str,
+    *,
+    strict_precondition: Callable[[dict], bool],
+) -> Optional[StrictNumberReleaseClaim]:
+    """Atomically reserve a strict release after its final safety read.
+
+    The reservation is deliberately durable and single-use. A crash after it
+    is created becomes an operator-reconciled hold rather than an automatic
+    second release attempt.  The subsequent provider call verifies the exact
+    document version produced by this transaction immediately before DELETE.
+    """
+    if not isinstance(contractor_id, str) or not contractor_id or not callable(strict_precondition):
+        return None
+
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    nonce = secrets.token_urlsafe(24)
+    loop = asyncio.get_running_loop()
+
+    @firestore.transactional
+    def claim(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if not isinstance(data, dict) or data.get(NUMBER_RELEASE_CLAIM_FIELD) is not None:
+            return False
+        try:
+            eligible = strict_precondition(data) is True
+        except Exception:
+            logger.exception(
+                "Strict Twilio release claim precondition failed for contractor %s",
+                contractor_id,
+            )
+            return False
+        if not eligible:
+            return False
+        transaction.update(doc_ref, {
+            NUMBER_RELEASE_CLAIM_FIELD: {
+                "nonce": nonce,
+                "claimed_at": int(time.time()),
+            },
+        })
+        return True
+
+    transaction = db.transaction()
+
+    def commit_claim() -> Any:
+        if not claim(transaction):
+            return None
+        # The Firestore transaction exposes the exact post-commit write
+        # version.  Reading the document after commit would be racy: a later
+        # profile mutation could leave our nonce in place and make us mistake
+        # that later version for the release claim's own version.
+        write_results = getattr(transaction, "write_results", ())
+        if len(write_results) != 1:
+            return None
+        update_time = getattr(write_results[0], "update_time", None)
+        if update_time is None:
+            return None
+        try:
+            # Transaction write results carry protobuf timestamps, while a
+            # DocumentSnapshot exposes DatetimeWithNanoseconds. Normalize at
+            # the claim boundary so the final exact-version comparison is
+            # meaningful rather than always false across those API types.
+            return DatetimeWithNanoseconds.from_timestamp_pb(update_time)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    update_time = await loop.run_in_executor(None, commit_claim)
+    if update_time is None:
+        return None
+    return StrictNumberReleaseClaim(nonce=nonce, update_time=update_time)
+
+
+def strict_number_release_claim_is_current(
+    contractor_id: str,
+    claim: StrictNumberReleaseClaim,
+) -> bool:
+    """Synchronously verify a release reservation at the provider boundary."""
+    if not isinstance(contractor_id, str) or not contractor_id:
+        return False
+    try:
+        snapshot = get_firestore_client().collection(COLLECTION).document(contractor_id).get()
+    except Exception:
+        logger.exception(
+            "Strict Twilio release claim read failed for contractor %s; preserving profile",
+            contractor_id,
+        )
+        return False
+    data = snapshot.to_dict() or {}
+    return (
+        bool(getattr(snapshot, "exists", False))
+        and getattr(snapshot, "update_time", None) == claim.update_time
+        and _claim_nonce_matches(data, claim.nonce)
+    )
+
+
 async def _create_regulatory_bundle(client, loop, country_code: str, business_name: str, address: str, city: str) -> str:
     """Create a Twilio regulatory bundle for EU/BR number provisioning.
 
@@ -870,6 +1000,7 @@ async def release_twilio_number(
     *,
     require_confirmed: bool = False,
     strict_precondition: Callable[[dict], bool] | None = None,
+    strict_release_claim: StrictNumberReleaseClaim | None = None,
 ) -> bool:
     """Release a contractor's Twilio phone number and clear it from their profile.
 
@@ -881,7 +1012,9 @@ async def release_twilio_number(
     also supply a synchronous precondition over the freshly reread profile.
     It is evaluated immediately before the provider deletion boundary so a
     release sweep cannot act on eligibility that changed during its prior
-    network checks.
+    network checks. A strict release claim adds an optimistic Firestore
+    version fence which is checked synchronously in the same owned thread as
+    the final provider DELETE.
     """
     from twilio.rest import Client
     from app.config import settings
@@ -889,6 +1022,15 @@ async def release_twilio_number(
     contractor = await get_contractor(contractor_id)
     if not contractor or not contractor.get("twilio_number"):
         logger.warning(f"No Twilio number to release for contractor {contractor_id}")
+        return False
+
+    if strict_release_claim is not None and (
+        not require_confirmed or strict_precondition is None
+    ):
+        logger.error(
+            "Strict Twilio release claim lacks its confirmed precondition for contractor %s",
+            contractor_id,
+        )
         return False
 
     def strict_precondition_holds(candidate: dict) -> bool:
@@ -944,10 +1086,30 @@ async def release_twilio_number(
                         contractor_id,
                     )
                     return False
-            deleted = await loop.run_in_executor(
-                None,
-                lambda: numbers[0].delete()
-            )
+
+            claim_fenced = object()
+
+            def delete_with_strict_fence():
+                # This synchronous Firestore version check and the Twilio
+                # DELETE share one executor task: no event-loop turn exists
+                # between observing the durable claim and the provider call.
+                if (
+                    strict_release_claim is not None
+                    and not strict_number_release_claim_is_current(
+                        contractor_id, strict_release_claim,
+                    )
+                ):
+                    return claim_fenced
+                return numbers[0].delete()
+
+            deleted = await loop.run_in_executor(None, delete_with_strict_fence)
+            if deleted is claim_fenced:
+                logger.warning(
+                    "Strict Twilio release claim changed at deletion boundary for contractor %s; "
+                    "preserving profile",
+                    contractor_id,
+                )
+                return False
             if require_confirmed and deleted is not True:
                 logger.error(
                     "Twilio release result unconfirmed for contractor %s; preserving profile for reconciliation",
@@ -1001,6 +1163,8 @@ async def release_twilio_number(
     # Clear the number from the contractor profile.  This preserves the
     # historical anomaly record and lets a human reconcile the original
     # number even though the normal profile field is cleared.
+    if strict_release_claim is not None:
+        updates[NUMBER_RELEASE_CLAIM_FIELD] = None
     await update_contractor(contractor_id, updates)
     return True
 
@@ -1011,6 +1175,7 @@ async def deactivate_contractor(
     *,
     require_confirmed_number_release: bool = False,
     strict_number_release_precondition: Callable[[dict], bool] | None = None,
+    strict_number_release_claim: StrictNumberReleaseClaim | None = None,
 ) -> bool:
     """Deactivate a contractor account and release their Twilio number.
 
@@ -1022,6 +1187,8 @@ async def deactivate_contractor(
         release_kwargs: dict[str, Any] = {"require_confirmed": True}
         if strict_number_release_precondition is not None:
             release_kwargs["strict_precondition"] = strict_number_release_precondition
+        if strict_number_release_claim is not None:
+            release_kwargs["strict_release_claim"] = strict_number_release_claim
         release_confirmed = await release_twilio_number(contractor_id, **release_kwargs)
         if not release_confirmed:
             # The strict worker owns a durable needs-attention ledger state.

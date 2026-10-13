@@ -29,6 +29,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+from google.protobuf.timestamp_pb2 import Timestamp
 
 from app.api import contractors as contractors_api
 from app.db import contractors as contractors_db
@@ -463,6 +465,135 @@ async def test_strict_release_fences_changed_profile_before_provider_delete(monk
     assert reads == 2
     assert fake_twilio.log == []
     assert updates == []
+
+
+@pytest.mark.asyncio
+async def test_strict_release_claim_fences_mutation_after_final_profile_read(monkeypatch, fake_twilio):
+    """The durable claim is checked in the provider executor immediately before DELETE."""
+    updates = []
+    fake_twilio.lookup_result = [_FakeNumber(fake_twilio.log)]
+
+    async def fake_get_contractor(cid):
+        return _contractor(contractor_id=cid, last_inbound_call_at=None)
+
+    async def fake_update(cid, fields):
+        updates.append((cid, fields))
+        return True
+
+    claim = contractors_db.StrictNumberReleaseClaim("claim-nonce", object())
+    mutation_observed = []
+
+    def claim_changed_after_final_read(cid, supplied_claim):
+        assert cid == "c1" and supplied_claim == claim
+        mutation_observed.append(True)
+        return False
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
+    monkeypatch.setattr(
+        contractors_db, "strict_number_release_claim_is_current", claim_changed_after_final_read,
+    )
+
+    confirmed = await contractors_db.release_twilio_number(
+        "c1",
+        require_confirmed=True,
+        strict_precondition=lambda candidate: candidate.get("last_inbound_call_at") is None,
+        strict_release_claim=claim,
+    )
+
+    assert confirmed is False
+    assert mutation_observed == [True]
+    assert fake_twilio.log == []
+    assert updates == []
+
+
+@pytest.mark.asyncio
+async def test_strict_release_claim_uses_its_transaction_commit_version(monkeypatch):
+    """The fence must use the claim write's version, never a later reread."""
+    state = {"active": True, "number_release_claim": None}
+    write_time = Timestamp(seconds=1_700_000_000, nanos=123_456_789)
+
+    class _Snapshot:
+        exists = True
+
+        def to_dict(self):
+            return dict(state)
+
+    class _Ref:
+        def get(self, transaction=None):
+            return _Snapshot()
+
+        def update(self, data):
+            state.update(data)
+
+    ref = _Ref()
+
+    class _Collection:
+        def document(self, _contractor_id):
+            return ref
+
+    class _Transaction:
+        write_results = ()
+
+        def update(self, doc_ref, data):
+            doc_ref.update(data)
+
+    class _Db:
+        def collection(self, _collection):
+            return _Collection()
+
+        def transaction(self):
+            return _Transaction()
+
+    def immediate_transactional(fn):
+        def run(transaction):
+            result = fn(transaction)
+            transaction.write_results = [SimpleNamespace(update_time=write_time)]
+            return result
+        return run
+
+    monkeypatch.setattr(contractors_db, "get_firestore_client", _Db)
+    monkeypatch.setattr(contractors_db.firestore, "transactional", immediate_transactional)
+
+    claim = await contractors_db.claim_strict_number_release(
+        "c1", strict_precondition=lambda candidate: candidate.get("active") is True,
+    )
+
+    assert claim is not None
+    assert claim.update_time == DatetimeWithNanoseconds.from_timestamp_pb(write_time)
+    assert state["number_release_claim"]["nonce"] == claim.nonce
+
+
+def test_strict_release_claim_requires_its_exact_committed_document_version(monkeypatch):
+    """A later profile write must invalidate a claim even if the nonce remains."""
+    claim_version = object()
+    state = {
+        "update_time": claim_version,
+        "data": {"number_release_claim": {"nonce": "claim-nonce"}},
+    }
+
+    class _Ref:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                update_time=state["update_time"],
+                to_dict=lambda: dict(state["data"]),
+            )
+
+    class _Collection:
+        def document(self, _contractor_id):
+            return _Ref()
+
+    class _Db:
+        def collection(self, _collection):
+            return _Collection()
+
+    monkeypatch.setattr(contractors_db, "get_firestore_client", _Db)
+    claim = contractors_db.StrictNumberReleaseClaim("claim-nonce", claim_version)
+
+    assert contractors_db.strict_number_release_claim_is_current("c1", claim)
+    state["update_time"] = object()  # a post-claim profile mutation
+    assert not contractors_db.strict_number_release_claim_is_current("c1", claim)
 
 
 @pytest.mark.asyncio

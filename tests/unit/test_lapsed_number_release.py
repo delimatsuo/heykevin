@@ -105,6 +105,7 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
     sms: list[tuple] = []
     deactivated: list[str] = []
     release_confirmation_flags: list[bool] = []
+    release_claims: list[str] = []
     last_calls: dict[str, object] = {}
     on_lookup: dict[str, object] = {}
     apple: dict[str, object] = {}
@@ -123,10 +124,13 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
         *,
         require_confirmed_number_release=False,
         strict_number_release_precondition=None,
+        strict_number_release_claim=None,
     ):
         release_confirmation_flags.append(require_confirmed_number_release)
         if strict_number_release_precondition is not None:
             assert strict_number_release_precondition(store[contractor_id]) is True
+        if require_confirmed_number_release:
+            assert strict_number_release_claim is not None
         deactivated.append(contractor_id)
         store[contractor_id]["active"] = False
         return True
@@ -147,16 +151,22 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
             raise value
         return value
 
+    async def fake_claim(contractor_id, *, strict_precondition):
+        assert strict_precondition(store[contractor_id]) is True
+        release_claims.append(contractor_id)
+        return object()
+
     monkeypatch.setattr(number_release, "get_firestore_client", lambda: _Db({"contractors": store, "system": system}))
     monkeypatch.setattr("app.services.owner_sms.send_owner_sms", fake_sms)
     monkeypatch.setattr(number_release, "deactivate_contractor", fake_deactivate)
+    monkeypatch.setattr(number_release, "claim_strict_number_release", fake_claim)
     monkeypatch.setattr(number_release, "latest_call_timestamp", fake_latest)
     if fake_apple:
         monkeypatch.setattr(number_release, "_apple_subscription_statuses", fake_apple_statuses)
     monkeypatch.setattr(number_release.settings, "lapsed_number_release_enabled", True)
     return SimpleNamespace(
         store=store, system=system, sms=sms, deactivated=deactivated,
-        release_confirmation_flags=release_confirmation_flags,
+        release_confirmation_flags=release_confirmation_flags, release_claims=release_claims,
         last_calls=last_calls, on_lookup=on_lookup, apple=apple, apple_calls=apple_calls,
     )
 
@@ -377,6 +387,7 @@ async def test_external_expired_sweep_uses_a_bounded_persisted_cursor(harness):
     assert second == {"cursor": None}
     assert harness.deactivated == [f"gone{index}" for index in range(6)]
     assert harness.release_confirmation_flags == [True] * 6
+    assert harness.release_claims == [f"gone{index}" for index in range(6)]
 
 
 @pytest.mark.asyncio
@@ -391,9 +402,11 @@ async def test_external_expired_sweep_holds_on_uncertain_deactivation(harness, m
         *,
         require_confirmed_number_release=False,
         strict_number_release_precondition=None,
+        strict_number_release_claim=None,
     ):
         assert require_confirmed_number_release is True
         assert strict_number_release_precondition is not None
+        assert strict_number_release_claim is not None
         harness.deactivated.append(contractor_id)  # provider boundary was crossed
         raise RuntimeError("profile update timed out")
 
@@ -419,9 +432,11 @@ async def test_external_expired_sweep_holds_on_unconfirmed_release(harness, monk
         *,
         require_confirmed_number_release=False,
         strict_number_release_precondition=None,
+        strict_number_release_claim=None,
     ):
         assert require_confirmed_number_release is True
         assert strict_number_release_precondition is not None
+        assert strict_number_release_claim is not None
         harness.deactivated.append(contractor_id)
         return False
 

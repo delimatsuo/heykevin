@@ -310,6 +310,7 @@ def test_held_external_job_blocks_embedded_fallback_until_operator_reconciles_it
 
 @pytest.mark.parametrize("job,record", [
     ("estimates", {"status": "completed"}),
+    ("estimates", {"status": "completed", "next_due_at": -1, "continuation": {}}),
     ("estimates", {"status": "completed", "next_due_at": float("inf"), "continuation": {}}),
     ("estimates", {"status": "completed", "next_due_at": 1100, "continuation": "bad"}),
     ("post_calls", {"status": "completed", "next_due_at": 1100, "continuation": {"unexpected": "x"}}),

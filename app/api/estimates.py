@@ -359,6 +359,16 @@ def _claim_upload(
         if data.get("status") == "processing":
             return False, data
 
+        # A strict external worker may have crossed an SMS provider boundary
+        # for this media attempt. A later upload must not overwrite the
+        # current attempt's reconciliation record, because that could turn an
+        # ambiguous send into a new silent notification state.
+        notification_state = data.get("notification_state")
+        if notification_state in {"pending_external", "needs_attention"}:
+            return False, data
+        if notification_state is not None and notification_state != "sent":
+            return False, data
+
         attempts = (data.get("attempts") or 0) + 1
         now = time.time()
         media_ids = list(data.get("media_ids") or [])
@@ -366,6 +376,19 @@ def _claim_upload(
         if object_path:
             media_ids.append(media_id)
             media_paths[media_id] = object_path
+        notification_history = list(data.get("notification_history") or [])
+        previous_notification_state = notification_state or (
+            "sent" if data.get("notified_at") else None
+        )
+        previous_media_id = data.get("media_id")
+        if previous_notification_state and isinstance(previous_media_id, str) and previous_media_id:
+            notification_history.append({
+                "media_id": previous_media_id,
+                "state": previous_notification_state,
+                "notified_at": data.get("notified_at"),
+                "uncertain_at": data.get("notification_uncertain_at"),
+            })
+            notification_history = notification_history[-10:]
         updates = {
             "status": "processing",
             "attempts": attempts,
@@ -375,6 +398,10 @@ def _claim_upload(
             "media_content_type": content_type,
             "description": caller_description,
             "notified_at": None,
+            "notification_state": None,
+            "notification_claimed_at": None,
+            "notification_uncertain_at": None,
+            "notification_history": notification_history,
             "result": None,
             "media_ids": media_ids,
             "media_paths": media_paths,
@@ -439,6 +466,8 @@ async def upload_and_analyze(
     # the public upload endpoint does not enforce upload_count.
     if estimate.get("status") == "processing":
         return JSONResponse(status_code=409, content={"status": "processing"})
+    if estimate.get("notification_state") in {"pending_external", "needs_attention"}:
+        return JSONResponse(status_code=409, content={"status": "notification_reconciliation"})
 
     if is_video:
         # 1. Archive to GCS
@@ -462,6 +491,8 @@ async def upload_and_analyze(
         if not claimed:
             if claim_data.get("status") == "processing":
                 return JSONResponse(status_code=409, content={"status": "processing"})
+            if claim_data.get("notification_state") in {"pending_external", "needs_attention"}:
+                return JSONResponse(status_code=409, content={"status": "notification_reconciliation"})
             raise HTTPException(status_code=404, detail="Invalid or expired token")
 
         # 3. Schedule async background task
@@ -504,6 +535,8 @@ async def upload_and_analyze(
         if not claimed:
             if claim_data.get("status") == "processing":
                 return JSONResponse(status_code=409, content={"status": "processing"})
+            if claim_data.get("notification_state") in {"pending_external", "needs_attention"}:
+                return JSONResponse(status_code=409, content={"status": "notification_reconciliation"})
             raise HTTPException(status_code=404, detail="Invalid or expired token")
 
         db = get_firestore_client()

@@ -249,3 +249,40 @@ file is a pre-pilot snapshot. No Cloud Run saving or real-call qualification
 has been demonstrated. Before another pilot, add bounded failure-phase/code
 diagnostics without provider messages or personal data, and bind a verified
 staging iPhone build, push environment and dedicated test account.
+
+## Diagnostic follow-up and call setup
+
+The local follow-up adds fixed failure phases and codes for worker bootstrap,
+configuration, admission, subprocess execution, completion and cleanup. It
+does not log exception messages, provider payloads, caller identifiers or
+tracebacks. Child output remains bounded at 4 KiB and stderr is discarded.
+Admission, nonce fencing, schedules, retries and call routing are unchanged.
+This improves diagnosis; it does not resolve the cause of the pilot failure.
+See the [diagnostic validation receipt](audits/2026-10-13-background-worker-diagnostics.json)
+for the source review, local tests and deliberate guard-removal checks.
+This follow-up has not run in hosted CI or staging.
+
+The following setup facts were checked on October 13:
+
+| Item | Status |
+| --- | --- |
+| Staging API | Restored to embedded workers, warm, healthy |
+| Staging Twilio number | Existing number ending 0993 routes to staging and one staging contractor; dedicated test ownership still needs confirmation |
+| Installed iPhone app | Unverified; phone unavailable during inspection |
+| App backend | Baked into `BackendURL`; there is no runtime environment switch or label |
+| TestFlight | Does not establish the backend; historical build 1.3.4 (45) was production |
+| Push environment | Staging uses sandbox APNs; source entitlement says production, so inspect the actual signed app before testing |
+| Local cached app | No `Kevin.app` found in the current project's standard build-products cache |
+
+Connect and unlock the iPhone for read-only installed-build inspection. Match
+its version and build to a signed artifact and verify `BackendURL` and APNs
+entitlements. The configurations share the same bundle identifier and
+Keychain namespace, so any later installation must account for the existing
+production app and credentials. No app was installed or signed, and no real
+call, push change, SMS or number purchase was initiated in this follow-up.
+
+Before another worker pilot, bind its exact candidate and a new one-build
+CI/GCP envelope, confirm the device and dedicated test account, and reconcile
+the held estimates claim using fresh aggregate counts and its exact nonce and
+update time. Do not clear or replay the claim automatically. Production stays
+unchanged and staging stays warm throughout call qualification.

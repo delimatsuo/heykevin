@@ -903,7 +903,28 @@
       "candidate and rollback images/revisions"
     ],
     "scheduler_api": "enabled with zero jobs",
-    "realized_cloud_run_savings": false
+    "realized_cloud_run_savings": false,
+    "later_scale_readback": {
+      "worker": {
+        "revision": "kevin-background-staging-00001-rk2",
+        "time": "2026-10-13T16:22:00Z",
+        "active": 0,
+        "idle": 0
+      },
+      "old_external_api": {
+        "revision": "kevin-api-staging-00189-qiy",
+        "time": "2026-10-13T16:20:00Z",
+        "active": 0,
+        "idle": 0
+      },
+      "warm_embedded_api": {
+        "revision": "kevin-api-staging-00191-jim",
+        "time": "2026-10-13T16:22:00Z",
+        "active": 2,
+        "idle": 0
+      },
+      "note": "The extra warm API instance is retained by Cloud Run during rollout/idle retention; configured minima remain one. No realized API savings claimed."
+    }
   },
   "duplicate_delivery_probes": {
     "completed_slot": {
@@ -1152,5 +1173,27 @@
     "latest_request_start": "2026-10-13T16:05:12.530204Z",
     "max_latency_seconds": 12.65877094,
     "does_not_infer_business_side_effects_from_http_200": true
+  },
+  "later_service_readback": {
+    "at_utc": "2026-10-13T16:37:35.047844+00:00",
+    "production_revision": "kevin-api-00277-neb",
+    "production_sha": "b62eea38d9ab5656fb8d809fb872f05d9c81147d",
+    "staging_revision": "kevin-api-staging-00191-jim",
+    "staging_mode": "embedded",
+    "staging_traffic_percent": 100,
+    "staging_minima": {
+      "service": 1,
+      "revision": 1
+    },
+    "latest_staging_instance_sample": {
+      "at_utc": "2026-10-13T16:36:00Z",
+      "active": 1,
+      "idle": 0
+    },
+    "worker_revision": "kevin-background-staging-00001-rk2",
+    "worker_min": 0,
+    "worker_max": 2,
+    "worker_cpu_idle": true,
+    "diagnostic_candidate_deployed": false
   }
 }

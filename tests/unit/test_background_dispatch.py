@@ -133,7 +133,7 @@ async def test_success_waits_for_child_exit_and_reaps(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_timeout_kills_term_ignoring_child_and_reaps(monkeypatch):
+async def test_timeout_kills_term_ignoring_child_and_reaps(monkeypatch, caplog):
     processes = child_factory(monkeypatch, 'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(20)')
     monkeypatch.setattr(dispatch, "WALL_BUDGET_SECONDS", .2)
     monkeypatch.setattr(dispatch, "TERMINATE_GRACE_SECONDS", .05)
@@ -143,6 +143,11 @@ async def test_timeout_kills_term_ignoring_child_and_reaps(monkeypatch):
     with pytest.raises(ChildProcessError):
         os.waitpid(processes[0].pid, os.WNOHANG)
     assert not dispatch._CHILDREN
+    assert "phase=child_timeout code=wall_budget_exceeded" in caplog.text
+    assert "timeout=true" in caplog.text
+    assert "phase=child_cleanup code=grace_exceeded" in caplog.text
+    assert "phase=child_cleanup code=reaped exit_code=-9" in caplog.text
+    assert "termination=reaped" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -383,3 +388,192 @@ async def test_temporary_estimate_failure_preserves_other_work_and_later_retry(m
             now=100, page_size=25, max_analyses=1, continuation=cursor)
     assert claims == ["e0", "e1", "e0"]
     notifications.assert_not_called()
+
+
+_DIAGNOSTIC_SECRET = "FAKE_TOKEN_phone_15555550199_provider_payload_private"
+
+
+def _diagnostic_records(caplog):
+    return [record for record in caplog.records if record.name == "app.background_worker"]
+
+
+def test_diagnostics_reject_arbitrary_fields_and_unbounded_metadata(caplog):
+    dispatch.log_worker_failure(_DIAGNOSTIC_SECRET, _DIAGNOSTIC_SECRET, _DIAGNOSTIC_SECRET,
+                                returncode=10**100, timed_out=_DIAGNOSTIC_SECRET,
+                                termination=_DIAGNOSTIC_SECRET)
+    dispatch.log_worker_failure("estimates", "completion", "completion_write_failed",
+                                returncode=True, termination="none")
+    records = _diagnostic_records(caplog)
+    assert len(records) == 2
+    assert records[0].getMessage() == (
+        "worker_failure job=unknown phase=unknown code=unknown exit_code=unknown timeout=false termination=unknown")
+    assert "phase=completion code=completion_write_failed exit_code=unknown" in records[1].getMessage()
+    assert _DIAGNOSTIC_SECRET not in caplog.text
+    assert all(record.exc_info is None and not record.stack_info for record in records)
+
+
+@pytest.mark.parametrize("phase,code", [
+    ("bootstrap", "import_failed"), ("config", "config_invalid"),
+    ("protocol", "input_invalid"), ("protocol", "output_invalid"),
+    ("execute", "execution_failed"), ("execute", "permission_denied"),
+    ("execute", "deadline_exceeded"), ("execute", "precondition_failed"),
+])
+@pytest.mark.asyncio
+async def test_child_failure_frames_distinguish_fixed_stage_without_stderr(monkeypatch, caplog, capsys, phase, code):
+    frame = {"completed": False, "failure": {"phase": phase, "code": code}}
+    processes = child_factory(monkeypatch,
+        f'import sys;sys.stdin.read();sys.stderr.write({_DIAGNOSTIC_SECRET!r});sys.stdout.write({json.dumps(frame)!r});sys.exit(1)')
+    with pytest.raises(dispatch.WorkerChildError) as error:
+        await dispatch.run_child("orphan_calls", {})
+    expected_phase = {"bootstrap": "child_bootstrap", "config": "child_config",
+                      "protocol": "child_protocol", "execute": "child_execute"}[phase]
+    assert (error.value.phase, error.value.code) == (expected_phase, code)
+    assert f"phase={expected_phase} code={code} exit_code=1" in caplog.text
+    assert processes[0].returncode == 1
+    assert _DIAGNOSTIC_SECRET not in caplog.text + capsys.readouterr().out
+    assert all(record.exc_info is None for record in _diagnostic_records(caplog))
+
+
+@pytest.mark.parametrize("frame", [
+    {"completed": False, "failure": {"phase": "execute", "code": _DIAGNOSTIC_SECRET}},
+    {"completed": False, "failure": {"phase": _DIAGNOSTIC_SECRET, "code": "execution_failed"}},
+    {"completed": False, "failure": {"phase": ["execute"], "code": _DIAGNOSTIC_SECRET}},
+    {"completed": False, "failure": {"phase": "execute", "code": "execution_failed", "message": _DIAGNOSTIC_SECRET}},
+    {"completed": False, "failure": {"phase": "execute", "code": "execution_failed"}, "payload": _DIAGNOSTIC_SECRET},
+    {"completed": False, "failure": _DIAGNOSTIC_SECRET},
+])
+@pytest.mark.asyncio
+async def test_malicious_child_failure_frames_fail_closed_without_log_injection(monkeypatch, caplog, frame):
+    child_factory(monkeypatch, f'import sys;sys.stdin.read();sys.stdout.write({json.dumps(frame)!r});sys.exit(1)')
+    with pytest.raises(dispatch.WorkerChildError) as error:
+        await dispatch.run_child("orphan_calls", {})
+    assert (error.value.phase, error.value.code) == ("child_protocol", "invalid_frame")
+    assert "phase=child_protocol code=invalid_frame" in caplog.text
+    assert _DIAGNOSTIC_SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("raw,returncode", [
+    (b'{"completed":false,"failure":{"phase":"execute","code":"execution_failed","code":"execution_failed"}}', 1),
+    (b'{"completed":false,"failure":{"phase":"execute","code":"execution_failed"}}', 0),
+    (b'not-json-' + _DIAGNOSTIC_SECRET.encode(), 1),
+    (b'{"completed":true,"continuation":{}}', 1),
+])
+def test_duplicate_malformed_and_inconsistent_failure_frames_rejected(raw, returncode):
+    with pytest.raises(dispatch.WorkerChildError):
+        dispatch._decode_completion("orphan_calls", raw, returncode)
+
+
+def test_oversized_failure_frame_rejected_before_json_parse():
+    raw = json.dumps({"completed": False, "failure": {"phase": "execute", "code": _DIAGNOSTIC_SECRET * 1000}}).encode()
+    with pytest.raises(dispatch.WorkerChildError) as error:
+        dispatch._decode_completion("orphan_calls", raw, 1)
+    assert (error.value.phase, error.value.code) == ("child_protocol", "output_overflow")
+
+
+@pytest.mark.asyncio
+async def test_launch_exception_diagnostic_does_not_inspect_secret_exception(monkeypatch, caplog):
+    class SecretException(RuntimeError):
+        def __str__(self):
+            raise AssertionError("Exception string must never be read")
+    failure = SecretException(_DIAGNOSTIC_SECRET)
+    monkeypatch.setattr(dispatch.asyncio, "create_subprocess_exec", AsyncMock(side_effect=failure))
+    with pytest.raises(SecretException):
+        await dispatch.run_child("orphan_calls", {})
+    assert "phase=child_launch code=launch_failed" in caplog.text
+    assert _DIAGNOSTIC_SECRET not in caplog.text
+    assert "SecretException" not in caplog.text
+    assert all(record.exc_info is None for record in _diagnostic_records(caplog))
+
+
+@pytest.mark.parametrize("trusted_type,code", list(dispatch._PROVIDER_FAILURE_TYPES))
+def test_provider_exception_classification_uses_fixed_codes_only(caplog, trusted_type, code):
+    failure = trusted_type(_DIAGNOSTIC_SECRET)
+    fixed_code = dispatch.classify_worker_failure(failure, "execution_failed")
+    assert fixed_code == code
+    dispatch.log_worker_failure("estimates", "child_execute", fixed_code)
+    assert f"phase=child_execute code={code}" in caplog.text
+    assert _DIAGNOSTIC_SECRET not in caplog.text
+    assert trusted_type.__name__ not in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["subclass", "same_name"])
+def test_provider_exception_classification_rejects_untrusted_types(kind):
+    trusted_type = dispatch.google_errors.PermissionDenied
+    base = trusted_type if kind == "subclass" else RuntimeError
+    untrusted_type = type(trusted_type.__name__, (base,), {})
+    failure = untrusted_type(_DIAGNOSTIC_SECRET)
+    assert dispatch.classify_worker_failure(failure, "execution_failed") == "execution_failed"
+
+
+@pytest.mark.asyncio
+async def test_runner_bootstrap_failure_in_fresh_interpreter_is_bounded(monkeypatch, caplog):
+    processes = child_factory(monkeypatch, f'''
+import builtins, runpy, sys
+assert not any(name.startswith("app.") for name in sys.modules)
+original_import = builtins.__import__
+def failed_import(name, *args, **kwargs):
+    if name == "app.middleware.worker_auth":
+        raise ImportError({_DIAGNOSTIC_SECRET!r})
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = failed_import
+sys.argv = ["app.worker_runner", "orphan_calls"]
+runpy.run_module("app.worker_runner", run_name="__main__")
+''')
+    with pytest.raises(dispatch.WorkerChildError) as error:
+        await dispatch.run_child("orphan_calls", {})
+    assert (error.value.phase, error.value.code) == ("child_bootstrap", "import_failed")
+    assert processes[0].returncode == 1
+    assert _DIAGNOSTIC_SECRET not in caplog.text
+    assert all(record.exc_info is None for record in _diagnostic_records(caplog))
+    with pytest.raises(ChildProcessError):
+        os.waitpid(processes[0].pid, os.WNOHANG)
+
+
+@pytest.mark.parametrize("stage,expected_code", [
+    ("bootstrap", "import_failed"), ("config", "config_invalid"),
+    ("input", "input_invalid"), ("execute", "execution_failed"),
+    ("output", "output_invalid"), ("permission", "permission_denied"),
+])
+def test_runner_emits_bounded_failure_without_exception_details(monkeypatch, capsys, stage, expected_code):
+    import builtins
+    from app import worker_runner
+    from app.middleware import worker_auth
+    from google.api_core import exceptions as google_errors
+
+    class SecretException(RuntimeError):
+        def __str__(self):
+            raise AssertionError("Exception string must never be read")
+
+    monkeypatch.setattr(sys, "argv", ["app.worker_runner", "orphan_calls"])
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(
+        b"invalid-" + _DIAGNOSTIC_SECRET.encode() if stage == "input" else b"{}")))
+    monkeypatch.setattr(worker_auth, "validate_worker_configuration", lambda: None)
+    async def fail_execute(job, continuation):
+        raise SecretException(_DIAGNOSTIC_SECRET)
+    async def invalid_output(job, continuation):
+        return {"untrusted": _DIAGNOSTIC_SECRET}
+    async def permission_failure(job, continuation):
+        raise google_errors.PermissionDenied(_DIAGNOSTIC_SECRET)
+    if stage == "bootstrap":
+        original = builtins.__import__
+        def failed_import(name, *args, **kwargs):
+            if name == "app.middleware.worker_auth":
+                raise SecretException(_DIAGNOSTIC_SECRET)
+            return original(name, *args, **kwargs)
+        monkeypatch.setattr(builtins, "__import__", failed_import)
+    elif stage == "config":
+        def fail_config(): raise SecretException(_DIAGNOSTIC_SECRET)
+        monkeypatch.setattr(worker_auth, "validate_worker_configuration", fail_config)
+    elif stage == "output":
+        monkeypatch.setattr(dispatch, "execute_once", invalid_output)
+    elif stage == "permission":
+        monkeypatch.setattr(dispatch, "execute_once", permission_failure)
+    else:
+        monkeypatch.setattr(dispatch, "execute_once", fail_execute)
+    assert worker_runner.main() == 1
+    captured = capsys.readouterr()
+    assert len(captured.out.encode()) <= dispatch.MAX_PROTOCOL_BYTES
+    assert _DIAGNOSTIC_SECRET not in captured.out + captured.err
+    assert "SecretException" not in captured.out + captured.err
+    phase = {"input": "protocol", "output": "protocol", "permission": "execute"}.get(stage, stage)
+    assert json.loads(captured.out) == {"completed": False, "failure": {"phase": phase, "code": expected_code}}

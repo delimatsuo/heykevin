@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-13T16:38:00Z",
+  "worktree": "cloud-run-worker-costs-20261013",
+  "branch": "codex/cloud-run-worker-costs-20261013",
+  "parent_commit": "e3c8c9fa04cb2bb6b995ea054dd0bb5d87c37a0a",
+  "deployed_candidate": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+  "binding": "Source hashes below are the tested and independently reviewed bytes. This receipt is committed with that source.",
+  "status": "local_validation_only",
+  "purpose": "Diagnose the pilot estimates failure without logging exception text, provider payloads, caller data, arbitrary class names or tracebacks.",
+  "unchanged": [
+    "admission and due slots",
+    "ledger semantics and nonce fencing",
+    "no automatic uncertain replay",
+    "240-second wall budget and TERM/KILL/reap",
+    "successful completion frame",
+    "call routing",
+    "production configuration"
+  ],
+  "source_sha256": {
+    "app/services/background_dispatch.py": "7ea276c5c243071aad914b15d775a18b8688e1da312350fca3cfd15a7cf8dc8a",
+    "app/worker_runner.py": "442bc42c81430af40f6cf346f2716e4ba4e2e89c880fc3b8dd505864870fa796",
+    "app/worker_main.py": "b67baaaeb2006f2fc0517e92d18d3cc7ee5c6934fb441cc90ebfa1ef3a6774f3",
+    "tests/unit/test_background_dispatch.py": "d8c72df737e8a56717bbd18ba8f1a734f3acf59009a01d4f44c1eb153d567455",
+    "tests/unit/test_worker_main.py": "e0638ad3710a032b9360595394e19084f61457864ef64495d1c7e8bc3e85014b"
+  },
+  "root_validation": {
+    "environment": "Python 3.12, KEVIN_DISABLE_DOTENV=1, clean environment, empty CLOUDSDK_CONFIG, outbound network denied by macOS sandbox-exec; scratch and bytecode isolated or disabled",
+    "focused": {
+      "passed": 139,
+      "failed": 0,
+      "warnings": 7,
+      "seconds": 2.6,
+      "files": [
+        "tests/unit/test_background_dispatch.py",
+        "tests/unit/test_worker_main.py",
+        "tests/unit/test_worker_lifecycle.py",
+        "tests/unit/test_background_jobs.py",
+        "tests/unit/test_background_maintenance.py"
+      ]
+    },
+    "full_backend": {
+      "command": "python -m pytest -q --tb=short",
+      "passed": 9332,
+      "skipped": 1,
+      "failed": 0,
+      "warnings": 44,
+      "seconds": 162.89
+    },
+    "static": {
+      "ruff_fatal_rules": "E9,F63,F7,F82 passed",
+      "compileall": "passed",
+      "diff_check": "passed"
+    },
+    "mutations": {
+      "expected": 3,
+      "detected": 3,
+      "source_restored": true,
+      "probes": [
+        {
+          "name": "log_job_allowlist",
+          "pytest_exit": 1,
+          "failed": 1
+        },
+        {
+          "name": "trusted_exception_identity",
+          "pytest_exit": 1,
+          "failed": 1,
+          "passed": 1
+        },
+        {
+          "name": "child_code_allowlist",
+          "pytest_exit": 1,
+          "failed": 2,
+          "passed": 4
+        }
+      ]
+    },
+    "initial_defect": {
+      "focused_failed": 17,
+      "cause": "Explicit exc_info=False stores False in LogRecord, contrary to strict None assertions.",
+      "repair": "Omitted keyword; default logging carries no exception or traceback. Tests retained."
+    }
+  },
+  "independent_review": {
+    "node": "worker_diagnostics_review",
+    "verdict": "approve_source_only",
+    "findings": [],
+    "source_sha256": {
+      "app/services/background_dispatch.py": "7ea276c5c243071aad914b15d775a18b8688e1da312350fca3cfd15a7cf8dc8a",
+      "app/worker_runner.py": "442bc42c81430af40f6cf346f2716e4ba4e2e89c880fc3b8dd505864870fa796",
+      "app/worker_main.py": "b67baaaeb2006f2fc0517e92d18d3cc7ee5c6934fb441cc90ebfa1ef3a6774f3",
+      "tests/unit/test_background_dispatch.py": "d8c72df737e8a56717bbd18ba8f1a734f3acf59009a01d4f44c1eb153d567455",
+      "tests/unit/test_worker_main.py": "e0638ad3710a032b9360595394e19084f61457864ef64495d1c7e8bc3e85014b"
+    },
+    "coverage_notes": [
+      "Fresh interpreter bootstrap failure exercised via supervised subprocess",
+      "Exact SDK type identity rejects subclasses and unrelated same-name classes",
+      "Reviewer did not run tests or provider operations",
+      "Local diagnostics do not determine the cause of the earlier estimates failure"
+    ]
+  },
+  "graph_reduction": {
+    "expected_nodes": 2,
+    "returned_nodes": 2,
+    "nodes": [
+      {
+        "node": "worker_isolation_builder",
+        "returned": true,
+        "artifact": "five-file diagnostic implementation"
+      },
+      {
+        "node": "worker_diagnostics_review",
+        "returned": true,
+        "verdict": "approve_source_only",
+        "findings": []
+      }
+    ]
+  },
+  "provider_evidence": {
+    "original_ci": {
+      "run_id": 38421770589,
+      "candidate": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+      "passed": 9286,
+      "conclusion": "success"
+    },
+    "diagnostic_ci": "not_triggered",
+    "diagnostic_image_build": "not_started",
+    "diagnostic_deployment": "not_started",
+    "last_service_readback_at": "2026-10-13T16:37:35.047844+00:00",
+    "production_revision": "kevin-api-00277-neb",
+    "production_sha": "b62eea38d9ab5656fb8d809fb872f05d9c81147d",
+    "staging_revision": "kevin-api-staging-00191-jim",
+    "staging_mode": "embedded",
+    "staging_latest_instance_sample": {
+      "at": "2026-10-13T16:36:00Z",
+      "active": 1,
+      "idle": 0
+    },
+    "pilot": "failed_sustained_qualification; stopped; schedules deleted; pilot invoker removed; estimates hold preserved",
+    "real_calls": "not_qualified",
+    "realized_cloud_run_savings": "not_demonstrated",
+    "cost": "Actual final billed pilot charges unavailable; see pilot receipt estimates and conservative reserve."
+  },
+  "publication_preflight": {
+    "at": "2026-10-13T16:36:50Z",
+    "repository": "delimatsuo/heykevin",
+    "visibility": "public",
+    "repository_owner": "delimatsuo",
+    "billing_owner": "delimatsuo",
+    "remote_branch_before": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+    "latest_main": "e689dc5ebff1ec583e2030e0630ca9bd37c5c50a",
+    "workflow_changes_since_pilot": "none",
+    "branch_push_triggers": [],
+    "expected_jobs_on_branch_push": 0,
+    "expected_incremental_actions_and_ai_usd": 0,
+    "pull_requests_on_branch": 0,
+    "pr_creation": "withheld because automatic review AI charge cannot be bounded",
+    "future_dispatch_jobs": "seven Ubuntu Python shards, quality, Test, Deploy to Staging; production skipped",
+    "future_required_check": "Test",
+    "cache_bytes": 295865010,
+    "october_posted_actions_net_usd": 0.687775904,
+    "latest_billing_date": "2026-10-13T14:46:06Z",
+    "billing_limit": "Posted portfolio usage is lagged and is not the charge for this pilot."
+  },
+  "remaining": [
+    "Connect and unlock iPhone for read-only installed build inspection",
+    "Match BackendURL and signed APNs entitlement to isolated staging",
+    "Confirm dedicated test account and caller consent",
+    "Bind new exact candidate and one-build CI/GCP envelope before further provider execution",
+    "Reconcile held estimates claim before any narrowly authorized release; never automatically replay",
+    "Complete unknown-caller screening, pickup/ring-through, hangup, saved transcript and exactly-one-summary checks"
+  ]
+}

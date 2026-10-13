@@ -220,3 +220,116 @@ async def test_failed_completion_commit_never_reports_success(route_access, monk
         assert (await client.post("/tasks/post_calls")).status_code == 503
     assert finish.call_count == 2
     assert finish.call_args.kwargs == {"completed": False}
+
+
+_PARENT_DIAGNOSTIC_SECRET = "FAKE_TOKEN_contractor_private_firestore_payload_15555550199"
+
+
+def _worker_diagnostics(caplog):
+    return [record for record in caplog.records if record.name == "app.background_worker"]
+
+
+@pytest.mark.asyncio
+async def test_store_bootstrap_preserves_500_with_sanitized_exception_chain(route_access, monkeypatch, caplog):
+    def failed_store():
+        raise ValueError(_PARENT_DIAGNOSTIC_SECRET)
+    monkeypatch.setattr(worker, "get_job_store", failed_store)
+    with pytest.raises(RuntimeError) as error:
+        await worker.task("estimates")
+    assert str(error.value) == "Worker datastore unavailable"
+    assert error.value.__suppress_context__ is True
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=worker.app, raise_app_exceptions=False),
+                                 base_url="https://worker") as client:
+        response = await client.post("/tasks/estimates")
+    assert response.status_code == 500
+    assert _PARENT_DIAGNOSTIC_SECRET not in response.text + caplog.text
+    assert "phase=admission code=store_unavailable" in caplog.text
+    assert all(record.exc_info is None and not record.stack_info for record in _worker_diagnostics(caplog))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_site,expected_phase,expected_code", [
+    ("admission", "admission", "admission_failed"),
+    ("child", "child_execute", "dispatch_failed"),
+    ("completion", "completion", "completion_write_failed"),
+    ("fenced", "completion", "completion_fenced"),
+    ("attention", "attention", "attention_write_failed"),
+])
+async def test_parent_failure_phases_are_distinguishable_without_exception_data(
+    route_access, monkeypatch, caplog, failure_site, expected_phase, expected_code,
+):
+    class SecretException(RuntimeError):
+        def __str__(self):
+            raise AssertionError("Exception string must never be read")
+    def admit(job):
+        if failure_site == "admission":
+            raise SecretException(_PARENT_DIAGNOSTIC_SECRET)
+        return Admission("admitted", "nonce-private", {})
+    finishes = []
+    def finish(*args, **kwargs):
+        finishes.append(kwargs)
+        if kwargs["completed"] and failure_site == "completion":
+            raise SecretException(_PARENT_DIAGNOSTIC_SECRET)
+        if kwargs["completed"] and failure_site == "fenced":
+            return False
+        if not kwargs["completed"] and failure_site == "attention":
+            raise SecretException(_PARENT_DIAGNOSTIC_SECRET)
+        return True
+    monkeypatch.setattr(worker, "get_job_store", lambda: SimpleNamespace(admit=admit, finish=finish))
+    run = AsyncMock(side_effect=SecretException(_PARENT_DIAGNOSTIC_SECRET)) if failure_site in {"child", "attention"} else AsyncMock(return_value={})
+    monkeypatch.setattr(worker, "run_child", run)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=worker.app), base_url="https://worker") as client:
+        response = await client.post("/tasks/estimates")
+    assert response.status_code == 503
+    assert f"phase={expected_phase} code={expected_code}" in caplog.text
+    assert _PARENT_DIAGNOSTIC_SECRET not in caplog.text + response.text
+    assert "SecretException" not in caplog.text and "nonce-private" not in caplog.text
+    assert all(record.exc_info is None and not record.stack_info for record in _worker_diagnostics(caplog))
+    if failure_site != "admission":
+        assert finishes[-1] == {"completed": False}
+
+
+@pytest.mark.asyncio
+async def test_typed_child_failure_is_distinct_from_completion_failure(route_access, monkeypatch, caplog):
+    from app.services.background_dispatch import WorkerChildError
+    finish = Mock(return_value=True)
+    monkeypatch.setattr(worker, "get_job_store", lambda: SimpleNamespace(
+        admit=lambda _: Admission("admitted", "nonce", {}), finish=finish))
+    monkeypatch.setattr(worker, "run_child", AsyncMock(side_effect=WorkerChildError("child_bootstrap", "import_failed")))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=worker.app), base_url="https://worker") as client:
+        assert (await client.post("/tasks/estimates")).status_code == 503
+    assert "phase=child_bootstrap code=import_failed" in caplog.text
+    assert "phase=completion" not in caplog.text
+    finish.assert_called_once_with("estimates", "nonce", completed=False)
+
+
+@pytest.mark.asyncio
+async def test_completion_provider_permission_code_is_static_and_private(route_access, monkeypatch, caplog):
+    from google.api_core import exceptions as google_errors
+    def finish(*args, **kwargs):
+        if kwargs["completed"]:
+            raise google_errors.PermissionDenied(_PARENT_DIAGNOSTIC_SECRET)
+        return True
+    monkeypatch.setattr(worker, "get_job_store", lambda: SimpleNamespace(
+        admit=lambda _: Admission("admitted", "nonce", {}), finish=finish))
+    monkeypatch.setattr(worker, "run_child", AsyncMock(return_value={}))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=worker.app), base_url="https://worker") as client:
+        assert (await client.post("/tasks/estimates")).status_code == 503
+    assert "phase=completion code=permission_denied" in caplog.text
+    assert _PARENT_DIAGNOSTIC_SECRET not in caplog.text
+    assert "PermissionDenied" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_configuration_diagnostics_do_not_serialize_failure(monkeypatch, caplog):
+    def invalid_config():
+        raise RuntimeError(_PARENT_DIAGNOSTIC_SECRET)
+    monkeypatch.setattr(worker, "validate_worker_configuration", invalid_config)
+    with pytest.raises(RuntimeError) as error:
+        async with worker.lifespan(worker.app):
+            pytest.fail("unsafe worker must not start")
+    assert str(error.value) == "Worker configuration invalid"
+    assert error.value.__suppress_context__ is True
+    assert "job=unknown phase=config code=config_invalid" in caplog.text
+    assert _PARENT_DIAGNOSTIC_SECRET not in caplog.text
+    assert all(record.exc_info is None for record in _worker_diagnostics(caplog))

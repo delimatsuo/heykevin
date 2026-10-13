@@ -390,3 +390,146 @@ final class OwnerSMSPreferenceTests: XCTestCase {
         }
     }
 }
+
+
+extension OwnerSMSPreferenceTests {
+    private var canadianAuth: CallAuthContext {
+        .init(contractorId: "synthetic-ca", bearerToken: "synthetic-token", generation: 1)
+    }
+
+    private func canadianProfile(required: Any? = true, owner: String = "+14165550100",
+                                  sender: String = "+14165550101", revision: Int = 3,
+                                  optedOut: Bool = false) -> [String: Any] {
+        var dict: [String: Any] = ["owner_sms_enabled": true, "owner_sms_opted_out": optedOut,
+            "owner_sms_opt_out_revision": revision, "owner_sms_settings_version": 1,
+            "country_code": "CA", "service_binding": ["country_code": "CA"],
+            "owner_phone": owner, "twilio_number": sender]
+        dict["owner_sms_consent_required"] = required
+        return dict
+    }
+
+    private func hydratedCanadian(_ profile: [String: Any]? = nil) -> OwnerSMSPreferenceState {
+        var state = OwnerSMSPreferenceState()
+        let token = state.captureLoadToken(auth: canadianAuth)!
+        state.applyHydration(dict: profile ?? canadianProfile(), token: token, auth: canadianAuth)
+        return state
+    }
+
+    func testCanadianLegacyTrueRequiresConsentAndCannotUseGenericToggle() {
+        for value: Any? in [nil, true, "false", 0] {
+            var state = hydratedCanadian(canadianProfile(required: value))
+            XCTAssertTrue(state.confirmedEnabled)
+            XCTAssertTrue(state.consentRequired)
+            XCTAssertFalse(state.displayedEnabled)
+            XCTAssertNotNil(state.consentSnapshot(auth: canadianAuth))
+            XCTAssertNil(state.beginSave(targetEnabled: true, auth: canadianAuth))
+        }
+    }
+
+    func testCanadianConsentSnapshotPinsExactPayload() throws {
+        let state = hydratedCanadian()
+        let snapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+        XCTAssertEqual(Set(snapshot.requestBody.keys), ["disclosure_version", "owner_phone_e164", "twilio_number", "expected_revision"])
+        XCTAssertEqual(snapshot.requestBody["disclosure_version"] as? String, "ca-owner-sms-v1")
+        XCTAssertEqual(snapshot.requestBody["owner_phone_e164"] as? String, "+14165550100")
+        XCTAssertEqual(snapshot.requestBody["twilio_number"] as? String, "+14165550101")
+        XCTAssertEqual(snapshot.requestBody["expected_revision"] as? Int, 3)
+        for text in ["Hey Kevin", "call summaries", "voicemail", "account notices", "frequency varies", "rates may apply", "STOP", "HELP"] {
+            XCTAssertTrue(snapshot.disclosure.contains(text))
+        }
+    }
+
+    func testCanonicalOwnerIdentityWinsOverFormattedOrDifferentRawPhone() throws {
+        for raw in ["(604) 555-0100", "+14165550100"] {
+            var profile = canadianProfile(owner: raw)
+            profile["owner_phone_e164"] = "+16045550100"
+            let state = hydratedCanadian(profile)
+            let snapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+            XCTAssertEqual(state.ownerPhoneE164, "+16045550100")
+            XCTAssertEqual(snapshot.ownerPhoneE164, "+16045550100")
+            XCTAssertEqual(snapshot.requestBody["owner_phone_e164"] as? String, "+16045550100")
+        }
+    }
+
+    func testPresentMalformedCanonicalOwnerNeverFallsBackToValidRawPhone() {
+        for canonical: Any in ["", "(604) 555-0100", " +16045550100", "+06045550100", "+1604555010０", true, 16045550100, NSNull()] {
+            var profile = canadianProfile(owner: "+14165550100")
+            profile["owner_phone_e164"] = canonical
+            let state = hydratedCanadian(profile)
+            XCTAssertEqual(state.ownerPhoneE164, "")
+            XCTAssertNil(state.consentSnapshot(auth: canadianAuth))
+        }
+    }
+
+    func testAbsentCanonicalOwnerUsesOnlyStrictE164RawPhone() throws {
+        let valid = hydratedCanadian(canadianProfile(owner: "+16045550100"))
+        XCTAssertEqual(try XCTUnwrap(valid.consentSnapshot(auth: canadianAuth)).ownerPhoneE164, "+16045550100")
+        XCTAssertNil(hydratedCanadian(canadianProfile(owner: "(604) 555-0100")).consentSnapshot(auth: canadianAuth))
+    }
+
+    func testCanonicalOwnerHydrationChangeInvalidatesOpenConfirmation() throws {
+        var profile = canadianProfile(owner: "(604) 555-0100")
+        profile["owner_phone_e164"] = "+16045550100"
+        var state = hydratedCanadian(profile)
+        let snapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+        profile["owner_phone_e164"] = "+16045550102"
+        let token = try XCTUnwrap(state.captureLoadToken(auth: canadianAuth))
+        state.applyHydration(dict: profile, token: token, auth: canadianAuth)
+        XCTAssertNil(state.beginConsent(snapshot, auth: canadianAuth))
+    }
+
+    func testCanadianConsentRejectsStopMalformedIdentityAndHydrationDrift() throws {
+        for profile in [canadianProfile(optedOut: true), canadianProfile(owner: "invalid"), canadianProfile(sender: "")] {
+            XCTAssertNil(hydratedCanadian(profile).consentSnapshot(auth: canadianAuth))
+        }
+        for profile in [canadianProfile(owner: "+14165550102"), canadianProfile(sender: "+14165550103"), canadianProfile(revision: 4), canadianProfile(optedOut: true)] {
+            var state = hydratedCanadian()
+            let snapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+            let token = state.captureLoadToken(auth: canadianAuth)!
+            state.applyHydration(dict: profile, token: token, auth: canadianAuth)
+            XCTAssertNil(state.beginConsent(snapshot, auth: canadianAuth))
+        }
+        var state = hydratedCanadian()
+        let snapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+        let changed = CallAuthContext(contractorId: canadianAuth.contractorId, bearerToken: "new-token", generation: 2)
+        XCTAssertNil(state.beginConsent(snapshot, auth: changed))
+        state.reset(auth: changed)
+        XCTAssertNil(state.beginConsent(snapshot, auth: changed))
+    }
+
+    func testCanadianConsentRequiresExplicitAckAndUnchangedRevision() throws {
+        let response = HTTPURLResponse(url: URL(string: "https://example.com")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        var ack = canadianProfile(required: false)
+        ack["status"] = "ok"
+        let parsed = OwnerSMSResponseParser.parseConsentResponse(data: try JSONSerialization.data(withJSONObject: ack), response: response)
+        XCTAssertEqual(parsed, .success(enabled: true, optedOut: false, revision: 3, version: 1))
+        for value: Any? in [nil, true, "false", 0] {
+            ack["owner_sms_consent_required"] = value
+            let result = OwnerSMSResponseParser.parseConsentResponse(data: try JSONSerialization.data(withJSONObject: ack), response: response)
+            if case .success = result { XCTFail("Malformed consent acknowledgment accepted") }
+        }
+        var state = hydratedCanadian()
+        let snapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+        let token = try XCTUnwrap(state.beginConsent(snapshot, auth: canadianAuth))
+        state.finishConsent(result: .success(enabled: true, optedOut: false, revision: 4, version: 1), snapshot: snapshot, operationToken: token, auth: canadianAuth)
+        XCTAssertTrue(state.consentRequired)
+        XCTAssertFalse(state.isSaving)
+        let nextSnapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+        let nextToken = try XCTUnwrap(state.beginConsent(nextSnapshot, auth: canadianAuth))
+        state.finishConsent(result: parsed, snapshot: nextSnapshot, operationToken: nextToken, auth: canadianAuth)
+        XCTAssertFalse(state.consentRequired)
+        XCTAssertTrue(state.displayedEnabled)
+        XCTAssertNil(state.consentSnapshot(auth: canadianAuth))
+    }
+
+    func testConsentReplyCannotCrossAccountFence() throws {
+        var state = hydratedCanadian()
+        let snapshot = try XCTUnwrap(state.consentSnapshot(auth: canadianAuth))
+        let token = try XCTUnwrap(state.beginConsent(snapshot, auth: canadianAuth))
+        let other = CallAuthContext(contractorId: "other", bearerToken: "other-token", generation: 2)
+        state.reset(auth: other)
+        state.finishConsent(result: .success(enabled: true, optedOut: false, revision: 3, version: 1), snapshot: snapshot, operationToken: token, auth: canadianAuth)
+        XCTAssertEqual(state.boundAuth, other)
+        XCTAssertFalse(state.isLoaded)
+    }
+}

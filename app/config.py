@@ -26,6 +26,8 @@ class Settings(DotenvProtectedBaseSettings):
     twilio_messaging_service_sid: str = ""
     twilio_sms_status_callback_url: str = ""
     # Guarded SMS sender enrollment and recovery (default OFF)
+    canada_sms_enabled: bool = False
+    canada_messaging_service_sid: str = ""
     sms_sender_enrollment_enabled: bool = False
     sms_sender_enrollment_campaign_sid: str = ""
     sms_sender_enrollment_campaign_sha256: str = ""
@@ -441,6 +443,16 @@ def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
             errors.append("PRODUCTION_TWILIO_ACCOUNT_SID is required outside production")
         elif settings.twilio_account_sid == settings.production_twilio_account_sid:
             errors.append("TWILIO_ACCOUNT_SID must not be the production account outside production")
+
+    if settings.canada_sms_enabled:
+        if env != "production" or settings.firestore_project_id != PRODUCTION_GCP_PROJECT_ID:
+            errors.append("CANADA_SMS_ENABLED requires the production environment and project")
+        if (not _re.fullmatch(r"AC[0-9a-fA-F]{32}", settings.twilio_account_sid)
+                or settings.twilio_account_sid != settings.production_twilio_account_sid):
+            errors.append("CANADA_SMS_ENABLED requires the pinned production Twilio account")
+        if (not _re.fullmatch(r"MG[0-9a-fA-F]{32}", settings.canada_messaging_service_sid)
+                or settings.canada_messaging_service_sid == settings.twilio_messaging_service_sid):
+            errors.append("CANADA_SMS_ENABLED requires a separate valid Canada Messaging Service")
 
     if settings.sms_sender_enrollment_enabled:
         if env != "production":

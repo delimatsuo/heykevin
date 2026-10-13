@@ -71,6 +71,33 @@ async def send_owner_sms(contractor_id: str, body: str) -> Optional[bool]:
         )
         return None
 
+    from app.services.canada_sms_consent import (
+        canadian_assignment_valid, is_canadian_phone, valid_canada_consent,
+    )
+    is_canada = (contractor.get("country_code") == "CA"
+                 or contractor.get("provisioned_country_code") == "CA"
+                 or is_canadian_phone(owner_phone) or is_canadian_phone(twilio_number))
+    if is_canada:
+        from app.services.canada_sms_enrollment import ensure_canada_sms_sender_membership
+        if not canadian_assignment_valid(contractor) or not valid_canada_consent(contractor):
+            return None
+        enrollment = await ensure_canada_sms_sender_membership(
+            clean_cid, twilio_number, allow_create=False,
+        )
+        if not enrollment.enrolled:
+            return None
+        # STOP, app-off, reassignment and consent changes during readback fail closed.
+        try:
+            fresh = await contractor_db.get_contractor(clean_cid)
+        except Exception:
+            return False
+        if (not fresh or fresh.get("contractor_id") != clean_cid
+                or not canadian_assignment_valid(fresh) or not valid_canada_consent(fresh)
+                or owner_sms_db.resolve_contractor_owner_sms_identities(fresh) != (owner_phone, twilio_number)
+                or fresh.get("owner_sms_consent") != contractor.get("owner_sms_consent")):
+            return None
+        contractor = fresh
+
     # Append disclosure once outside translated/generated content
     if DISCLOSURE_TEXT not in body:
         full_body = f"{body.rstrip()}\n\n{DISCLOSURE_TEXT}"
@@ -100,11 +127,18 @@ async def send_owner_sms(contractor_id: str, body: str) -> Optional[bool]:
     query = urllib.parse.urlencode({"contractor_id": clean_cid, "revision": str(revision)})
     status_callback_url = f"{base_url}/webhooks/twilio/owner-sms-status?{query}"
 
-    create_kwargs = _message_create_kwargs(
-        to=owner_phone,
-        body=full_body,
-        from_number=twilio_number,
-    )
+    if is_canada:
+        from app.services.canada_sms_enrollment import configuration_valid
+        if not configuration_valid():
+            return None
+        create_kwargs = {
+            "to": owner_phone, "body": full_body, "from_": twilio_number,
+            "messaging_service_sid": settings.canada_messaging_service_sid,
+        }
+    else:
+        create_kwargs = _message_create_kwargs(
+            to=owner_phone, body=full_body, from_number=twilio_number,
+        )
     create_kwargs["status_callback"] = status_callback_url
 
     loop = asyncio.get_running_loop()

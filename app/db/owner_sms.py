@@ -238,3 +238,59 @@ async def apply_owner_sms_consent_transition(
         return _apply(transaction)
 
     return await loop.run_in_executor(None, _txn)
+
+
+async def collect_canada_owner_sms_consent(
+    contractor_id: str, *, disclosure_version: str, owner_phone_e164: str,
+    twilio_number: str, expected_revision: int,
+) -> tuple[bool, dict]:
+    """Bind express consent to fresh server identities without clearing STOP or revision."""
+    from datetime import datetime, timezone
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from app.services.canada_sms_consent import DISCLOSURE_VERSION, canadian_assignment_valid
+
+    if (not isinstance(contractor_id, str) or not contractor_id.strip()
+            or disclosure_version != DISCLOSURE_VERSION
+            or type(expected_revision) is not int or expected_revision < 0):
+        return False, {"error": "invalid_consent_request"}
+    db = get_firestore_client()
+    ref = db.collection("contractors").document(contractor_id)
+
+    def run():
+        @firestore.transactional
+        def apply(tx):
+            snap = ref.get(transaction=tx)
+            if not snap.exists:
+                return False, {"error": "contractor_not_found"}
+            data = snap.to_dict() or {}
+            owner, sender = resolve_contractor_owner_sms_identities(data)
+            if (owner_phone_e164 != owner or twilio_number != sender
+                    or expected_revision != data.get("owner_sms_opt_out_revision")):
+                return False, {"error": "stale_consent_snapshot"}
+            if not canadian_assignment_valid(data, require_enabled=False):
+                return False, {"error": "consent_not_eligible"}
+            # Duplicate assignment protection is in the same serializable transaction.
+            query = db.collection("contractors").where(
+                filter=FieldFilter("twilio_number", "==", sender)
+            ).limit(2)
+            assignments = list(query.stream(transaction=tx))
+            if len(assignments) != 1 or assignments[0].id != contractor_id:
+                return False, {"error": "assignment_ambiguous"}
+            tx.update(ref, {
+                "owner_sms_enabled": True,
+                "owner_sms_consent": {
+                    "contractor_id": contractor_id,
+                    "disclosure_version": DISCLOSURE_VERSION,
+                    "owner_phone_e164": owner, "twilio_number": sender,
+                    "source": "ios_settings", "collected_at": datetime.now(timezone.utc),
+                    "opt_out_revision": expected_revision,
+                },
+            })
+            return True, {
+                "status": "ok", "owner_sms_enabled": True, "owner_sms_opted_out": False,
+                "owner_sms_opt_out_revision": expected_revision,
+                "owner_sms_settings_version": 1, "owner_sms_consent_required": False,
+            }
+        return apply(db.transaction())
+
+    return await asyncio.get_running_loop().run_in_executor(None, run)

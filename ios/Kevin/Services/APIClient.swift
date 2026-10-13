@@ -489,7 +489,7 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
             authorize(&request)
 
             let (data, response) = try await session.data(for: request)
-            return ForwardingInstructionsParser.parse(response: response, data: data)
+            return ForwardingInstructionsParser.parse(response: response, data: data, expectedCountry: countryCode)
         } catch {
             debugLog("Forwarding instructions fetch failed: \(error.localizedDescription)")
         }
@@ -1524,6 +1524,31 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         } catch {
             debugLog("Patch owner SMS preference failed: \(error.localizedDescription)")
             return .failure(String(localized: "Failed to save setting. Please check your connection and try again."))
+        }
+    }
+
+    func recordOwnerSMSConsent(snapshot: OwnerSMSConsentSnapshot) async -> OwnerSMSPatchResult {
+        guard snapshot.auth.isValid, snapshot.expectedRevision >= 0 else {
+            return .failure(String(localized: "Refresh SMS settings and try again."))
+        }
+        let encodedId = snapshot.auth.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? snapshot.auth.contractorId
+        guard let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)/owner-sms-consent") else {
+            return .failure(String(localized: "Invalid URL."))
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(snapshot.auth.bearerToken)", forHTTPHeaderField: "Authorization")
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: snapshot.requestBody)
+            let (data, response) = try await retryRequest(request, maxRetries: 0, signalReauth: false)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(String(localized: "Invalid server response."))
+            }
+            return OwnerSMSResponseParser.parseConsentResponse(data: data, response: http)
+        } catch {
+            return .failure(String(localized: "SMS consent was not confirmed. Refresh settings and try again."))
         }
     }
 

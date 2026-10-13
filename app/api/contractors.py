@@ -1,7 +1,8 @@
 """Contractor management API."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, StrictBool, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
+from typing import Literal
 from typing import Optional
 from urllib.parse import urlparse
 import ipaddress
@@ -43,6 +44,7 @@ _SENSITIVE_KEYS = frozenset({
     "subscription_renewal_status_signed_at_ms",
     "subscription_forwarded_from",
     "acquisition_measurement",
+    "owner_sms_consent",
 })
 
 
@@ -60,6 +62,8 @@ def _redact_contractor(data: dict) -> dict:
     redacted["owner_sms_opted_out"] = resolve_owner_sms_opted_out(data)
     redacted["owner_sms_opt_out_revision"] = resolve_owner_sms_opt_out_revision(data)
     redacted["owner_sms_settings_version"] = 1
+    from app.services.canada_sms_consent import canada_consent_required
+    redacted["owner_sms_consent_required"] = canada_consent_required(data)
     redacted["service_binding"] = resolve_service_binding(data)
     return redacted
 
@@ -530,6 +534,9 @@ async def api_provision_number(contractor_id: str, request: Request):
             await ensure_sms_sender_membership(contractor_id, existing_number)
         except Exception:
             logger.warning("SMS sender enrollment check failed on API existing number return")
+        if contractor.get("country_code") == "CA":
+            from app.services.canada_sms_enrollment import ensure_canada_sms_sender_membership
+            await ensure_canada_sms_sender_membership(contractor_id, existing_number)
         return {
             "status": "ok",
             "phone_number": existing_number,
@@ -611,6 +618,44 @@ async def api_provision_number(contractor_id: str, request: Request):
         if "unsupported" in error_msg.lower():
             return {"status": "error", "message": "Your country is not yet supported for number provisioning."}
         return {"status": "error", "message": "Failed to provision phone number. Please try again or contact support."}
+
+
+class OwnerSmsConsentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    disclosure_version: Literal["ca-owner-sms-v1"]
+    owner_phone_e164: str = Field(max_length=16)
+    twilio_number: str = Field(max_length=16)
+    expected_revision: StrictInt = Field(ge=0)
+
+
+@router.post("/{contractor_id}/owner-sms-consent")
+async def api_owner_sms_consent(contractor_id: str, body: OwnerSmsConsentRequest, request: Request):
+    require_contractor_access(request, contractor_id)
+    from app.db.owner_sms import collect_canada_owner_sms_consent
+    accepted, result = await collect_canada_owner_sms_consent(contractor_id, **body.model_dump())
+    if not accepted:
+        raise HTTPException(status_code=409, detail={"code": result["error"]})
+    from app.services.canada_sms_enrollment import ensure_canada_sms_sender_membership
+    await ensure_canada_sms_sender_membership(contractor_id, body.twilio_number)
+    # Enrollment performs provider I/O: STOP or reassignment may occur while it waits.
+    # Acknowledge only the current binding and preference state, never the earlier write.
+    from app.db.owner_sms import resolve_contractor_owner_sms_identities
+    from app.services.canada_sms_consent import canadian_assignment_valid, valid_canada_consent
+    try:
+        fresh = await get_contractor(contractor_id)
+    except Exception:
+        raise HTTPException(status_code=409, detail={"code": "consent_state_unconfirmed"})
+    if (not fresh or fresh.get("contractor_id") != contractor_id
+            or resolve_contractor_owner_sms_identities(fresh) != (body.owner_phone_e164, body.twilio_number)
+            or fresh.get("owner_sms_opt_out_revision") != body.expected_revision
+            or not canadian_assignment_valid(fresh) or not valid_canada_consent(fresh)):
+        raise HTTPException(status_code=409, detail={"code": "consent_state_changed"})
+    return {
+        "status": "ok", "owner_sms_enabled": fresh["owner_sms_enabled"],
+        "owner_sms_opted_out": fresh["owner_sms_opted_out"],
+        "owner_sms_opt_out_revision": fresh["owner_sms_opt_out_revision"],
+        "owner_sms_settings_version": 1, "owner_sms_consent_required": False,
+    }
 
 
 @router.patch("/{contractor_id}")
@@ -717,6 +762,7 @@ async def api_update_contractor(contractor_id: str, body: ContractorUpdate, requ
             "owner_sms_opted_out": resolve_owner_sms_opted_out(fresh),
             "owner_sms_opt_out_revision": resolve_owner_sms_opt_out_revision(fresh),
             "owner_sms_settings_version": 1,
+            "owner_sms_consent_required": _redact_contractor(fresh)["owner_sms_consent_required"],
         }
 
     return {"status": "ok"}

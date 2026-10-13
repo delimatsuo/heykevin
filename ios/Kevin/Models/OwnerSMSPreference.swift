@@ -62,6 +62,17 @@ enum OwnerSMSResponseParser {
         return .success(enabled: enabled, optedOut: optedOut, revision: revision, version: version)
     }
 
+    /// Consent requires explicit server confirmation; a generic preference ACK is insufficient.
+    static func parseConsentResponse(data: Data, response: HTTPURLResponse) -> OwnerSMSPatchResult {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              OwnerSMSParsingHelper.strictBool(json["owner_sms_consent_required"]) == false,
+              OwnerSMSParsingHelper.strictBool(json["owner_sms_enabled"]) == true,
+              OwnerSMSParsingHelper.strictBool(json["owner_sms_opted_out"]) == false else {
+            return .failure(String(localized: "SMS consent was not confirmed. Refresh settings and try again."))
+        }
+        return parsePatchResponse(data: data, response: response)
+    }
+
     /// Parse profile dictionary from GET /api/contractors/{id}.
     /// - owner_sms_enabled: absent defaults true; present non-bool fails closed (false).
     /// - owner_sms_opted_out: absent defaults false; present non-bool fails closed (true/blocked).
@@ -117,6 +128,10 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
     var isUnsupportedBackend: Bool
     var fenceRevision: Int
     private(set) var requestedEnabled: Bool?
+    private(set) var consentRequired = false
+    private(set) var consentCountry = ""
+    private(set) var ownerPhoneE164 = ""
+    private(set) var senderNumber = ""
 
     init(
         boundAuth: CallAuthContext = CallAuthContext(contractorId: "", bearerToken: "", generation: 0),
@@ -146,7 +161,7 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
 
     /// User-visible state of the SMS notifications switch.
     var displayedEnabled: Bool {
-        isSaving ? (requestedEnabled ?? confirmedEnabled) : confirmedEnabled
+        consentRequired ? false : (isSaving ? (requestedEnabled ?? confirmedEnabled) : confirmedEnabled)
     }
 
     /// Whether texts are blocked at the carrier/provider level.
@@ -166,6 +181,7 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
     /// Begin a save operation. Returns operation token (fenceRevision) if permitted, or nil if invalid/busy.
     mutating func beginSave(targetEnabled: Bool, auth: CallAuthContext) -> (operationToken: Int, previous: Bool)? {
         guard auth.isValid, auth == boundAuth, isLoaded, !isUnsupportedBackend, !isSaving else { return nil }
+        guard !targetEnabled || !consentRequired else { return nil }
         requestedEnabled = targetEnabled
         fenceRevision += 1
         isSaving = true
@@ -230,6 +246,23 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
             loadError = Self.unavailableNotice
             return
         }
+        consentCountry = ForwardingCountry.resolve(
+            serviceBinding: ServiceBindingParser.parse(from: dict),
+            accountCountry: dict["country_code"] as? String,
+            assignedNumber: dict["twilio_number"] as? String,
+            hasAssignedNumber: true
+        )
+        // Missing/malformed Canadian consent metadata must never inherit legacy true.
+        consentRequired = consentCountry == "CA"
+            ? (OwnerSMSParsingHelper.strictBool(dict["owner_sms_consent_required"]) ?? true)
+            : (OwnerSMSParsingHelper.strictBool(dict["owner_sms_consent_required"]) ?? false)
+        // Match server identity precedence: a present canonical companion is
+        // authoritative, including when malformed. Never fall back around it.
+        let ownerIdentity = dict.keys.contains("owner_phone_e164")
+            ? dict["owner_phone_e164"] as? String
+            : dict["owner_phone"] as? String
+        ownerPhoneE164 = ownerIdentity.flatMap { Self.isE164($0) ? $0 : nil } ?? ""
+        senderNumber = dict["twilio_number"] as? String ?? ""
         confirmedEnabled = parsed.enabled
         carrierOptedOut = parsed.optedOut
         optOutRevision = parsed.revision
@@ -243,6 +276,51 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
         }
     }
 
+    /// The confirmation binds disclosure acceptance to one freshly hydrated identity.
+    func consentSnapshot(auth: CallAuthContext) -> OwnerSMSConsentSnapshot? {
+        guard auth.isValid, auth == boundAuth, isLoaded, !isSaving, !isUnsupportedBackend,
+              consentCountry == "CA", consentRequired, !carrierOptedOut,
+              Self.isE164(ownerPhoneE164), Self.isE164(senderNumber) else { return nil }
+        return OwnerSMSConsentSnapshot(auth: auth, ownerPhoneE164: ownerPhoneE164,
+                                       twilioNumber: senderNumber, expectedRevision: optOutRevision,
+                                       fenceRevision: fenceRevision)
+    }
+
+    func matchesConsent(_ snapshot: OwnerSMSConsentSnapshot, auth: CallAuthContext) -> Bool {
+        consentSnapshot(auth: auth) == snapshot
+    }
+
+    mutating func beginConsent(_ snapshot: OwnerSMSConsentSnapshot, auth: CallAuthContext) -> Int? {
+        guard matchesConsent(snapshot, auth: auth) else { return nil }
+        fenceRevision += 1
+        isSaving = true
+        requestedEnabled = true
+        saveError = ""
+        return fenceRevision
+    }
+
+    mutating func finishConsent(result: OwnerSMSPatchResult, snapshot: OwnerSMSConsentSnapshot,
+                                operationToken: Int, auth: CallAuthContext) {
+        guard auth == boundAuth, auth == snapshot.auth, operationToken == fenceRevision,
+              isSaving, ownerPhoneE164 == snapshot.ownerPhoneE164,
+              senderNumber == snapshot.twilioNumber, optOutRevision == snapshot.expectedRevision else { return }
+        // The dedicated parser has already required consent_required=false and no STOP.
+        if case .success(let enabled, let optedOut, let revision, let version) = result,
+           enabled, !optedOut, revision == snapshot.expectedRevision, version == 1 {
+            consentRequired = false
+            finishSave(result: result, operationToken: operationToken, auth: auth)
+        } else {
+            finishSave(result: .failure(String(localized: "SMS consent was not confirmed. Refresh settings and try again.")),
+                       operationToken: operationToken, auth: auth)
+            requestedEnabled = nil
+        }
+    }
+
+    private static func isE164(_ value: String) -> Bool {
+        value.first == "+" && (9...16).contains(value.count)
+            && value.dropFirst().first != "0" && value.dropFirst().allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
     static let unavailableNotice = String(localized: "SMS settings are unavailable right now. Please try again.")
 
     mutating func recordLoadFailure(token: Int, auth: CallAuthContext) {
@@ -254,6 +332,10 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
     mutating func reset(auth: CallAuthContext) {
         boundAuth = auth
         requestedEnabled = nil
+        consentRequired = false
+        consentCountry = ""
+        ownerPhoneE164 = ""
+        senderNumber = ""
         confirmedEnabled = true
         carrierOptedOut = false
         optOutRevision = 0
@@ -264,5 +346,25 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
         loadError = ""
         isUnsupportedBackend = false
         fenceRevision += 1
+    }
+}
+
+
+struct OwnerSMSConsentSnapshot: Equatable, Sendable, Identifiable {
+    var id: Int { fenceRevision }
+    let auth: CallAuthContext
+    let ownerPhoneE164: String
+    let twilioNumber: String
+    let expectedRevision: Int
+    let fenceRevision: Int
+    static let disclosureVersion = "ca-owner-sms-v1"
+    var requestBody: [String: Any] {
+        ["disclosure_version": Self.disclosureVersion,
+         "owner_phone_e164": ownerPhoneE164,
+         "twilio_number": twilioNumber,
+         "expected_revision": expectedRevision]
+    }
+    var disclosure: String {
+        "I agree to receive SMS from Hey Kevin at \(ownerPhoneE164), sent from my Kevin number \(twilioNumber), for call summaries, voicemail and account notices. Message frequency varies. Message and data rates may apply. Reply STOP to stop or HELP for help."
     }
 }

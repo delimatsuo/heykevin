@@ -193,6 +193,9 @@ class Settings(DotenvProtectedBaseSettings):
     background_worker_mode: str = "embedded"
     background_worker_scheduler_audience: str = ""
     background_worker_scheduler_service_account_email: str = ""
+    # An operator-generated, non-secret generation identifier binds one bounded
+    # staging cutover. It is required only when external worker mode is used.
+    background_worker_cutover_generation: str = ""
 
     @field_validator("background_worker_mode")
     @classmethod
@@ -296,6 +299,27 @@ def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
             errors.append("External background workers require ENVIRONMENT=staging")
         if settings.allow_production_resources_in_non_production:
             errors.append("External background workers forbid production resource overrides")
+        configured_generation = settings.background_worker_cutover_generation
+        generation = configured_generation.strip()
+        if (
+            generation != configured_generation
+            or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{15,127}", generation)
+        ):
+            errors.append(
+                "BACKGROUND_WORKER_CUTOVER_GENERATION must be a 16-128 character "
+                "non-secret identifier when external workers are enabled"
+            )
+        # These loops have not received a bounded external-worker contract.
+        # Refuse a configuration that would silently stop them during cutover.
+        for enabled, setting in (
+            (settings.purge_enabled, "PURGE_ENABLED"),
+            (settings.service_request_recovery_enabled, "SERVICE_REQUEST_RECOVERY_ENABLED"),
+            (settings.jobber_disconnect_recovery_enabled, "JOBBER_DISCONNECT_RECOVERY_ENABLED"),
+        ):
+            if enabled:
+                errors.append(
+                    f"External background workers require {setting}=false until its loop is separately migrated"
+                )
 
 
     parent_breaker_fields = (

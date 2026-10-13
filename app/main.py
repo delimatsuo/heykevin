@@ -52,6 +52,8 @@ _service_request_recovery_task: asyncio.Task | None = None
 _estimate_worker_task: asyncio.Task | None = None
 _jobber_disconnect_recovery_task: asyncio.Task | None = None
 _housekeeping_tasks: dict[str, asyncio.Task] = {}
+_cutover_task: asyncio.Task | None = None
+_effective_background_worker_mode = "embedded"
 
 app = FastAPI(
     title="Kevin",
@@ -105,7 +107,7 @@ async def health():
     staging_live_safety = staging_native_live_safety_controls_enabled()
     return {
         "status": "ok",
-        "worker_mode": settings.background_worker_mode,
+        "worker_mode": _effective_background_worker_mode,
         "environment": settings.environment,
         "service": os.getenv("K_SERVICE", ""),
         "revision": os.getenv("K_REVISION", ""),
@@ -202,10 +204,140 @@ async def _data_purge_sweep():
     await _periodic_maintenance("data_purge_once", 6 * 3600, immediate=True)
 
 
-@app.on_event("startup")
-async def startup():
+def _start_embedded_background_loops():
+    """Start legacy loops only after the shared cutover record permits them."""
     global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task, _jobber_disconnect_recovery_task
 
+    for factory in (
+        _orphan_call_cleanup, _call_retention_sweep, _lapsed_trial_sweep,
+        _expired_contractor_cleanup, _data_purge_sweep,
+    ):
+        task = _housekeeping_tasks.get(factory.__name__)
+        if task is None or task.done():
+            _housekeeping_tasks[factory.__name__] = asyncio.create_task(factory())
+    from app.services.post_call_handoff import post_call_worker_loop
+
+    if _post_call_worker_task is None or _post_call_worker_task.done():
+        _post_call_worker_task = asyncio.create_task(post_call_worker_loop())
+    from app.services.estimate_worker import estimate_worker_loop
+
+    if _estimate_worker_task is None or _estimate_worker_task.done():
+        _estimate_worker_task = asyncio.create_task(estimate_worker_loop())
+    from app.services.service_request_recovery import service_request_recovery_worker_loop
+
+    if (
+        settings.service_request_recovery_enabled is True
+        and (_service_request_recovery_task is None or _service_request_recovery_task.done())
+    ):
+        # Recovery processes only already-durable intents. Initiating new
+        # mutations remains gated per contractor at the voice-tool boundary.
+        _service_request_recovery_task = asyncio.create_task(service_request_recovery_worker_loop())
+
+    from app.services.jobber_disconnect_recovery import jobber_disconnect_recovery_worker_loop
+
+    if (
+        getattr(settings, "jobber_disconnect_recovery_enabled", False) is True
+        and (_jobber_disconnect_recovery_task is None or _jobber_disconnect_recovery_task.done())
+    ):
+        _jobber_disconnect_recovery_task = asyncio.create_task(jobber_disconnect_recovery_worker_loop())
+
+
+def _get_background_cutover_store():
+    from app.db.background_jobs import BackgroundWorkerCutoverStore
+    from app.db.firestore_client import get_firestore_client
+
+    return BackgroundWorkerCutoverStore(get_firestore_client())
+
+
+async def _wait_for_embedded_cutover(store, *, fallback: bool) -> None:
+    """Drain any admitted external child before restarting embedded loops."""
+    global _effective_background_worker_mode
+
+    while True:
+        try:
+            ready = await asyncio.to_thread(store.begin_embedded)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning("Background-worker cutover read failed: %s", type(error).__name__)
+            await asyncio.sleep(5)
+            continue
+        if ready:
+            _start_embedded_background_loops()
+            _effective_background_worker_mode = "embedded_fallback" if fallback else "embedded"
+            return
+        await asyncio.sleep(5)
+
+
+async def _watch_external_cutover(store, generation: str) -> None:
+    """Fall back to embedded processing after an external lease expires."""
+    while True:
+        await asyncio.sleep(15)
+        try:
+            active = await asyncio.to_thread(store.external_active, generation)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning("Background-worker lease read failed: %s", type(error).__name__)
+            continue
+        if not active:
+            await _wait_for_embedded_cutover(store, fallback=True)
+            return
+
+
+async def _configure_background_workers() -> None:
+    """Select an effective mode without permitting an unchecked handoff."""
+    global _cutover_task, _effective_background_worker_mode
+
+    # External mode is prohibited outside staging. Preserve normal embedded
+    # operation in production, development, and tests without an extra control
+    # datastore dependency.
+    if settings.environment != "staging":
+        _start_embedded_background_loops()
+        _effective_background_worker_mode = "embedded"
+        return
+
+    try:
+        store = _get_background_cutover_store()
+    except Exception as error:
+        logger.warning("Background-worker cutover store unavailable: %s", type(error).__name__)
+        _effective_background_worker_mode = "cutover_unavailable"
+        return
+
+    if settings.background_worker_mode == "external":
+        try:
+            if await asyncio.to_thread(
+                store.activate_external, settings.background_worker_cutover_generation,
+            ):
+                _effective_background_worker_mode = "external"
+                _cutover_task = asyncio.create_task(_watch_external_cutover(
+                    store, settings.background_worker_cutover_generation,
+                ))
+                return
+        except Exception as error:
+            logger.warning("Background-worker external activation rejected: %s", type(error).__name__)
+
+    # A missing, expired, or incomplete external record is never permission to
+    # stop recovery. This transaction fences new external claims first; if a
+    # previously admitted child is still running, wait for it instead of racing
+    # legacy loops against the same work.
+    try:
+        ready = await asyncio.to_thread(store.begin_embedded)
+    except Exception as error:
+        logger.warning("Background-worker embedded cutover unavailable: %s", type(error).__name__)
+        _effective_background_worker_mode = "cutover_unavailable"
+        return
+    fallback = settings.background_worker_mode == "external"
+    if ready:
+        _start_embedded_background_loops()
+        _effective_background_worker_mode = "embedded_fallback" if fallback else "embedded"
+        return
+    _effective_background_worker_mode = "draining"
+    _cutover_task = asyncio.create_task(_wait_for_embedded_cutover(store, fallback=fallback))
+
+
+@app.on_event("startup")
+async def startup():
     # Validate required config
     required = ['twilio_account_sid', 'twilio_auth_token', 'anthropic_api_key',
                 'deepgram_api_key', 'elevenlabs_api_key', 'api_bearer_token']
@@ -219,53 +351,7 @@ async def startup():
     if not settings.vapi_webhook_secret and settings.environment != "development":
         logger.critical("SECURITY WARNING: vapi_webhook_secret is not set — Vapi webhook is unauthenticated")
 
-    if settings.background_worker_mode == "embedded":
-        for factory in (
-            _orphan_call_cleanup, _call_retention_sweep, _lapsed_trial_sweep,
-            _expired_contractor_cleanup, _data_purge_sweep,
-        ):
-            task = _housekeeping_tasks.get(factory.__name__)
-            if task is None or task.done():
-                _housekeeping_tasks[factory.__name__] = asyncio.create_task(factory())
-        from app.services.post_call_handoff import post_call_worker_loop
-
-        if _post_call_worker_task is None or _post_call_worker_task.done():
-            _post_call_worker_task = asyncio.create_task(post_call_worker_loop())
-        from app.services.estimate_worker import estimate_worker_loop
-
-        if _estimate_worker_task is None or _estimate_worker_task.done():
-            _estimate_worker_task = asyncio.create_task(estimate_worker_loop())
-        from app.services.service_request_recovery import (
-            service_request_recovery_worker_loop,
-        )
-
-        if (
-            settings.service_request_recovery_enabled is True
-            and (
-            _service_request_recovery_task is None
-            or _service_request_recovery_task.done()
-            )
-        ):
-            # Recovery processes only already-durable intents. Initiating new
-            # mutations remains gated per contractor at the voice-tool boundary.
-            _service_request_recovery_task = asyncio.create_task(
-                service_request_recovery_worker_loop()
-            )
-
-        from app.services.jobber_disconnect_recovery import (
-            jobber_disconnect_recovery_worker_loop,
-        )
-
-        if (
-            getattr(settings, "jobber_disconnect_recovery_enabled", False) is True
-            and (
-                _jobber_disconnect_recovery_task is None
-                or _jobber_disconnect_recovery_task.done()
-            )
-        ):
-            _jobber_disconnect_recovery_task = asyncio.create_task(
-                jobber_disconnect_recovery_worker_loop()
-            )
+    await _configure_background_workers()
 
     # F-21: drop the redacted Twilio number from startup logs entirely. Even
     # the last 4 digits are unnecessary signal in centralised logs and the
@@ -275,11 +361,11 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task, _jobber_disconnect_recovery_task
+    global _post_call_worker_task, _service_request_recovery_task, _estimate_worker_task, _jobber_disconnect_recovery_task, _cutover_task
 
     tasks = list(_housekeeping_tasks.values()) + [
         _post_call_worker_task, _estimate_worker_task,
-        _service_request_recovery_task, _jobber_disconnect_recovery_task,
+        _service_request_recovery_task, _jobber_disconnect_recovery_task, _cutover_task,
     ]
     tasks = [task for task in tasks if task is not None]
     for task in tasks:
@@ -288,6 +374,7 @@ async def shutdown():
     _housekeeping_tasks.clear()
     _post_call_worker_task = _estimate_worker_task = None
     _service_request_recovery_task = _jobber_disconnect_recovery_task = None
+    _cutover_task = None
 
     from app.db.jobber_disconnect_transactions import drain_jobber_operations
     await drain_jobber_operations()

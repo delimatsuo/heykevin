@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 
+from app.config import settings
 from app.db.background_jobs import BackgroundJobStore, JOB_INTERVALS
 from app.middleware.worker_auth import validate_worker_configuration, verify_worker_identity
 from app.services.background_dispatch import (
@@ -30,7 +31,10 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
 
 def get_job_store():
     from app.db.firestore_client import get_firestore_client
-    return BackgroundJobStore(get_firestore_client())
+    return BackgroundJobStore(
+        get_firestore_client(),
+        external_generation=settings.background_worker_cutover_generation,
+    )
 
 
 @app.get("/health")
@@ -90,6 +94,14 @@ async def task(job: str):
     if admission.status == "needs_attention":
         log_worker_failure(job, "admission", "admission_blocked")
         raise HTTPException(status_code=409, detail="Worker job requires operator attention")
+    if admission.status == "cutover_pending":
+        # Scheduler has reached a live private worker, but the API has not
+        # yet acknowledged the operator-prepared drain. Never run business
+        # work while the legacy API could still own the same loop.
+        return {"status": "cutover_pending"}
+    if admission.status == "cutover_blocked":
+        log_worker_failure(job, "admission", "cutover_blocked")
+        raise HTTPException(status_code=409, detail="Worker cutover is not active")
     if admission.status in {"not_due", "in_progress"}:
         return {"status": admission.status}
     if admission.status != "admitted" or not admission.nonce:

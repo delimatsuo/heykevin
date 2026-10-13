@@ -9,7 +9,6 @@ import sys
 
 from google.api_core import exceptions as google_errors
 
-from app.config import settings
 from app.db.background_jobs import JOB_INTERVALS
 
 WALL_BUDGET_SECONDS = 240.0
@@ -21,6 +20,14 @@ _CHILD_JOBS: dict = {}
 _CHILD_FAILURES: dict = {}
 
 logger = logging.getLogger("app.background_worker")
+
+# External mode deliberately carries only jobs with a bounded, persisted scan
+# cursor or a fixed per-pass action cap. Configuration rejects enabled purge
+# and provider-recovery loops until each has its own reviewed contract.
+EXTERNAL_JOB_NAMES = frozenset({
+    "orphan_calls", "call_retention", "lapsed_trials", "expired_contractors",
+    "post_calls", "estimates",
+})
 
 # Exact trusted class identities select fixed codes. Exception names, messages,
 # attributes and tracebacks are never inspected or serialized.
@@ -49,7 +56,7 @@ DIAGNOSTIC_CODES = {
     "bootstrap": frozenset({"import_failed"}),
     "config": frozenset({"config_invalid"}),
     "admission": frozenset({"store_unavailable", "admission_failed", "admission_invalid",
-                            "admission_blocked", "admission_settle_failed", "cancelled"}),
+                            "admission_blocked", "admission_settle_failed", "cutover_blocked", "cancelled"}),
     "child_launch": frozenset({"launch_failed", "cancelled"}),
     "child_bootstrap": frozenset({"import_failed"}),
     "child_config": frozenset({"config_invalid"}),
@@ -142,17 +149,19 @@ def _decode_completion(job: str, raw: bytes, returncode: int) -> dict:
 
 
 def job_enabled(job: str) -> bool:
-    if job not in JOB_INTERVALS:
-        return False
-    flags = {"data_purge": "purge_enabled", "service_requests": "service_request_recovery_enabled",
-             "jobber_disconnect": "jobber_disconnect_recovery_enabled"}
-    return job not in flags or getattr(settings, flags[job]) is True
+    return job in EXTERNAL_JOB_NAMES and job in JOB_INTERVALS
 
 
 def validate_continuation(job: str, continuation: object) -> dict:
     if not isinstance(continuation, dict):
         raise ValueError("Invalid continuation")
-    allowed = {"post_calls": {"pending", "in_progress"}, "estimates": {"processing"}}.get(job, set())
+    allowed = {
+        "orphan_calls": {"cursor"},
+        "lapsed_trials": {"cursor"},
+        "expired_contractors": {"cursor"},
+        "post_calls": {"pending", "in_progress"},
+        "estimates": {"processing"},
+    }.get(job, set())
     if not set(continuation).issubset(allowed):
         raise ValueError("Unexpected continuation")
     for value in continuation.values():
@@ -171,26 +180,24 @@ async def execute_once(job: str, continuation: dict) -> dict:
     validate_continuation(job, continuation)
     from app.services import background_maintenance as maintenance
 
-    simple = {"orphan_calls": maintenance.orphan_calls_once,
-              "call_retention": maintenance.call_retention_once,
-              "expired_contractors": maintenance.expired_contractors_once,
-              "data_purge": maintenance.data_purge_once}
-    if job in simple:
-        await simple[job]()
+    if job == "orphan_calls":
+        return await maintenance.orphan_calls_once(continuation=continuation, page_size=25)
+    if job == "call_retention":
+        await maintenance.call_retention_once()
     elif job == "lapsed_trials":
-        await maintenance.lapsed_trials_once(strict=True)
+        return await maintenance.lapsed_trials_once(
+            strict=True, continuation=continuation, page_size=25,
+        )
+    elif job == "expired_contractors":
+        return await maintenance.expired_contractors_once(
+            continuation=continuation, page_size=5,
+        )
     elif job == "post_calls":
         from app.services.post_call_handoff import run_bounded_post_calls_once
         return await run_bounded_post_calls_once(continuation)
     elif job == "estimates":
         from app.services.estimate_worker import run_pending_estimates_once
         return await run_pending_estimates_once(page_size=25, max_analyses=1, continuation=continuation)
-    elif job == "service_requests":
-        from app.services.service_request_recovery import ServiceRequestRecoveryWorker, FirestoreServiceRequestRepository
-        await ServiceRequestRecoveryWorker(FirestoreServiceRequestRepository(), batch_size=1).run_once()
-    elif job == "jobber_disconnect":
-        from app.services.jobber_disconnect_recovery import run_jobber_disconnect_recovery_once
-        await run_jobber_disconnect_recovery_once()
     return {}
 
 

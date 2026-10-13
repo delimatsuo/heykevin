@@ -90,7 +90,6 @@ def test_runner_settles_enabled_screening_measurement_before_success(monkeypatch
 
 @pytest.mark.asyncio
 async def test_disabled_job_performs_zero_imported_work(monkeypatch):
-    monkeypatch.setattr(dispatch.settings, "purge_enabled", False)
     with pytest.raises(ValueError):
         await dispatch.run_child("data_purge", {})
     with pytest.raises(ValueError):

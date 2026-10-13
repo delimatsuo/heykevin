@@ -1,6 +1,7 @@
 """Actual API lifecycle behavior, all nine loops and conservative mode gates."""
 
 import asyncio
+import base64
 import os
 from unittest.mock import AsyncMock
 
@@ -25,6 +26,8 @@ def inert_lifecycle(monkeypatch):
     monkeypatch.setattr(main, "_housekeeping_tasks", {})
     for name in ("_post_call_worker_task", "_estimate_worker_task", "_service_request_recovery_task", "_jobber_disconnect_recovery_task"):
         monkeypatch.setattr(main, name, None)
+    monkeypatch.setattr(main, "_cutover_task", None)
+    monkeypatch.setattr(main, "_effective_background_worker_mode", "embedded")
     cancelled = []
 
     def factory(name):
@@ -96,10 +99,17 @@ async def test_shutdown_joins_remaining_tasks_when_one_already_failed(inert_life
 
 
 @pytest.mark.asyncio
-async def test_external_mode_starts_zero_loops_even_with_optional_flags(inert_lifecycle, monkeypatch):
+async def test_external_mode_starts_zero_embedded_loops(inert_lifecycle, monkeypatch):
     monkeypatch.setattr(main.settings, "background_worker_mode", "external")
-    monkeypatch.setattr(main.settings, "service_request_recovery_enabled", True)
-    monkeypatch.setattr(main.settings, "jobber_disconnect_recovery_enabled", True)
+    monkeypatch.setattr(main.settings, "background_worker_cutover_generation", "staging-cutover-20261013")
+    monkeypatch.setattr(main.settings, "environment", "staging")
+    class ActiveCutover:
+        def activate_external(self, generation):
+            assert generation == "staging-cutover-20261013"
+            return True
+        def external_active(self, generation):
+            return True
+    monkeypatch.setattr(main, "_get_background_cutover_store", ActiveCutover)
     await main.startup()
     try:
         assert not main._housekeeping_tasks
@@ -110,11 +120,61 @@ async def test_external_mode_starts_zero_loops_even_with_optional_flags(inert_li
     assert not inert_lifecycle
 
 
+@pytest.mark.asyncio
+async def test_incomplete_external_cutover_retains_embedded_recovery(inert_lifecycle, monkeypatch):
+    monkeypatch.setattr(main.settings, "background_worker_mode", "external")
+    monkeypatch.setattr(main.settings, "background_worker_cutover_generation", "staging-cutover-20261013")
+    monkeypatch.setattr(main.settings, "environment", "staging")
+    monkeypatch.setattr(main.settings, "service_request_recovery_enabled", True)
+    monkeypatch.setattr(main.settings, "jobber_disconnect_recovery_enabled", True)
+
+    class PendingCutover:
+        def activate_external(self, generation):
+            assert generation == "staging-cutover-20261013"
+            return False
+        def begin_embedded(self):
+            return True
+    monkeypatch.setattr(main, "_get_background_cutover_store", PendingCutover)
+
+    try:
+        await main.startup()
+        assert len(tasks()) == 9 and all(task is not None for task in tasks())
+        assert (await main.health())["worker_mode"] == "embedded_fallback"
+        await asyncio.sleep(0)
+    finally:
+        await main.shutdown()
+    assert len(inert_lifecycle) == 9
+
+
 @pytest.mark.parametrize("environment", ["development", "production", "test"])
 def test_external_mode_forbidden_outside_staging(monkeypatch, environment):
     monkeypatch.setattr(main.settings, "background_worker_mode", "external")
     monkeypatch.setattr(main.settings, "environment", environment)
     with pytest.raises(RuntimeError, match="External background workers require"):
+        validate_runtime_safety()
+
+
+@pytest.mark.parametrize("field", [
+    "purge_enabled", "service_request_recovery_enabled", "jobber_disconnect_recovery_enabled",
+])
+def test_external_mode_refuses_unmigrated_enabled_loops(monkeypatch, field):
+    key = base64.b64encode(b"x" * 32).decode()
+    monkeypatch.setattr(main.settings, "background_worker_mode", "external")
+    monkeypatch.setattr(main.settings, "environment", "staging")
+    monkeypatch.setattr(main.settings, "background_worker_cutover_generation", "staging-cutover-20261013")
+    monkeypatch.setattr(main.settings, "allow_production_resources_in_non_production", False)
+    monkeypatch.setattr(main.settings, "cloud_run_url", "https://kevin-staging.example.com")
+    monkeypatch.setattr(main.settings, "firestore_project_id", "kevin-staging")
+    monkeypatch.setattr(main.settings, "firebase_database_url", "https://kevin-staging.firebaseio.com")
+    monkeypatch.setattr(main.settings, "production_twilio_account_sid", "ACproduction")
+    monkeypatch.setattr(main.settings, "twilio_account_sid", "ACstaging")
+    monkeypatch.setattr(main.settings, "appstore_environment", "sandbox")
+    monkeypatch.setattr(main.settings, "apns_sandbox", True)
+    monkeypatch.setattr(main.settings, "transcript_encryption_key", key)
+    monkeypatch.setattr(main.settings, "integration_token_encryption_keys", f'{{"1": "{key}"}}')
+    monkeypatch.setattr(main.settings, "integration_token_active_key_version", "1")
+    monkeypatch.setattr(main.settings, field, True)
+    with pytest.raises(RuntimeError, match="until its loop is separately migrated"):
         validate_runtime_safety()
 
 

@@ -9,7 +9,15 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.db.background_jobs import BackgroundJobStore, BoundedTransaction, COLLECTION, JOB_INTERVALS
+from app.db.background_jobs import (
+    BackgroundJobStore,
+    BackgroundWorkerCutoverStore,
+    BoundedTransaction,
+    COLLECTION,
+    CUTOVER_COLLECTION,
+    CUTOVER_DOCUMENT,
+    JOB_INTERVALS,
+)
 
 
 class Transaction:
@@ -53,10 +61,11 @@ class Transaction:
 
 
 class Reference:
-    def __init__(self, db, key):
-        self.db, self.key = db, key
+    def __init__(self, db, collection, key):
+        self.db = db
+        self.key = key if collection == COLLECTION else (collection, key)
 
-    def get(self, *, transaction, retry, timeout):
+    def get(self, *, transaction=None, retry, timeout):
         assert retry is None and timeout == 2.0
         data = deepcopy(self.db.data.get(self.key))
         return SimpleNamespace(exists=data is not None, to_dict=lambda: data,
@@ -68,14 +77,20 @@ class Database:
         self.data, self.lock, self.now = {}, RLock(), 1000.0
 
     def collection(self, name):
-        assert name == COLLECTION
-        return SimpleNamespace(document=lambda key: Reference(self, key))
+        return SimpleNamespace(document=lambda key: Reference(self, name, key))
 
     def get_all(self, refs, **kwargs):
         return (ref.get(**kwargs) for ref in refs)
 
-    def store(self):
-        return BackgroundJobStore(self, transaction_factory=lambda: Transaction(self))
+    def store(self, *, external_generation=None):
+        return BackgroundJobStore(
+            self,
+            transaction_factory=lambda: Transaction(self),
+            external_generation=external_generation,
+        )
+
+    def cutover(self):
+        return BackgroundWorkerCutoverStore(self, transaction_factory=lambda: Transaction(self))
 
 
 def test_competing_independent_stores_execute_only_one_admission():
@@ -187,3 +202,78 @@ def test_calendar_slots_preserve_cron_cadence_after_execution_latency():
     assert db.store().admit("orphan_calls").status == "not_due"
     db.now = 1500.2
     assert db.store().admit("orphan_calls").status == "admitted"
+
+
+_GENERATION = "staging-cutover-20261013"
+_CUTOVER_KEY = (CUTOVER_COLLECTION, CUTOVER_DOCUMENT)
+
+
+def test_external_claims_wait_for_api_ack_and_drain_before_embedded_restarts():
+    db = Database()
+    cutover = db.cutover()
+    external = db.store(external_generation=_GENERATION)
+
+    assert cutover.begin_embedded()
+    cutover.prepare_external(
+        _GENERATION,
+        lease_seconds=300,
+        embedded_instances_drained=True,
+        scheduler_delivery_verified=True,
+    )
+    assert external.admit("post_calls").status == "cutover_pending"
+    assert "post_calls" not in db.data
+    assert cutover.activate_external(_GENERATION)
+
+    claim = external.admit("post_calls")
+    assert claim.status == "admitted"
+    assert not cutover.begin_embedded()
+    assert db.data[_CUTOVER_KEY]["state"] == "external_draining"
+    assert external.admit("estimates").status == "cutover_blocked"
+
+    assert external.finish("post_calls", claim.nonce, completed=True)
+    assert cutover.begin_embedded()
+    assert db.data[_CUTOVER_KEY] == {"state": "embedded", "protocol_version": 1}
+    assert external.admit("estimates").status == "cutover_blocked"
+
+
+def test_expired_external_lease_never_admits_work_and_reverts_to_embedded():
+    db = Database()
+    cutover = db.cutover()
+    external = db.store(external_generation=_GENERATION)
+    assert cutover.begin_embedded()
+    cutover.prepare_external(
+        _GENERATION,
+        lease_seconds=60,
+        embedded_instances_drained=True,
+        scheduler_delivery_verified=True,
+    )
+    assert cutover.activate_external(_GENERATION)
+    db.now += 60
+
+    assert not cutover.external_active(_GENERATION)
+    assert external.admit("orphan_calls").status == "cutover_blocked"
+    assert not cutover.begin_embedded()
+    assert db.data[_CUTOVER_KEY]["state"] == "external_draining"
+    assert cutover.begin_embedded()
+    assert db.data[_CUTOVER_KEY] == {"state": "embedded", "protocol_version": 1}
+
+
+def test_external_cutover_requires_a_verified_embedded_baseline():
+    db = Database()
+    cutover = db.cutover()
+
+    with pytest.raises(ValueError, match="verified embedded baseline"):
+        cutover.prepare_external(
+            _GENERATION,
+            lease_seconds=300,
+            embedded_instances_drained=True,
+            scheduler_delivery_verified=True,
+        )
+
+    assert cutover.begin_embedded()
+    cutover.prepare_external(
+        _GENERATION,
+        lease_seconds=300,
+        embedded_instances_drained=True,
+        scheduler_delivery_verified=True,
+    )

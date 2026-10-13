@@ -27,6 +27,7 @@ from app.middleware import worker_auth as auth
 def valid_worker(monkeypatch):
     overrides = {
         "environment": "staging", "background_worker_mode": "external",
+        "background_worker_cutover_generation": "staging-cutover-20261013",
         "background_worker_scheduler_audience": "https://private-worker.example.com",
         "background_worker_scheduler_service_account_email": "scheduler@kevin-staging.iam.gserviceaccount.com",
         "allow_production_resources_in_non_production": False,
@@ -60,6 +61,8 @@ def test_worker_only_exposes_health_and_fixed_task_route():
     ("background_worker_mode", "embedded"), ("background_worker_scheduler_audience", "http://worker.example.com"),
     ("background_worker_scheduler_audience", "https://worker.example.com/tasks"),
     ("background_worker_scheduler_service_account_email", "caller@example.com"),
+    ("background_worker_cutover_generation", "too-short"),
+    ("background_worker_cutover_generation", " staging-cutover-20261013"),
     ("allow_production_resources_in_non_production", True), ("apns_sandbox", False),
     ("firestore_project_id", "kevin-491315"), ("twilio_account_sid", "ACproduction")])
 def test_worker_startup_refuses_unsafe_or_malformed_configuration(valid_worker, monkeypatch, field, value):
@@ -167,6 +170,20 @@ async def test_non_admitted_requests_never_execute(route_access, monkeypatch, ad
     monkeypatch.setattr(worker, "run_child", run)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=worker.app), base_url="https://worker") as client:
         assert (await client.post("/tasks/orphan_calls")).status_code == expected
+    run.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,expected", [("cutover_pending", 200), ("cutover_blocked", 409)])
+async def test_unacknowledged_or_draining_cutover_never_executes_work(route_access, monkeypatch, status, expected):
+    monkeypatch.setattr(worker, "get_job_store", lambda: SimpleNamespace(admit=lambda _: Admission(status)))
+    run = AsyncMock(side_effect=AssertionError("cutover must not execute work"))
+    monkeypatch.setattr(worker, "run_child", run)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=worker.app), base_url="https://worker") as client:
+        response = await client.post("/tasks/post_calls")
+    assert response.status_code == expected
+    if status == "cutover_pending":
+        assert response.json() == {"status": "cutover_pending"}
     run.assert_not_called()
 
 

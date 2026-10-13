@@ -27,12 +27,34 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
 ## Source contract
 
 - `BACKGROUND_WORKER_MODE=embedded` remains the default. `external` is
-  rejected outside staging and with a production-resource override.
+  rejected outside staging, with a production-resource override, or unless
+  `BACKGROUND_WORKER_CUTOVER_GENERATION` is a 16–128 character non-secret
+  identifier. It also rejects enabled `PURGE_ENABLED`,
+  `SERVICE_REQUEST_RECOVERY_ENABLED`, or
+  `JOBBER_DISCONNECT_RECOVERY_ENABLED`: those loops have not been given this
+  external-worker contract and must never be silently stopped by a cutover.
 - The API starts its existing nine loops only in embedded mode. Maintenance
   tasks are retained, cancelled, and awaited on shutdown. Call routes,
   subscription policy, feature defaults, and Firestore client rules are intact.
-- `app.worker_main:app` exposes health and nine allowlisted job endpoints.
-  It imports no public API startup. Cloud Run IAM and a Google-signed OIDC
+- Before any external cutover, an updated staging API must run in embedded mode
+  and write protocol version 1 to
+  `private_background_worker_control/cutover`. The only permitted state path
+  is `embedded → external_requested → external_active → external_draining →
+  embedded`. A missing protocol baseline is not a valid starting point.
+- A controlled, non-HTTP operator action may create `external_requested` only
+  after independently observing old embedded instances drained and a blocked
+  Scheduler request reach the private worker. It records the exact generation
+  and a 60-second to 24-hour lease. The API acknowledges that record
+  transactionally before it stops embedded loops; the worker transactionally
+  refuses to claim business work until the matching `external_active` record
+  exists. An incomplete, mismatched, or expired handoff fences external claims
+  and restores embedded processing only after any admitted worker job drains.
+  If the control datastore is unavailable, the API reports
+  `cutover_unavailable` and starts no loops rather than risk duplicate work.
+- `app.worker_main:app` recognizes the ledger's fixed job names but executes
+  only the six jobs below. Requests for `data_purge`, `service_requests`, or
+  `jobber_disconnect` return `disabled` before a datastore claim or business
+  I/O. It imports no public API startup. Cloud Run IAM and a Google-signed OIDC
   token with the exact audience and invoker email protect task requests.
 - Each admitted request awaits a separate process with a 240-second wall
   budget. Cancellation, timeout, malformed output, and shutdown terminate
@@ -49,6 +71,11 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
   post-call item does not stop the global scan.
 - Pending/in-progress post-call cursors and estimate cursors are persisted
   across requests. Cold starts cannot repeatedly starve later documents.
+- External orphan cleanup reads at most 25 RTDB keys plus its current boundary;
+  lapsed trials read at most 25 Firestore documents; and expired-contractor
+  cleanup reads and acts on at most five documents per request. Call retention
+  retains its four 500-record-batch cap. No external job materializes an
+  unbounded contractor or active-call collection.
 
 ## Proposed pilot resources
 
@@ -68,7 +95,8 @@ This is the reviewable configuration, not evidence that it exists.
 | Scheduler retry count | 0; later cron deliveries use the durable ledger |
 | Audience | Exact worker service origin returned by Cloud Run, without task path |
 | Data | Firestore `kevin-staging-491315`, staging RTDB only |
-| Worker mode | `ENVIRONMENT=staging`, `BACKGROUND_WORKER_MODE=external` |
+| Worker mode | `ENVIRONMENT=staging`, `BACKGROUND_WORKER_MODE=external`, exact generation |
+| Cutover control | `private_background_worker_control/cutover`, protocol version 1, finite lease |
 | Public invokers | None; no `allUsers` or `allAuthenticatedUsers` binding |
 | API during migration | Staging minimum 1, instance-based CPU |
 
@@ -85,21 +113,19 @@ Initial UTC schedules (six jobs):
 | --- | --- | --- |
 | `post_calls` | `* * * * *` | One pending item and 25 in-progress records; durable cursors |
 | `estimates` | `* * * * *` | Scan at most 25; analyze at most one |
-| `orphan_calls` | `*/5 * * * *` | Recheck stale call state transactionally before deletion |
+| `orphan_calls` | `*/5 * * * *` | At most 25 RTDB keys plus boundary; recheck stale state before deletion |
 | `call_retention` | `7 */6 * * *` | At most four existing 500-record cleanup batches |
-| `lapsed_trials` | `17 */6 * * *` | Transactionally recheck subscription before expiry |
-| `expired_contractors` | `27 */6 * * *` | Existing deleted-app and lapsed-number safety guards |
+| `lapsed_trials` | `17 */6 * * *` | At most 25 documents; transactionally recheck before expiry |
+| `expired_contractors` | `27 */6 * * *` | At most five documents/actions; existing release safety guards |
 
-`data_purge`, `service_requests`, and `jobber_disconnect` remain disabled when
-their existing feature flags are off; do not create their schedules then.
-Immediately before cutover, read back `PURGE_ENABLED`,
+`data_purge`, `service_requests`, and `jobber_disconnect` do not have external
+schedules. Immediately before cutover, read back `PURGE_ENABLED`,
 `SERVICE_REQUEST_RECOVERY_ENABLED`, and `JOBBER_DISCONNECT_RECOVERY_ENABLED`
-and require all three to be false (unset uses the source default false).
-If any is true, stop and revise the authorized schedule/resource envelope;
-do not silently stop an existing recovery worker or change its flag.
-If separately authorized later, their intervals are six hours, one minute,
-and one minute respectively. The new ledger does not authorize Twilio number
-release or messages independently of the existing service and owner rules.
+and require all three to be false (unset uses the source default false). The
+runtime rejects external mode if any is true. A later migration needs a
+separate reviewed contract and owner-authorized schedule/resource envelope.
+The new ledger does not authorize Twilio number release or messages
+independently of the existing service and owner rules.
 
 ## Cost envelope and limits
 
@@ -133,60 +159,59 @@ has been qualified and read back, followed by measured billing.
 
 ## Activation sequence
 
-1. Bind exact candidate SHA, required CI result, approved spend, runtime
-   identity, immutable image digest, and the current staging rollback revision.
-   As observed on October 13, staging runs source `5a1236d7d0aaa187b5bf1d951c8765d83d9d8117`;
-   this candidate includes intervening main-branch changes, so qualify the
-   complete candidate, not just this diff.
-2. Enable Scheduler only within the approved project. Deploy the worker
-   privately, with no scheduler invoker grant yet. Inspect its actual IAM,
-   config, route surface, and unauthorized responses. Create all six schedules
-   and explicitly pause/read back each one before granting invoker permission.
-   Do not assume the create command supports a `--paused` option. Grant the
-   scheduler identity `roles/run.invoker` on this worker only; preserve the
-   Google-managed Scheduler service-agent role required for OIDC delivery.
-   See [Scheduler HTTP authentication](https://docs.cloud.google.com/scheduler/docs/http-target-auth).
-3. Keep the staging API minimum at one and CPU always allocated. Require the
-   three omitted-worker flags to be false as described above. Ensure no staging
-   call is active, deploy staging API with external mode, and stop **every**
-   old embedded staging instance before schedules resume. Record the exact old
-   revision/tag IDs; remove their traffic allocations and traffic tags, then
-   wait for outstanding requests to settle and old revisions to reach zero
-   instances. Verify fresh per-revision metrics and account for ingestion lag;
-   missing metrics are not proof of zero. Revision minima keep tagged revisions
-   warm even at zero traffic, as described in
-   [minimum-instance behavior](https://docs.cloud.google.com/run/docs/configuring/min-instances).
-   Legacy loops do not participate in the new ledger, and moving traffic alone
-   does not prove they stopped. This pilot does not delete old revisions. If
-   their termination cannot be verified, stop rather than activating schedules
-   or deleting revisions. Retain the rollback revision, image and configuration.
-4. Verify worker OIDC audience/email, successful real scheduled delivery,
-   duplicate delivery across two instances, cancellation during admission and
-   completion, and uncertain completion acknowledgement. Check each ledger
-   status without exposing call records or secrets. Confirm inactive jobs
-   execute zero business I/O. Resume only the approved six jobs.
-5. Measure duration, peak memory, cold-start time, request failures, scheduling
-   overlap, oldest pending item, and completion latency. The bounded recovery
-   throughput is lower than embedded mode (post-calls formerly ten per pass
-   every 30 seconds, estimates every 30 seconds, Jobber every ten seconds).
-   Stop if oldest ready post-call/estimate exceeds five minutes for two checks,
-   fails to drain after a test burst, memory reaches 80%, or any job is held.
-   A one-item scan per minute is not a general high-volume capacity guarantee.
-6. Before reducing staging minimum instances, the owner qualifies actual
+1. Bind the exact candidate SHA, required CI result, approved spend, runtime
+   identity, immutable image digest, and current staging rollback revision.
+   Deploy that candidate first with `BACKGROUND_WORKER_MODE=embedded`; read
+   back the protocol-version-1 `embedded` control document and the healthy API.
+   This baseline is required before external preparation.
+2. Deploy the worker privately with the exact generation but no active
+   cutover. Inspect actual IAM, configuration, route surface, and unauthorized
+   responses. Create the six schedules paused, grant the dedicated scheduler
+   identity `roles/run.invoker` on this worker only, and preserve the
+   Google-managed Scheduler service-agent role required for OIDC delivery. See
+   [Scheduler HTTP authentication](https://docs.cloud.google.com/scheduler/docs/http-target-auth).
+3. With the API still embedded and the three omitted-worker flags confirmed
+   false, use one paused/controlled Scheduler delivery to verify the exact OIDC
+   identity reaches the worker. Its pre-cutover `409 cutover_blocked` response
+   is expected and performs no business I/O. Record the delivery outcome before
+   calling the controlled preparation action; do not treat an HTTP `200` or a
+   health endpoint as proof that Scheduler is configured.
+4. Ensure no staging call is active and drain every old embedded staging
+   instance. Record old revision/tag IDs, remove traffic allocations and tags,
+   then wait for outstanding requests to settle and old revisions to reach zero
+   instances. Fresh per-revision metrics may lag; absence of metrics is not
+   proof of zero. Revision minima can keep tagged revisions warm even at zero
+   traffic, as described in [minimum-instance behavior](https://docs.cloud.google.com/run/docs/configuring/min-instances).
+   Legacy loops do not participate in the ledger. If termination cannot be
+   verified, stop rather than preparing a cutover or deleting revisions.
+5. Only after steps 1–4 are independently read back, prepare the finite lease
+   with the exact generation and explicit drain/Scheduler confirmations. A
+   schedule now receives `200 cutover_pending`, still without business I/O.
+   Deploy or restart the staging API in external mode. It must report
+   `worker_mode=external` after transactionally acknowledging the same record;
+   otherwise it remains/waits in embedded recovery. Resume only the approved
+   six schedules.
+6. Verify duplicate delivery across two instances, cancellation during
+   admission and completion, lease expiry/fallback, and uncertain completion
+   acknowledgement. Check ledger statuses without exposing call records or
+   secrets. Measure duration, peak memory, cold start, failures, overlap,
+   oldest pending item, and completion latency. Stop if oldest ready
+   post-call/estimate exceeds five minutes for two checks, fails to drain after
+   a test burst, memory reaches 80%, or any job is held.
+7. Before reducing staging minimum instances, the owner qualifies actual
    cold-start calls, two simultaneous calls, long calls, ring/pickup/redirect,
    hangup and transcript persistence, summary/SMS once, and restart/shutdown
-   around post-call handoff using dedicated test identities. Agents do not
-   call existing customers. Investigate the pre-durable-handoff window;
-   a successful normal call is insufficient evidence for arbitrary instance
-   termination. Keep minimum one if this remains unresolved.
-7. **Separate later phase:** the initial 24-hour/US$5 envelope ends after
+   around post-call handoff using dedicated test identities. Agents do not call
+   existing customers. Keep minimum one if the pre-durable-handoff window
+   remains unresolved.
+8. **Separate later phase:** the initial 24-hour/US$5 envelope ends after
    qualification and does not authorize another day of operation. Only after
    qualification and a further explicit time/cost envelope for scale reduction,
-   reduce **both** service-level and revision-level staging minima to zero,
-   preserving instance-based API CPU. October 13 readback found both minima
-   set to one. Read the effective service and revision settings back, repeat
-   cold-start checks, and compare at least 24 hours of measured instance
-   seconds and request latency. Do not change production in this pilot.
+   reduce both service-level and revision-level staging minima to zero,
+   preserving instance-based API CPU. Read the effective service and revision
+   settings back, repeat cold-start checks, and compare at least 24 hours of
+   measured instance seconds and request latency. Do not change production in
+   this pilot.
 
 ## Holds and rollback
 
@@ -203,19 +228,21 @@ whether a side effect happened, the operator may authorize a nonce-matched
 ledger transition to completed with the preserved cursor and explicit next
 due time. No automated replay or repair endpoint is included in this slice.
 
-For API rollback, restore minimum one first; pause/drain external workers and
-reconcile holds before starting any embedded revision. Redeploy the retained
-rollback image with staging bindings and embedded mode. Never run old
-embedded and new external sweeps concurrently. Retain the candidate image
-and rollback configuration through qualification; do not expand the earlier
+For API rollback, restore minimum one first; pause schedules and let the API
+move the control record to `external_draining`. The worker refuses new claims,
+and embedded loops start only after the admitted ledger work settles. Reconcile
+holds before starting any retained embedded revision. Never delete or manually
+clear the control record to bypass that fence. Retain the candidate image and
+rollback configuration through qualification; do not expand the earlier
 one-time container cleanup approval to these images or other resources.
 
 ## Evidence
 
-See `docs/audits/2026-10-13-background-worker-validation.json` for root-run
-local checks, the independently reviewed source hash, mutation probes,
-provider observations, and remaining activation work. CI, deployment,
-real-call safety, and realized billing are distinct outcomes.
+See `docs/audits/2026-10-13-background-worker-validation.json` for the
+historical root-run local checks, reviewed source hash, mutation probes,
+provider observations, and remaining activation work. It predates the durable
+cutover and pagination hardening described above. CI, deployment, real-call
+safety, and realized billing are distinct outcomes.
 
 ## October 13 pilot result
 
@@ -229,7 +256,7 @@ worker instances without a second claim in the same slot.
 **The pilot did not qualify sustained external operation.** A later estimates
 request returned HTTP 503 and became `needs_attention` at 16:05:17 UTC. The
 external monitor paused all six schedules at 16:05:47. Deployed diagnostics
-cannot distinguish a child failure from a completion-write failure, so the
+could not distinguish a child failure from a completion-write failure, so the
 technical cause remains unresolved. Do not replay or clear this claim.
 
 Authoritative Firestore snapshots found the entire estimates collection empty
@@ -250,17 +277,19 @@ has been demonstrated. Before another pilot, add bounded failure-phase/code
 diagnostics without provider messages or personal data, and bind a verified
 staging iPhone build, push environment and dedicated test account.
 
-## Diagnostic follow-up and call setup
+## Current hardening and call setup
 
-The local follow-up adds fixed failure phases and codes for worker bootstrap,
+The local follow-up keeps fixed failure phases and codes for worker bootstrap,
 configuration, admission, subprocess execution, completion and cleanup. It
 does not log exception messages, provider payloads, caller identifiers or
 tracebacks. Child output remains bounded at 4 KiB and stderr is discarded.
-Admission, nonce fencing, schedules, retries and call routing are unchanged.
-This improves diagnosis; it does not resolve the cause of the pilot failure.
-See the [diagnostic validation receipt](audits/2026-10-13-background-worker-diagnostics.json)
-for the source review, local tests and deliberate guard-removal checks.
-This follow-up has not run in hosted CI or staging.
+It also adds the durable generation/lease handoff, a verified embedded
+baseline, external claim fencing, bounded Firestore/RTDB pages, and a runtime
+refusal for unmigrated optional loops. It has not run in hosted CI or staging.
+It does not resolve the historical estimates failure or authorize another
+pilot. See the [diagnostic validation receipt](audits/2026-10-13-background-worker-diagnostics.json)
+for the earlier diagnostics-specific source review and deliberate
+guard-removal checks.
 
 The following setup facts were checked on October 13:
 
@@ -288,7 +317,8 @@ app was signed or installed, and no real call, push change, SMS or number
 purchase was initiated in this follow-up.
 
 Before another worker pilot, bind its exact candidate and a new one-build
-CI/GCP envelope, confirm the device and dedicated test account, and reconcile
-the held estimates claim using fresh aggregate counts and its exact nonce and
-update time. Do not clear or replay the claim automatically. Production stays
-unchanged and staging stays warm throughout call qualification.
+CI/GCP envelope, confirm the device and dedicated test account, reconcile the
+held estimates claim using fresh aggregate counts and its exact nonce and
+update time, and complete the new control-record sequence above. Do not clear
+or replay the claim automatically. Production stays unchanged and staging
+stays warm throughout call qualification.

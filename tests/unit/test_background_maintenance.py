@@ -52,3 +52,75 @@ async def test_trial_transaction_does_not_clobber_paid_activation(monkeypatch):
     monkeypatch.setattr(subscription, "should_expire_trial", lambda data, now: data["subscription_status"] == "trial")
     await maintenance.lapsed_trials_once(strict=True)
     assert updates == []
+
+
+@pytest.mark.asyncio
+async def test_external_orphan_cleanup_uses_a_key_cursor_and_never_reads_more_than_one_page(monkeypatch):
+    from app.db import cache
+    from firebase_admin import db as rtdb
+
+    rows = {key: {"state_updated_at": 9999} for key in ("a", "b", "c", "d", "e")}
+    query_limits = []
+
+    class Query:
+        def __init__(self):
+            self.cursor = None
+            self.limit = None
+        def order_by_key(self): return self
+        def start_at(self, value): self.cursor = value; return self
+        def limit_to_first(self, value): self.limit = value; query_limits.append(value); return self
+        def get(self):
+            keys = [key for key in sorted(rows) if self.cursor is None or key >= self.cursor]
+            return {key: rows[key] for key in keys[:self.limit]}
+
+    class Ref:
+        def order_by_key(self): return Query()
+        def get(self): return dict(rows)
+        def transaction(self, callback): return callback(None)
+
+    monkeypatch.setattr(cache, "_init_firebase", lambda: None)
+    monkeypatch.setattr(rtdb, "reference", lambda _path: Ref())
+
+    first = await maintenance.orphan_calls_once(continuation={}, page_size=2)
+    second = await maintenance.orphan_calls_once(continuation=first, page_size=2)
+
+    assert first == {"cursor": "b"}
+    assert second == {"cursor": "d"}
+    assert query_limits == [3, 3]
+
+
+@pytest.mark.asyncio
+async def test_external_lapsed_trial_sweep_pages_by_document_id(monkeypatch):
+    from app.db import firestore_client
+    from app.services import subscription
+
+    records = {key: {"subscription_status": "trial", "trial_start": 9999} for key in ("a", "b", "c", "d")}
+    query_limits = []
+
+    class Snap:
+        def __init__(self, doc_id): self.id = doc_id
+        def to_dict(self): return dict(records[self.id])
+
+    class Query:
+        def __init__(self): self.cursor, self.count = "", None
+        def where(self, *args): return self
+        def order_by(self, *args): return self
+        def start_after(self, value): self.cursor = value["__name__"]; return self
+        def limit(self, count): self.count = count; query_limits.append(count); return self
+        def stream(self):
+            ids = [key for key in sorted(records) if key > self.cursor]
+            return [Snap(key) for key in ids[:self.count]]
+
+    class Collection:
+        def where(self, *args): return Query()
+        def document(self, doc_id): return doc_id
+
+    monkeypatch.setattr(firestore_client, "get_firestore_client", lambda: SimpleNamespace(collection=lambda _: Collection()))
+    monkeypatch.setattr(subscription, "should_expire_trial", lambda data, now: False)
+
+    first = await maintenance.lapsed_trials_once(strict=True, continuation={}, page_size=2)
+    second = await maintenance.lapsed_trials_once(strict=True, continuation=first, page_size=2)
+
+    assert first == {"cursor": "b"}
+    assert second == {"cursor": "d"}
+    assert query_limits == [2, 2]

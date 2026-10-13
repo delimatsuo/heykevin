@@ -165,12 +165,8 @@ async def _observation_window_elapsed(db, loop, now: float) -> bool:
     return True
 
 
-async def run_expired_contractor_cleanup_once(now: Optional[float] = None) -> dict:
-    """One pass over expired, active contractors. Returns release counts."""
-    if now is None:
-        now = time.time()
-    db = get_firestore_client()
-    loop = asyncio.get_running_loop()
+async def _process_expired_contractors(docs, *, db, loop, now: float) -> dict:
+    """Act on one already-bounded snapshot of expired contractors."""
     counts = {"deleted_app_released": 0, "lapsed_released": 0, "skipped": 0}
 
     # The marker read must never take the always-on deleted-app path down with
@@ -181,16 +177,6 @@ async def run_expired_contractor_cleanup_once(now: Optional[float] = None) -> di
         logger.warning("Number release: observation marker unavailable (%s); lapsed releases held", type(e).__name__)
         window_elapsed = False
     lapsed_enabled = window_elapsed and bool(settings.lapsed_number_release_enabled)
-
-    docs = await loop.run_in_executor(
-        None,
-        lambda: list(
-            db.collection("contractors")
-            .where("subscription_status", "==", "expired")
-            .where("active", "==", True)
-            .stream()
-        ),
-    )
 
     for doc in docs:
         contractor_id = doc.id
@@ -245,3 +231,51 @@ async def run_expired_contractor_cleanup_once(now: Optional[float] = None) -> di
             counts["deleted_app_released"], counts["lapsed_released"], counts["skipped"],
         )
     return counts
+
+
+def _expired_contractors_query(db):
+    return (db.collection("contractors")
+        .where("subscription_status", "==", "expired")
+        .where("active", "==", True))
+
+
+async def run_expired_contractor_cleanup_once(now: Optional[float] = None) -> dict:
+    """Legacy embedded pass over expired, active contractors."""
+    if now is None:
+        now = time.time()
+    db = get_firestore_client()
+    loop = asyncio.get_running_loop()
+    docs = await loop.run_in_executor(
+        None, lambda: list(_expired_contractors_query(db).stream()),
+    )
+    return await _process_expired_contractors(docs, db=db, loop=loop, now=now)
+
+
+async def run_bounded_expired_contractor_cleanup_once(
+    continuation: dict, *, page_size: int, now: Optional[float] = None,
+) -> dict:
+    """Process a persisted document-ID page for the external worker only."""
+    if not isinstance(continuation, dict):
+        raise ValueError("Invalid expired-contractor continuation")
+    cursor = continuation.get("cursor")
+    if cursor is not None and not isinstance(cursor, str):
+        raise ValueError("Invalid expired-contractor cursor")
+    if not isinstance(page_size, int) or not 1 <= page_size <= LAPSED_RELEASE_MAX_PER_RUN:
+        raise ValueError("External expired-contractor page size is unsafe")
+    if now is None:
+        now = time.time()
+    db = get_firestore_client()
+    loop = asyncio.get_running_loop()
+
+    def fetch_docs():
+        query = _expired_contractors_query(db).order_by("__name__")
+        if cursor:
+            query = query.start_after({"__name__": db.collection("contractors").document(cursor)})
+        docs = list(query.limit(page_size).stream())
+        if not docs and cursor:
+            docs = list(_expired_contractors_query(db).order_by("__name__").limit(page_size).stream())
+        return docs
+
+    docs = await loop.run_in_executor(None, fetch_docs)
+    await _process_expired_contractors(docs, db=db, loop=loop, now=now)
+    return {"cursor": docs[-1].id if len(docs) == page_size else None}

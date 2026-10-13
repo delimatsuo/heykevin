@@ -140,7 +140,11 @@ async def test_actual_startup_shutdown_track_single_recovery_task(monkeypatch):
     source = Path(__file__).resolve().parents[2] / "app" / "main.py"
     # tests/unit -> repository root is parents[2].
     tree = ast.parse(source.read_text())
-    functions = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name in ("startup", "shutdown")]
+    lifecycle_names = {
+        "_start_embedded_background_loops", "_configure_background_workers", "startup", "shutdown",
+    }
+    functions = [node for node in tree.body if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+                 and node.name in lifecycle_names]
     for node in functions:
         node.decorator_list = []
     tasks = []
@@ -170,6 +174,8 @@ async def test_actual_startup_shutdown_track_single_recovery_task(monkeypatch):
         "logger": SimpleNamespace(info=lambda *args, **kwargs: None), "suppress": suppress}
     for name in ["_post_call_worker_task", "_service_request_recovery_task", "_estimate_worker_task", "_jobber_disconnect_recovery_task"]:
         namespace[name] = None
+    namespace["_cutover_task"] = None
+    namespace["_effective_background_worker_mode"] = "embedded"
     namespace["_housekeeping_tasks"] = {}
     for name in ["_orphan_call_cleanup", "_call_retention_sweep", "_lapsed_trial_sweep", "_expired_contractor_cleanup", "_data_purge_sweep"]:
         async def housekeeping():

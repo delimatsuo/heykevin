@@ -41,13 +41,30 @@ class _Snap:
 class _Query:
     def __init__(self, store: dict):
         self._store = store
+        self._cursor = ""
+        self._limit = None
 
     def where(self, *_a, **_k):
         return self
 
+    def order_by(self, *_a, **_k):
+        return self
+
+    def start_after(self, value):
+        cursor = value["__name__"]
+        self._cursor = getattr(cursor, "_id", cursor)
+        return self
+
+    def limit(self, value):
+        self._limit = value
+        return self
+
     def stream(self):
         # Snapshot semantics: copies taken at query time, like a real stream.
-        return iter([_Snap(i, dict(d)) for i, d in self._store.items()])
+        items = [(i, d) for i, d in sorted(self._store.items()) if i > self._cursor]
+        if self._limit is not None:
+            items = items[:self._limit]
+        return iter([_Snap(i, dict(d)) for i, d in items])
 
 
 class _DocRef:
@@ -334,6 +351,20 @@ async def test_lapsed_releases_are_capped_per_run_but_deleted_app_releases_are_n
     assert result["lapsed_released"] == number_release.LAPSED_RELEASE_MAX_PER_RUN
     assert result["deleted_app_released"] == 1
     assert len(harness.deactivated) == number_release.LAPSED_RELEASE_MAX_PER_RUN + 1
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_uses_a_bounded_persisted_cursor(harness):
+    now = time.time()
+    for index in range(6):
+        harness.store[f"gone{index}"] = _deleted_app(now)
+
+    first = await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+    second = await number_release.run_bounded_expired_contractor_cleanup_once(first, page_size=5, now=now)
+
+    assert first == {"cursor": "gone4"}
+    assert second == {"cursor": None}
+    assert harness.deactivated == [f"gone{index}" for index in range(6)]
 
 
 @pytest.mark.asyncio

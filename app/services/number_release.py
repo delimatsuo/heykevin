@@ -65,6 +65,25 @@ LAPSED_RELEASE_MAX_PER_RUN = 5
 
 OBSERVATION_DOC = ("system", "number_release")
 
+# These fields are the complete local eligibility and routing binding used by
+# the release sweep.  The strict external worker compares every one after its
+# awaited safety checks, then passes the same fence to the Twilio deletion
+# boundary.  Treating an absent field as distinct from ``None`` makes a schema
+# or signal transition fail closed as well.
+_STRICT_RELEASE_GUARD_FIELDS = (
+    "active",
+    "subscription_status",
+    "subscription_expires",
+    "trial_start",
+    "subscription_original_transaction_id",
+    "twilio_number",
+    "owner_phone",
+    "deleted_app_detected_at",
+    "forwarding_last_seen_at",
+    "last_inbound_call_at",
+)
+_MISSING_GUARD_VALUE = object()
+
 # Apple subscription status codes that mean "still a customer".
 _APPLE_HOLD_STATUSES = frozenset({1, 3, 4})  # ACTIVE, IN_BILLING_RETRY, IN_GRACE_PERIOD
 
@@ -80,6 +99,23 @@ LAPSED_NOTICE = (
     "(Verizon: dial *73). To get a new number, resubscribe in the Kevin AI app."
 )
 
+# The strict external worker sends from the number before it attempts the
+# irreversible provider release. It must never tell an owner that a release
+# already happened before Twilio and Firestore have both confirmed it.
+DELETED_APP_RELEASE_ATTEMPT_NOTICE = (
+    f"Kevin AI: We are processing release of your Kevin number after {NUMBER_RELEASE_QUIET_DAYS} days. "
+    "If we cannot confirm it, your account will remain active while we investigate. "
+    "If the release completes, to stop forwarding calls to the old number, dial ##61# "
+    "(Verizon: dial *73)."
+)
+
+LAPSED_RELEASE_ATTEMPT_NOTICE = (
+    f"Kevin AI: We are processing release of your Kevin number after {LAPSED_NUMBER_RELEASE_DAYS} days "
+    "without an active subscription. If we cannot confirm it, your account will remain active while "
+    "we investigate. If the release completes, to stop forwarding calls to it, dial ##61# "
+    "(Verizon: dial *73)."
+)
+
 
 class NumberReleaseOutcomeUncertain(RuntimeError):
     """A bounded external sweep must stop after an uncertain provider outcome.
@@ -91,6 +127,23 @@ class NumberReleaseOutcomeUncertain(RuntimeError):
     boundary, an error or an explicit unsuccessful result leaves the provider
     outcome unknown, so it must hold that ledger for operator reconciliation.
     """
+
+
+def _same_strict_release_snapshot(expected: dict, actual: dict) -> bool:
+    """Require every eligibility and binding field to remain unchanged."""
+    return all(
+        expected.get(field, _MISSING_GUARD_VALUE) == actual.get(field, _MISSING_GUARD_VALUE)
+        for field in _STRICT_RELEASE_GUARD_FIELDS
+    )
+
+
+async def _read_release_snapshot(db, loop, contractor_id: str) -> dict:
+    """Read the current profile without evaluating eligibility."""
+    fresh = await loop.run_in_executor(
+        None,
+        lambda cid=contractor_id: db.collection("contractors").document(cid).get(),
+    )
+    return fresh.to_dict() or {}
 
 
 async def _apple_subscription_statuses(original_transaction_id: str) -> list[int]:
@@ -177,6 +230,14 @@ async def _observation_window_elapsed(db, loop, now: float) -> bool:
     return True
 
 
+async def _fresh_release_candidate(db, loop, contractor_id: str, allow_lapsed: bool) -> tuple[Optional[str], dict]:
+    """Re-read a candidate immediately before the irreversible provider call."""
+    data = await _read_release_snapshot(db, loop, contractor_id)
+    if not data.get("active"):
+        return None, data
+    return await _release_reason(data, time.time(), contractor_id, allow_lapsed), data
+
+
 async def _process_expired_contractors(
     docs, *, db, loop, now: float, strict_external: bool = False,
 ) -> dict:
@@ -210,13 +271,8 @@ async def _process_expired_contractors(
         # snapshot ages as this loop progresses, and a forwarded call or a
         # device re-registration arriving in that window writes exactly the
         # evidence that must block release (review finding on PR #143).
-        fresh = await loop.run_in_executor(
-            None,
-            lambda cid=contractor_id: db.collection("contractors").document(cid).get(),
-        )
-        data = fresh.to_dict() or {}
-        reason = None if not data.get("active") else await _release_reason(
-            data, time.time(), contractor_id, allow_lapsed
+        reason, data = await _fresh_release_candidate(
+            db, loop, contractor_id, allow_lapsed,
         )
         if reason is None:
             logger.info(f"Number release: skipping {contractor_id} — state changed since snapshot")
@@ -228,8 +284,17 @@ async def _process_expired_contractors(
         logger.info(f"Number release ({reason}): deactivating {contractor_id}")
 
         # Notice goes out before the number is gone so it is sent from it.
+        # The legacy loop retains its established completion notice. The
+        # external path has a durable hold for an uncertain provider result,
+        # so it can only make a truthful processing statement at this point.
         if owner_phone:
-            notice = LAPSED_NOTICE if reason == "lapsed" else DELETED_APP_NOTICE
+            if strict_external:
+                notice = (
+                    LAPSED_RELEASE_ATTEMPT_NOTICE
+                    if reason == "lapsed" else DELETED_APP_RELEASE_ATTEMPT_NOTICE
+                )
+            else:
+                notice = LAPSED_NOTICE if reason == "lapsed" else DELETED_APP_NOTICE
             try:
                 from app.services.owner_sms import send_owner_sms
                 sent = await send_owner_sms(contractor_id, notice)
@@ -240,17 +305,58 @@ async def _process_expired_contractors(
                         "Number-release SMS outcome is uncertain"
                     ) from sms_err
             else:
-                if sent is False:
+                if sent is not True and sent is not None:
                     logger.warning("Number release SMS outcome uncertain for %s", contractor_id)
                     if strict_external:
                         raise NumberReleaseOutcomeUncertain(
                             "Number-release SMS outcome is uncertain"
                         )
 
+        if strict_external:
+            # The notice itself awaits provider I/O. Inbound/forwarding
+            # evidence or a subscription update may land while it is in
+            # flight, so re-read the exact eligibility and number binding
+            # before crossing the Twilio deletion boundary.
+            try:
+                post_notice_reason, post_notice_data = await _fresh_release_candidate(
+                    db, loop, contractor_id, allow_lapsed,
+                )
+            except Exception as revalidation_error:
+                raise NumberReleaseOutcomeUncertain(
+                    "Number-release eligibility outcome is uncertain"
+                ) from revalidation_error
+            # ``_fresh_release_candidate`` reads the document before its
+            # awaited call-history and App Store checks.  Read it once more
+            # after those checks, then keep this exact safety/binding snapshot
+            # all the way through the strict provider boundary.
+            try:
+                deletion_boundary_data = await _read_release_snapshot(
+                    db, loop, contractor_id,
+                )
+            except Exception as boundary_read_error:
+                raise NumberReleaseOutcomeUncertain(
+                    "Number-release eligibility outcome is uncertain"
+                ) from boundary_read_error
+            if (
+                post_notice_reason != reason
+                or not _same_strict_release_snapshot(
+                    post_notice_data, deletion_boundary_data,
+                )
+            ):
+                logger.warning("Number-release eligibility changed after notice for %s", contractor_id)
+                raise NumberReleaseOutcomeUncertain(
+                    "Number-release eligibility changed after notice"
+                )
+
         try:
             if strict_external:
                 deactivated = await deactivate_contractor(
-                    contractor_id, require_confirmed_number_release=True,
+                    contractor_id,
+                    require_confirmed_number_release=True,
+                    strict_number_release_precondition=(
+                        lambda candidate, expected=deletion_boundary_data:
+                        _same_strict_release_snapshot(expected, candidate)
+                    ),
                 )
             else:
                 deactivated = await deactivate_contractor(contractor_id)

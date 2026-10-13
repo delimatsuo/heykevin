@@ -9,7 +9,7 @@ import sys
 
 from google.api_core import exceptions as google_errors
 
-from app.db.background_jobs import JOB_INTERVALS
+from app.db.background_jobs import JOB_INTERVALS, validate_continuation as _validate_continuation
 
 WALL_BUDGET_SECONDS = 240.0
 TERMINATE_GRACE_SECONDS = 2.0
@@ -153,24 +153,7 @@ def job_enabled(job: str) -> bool:
 
 
 def validate_continuation(job: str, continuation: object) -> dict:
-    if not isinstance(continuation, dict):
-        raise ValueError("Invalid continuation")
-    allowed = {
-        "orphan_calls": {"cursor"},
-        "lapsed_trials": {"cursor"},
-        "expired_contractors": {"cursor"},
-        "post_calls": {"pending", "in_progress"},
-        "estimates": {"processing"},
-    }.get(job, set())
-    if not set(continuation).issubset(allowed):
-        raise ValueError("Unexpected continuation")
-    for value in continuation.values():
-        if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 512
-                                  or "/" in value or any(ord(c) < 32 for c in value)):
-            raise ValueError("Invalid continuation cursor")
-    if len(json.dumps(continuation).encode()) > MAX_PROTOCOL_BYTES:
-        raise ValueError("Oversized continuation")
-    return continuation
+    return _validate_continuation(job, continuation)
 
 
 async def execute_once(job: str, continuation: dict) -> dict:

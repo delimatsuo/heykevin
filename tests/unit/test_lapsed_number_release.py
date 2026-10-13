@@ -118,9 +118,15 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
         return True
 
     async def fake_deactivate(
-        contractor_id, user_requested=False, *, require_confirmed_number_release=False,
+        contractor_id,
+        user_requested=False,
+        *,
+        require_confirmed_number_release=False,
+        strict_number_release_precondition=None,
     ):
         release_confirmation_flags.append(require_confirmed_number_release)
+        if strict_number_release_precondition is not None:
+            assert strict_number_release_precondition(store[contractor_id]) is True
         deactivated.append(contractor_id)
         store[contractor_id]["active"] = False
         return True
@@ -380,9 +386,14 @@ async def test_external_expired_sweep_holds_on_uncertain_deactivation(harness, m
     harness.store["gone1"] = _deleted_app(now)
 
     async def uncertain_deactivate(
-        contractor_id, user_requested=False, *, require_confirmed_number_release=False,
+        contractor_id,
+        user_requested=False,
+        *,
+        require_confirmed_number_release=False,
+        strict_number_release_precondition=None,
     ):
         assert require_confirmed_number_release is True
+        assert strict_number_release_precondition is not None
         harness.deactivated.append(contractor_id)  # provider boundary was crossed
         raise RuntimeError("profile update timed out")
 
@@ -392,6 +403,9 @@ async def test_external_expired_sweep_holds_on_uncertain_deactivation(harness, m
         await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
 
     assert harness.deactivated == ["gone1"]
+    assert len(harness.sms) == 1
+    assert "processing release" in harness.sms[0][1]
+    assert "has been released" not in harness.sms[0][1]
 
 
 @pytest.mark.asyncio
@@ -400,9 +414,14 @@ async def test_external_expired_sweep_holds_on_unconfirmed_release(harness, monk
     harness.store["gone1"] = _deleted_app(now)
 
     async def unconfirmed_deactivate(
-        contractor_id, user_requested=False, *, require_confirmed_number_release=False,
+        contractor_id,
+        user_requested=False,
+        *,
+        require_confirmed_number_release=False,
+        strict_number_release_precondition=None,
     ):
         assert require_confirmed_number_release is True
+        assert strict_number_release_precondition is not None
         harness.deactivated.append(contractor_id)
         return False
 
@@ -428,6 +447,71 @@ async def test_external_expired_sweep_holds_on_unsuccessful_release_notice(harne
     with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="SMS outcome"):
         await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
 
+    assert harness.deactivated == []
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_when_inbound_evidence_arrives_after_notice(harness, monkeypatch):
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def sms_records_inbound(contractor_id, body):
+        account = harness.store[contractor_id]
+        harness.sms.append((account["owner_phone"], body, account["twilio_number"]))
+        account["last_inbound_call_at"] = time.time()
+        return True
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", sms_records_inbound)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="eligibility changed"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == []
+    assert len(harness.sms) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_when_subscription_changes_after_notice(harness, monkeypatch):
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now)
+
+    async def sms_activates_subscription(contractor_id, body):
+        account = harness.store[contractor_id]
+        harness.sms.append((account["owner_phone"], body, account["twilio_number"]))
+        account["subscription_status"] = "active"
+        return True
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", sms_activates_subscription)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="eligibility changed"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == []
+    assert len(harness.sms) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_evidence_during_post_notice_lookup(harness, monkeypatch):
+    """The final raw read catches a change after async eligibility lookup starts."""
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now)
+    lookup_count = 0
+
+    async def late_inbound_lookup(contractor_id):
+        nonlocal lookup_count
+        lookup_count += 1
+        # The third lookup is the post-notice fresh candidate. Its document
+        # read already happened, so old code continued from a stale dict.
+        if lookup_count == 3:
+            harness.store[contractor_id]["last_inbound_call_at"] = time.time()
+        return None
+
+    monkeypatch.setattr(number_release, "latest_call_timestamp", late_inbound_lookup)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="eligibility changed"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert lookup_count == 3
     assert harness.deactivated == []
 
 

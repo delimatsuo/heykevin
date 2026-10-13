@@ -291,6 +291,12 @@ class _FakeNumber:
 
     def delete(self):
         self._log.append("deleted")
+        return True
+
+
+class _FakeNumberUnconfirmed:
+    def delete(self):
+        return False
 
 
 class _FakeTwilioClient:
@@ -400,6 +406,63 @@ async def test_strict_release_reports_empty_twilio_lookup_as_unconfirmed(monkeyp
     assert confirmed is False
     assert updates[0][1]["number_release_anomaly"]["number"] == "+15559999999"
     assert "twilio_number" not in updates[0][1]
+
+
+@pytest.mark.asyncio
+async def test_strict_release_reports_unconfirmed_delete_result(monkeypatch, fake_twilio):
+    updates = []
+    fake_twilio.lookup_result = [_FakeNumberUnconfirmed()]
+
+    async def fake_get_contractor(cid):
+        return _contractor(contractor_id=cid)
+
+    async def fake_update(cid, fields):
+        updates.append((cid, fields))
+        return True
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
+
+    confirmed = await contractors_db.release_twilio_number("c1", require_confirmed=True)
+
+    assert confirmed is False
+    assert updates[0][0] == "c1"
+    assert updates[0][1]["number_release_anomaly"]["number"] == "+15559999999"
+    assert "twilio_number" not in updates[0][1]
+
+
+@pytest.mark.asyncio
+async def test_strict_release_fences_changed_profile_before_provider_delete(monkeypatch, fake_twilio):
+    """An external worker must stop before Twilio when its final fence fails."""
+    updates = []
+    reads = 0
+    fake_twilio.lookup_result = [_FakeNumber(fake_twilio.log)]
+
+    async def fake_get_contractor(cid):
+        nonlocal reads
+        reads += 1
+        return _contractor(
+            contractor_id=cid,
+            last_inbound_call_at=None if reads == 1 else 123,
+        )
+
+    async def fake_update(cid, fields):
+        updates.append((cid, fields))
+        return True
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
+
+    confirmed = await contractors_db.release_twilio_number(
+        "c1",
+        require_confirmed=True,
+        strict_precondition=lambda candidate: candidate.get("last_inbound_call_at") is None,
+    )
+
+    assert confirmed is False
+    assert reads == 2
+    assert fake_twilio.log == []
+    assert updates == []
 
 
 @pytest.mark.asyncio

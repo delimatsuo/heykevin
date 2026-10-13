@@ -6,7 +6,7 @@ import secrets
 import time
 import uuid as _uuid
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from google.cloud.firestore_v1.base_query import FieldFilter
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
@@ -865,14 +865,23 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
     return purchased.phone_number
 
 
-async def release_twilio_number(contractor_id: str, *, require_confirmed: bool = False) -> bool:
+async def release_twilio_number(
+    contractor_id: str,
+    *,
+    require_confirmed: bool = False,
+    strict_precondition: Callable[[dict], bool] | None = None,
+) -> bool:
     """Release a contractor's Twilio phone number and clear it from their profile.
 
     The legacy result stays compatible for callers that only need the profile
     transition: an empty Twilio lookup is recorded as an anomaly and returns
     success after the profile is cleared.  A ledger-backed caller can require
     a confirmed provider result instead; it receives ``False`` for that
-    anomaly and must hold the work for reconciliation.
+    anomaly and must hold the work for reconciliation.  A strict caller can
+    also supply a synchronous precondition over the freshly reread profile.
+    It is evaluated immediately before the provider deletion boundary so a
+    release sweep cannot act on eligibility that changed during its prior
+    network checks.
     """
     from twilio.rest import Client
     from app.config import settings
@@ -880,6 +889,25 @@ async def release_twilio_number(contractor_id: str, *, require_confirmed: bool =
     contractor = await get_contractor(contractor_id)
     if not contractor or not contractor.get("twilio_number"):
         logger.warning(f"No Twilio number to release for contractor {contractor_id}")
+        return False
+
+    def strict_precondition_holds(candidate: dict) -> bool:
+        if not require_confirmed or strict_precondition is None:
+            return True
+        try:
+            return strict_precondition(candidate) is True
+        except Exception:
+            logger.exception(
+                "Strict Twilio release precondition failed for contractor %s; preserving profile",
+                contractor_id,
+            )
+            return False
+
+    if not strict_precondition_holds(contractor):
+        logger.warning(
+            "Strict Twilio release precondition changed for contractor %s; preserving profile",
+            contractor_id,
+        )
         return False
 
     twilio_number = contractor["twilio_number"]
@@ -904,10 +932,33 @@ async def release_twilio_number(contractor_id: str, *, require_confirmed: bool =
             "number_capabilities": None,
         }
         try:
-            await loop.run_in_executor(
+            # The provider lookup itself awaits I/O.  Re-read once more after
+            # it and make the strict eligibility/binding check immediately
+            # before the irreversible Twilio DELETE.
+            if require_confirmed and strict_precondition is not None:
+                final_contractor = await get_contractor(contractor_id)
+                if not final_contractor or not strict_precondition_holds(final_contractor):
+                    logger.warning(
+                        "Strict Twilio release precondition changed at deletion boundary for contractor %s; "
+                        "preserving profile",
+                        contractor_id,
+                    )
+                    return False
+            deleted = await loop.run_in_executor(
                 None,
                 lambda: numbers[0].delete()
             )
+            if require_confirmed and deleted is not True:
+                logger.error(
+                    "Twilio release result unconfirmed for contractor %s; preserving profile for reconciliation",
+                    contractor_id,
+                )
+                await update_contractor(contractor_id, {
+                    "number_release_anomaly": {
+                        "at": int(time.time()), "number": twilio_number,
+                    },
+                })
+                return False
             logger.info(f"Released Twilio number {redact_phone(twilio_number)} for contractor {contractor_id}")
         except TwilioRestException as e:
             if e.status != 404:
@@ -959,6 +1010,7 @@ async def deactivate_contractor(
     user_requested: bool = False,
     *,
     require_confirmed_number_release: bool = False,
+    strict_number_release_precondition: Callable[[dict], bool] | None = None,
 ) -> bool:
     """Deactivate a contractor account and release their Twilio number.
 
@@ -967,9 +1019,10 @@ async def deactivate_contractor(
     accepts. System deactivations (deleted-app cleanup) must never set it.
     """
     if require_confirmed_number_release:
-        release_confirmed = await release_twilio_number(
-            contractor_id, require_confirmed=True,
-        )
+        release_kwargs: dict[str, Any] = {"require_confirmed": True}
+        if strict_number_release_precondition is not None:
+            release_kwargs["strict_precondition"] = strict_number_release_precondition
+        release_confirmed = await release_twilio_number(contractor_id, **release_kwargs)
         if not release_confirmed:
             # The strict worker owns a durable needs-attention ledger state.
             # Preserve the account and its routing number until an operator

@@ -306,3 +306,21 @@ def test_held_external_job_blocks_embedded_fallback_until_operator_reconciles_it
     # Human reconciliation is deliberately outside the worker protocol.
     db.data["estimates"]["status"] = "completed"
     assert cutover.begin_embedded()
+
+
+@pytest.mark.parametrize("job,record", [
+    ("estimates", {"status": "completed"}),
+    ("estimates", {"status": "completed", "next_due_at": float("inf"), "continuation": {}}),
+    ("estimates", {"status": "completed", "next_due_at": 1100, "continuation": "bad"}),
+    ("post_calls", {"status": "completed", "next_due_at": 1100, "continuation": {"unexpected": "x"}}),
+    ("expired_contractors", {"status": "completed", "next_due_at": 1100, "continuation": {"cursor": 7}}),
+])
+def test_malformed_completed_job_blocks_embedded_fallback(job, record):
+    db = Database()
+    cutover = db.cutover()
+    assert cutover.begin_embedded()
+    db.data[job] = record
+
+    assert db.store().admit(job).status == "needs_attention"
+    assert not cutover.begin_embedded()
+    assert db.data[_CUTOVER_KEY]["state"] == "external_draining"

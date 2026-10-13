@@ -52,22 +52,51 @@ class FakeDocRef:
 
 
 class FakeQuery:
-    def __init__(self, collection: "FakeCollection", filters=None, limit_val=None):
+    def __init__(
+        self, collection: "FakeCollection", filters=None, limit_val=None,
+        ordered: bool = False, start_after_id: str = "",
+    ):
         self.collection = collection
         self.filters = filters or []
         self.limit_val = limit_val
+        self.ordered = ordered
+        self.start_after_id = start_after_id
 
     def where(self, field: str, op: str, value: object) -> "FakeQuery":
         new_filters = list(self.filters)
         new_filters.append((field, op, value))
-        return FakeQuery(self.collection, new_filters, self.limit_val)
+        return FakeQuery(
+            self.collection, new_filters, self.limit_val,
+            self.ordered, self.start_after_id,
+        )
 
     def limit(self, count: int) -> "FakeQuery":
-        return FakeQuery(self.collection, self.filters, count)
+        return FakeQuery(
+            self.collection, self.filters, count,
+            self.ordered, self.start_after_id,
+        )
+
+    def order_by(self, _field: str) -> "FakeQuery":
+        return FakeQuery(
+            self.collection, self.filters, self.limit_val,
+            True, self.start_after_id,
+        )
+
+    def start_after(self, value: dict) -> "FakeQuery":
+        cursor = value["__name__"]
+        return FakeQuery(
+            self.collection, self.filters, self.limit_val,
+            self.ordered, getattr(cursor, "id", str(cursor)),
+        )
 
     def stream(self):
         results = []
-        for key, data in self.collection.docs.items():
+        items = self.collection.docs.items()
+        if self.ordered:
+            items = sorted(items)
+        for key, data in items:
+            if self.start_after_id and key <= self.start_after_id:
+                continue
             match = True
             for field, op, val in self.filters:
                 if op == "==" and data.get(field) != val:
@@ -388,6 +417,103 @@ def test_notification_claim_grants_exactly_one_winner(monkeypatch):
     assert first[0] is True and first[1] is True
     assert second[0] is False
     assert second[1] is False
+
+
+def test_strict_notification_claim_waits_for_confirmed_provider_result(monkeypatch):
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    db, doc_ref = _claims_db_with("tok-strict", {
+        "status": "processing",
+        "media_id": "m-strict",
+        "notified_at": None,
+    })
+
+    accepted, should_notify, _ = estimate_worker.claim_notification_and_complete(
+        db, doc_ref, "m-strict", {"diagnosis": "x"}, 10.0, strict_external=True,
+    )
+
+    assert accepted is True and should_notify is True
+    pending = doc_ref.get().to_dict()
+    assert pending["notification_state"] == "pending_external"
+    assert pending.get("notified_at") is None
+    assert pending["notification_claimed_at"] == 10.0
+
+    assert estimate_worker.confirm_external_notification(db, doc_ref, 11.0) is True
+    settled = doc_ref.get().to_dict()
+    assert settled["notification_state"] == "sent"
+    assert settled["notified_at"] == 11.0
+
+
+@pytest.mark.asyncio
+async def test_external_notification_failure_holds_estimate_and_raises(monkeypatch):
+    db = FakeDB()
+    monkeypatch.setattr(estimate_worker, "get_firestore_client", lambda: db)
+    monkeypatch.setattr(estimate_worker, "transactional", lambda fn: fn)
+    now = 100.0
+    doc_ref = db.collection("estimates").document("tok-external-failure")
+    doc_ref.set({
+        "status": "processing",
+        "media_id": "m-external-failure",
+        "attempts": estimate_worker.MAX_ANALYSIS_ATTEMPTS,
+        "lease_expires_at": 0.0,
+        "caller_phone": "+15551234567",
+        "contractor_id": "c1",
+    })
+
+    async def contractor(_contractor_id):
+        return {"contractor_id": "c1"}
+
+    async def uncertain_notification(**kwargs):
+        assert kwargs["strict"] is True
+        raise estimate_notifications.EstimateNotificationOutcomeUncertain("provider declined")
+
+    monkeypatch.setattr(estimate_worker, "get_contractor", contractor)
+    monkeypatch.setattr(estimate_worker, "send_estimate_notifications", uncertain_notification)
+
+    with pytest.raises(estimate_notifications.EstimateNotificationOutcomeUncertain, match="uncertain"):
+        await estimate_worker.run_pending_estimates_once(
+            now=now, page_size=25, max_analyses=1, continuation={},
+        )
+
+    held = doc_ref.get().to_dict()
+    assert held["status"] == "failed"
+    assert held["notification_state"] == "needs_attention"
+    assert held["notification_uncertain_at"] >= now
+    assert not held.get("notified_at")
+
+
+@pytest.mark.asyncio
+async def test_strict_notifications_reject_unconfirmed_customer_sms():
+    async def declined(*_args, **_kwargs):
+        return False
+
+    with pytest.raises(estimate_notifications.EstimateNotificationOutcomeUncertain, match="Customer"):
+        await estimate_notifications.send_estimate_notifications(
+            "+15551234567", None, "CA-test", "token-test", send_sms_fn=declined, strict=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_strict_notifications_allow_owner_preference_suppression(monkeypatch):
+    async def suppressed(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", suppressed)
+    await estimate_notifications.send_estimate_notifications(
+        "", {"contractor_id": "c1"}, "CA-test", "token-test", strict=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_result", [False, 0, "unknown"])
+async def test_strict_notifications_reject_unconfirmed_owner_sms(monkeypatch, owner_result):
+    async def declined(*_args, **_kwargs):
+        return owner_result
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", declined)
+    with pytest.raises(estimate_notifications.EstimateNotificationOutcomeUncertain, match="Contractor"):
+        await estimate_notifications.send_estimate_notifications(
+            "", {"contractor_id": "c1"}, "CA-test", "token-test", strict=True,
+        )
 
 
 @pytest.mark.asyncio

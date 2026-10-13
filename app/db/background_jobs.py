@@ -1,6 +1,7 @@
 """Constant-cardinality private admission ledger. Uncertain work never replays."""
 
 from dataclasses import dataclass
+import json
 import math
 import re
 import secrets
@@ -26,6 +27,7 @@ JOB_INTERVALS = {
 
 
 RPC_TIMEOUT_SECONDS = 2.0
+MAX_CONTINUATION_BYTES = 4096
 CUTOVER_MIN_LEASE_SECONDS = 60
 CUTOVER_MAX_LEASE_SECONDS = 24 * 60 * 60
 _CUTOVER_GENERATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{15,127}\Z")
@@ -98,6 +100,51 @@ def _valid_timestamp(value: object, now: float) -> bool:
         and value >= 0
         and value <= now
     )
+
+
+def validate_continuation(job: str, continuation: object) -> dict:
+    """Validate the fixed, durable cursor shape for one background job."""
+    if job not in JOB_INTERVALS or not isinstance(continuation, dict):
+        raise ValueError("Invalid continuation")
+    allowed = {
+        "orphan_calls": {"cursor"},
+        "lapsed_trials": {"cursor"},
+        "expired_contractors": {"cursor"},
+        "post_calls": {"pending", "in_progress"},
+        "estimates": {"processing"},
+    }.get(job, set())
+    if not set(continuation).issubset(allowed):
+        raise ValueError("Unexpected continuation")
+    for value in continuation.values():
+        if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 512
+                                  or "/" in value or any(ord(char) < 32 for char in value)):
+            raise ValueError("Invalid continuation cursor")
+    if len(json.dumps(continuation).encode()) > MAX_CONTINUATION_BYTES:
+        raise ValueError("Oversized continuation")
+    return continuation
+
+
+def _settled_job_snapshot(job: str, snapshot) -> bool:
+    """Whether a ledger row is safe to leave behind before embedded fallback.
+
+    This deliberately matches the completed-record shape accepted by normal
+    admission. A status string alone is never enough to let a cutover restart
+    legacy loops: a partial/manual record could otherwise hide uncertain work.
+    """
+    if not snapshot.exists:
+        return True
+    data = snapshot.to_dict()
+    if not isinstance(data, dict) or data.get("status") != "completed":
+        return False
+    due = data.get("next_due_at")
+    if not isinstance(due, (int, float)) or isinstance(due, bool) or not math.isfinite(due):
+        return False
+    continuation = data["continuation"] if "continuation" in data else {}
+    try:
+        validate_continuation(job, continuation)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return True
 
 
 def _authoritative_batch_snapshots(db, refs, *, transaction=None, error_message: str) -> list:
@@ -252,8 +299,8 @@ class BackgroundWorkerCutoverStore:
             control, *jobs = self._snapshots(refs, transaction)
             data = control.to_dict() or {}
             unsettled = any(
-                snapshot.exists and (snapshot.to_dict() or {}).get("status") != "completed"
-                for snapshot in jobs
+                not _settled_job_snapshot(job, snapshot)
+                for job, snapshot in zip(JOB_INTERVALS, jobs)
             )
             if unsettled:
                 if not control.exists or data.get("state") != "external_draining":
@@ -324,6 +371,14 @@ class BackgroundJobStore:
     @staticmethod
     def _admit_from_snapshot(job: str, ref, snapshot, transaction, now: float, nonce: str) -> Admission:
         data = snapshot.to_dict() or {}
+        # Validate before the due-time return. A malformed completed row must
+        # become visible as a held ledger state immediately, rather than sit
+        # quietly until its next calendar slot while embedded fallback starts.
+        continuation = data["continuation"] if "continuation" in data else {}
+        try:
+            continuation = validate_continuation(job, continuation)
+        except (TypeError, ValueError, RecursionError):
+            return Admission("needs_attention")
         if snapshot.exists:
             if data.get("status") == "running":
                 started = data.get("started_at")
@@ -338,9 +393,6 @@ class BackgroundJobStore:
                 return Admission("needs_attention")
             if now < due:
                 return Admission("not_due")
-        continuation = data.get("continuation") or {}
-        if not isinstance(continuation, dict):
-            return Admission("needs_attention")
         transaction.set(ref, {
             "status": "running", "nonce": nonce, "started_at": now,
             "next_due_at": (math.floor(now / JOB_INTERVALS[job]) + 1) * JOB_INTERVALS[job],

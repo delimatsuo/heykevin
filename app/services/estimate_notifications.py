@@ -9,6 +9,16 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+class EstimateNotificationOutcomeUncertain(RuntimeError):
+    """A strict worker cannot prove that an estimate notification completed.
+
+    The embedded/API paths retain their historical best-effort notification
+    behavior.  The external worker has a durable ledger, so it must stop for
+    operator reconciliation when a provider declines a send or its result is
+    otherwise unknown.
+    """
+
+
 async def send_estimate_notifications(
     caller_phone: str,
     contractor: Optional[dict],
@@ -18,8 +28,15 @@ async def send_estimate_notifications(
     is_failure: bool = False,
     watch_url: str = "",
     send_sms_fn: Optional[Callable] = None,
+    *,
+    strict: bool = False,
 ) -> None:
-    """Send customer and contractor notification SMS for an estimate outcome."""
+    """Send customer and contractor notification SMS for an estimate outcome.
+
+    ``strict`` is reserved for the ledger-backed external worker.  It raises
+    when a required provider send is not explicitly accepted, rather than
+    allowing the caller to record a terminal notification outcome.
+    """
     _send_sms = send_sms_fn or send_sms
     business_name = (contractor or {}).get("business_name", "the business")
     twilio_number = (contractor or {}).get("twilio_number", "")
@@ -59,7 +76,7 @@ async def send_estimate_notifications(
             idempotency_key=f"{token_hash[:12]}:result",
         )
         try:
-            await _send_sms(
+            customer_sent = await _send_sms(
                 caller_phone,
                 customer_msg,
                 from_number=twilio_number,
@@ -73,6 +90,16 @@ async def send_estimate_notifications(
                 token_hash[:8],
                 type(e).__name__,
             )
+            if strict:
+                raise EstimateNotificationOutcomeUncertain(
+                    "Customer estimate SMS outcome is uncertain"
+                ) from e
+        else:
+            if strict and customer_sent is not True:
+                logger.error("Customer estimate SMS outcome uncertain for %s", token_hash[:8])
+                raise EstimateNotificationOutcomeUncertain(
+                    "Customer estimate SMS outcome is uncertain"
+                )
 
     # Contractor SMS: single body construction block, sent only through send_owner_sms when contractor_id is present
     contractor_id = (contractor or {}).get("contractor_id", "")
@@ -109,10 +136,23 @@ async def send_estimate_notifications(
 
         try:
             from app.services.owner_sms import send_owner_sms
-            await send_owner_sms(contractor_id, contractor_msg)
+            owner_sent = await send_owner_sms(contractor_id, contractor_msg)
         except Exception as e:
             logger.error(
                 "Failed to send contractor estimate SMS for %s: %s",
                 token_hash[:8],
                 type(e).__name__,
             )
+            if strict:
+                raise EstimateNotificationOutcomeUncertain(
+                    "Contractor estimate SMS outcome is uncertain"
+                ) from e
+        else:
+            # None is an intentional owner-SMS suppression, which is a
+            # complete outcome. Only True confirms provider acceptance; any
+            # other result must be reconciled by the strict worker.
+            if strict and owner_sent is not True and owner_sent is not None:
+                logger.error("Contractor estimate SMS outcome uncertain for %s", token_hash[:8])
+                raise EstimateNotificationOutcomeUncertain(
+                    "Contractor estimate SMS outcome is uncertain"
+                )

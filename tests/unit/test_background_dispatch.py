@@ -349,11 +349,11 @@ async def test_estimate_only_one_item_claim_per_external_pass(monkeypatch):
         def stream(self): return records
     monkeypatch.setattr(worker, "get_firestore_client", lambda: SimpleNamespace(collection=lambda _: Query()))
     claims = []
-    def claim(db, ref, now):
+    def claim(db, ref, now, **_kwargs):
         claims.append(ref)
         return "failed_notify", {"caller_phone": "", "media_id": "", "media_object_path": ""}
     monkeypatch.setattr(worker, "claim_reanalysis_or_fail", claim)
-    monkeypatch.setattr(worker, "send_estimate_notifications", AsyncMock())
+    monkeypatch.setattr(worker, "_send_claimed_estimate_notifications", AsyncMock())
     result = await worker.run_pending_estimates_once(now=100, page_size=25, max_analyses=1)
     assert claims == ["e0"]
     assert result == {"processing": "e0"}
@@ -380,7 +380,7 @@ async def test_temporary_estimate_failure_preserves_other_work_and_later_retry(m
     monkeypatch.setattr(worker, "get_firestore_client", lambda: SimpleNamespace(collection=lambda _: Query()))
     claims = []
 
-    def claim(db, ref, now):
+    def claim(db, ref, now, **_kwargs):
         claims.append(ref)
         return "reclaimed", {"media_id": ref, "media_object_path": "fictional/video",
             "attempts": claims.count(ref), "media_content_type": "video/mp4"}

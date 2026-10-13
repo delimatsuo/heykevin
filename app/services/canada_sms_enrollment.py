@@ -12,9 +12,11 @@ from twilio.base.exceptions import TwilioRestException
 from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
 
-from app.config import PRODUCTION_GCP_PROJECT_ID, PRODUCTION_CLOUD_RUN_URL, settings
+from app.config import PRODUCTION_GCP_PROJECT_ID, settings
 from app.db.firestore_client import get_firestore_client
-from app.services.canada_sms_consent import canadian_assignment_valid, is_canadian_phone, valid_canada_consent
+from app.services.canada_sms_consent import (
+    canada_configuration_valid, canadian_assignment_valid, is_canadian_phone, valid_canada_consent,
+)
 from app.services.sms_sender_enrollment import (
     _SILENT_TRANSPORT_LOGGER, _validate_incoming_resource, _validate_membership_capabilities,
 )
@@ -41,16 +43,7 @@ class CanadaEnrollmentResult:
 
 
 def configuration_valid() -> bool:
-    return (
-        settings.canada_sms_enabled is True
-        and settings.environment == "production"
-        and settings.firestore_project_id == PRODUCTION_GCP_PROJECT_ID
-        and settings.cloud_run_url.rstrip("/") == PRODUCTION_CLOUD_RUN_URL
-        and re.fullmatch(r"AC[0-9a-fA-F]{32}", settings.twilio_account_sid or "") is not None
-        and settings.twilio_account_sid == settings.production_twilio_account_sid
-        and re.fullmatch(r"MG[0-9a-fA-F]{32}", settings.canada_messaging_service_sid or "") is not None
-        and settings.canada_messaging_service_sid != settings.twilio_messaging_service_sid
-    )
+    return canada_configuration_valid()
 
 
 class _Refused(Exception):

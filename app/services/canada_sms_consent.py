@@ -1,7 +1,11 @@
 """Pure, fail-closed identity and express-consent policy for Canadian owner SMS."""
 from datetime import datetime, timezone
 
+import re
+
 import phonenumbers
+
+from app.config import PRODUCTION_GCP_PROJECT_ID, PRODUCTION_CLOUD_RUN_URL, settings
 
 from app.db.owner_sms import resolve_contractor_owner_sms_identities
 
@@ -66,8 +70,46 @@ def valid_canada_consent(data: dict) -> bool:
     )
 
 
-def canada_consent_required(data: dict) -> bool:
-    """Only a positively US-bound profile avoids extra consent; unknown is blocked."""
-    if data.get("country_code") == "US" and data.get("provisioned_country_code") in (None, "US"):
+def canada_configuration_valid() -> bool:
+    return (
+        settings.canada_sms_enabled is True and settings.environment == "production"
+        and settings.firestore_project_id == PRODUCTION_GCP_PROJECT_ID
+        and settings.cloud_run_url.rstrip("/") == PRODUCTION_CLOUD_RUN_URL
+        and re.fullmatch(r"AC[0-9a-fA-F]{32}", settings.twilio_account_sid or "") is not None
+        and settings.twilio_account_sid == settings.production_twilio_account_sid
+        and re.fullmatch(r"MG[0-9a-fA-F]{32}", settings.canada_messaging_service_sid or "") is not None
+        and settings.canada_messaging_service_sid != settings.twilio_messaging_service_sid
+    )
+
+
+def valid_canada_delivery_binding(
+    data: dict, *, account_sid: str, messaging_service_sid: str, configuration_enabled: bool,
+) -> bool:
+    """Pure readiness check; app preference and lifecycle remain separate send guards."""
+    if configuration_enabled is not True or not valid_canada_consent(data):
         return False
-    return not valid_canada_consent(data)
+    consent = data["owner_sms_consent"]
+    verified = consent.get("verified_at")
+    return (
+        consent.get("delivery_state") == "verified"
+        and consent.get("account_sid") == account_sid
+        and consent.get("messaging_service_sid") == messaging_service_sid
+        and isinstance(verified, datetime) and verified.tzinfo is not None
+        and verified.utcoffset() == timezone.utc.utcoffset(verified)
+        and consent["collected_at"] <= verified <= datetime.now(timezone.utc)
+    )
+
+
+def canada_delivery_ready(data: dict) -> bool:
+    return valid_canada_delivery_binding(
+        data, account_sid=settings.twilio_account_sid,
+        messaging_service_sid=settings.canada_messaging_service_sid,
+        configuration_enabled=canada_configuration_valid(),
+    )
+
+
+def canada_consent_required(data: dict) -> bool:
+    """Only explicit Canadian assignments use the Canadian review/retry flow."""
+    if data.get("country_code") != "CA" or data.get("provisioned_country_code") != "CA":
+        return False
+    return not canada_delivery_ready(data)

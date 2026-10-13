@@ -54,8 +54,8 @@ outside this slice.
 
 ## Local validation collected 2026-10-13
 
-- 284 focused Canada/US owner SMS, enrollment, forwarding and post-call identity
-  tests passed; 75 runtime-safety and provisioning regressions passed.
+- 399 focused Canada/US owner SMS, enrollment, forwarding, post-call identity,
+  runtime-safety and provisioning tests passed on the corrected local candidate.
 - 58 actual Foundation/XCTest forwarding and SMS preference tests passed on
   macOS, including canonical phone identity and stale confirmation checks.
 - Three backend guard mutations (disabled path, Canadian region, consent) and
@@ -66,11 +66,18 @@ outside this slice.
   was booted; this was compilation, not iOS test execution or device evidence.
 - Fresh independent review found and verified corrections for final-read
   cancellation, stale consent acknowledgment after STOP, and canonical owner
-  phone hydration. Re-review is clean. Fatal Ruff selectors and diff checks
-  passed.
+  phone hydration. Hosted review subsequently identified missing enrollment
+  recovery and overbroad Canadian consent gating. Consent now stays pending
+  until verified membership and conditional promotion, with an explicit retry
+  path; legacy and non-Canadian profiles retain ordinary preference controls.
+  Independent re-review of those corrections is clean. Fatal Ruff selectors
+  and diff checks passed.
 
-Hosted checks and automatic PR review must still run on the committed candidate
-before merge. Their results belong to that exact GitHub head, not this local
-validation record. Carrier profiles, Canadian service/suppression qualification,
+All nine required hosted checks passed on initial head `2301308`; its hosted
+review produced the two findings described above. The corrected candidate must
+receive its own exact-head checks and review before merge. A separate Cursor
+security automation failed on the initial head. Its billing and trigger scope
+must be established before another remote event under the $0 envelope; do not
+rerun it or assume failure means no charge. Carrier profiles, Canadian service/suppression qualification,
 deployment, handset delivery and physical forwarding/restoration remain future
 owner-gated work.

@@ -631,16 +631,36 @@ class OwnerSmsConsentRequest(BaseModel):
 @router.post("/{contractor_id}/owner-sms-consent")
 async def api_owner_sms_consent(contractor_id: str, body: OwnerSmsConsentRequest, request: Request):
     require_contractor_access(request, contractor_id)
-    from app.db.owner_sms import collect_canada_owner_sms_consent
+    from app.db.owner_sms import collect_canada_owner_sms_consent, verify_canada_owner_sms_delivery
     accepted, result = await collect_canada_owner_sms_consent(contractor_id, **body.model_dump())
     if not accepted:
         raise HTTPException(status_code=409, detail={"code": result["error"]})
     from app.services.canada_sms_enrollment import ensure_canada_sms_sender_membership
-    await ensure_canada_sms_sender_membership(contractor_id, body.twilio_number)
+    from app.services.canada_sms_consent import canada_configuration_valid
+    accepted_consent = result["accepted_consent"]
+    if not canada_configuration_valid():
+        raise HTTPException(status_code=409, detail={"code": "consent_delivery_unavailable"})
+    account_sid = settings.twilio_account_sid
+    service_sid = settings.canada_messaging_service_sid
+    try:
+        enrollment = await ensure_canada_sms_sender_membership(contractor_id, body.twilio_number)
+    except Exception:
+        raise HTTPException(status_code=409, detail={"code": "consent_delivery_pending"})
+    if enrollment.enrolled is not True:
+        raise HTTPException(status_code=409, detail={"code": "consent_delivery_pending"})
+    try:
+        verified, result = await verify_canada_owner_sms_delivery(
+            contractor_id, accepted_consent=accepted_consent,
+            account_sid=account_sid, messaging_service_sid=service_sid,
+        )
+    except Exception:
+        raise HTTPException(status_code=409, detail={"code": "consent_state_unconfirmed"})
+    if not verified:
+        raise HTTPException(status_code=409, detail={"code": result["error"]})
     # Enrollment performs provider I/O: STOP or reassignment may occur while it waits.
     # Acknowledge only the current binding and preference state, never the earlier write.
     from app.db.owner_sms import resolve_contractor_owner_sms_identities
-    from app.services.canada_sms_consent import canadian_assignment_valid, valid_canada_consent
+    from app.services.canada_sms_consent import canadian_assignment_valid, canada_delivery_ready
     try:
         fresh = await get_contractor(contractor_id)
     except Exception:
@@ -648,7 +668,8 @@ async def api_owner_sms_consent(contractor_id: str, body: OwnerSmsConsentRequest
     if (not fresh or fresh.get("contractor_id") != contractor_id
             or resolve_contractor_owner_sms_identities(fresh) != (body.owner_phone_e164, body.twilio_number)
             or fresh.get("owner_sms_opt_out_revision") != body.expected_revision
-            or not canadian_assignment_valid(fresh) or not valid_canada_consent(fresh)):
+            or not canadian_assignment_valid(fresh) or not canada_delivery_ready(fresh)
+            or fresh["owner_sms_consent"].get("collected_at") != accepted_consent["collected_at"]):
         raise HTTPException(status_code=409, detail={"code": "consent_state_changed"})
     return {
         "status": "ok", "owner_sms_enabled": fresh["owner_sms_enabled"],

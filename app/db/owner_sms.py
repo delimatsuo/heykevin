@@ -247,7 +247,9 @@ async def collect_canada_owner_sms_consent(
     """Bind express consent to fresh server identities without clearing STOP or revision."""
     from datetime import datetime, timezone
     from google.cloud.firestore_v1.base_query import FieldFilter
-    from app.services.canada_sms_consent import DISCLOSURE_VERSION, canadian_assignment_valid
+    from app.services.canada_sms_consent import (
+        DISCLOSURE_VERSION, canadian_assignment_valid, valid_canada_consent,
+    )
 
     if (not isinstance(contractor_id, str) or not contractor_id.strip()
             or disclosure_version != DISCLOSURE_VERSION
@@ -276,21 +278,79 @@ async def collect_canada_owner_sms_consent(
             assignments = list(query.stream(transaction=tx))
             if len(assignments) != 1 or assignments[0].id != contractor_id:
                 return False, {"error": "assignment_ambiguous"}
-            tx.update(ref, {
-                "owner_sms_enabled": True,
-                "owner_sms_consent": {
+            data["contractor_id"] = contractor_id
+            if valid_canada_consent(data):
+                # A retry preserves the original express-consent facts and collection time.
+                consent = dict(data["owner_sms_consent"])
+            else:
+                consent = {
                     "contractor_id": contractor_id,
                     "disclosure_version": DISCLOSURE_VERSION,
                     "owner_phone_e164": owner, "twilio_number": sender,
                     "source": "ios_settings", "collected_at": datetime.now(timezone.utc),
                     "opt_out_revision": expected_revision,
-                },
-            })
-            return True, {
-                "status": "ok", "owner_sms_enabled": True, "owner_sms_opted_out": False,
-                "owner_sms_opt_out_revision": expected_revision,
-                "owner_sms_settings_version": 1, "owner_sms_consent_required": False,
-            }
+                }
+            consent["delivery_state"] = "pending"
+            tx.update(ref, {"owner_sms_enabled": True, "owner_sms_consent": consent})
+            return True, {"status": "pending", "accepted_consent": dict(consent)}
+        return apply(db.transaction())
+
+    return await asyncio.get_running_loop().run_in_executor(None, run)
+
+
+async def verify_canada_owner_sms_delivery(
+    contractor_id: str, *, accepted_consent: dict, account_sid: str, messaging_service_sid: str,
+) -> tuple[bool, dict]:
+    """Promote only the exact accepted consent after independent enrollment readback.
+
+    This function receives pinned enrollment configuration, and never contacts Twilio.
+    A newer consent, STOP epoch, recipient, sender or configuration invalidates promotion.
+    """
+    from datetime import datetime, timezone
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    from app.config import PRODUCTION_GCP_PROJECT_ID, settings
+    from app.services.canada_sms_consent import (
+        canada_configuration_valid, canadian_assignment_valid, valid_canada_consent,
+    )
+
+    def config_matches():
+        return (canada_configuration_valid() and settings.twilio_account_sid == account_sid
+                and settings.canada_messaging_service_sid == messaging_service_sid)
+
+    if not config_matches() or not isinstance(accepted_consent, dict):
+        return False, {"error": "consent_delivery_unavailable"}
+    db = get_firestore_client()
+    if db.project != PRODUCTION_GCP_PROJECT_ID:
+        return False, {"error": "consent_delivery_unavailable"}
+    ref = db.collection("contractors").document(contractor_id)
+
+    def run():
+        @firestore.transactional
+        def apply(tx):
+            if not config_matches():
+                return False, {"error": "consent_delivery_unavailable"}
+            snap = ref.get(transaction=tx)
+            if not snap.exists:
+                return False, {"error": "consent_state_changed"}
+            data = snap.to_dict() or {}
+            data["contractor_id"] = contractor_id
+            if (data.get("owner_sms_consent") != accepted_consent
+                    or accepted_consent.get("delivery_state") != "pending"
+                    or not canadian_assignment_valid(data) or not valid_canada_consent(data)):
+                return False, {"error": "consent_state_changed"}
+            query = db.collection("contractors").where(filter=FieldFilter(
+                "twilio_number", "==", accepted_consent["twilio_number"],
+            )).limit(2)
+            assignments = list(query.stream(transaction=tx))
+            if len(assignments) != 1 or assignments[0].id != contractor_id:
+                return False, {"error": "assignment_ambiguous"}
+            consent = dict(accepted_consent)
+            consent.update({"delivery_state": "verified", "account_sid": account_sid,
+                "messaging_service_sid": messaging_service_sid, "verified_at": datetime.now(timezone.utc)})
+            if not config_matches():
+                return False, {"error": "consent_delivery_unavailable"}
+            tx.update(ref, {"owner_sms_consent": consent})
+            return True, {"status": "verified"}
         return apply(db.transaction())
 
     return await asyncio.get_running_loop().run_in_executor(None, run)

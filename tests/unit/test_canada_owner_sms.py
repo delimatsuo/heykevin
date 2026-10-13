@@ -17,7 +17,9 @@ os.environ.setdefault("USER_PHONE", "+14165550100")
 
 from app.config import settings, PRODUCTION_GCP_PROJECT_ID, PRODUCTION_CLOUD_RUN_URL
 from app.services import canada_sms_enrollment as enrollment
-from app.services.canada_sms_consent import valid_canada_consent, canada_consent_required
+from app.services.canada_sms_consent import (
+    valid_canada_consent, canada_consent_required, canada_delivery_ready, valid_canada_delivery_binding,
+)
 from app.services import owner_sms
 from app.db import owner_sms as consent_db
 from app.api.contractors import OwnerSmsConsentRequest, _redact_contractor, api_owner_sms_consent, ContractorUpdate
@@ -41,7 +43,9 @@ def profile():
         "owner_sms_opted_out": False, "owner_sms_opt_out_revision": 0,
         "owner_sms_consent": {"contractor_id": CID, "owner_phone_e164": OWNER, "twilio_number": SENDER,
             "disclosure_version": "ca-owner-sms-v1", "source": "ios_settings",
-            "opt_out_revision": 0, "collected_at": datetime.now(timezone.utc) - timedelta(seconds=1)},
+            "opt_out_revision": 0, "collected_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+            "delivery_state": "verified", "account_sid": ACCOUNT, "messaging_service_sid": SERVICE,
+            "verified_at": datetime.now(timezone.utc) - timedelta(milliseconds=500)},
     }
 
 
@@ -264,7 +268,7 @@ async def test_cancel_before_mutation(world):
     world.service.phone_numbers.create.assert_not_called()
 
 
-def test_projection_redacts_record_and_patch_cannot_manufacture():
+def test_projection_redacts_record_and_patch_cannot_manufacture(world):
     data = profile(); data.pop("owner_sms_consent")
     assert _redact_contractor(data)["owner_sms_consent_required"] is True
     data = profile()
@@ -308,9 +312,10 @@ async def test_transaction_success_enables_without_revision_reset(transaction_wo
     world.data["owner_sms_enabled"] = False
     world.data.pop("owner_sms_consent")
     ok, result = await consent_db.collect_canada_owner_sms_consent(CID, **consent_body())
-    assert ok and result == {"status": "ok", "owner_sms_enabled": True, "owner_sms_opted_out": False,
-        "owner_sms_opt_out_revision": 0, "owner_sms_settings_version": 1, "owner_sms_consent_required": False}
-    assert valid_canada_consent(world.data)
+    assert ok and result["status"] == "pending"
+    assert result["accepted_consent"]["delivery_state"] == "pending"
+    assert valid_canada_consent(world.data) and not canada_delivery_ready(world.data)
+    assert canada_consent_required(world.data) is True
     assert world.data["owner_sms_opt_out_revision"] == 0
     assert world.data["owner_sms_opted_out"] is False
 
@@ -557,7 +562,7 @@ async def test_consent_ack_rejects_drift_during_enrollment(transaction_world, mo
     with pytest.raises(HTTPException) as error:
         await api_owner_sms_consent(CID, OwnerSmsConsentRequest(**consent_body()), request)
     assert error.value.status_code == 409
-    assert reads == [CID]
+    assert reads == ([CID] if drift in ("missing", "readerror", "tenant") else [])
 
 
 @pytest.mark.asyncio
@@ -577,3 +582,153 @@ async def test_consent_ack_reads_current_state_after_enrollment(transaction_worl
     assert order == ["enrollment", "readback"]
     assert response == {"status": "ok", "owner_sms_enabled": True, "owner_sms_opted_out": False,
         "owner_sms_opt_out_revision": 0, "owner_sms_settings_version": 1, "owner_sms_consent_required": False}
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("disabled", "feature_disabled"), ("uncertain", "budget_exceeded"),
+    ("uncertain", "create_failed_uncertain"), ("skipped", "membership_absent"),
+    ("rejected", "invalid_configuration"), ("exception", "timeout"),
+])
+@pytest.mark.asyncio
+async def test_pending_enrollment_keeps_review_and_suppresses_send(transaction_world, monkeypatch, status, reason):
+    from fastapi import HTTPException
+    world = transaction_world
+    if status == "disabled": monkeypatch.setattr(settings, "canada_sms_enabled", False)
+    async def enroll(*args, **kwargs):
+        if status == "exception": raise TimeoutError("Synthetic enrollment timeout")
+        return enrollment.CanadaEnrollmentResult(status, reason)
+    monkeypatch.setattr(enrollment, "ensure_canada_sms_sender_membership", enroll)
+    request = SimpleNamespace(state=SimpleNamespace(is_admin=False, contractor_id=CID))
+    original_facts = {k: v for k, v in world.data["owner_sms_consent"].items()
+        if k not in ("delivery_state", "account_sid", "messaging_service_sid", "verified_at")}
+    with pytest.raises(HTTPException) as error:
+        await api_owner_sms_consent(CID, OwnerSmsConsentRequest(**consent_body()), request)
+    assert error.value.status_code == 409
+    assert world.data["owner_sms_consent"]["delivery_state"] == "pending"
+    assert valid_canada_consent(world.data) and not canada_delivery_ready(world.data)
+    for key, value in original_facts.items(): assert world.data["owner_sms_consent"][key] == value
+    assert _redact_contractor(world.data)["owner_sms_consent_required"] is True
+    async def get(_): return deepcopy(world.data)
+    monkeypatch.setattr("app.db.contractors.get_contractor", get)
+    assert await owner_sms.send_owner_sms(CID, "Synthetic pending message") is None
+    world.service.phone_numbers.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_initial_disabled_then_activation_retry_promotes_existing_member(transaction_world, monkeypatch):
+    from fastapi import HTTPException
+    world = transaction_world
+    world.data.pop("owner_sms_consent")
+    monkeypatch.setattr(settings, "canada_sms_enabled", False)
+    request = SimpleNamespace(state=SimpleNamespace(is_admin=False, contractor_id=CID))
+    with pytest.raises(HTTPException) as error:
+        await api_owner_sms_consent(CID, OwnerSmsConsentRequest(**consent_body()), request)
+    assert error.value.status_code == 409
+    world.service.fetch.assert_not_called()
+    saved = deepcopy(world.data["owner_sms_consent"])
+    assert saved["delivery_state"] == "pending" and canada_consent_required(world.data)
+    monkeypatch.setattr(settings, "canada_sms_enabled", True)
+    response = await api_owner_sms_consent(CID, OwnerSmsConsentRequest(**consent_body()), request)
+    assert response["owner_sms_consent_required"] is False
+    verified = world.data["owner_sms_consent"]
+    assert verified["collected_at"] == saved["collected_at"]
+    assert verified["delivery_state"] == "verified"
+    assert verified["account_sid"] == ACCOUNT and verified["messaging_service_sid"] == SERVICE
+    assert isinstance(verified["verified_at"], datetime) and verified["verified_at"].tzinfo is not None
+    assert canada_delivery_ready(world.data) and not canada_consent_required(world.data)
+    world.service.phone_numbers.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pending_retry_creates_once_then_promotes(transaction_world):
+    world = transaction_world
+    world.data["owner_sms_consent"]["delivery_state"] = "pending"
+    world.service.phone_numbers.return_value.fetch.side_effect = [missing(), missing(), world.member]
+    request = SimpleNamespace(state=SimpleNamespace(is_admin=False, contractor_id=CID))
+    response = await api_owner_sms_consent(CID, OwnerSmsConsentRequest(**consent_body()), request)
+    assert response["owner_sms_consent_required"] is False and canada_delivery_ready(world.data)
+    world.service.phone_numbers.create.assert_called_once_with(phone_number_sid=PN)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("delivery_state", "pending"), ("delivery_state", None),
+    ("account_sid", "AC" + "8" * 32), ("messaging_service_sid", OTHER),
+    ("verified_at", None), ("verified_at", "2026-10-13"),
+    ("verified_at", datetime.now()), ("verified_at", datetime.now(timezone.utc) + timedelta(days=1)),
+])
+def test_delivery_readiness_requires_verified_server_binding(world, field, value):
+    world.data["owner_sms_consent"][field] = value
+    assert valid_canada_consent(world.data)
+    assert not canada_delivery_ready(world.data)
+    assert canada_consent_required(world.data)
+
+
+def test_pending_state_alone_cannot_forge_readiness(world):
+    pending = world.data["owner_sms_consent"]
+    for key in ("account_sid", "messaging_service_sid", "verified_at"): pending.pop(key)
+    pending["delivery_state"] = "verified"
+    assert not canada_delivery_ready(world.data)
+    assert "owner_sms_consent" not in ContractorUpdate(owner_sms_consent=pending).model_dump()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("canada_sms_enabled", False), ("canada_messaging_service_sid", "MG" + "8" * 32),
+    ("twilio_account_sid", "AC" + "8" * 32), ("environment", "staging"),
+])
+def test_current_config_drift_invalidates_delivery_readiness(world, monkeypatch, field, value):
+    assert canada_delivery_ready(world.data)
+    monkeypatch.setattr(settings, field, value)
+    assert not canada_delivery_ready(world.data) and canada_consent_required(world.data)
+
+
+def test_verified_appoff_keeps_normal_preference_control(world):
+    world.data["owner_sms_enabled"] = False
+    assert canada_delivery_ready(world.data)
+    assert _redact_contractor(world.data)["owner_sms_consent_required"] is False
+
+
+@pytest.mark.parametrize("countries", [
+    {}, {"country_code": "US"}, {"provisioned_country_code": "US"},
+    {"country_code": "US", "provisioned_country_code": "US"},
+    {"country_code": "BR", "provisioned_country_code": "BR"},
+    {"country_code": "GB", "provisioned_country_code": "GB"},
+    {"country_code": "CA", "provisioned_country_code": "US"},
+    {"country_code": "US", "provisioned_country_code": "CA"}, {"country_code": "CA"},
+])
+def test_only_explicit_ca_profiles_enter_consent_review_flow(countries):
+    data = {"contractor_id": CID, "owner_sms_enabled": False, **countries}
+    assert not canada_consent_required(data)
+    assert _redact_contractor(data)["owner_sms_consent_required"] is False
+    assert _redact_contractor(data)["owner_sms_enabled"] is False
+
+
+@pytest.mark.parametrize("drift", ["stop", "revision", "sender", "owner", "consent_time", "service", "account", "appoff"])
+@pytest.mark.asyncio
+async def test_transactional_promotion_rechecks_accepted_binding(transaction_world, monkeypatch, drift):
+    world = transaction_world
+    ok, pending = await consent_db.collect_canada_owner_sms_consent(CID, **consent_body())
+    assert ok
+    accepted = deepcopy(pending["accepted_consent"])
+    if drift == "stop": world.data["owner_sms_opted_out"] = True
+    if drift == "revision": world.data["owner_sms_opt_out_revision"] += 1
+    if drift == "sender": world.data["twilio_number"] = OWNER
+    if drift == "owner": world.data["owner_phone_e164"] = SENDER
+    if drift == "consent_time": world.data["owner_sms_consent"]["collected_at"] += timedelta(microseconds=1)
+    if drift == "service": monkeypatch.setattr(settings, "canada_messaging_service_sid", "MG" + "8" * 32)
+    if drift == "account": monkeypatch.setattr(settings, "twilio_account_sid", "AC" + "8" * 32)
+    if drift == "appoff": world.data["owner_sms_enabled"] = False
+    before = deepcopy(world.data)
+    promoted, _ = await consent_db.verify_canada_owner_sms_delivery(
+        CID, accepted_consent=accepted, account_sid=ACCOUNT, messaging_service_sid=SERVICE,
+    )
+    assert not promoted and world.data == before
+    assert world.data["owner_sms_consent"]["delivery_state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_recovery_enrollment_does_not_promote_pending_consent(world):
+    world.data["owner_sms_consent"]["delivery_state"] = "pending"
+    before = deepcopy(world.data["owner_sms_consent"])
+    result = await enrollment.ensure_canada_sms_sender_membership(CID, SENDER)
+    assert result.enrolled and world.data["owner_sms_consent"] == before
+    assert canada_consent_required(world.data)

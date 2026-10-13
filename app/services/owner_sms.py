@@ -72,14 +72,14 @@ async def send_owner_sms(contractor_id: str, body: str) -> Optional[bool]:
         return None
 
     from app.services.canada_sms_consent import (
-        canadian_assignment_valid, is_canadian_phone, valid_canada_consent,
+        canadian_assignment_valid, is_canadian_phone, canada_delivery_ready,
     )
     is_canada = (contractor.get("country_code") == "CA"
                  or contractor.get("provisioned_country_code") == "CA"
                  or is_canadian_phone(owner_phone) or is_canadian_phone(twilio_number))
     if is_canada:
         from app.services.canada_sms_enrollment import ensure_canada_sms_sender_membership
-        if not canadian_assignment_valid(contractor) or not valid_canada_consent(contractor):
+        if not canadian_assignment_valid(contractor) or not canada_delivery_ready(contractor):
             return None
         enrollment = await ensure_canada_sms_sender_membership(
             clean_cid, twilio_number, allow_create=False,
@@ -92,7 +92,7 @@ async def send_owner_sms(contractor_id: str, body: str) -> Optional[bool]:
         except Exception:
             return False
         if (not fresh or fresh.get("contractor_id") != clean_cid
-                or not canadian_assignment_valid(fresh) or not valid_canada_consent(fresh)
+                or not canadian_assignment_valid(fresh) or not canada_delivery_ready(fresh)
                 or owner_sms_db.resolve_contractor_owner_sms_identities(fresh) != (owner_phone, twilio_number)
                 or fresh.get("owner_sms_consent") != contractor.get("owner_sms_consent")):
             return None

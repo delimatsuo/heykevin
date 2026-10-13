@@ -216,3 +216,36 @@ See `docs/audits/2026-10-13-background-worker-validation.json` for root-run
 local checks, the independently reviewed source hash, mutation probes,
 provider observations, and remaining activation work. CI, deployment,
 real-call safety, and realized billing are distinct outcomes.
+
+## October 13 pilot result
+
+The owner approved US$1 maximum for CI/AI and US$5 incremental GCP for the
+candidate `ec6b8c1246c8f27a690c39876981dc5acf04c6ef`. Its single
+[staging workflow](https://github.com/delimatsuo/heykevin/actions/runs/38421770589)
+passed 9,286 Python tests and deployed successfully. All six jobs completed an
+initial authenticated pass, and duplicate requests overlapped across two
+worker instances without a second claim in the same slot.
+
+**The pilot did not qualify sustained external operation.** A later estimates
+request returned HTTP 503 and became `needs_attention` at 16:05:17 UTC. The
+external monitor paused all six schedules at 16:05:47. Deployed diagnostics
+cannot distinguish a child failure from a completion-write failure, so the
+technical cause remains unresolved. Do not replay or clear this claim.
+
+Authoritative Firestore snapshots found the entire estimates collection empty
+at admission, at the hold transition, and after draining. There was no observed
+staging write traffic, active call, or recovery backlog. After confirming
+execution had stopped, the six temporary Scheduler jobs were deleted and the
+pilot invoker binding was removed. Independent readback at 16:15 UTC confirmed
+staging revision `kevin-api-staging-00191-jim`, the same candidate image,
+embedded mode, both minima one, and always-allocated CPU. Production remained
+`kevin-api-00277-neb`. The held ledger, historical quarantines, images and
+revisions were retained.
+
+The [pilot receipt](audits/2026-10-13-background-worker-pilot.json) and
+[monitor observations](audits/2026-10-13-background-worker-pilot-observations.jsonl)
+record execution, reconciliation, costs and cleanup. The earlier validation
+file is a pre-pilot snapshot. No Cloud Run saving or real-call qualification
+has been demonstrated. Before another pilot, add bounded failure-phase/code
+diagnostics without provider messages or personal data, and bind a verified
+staging iPhone build, push environment and dedicated test account.

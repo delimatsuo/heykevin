@@ -2,10 +2,11 @@
 
 Base: `2c345b4eb370946b7ae72ca088609e158830fa07`.
 
-The owner selected Canada as the next market to qualify. The working cost
-assumption is that the incoming screening and in-app pickup flow does not need
-emergency registration or an emergency monthly fee. This is provisional and
-does not authorize changing provider settings. This slice spends $0 and does
+The owner selected Canada as the next market to qualify. Twilio confirmed on
+October 13 that emergency registration and its monthly fee are not mandatory
+for the described incoming-only screening and in-app conference pickup flow.
+That answer does not authorize changing provider settings or establish live
+account configuration or billing. This slice has a $0 incremental budget and does
 not activate Canada, deploy either environment, buy numbers, register senders,
 change credentials or IAM, or place calls or messages.
 
@@ -58,8 +59,8 @@ outside this slice.
   runtime-safety and provisioning tests passed on the corrected local candidate.
 - 58 actual Foundation/XCTest forwarding and SMS preference tests passed on
   macOS, including canonical phone identity and stale confirmation checks.
-- Three backend guard mutations (disabled path, Canadian region, consent) and
-  one native Canadian dial-code guard mutation were detected by the tests.
+- Six focused guard mutations were detected by the tests, covering backend
+  consent/enrollment guards and the native Canadian dial-code guard.
 - The final app and unit-test targets compiled for generic iOS Simulator with
   signing disabled through `xcodebuild-external`. The result bundle reports
   `succeeded`, zero errors and one existing acquisition warning. No simulator
@@ -75,9 +76,13 @@ outside this slice.
 
 All nine required hosted checks passed on initial head `2301308`; its hosted
 review produced the two findings described above. The corrected candidate must
-receive its own exact-head checks and review before merge. A separate Cursor
-security automation failed on the initial head. Its billing and trigger scope
-must be established before another remote event under the $0 envelope; do not
-rerun it or assume failure means no charge. Carrier profiles, Canadian service/suppression qualification,
+receive its own exact-head checks and review before merge. Read-only inspection
+of the separate Cursor security automation found that its initial run was
+blocked by a team usage limit. The current automation lists only `PR Opened`
+as its trigger, and the current team Spending dashboard shows on-demand usage
+off. It is unavailable review evidence, not a successful security review; no
+rerun or account setting change is part of this slice. Standard public Ubuntu
+Actions jobs and existing included Codex review allowance admit the bounded
+PR update at $0 incremental cost. Carrier profiles, Canadian service/suppression qualification,
 deployment, handset delivery and physical forwarding/restoration remain future
 owner-gated work.

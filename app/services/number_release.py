@@ -248,7 +248,12 @@ async def _process_expired_contractors(
                         )
 
         try:
-            deactivated = await deactivate_contractor(contractor_id)
+            if strict_external:
+                deactivated = await deactivate_contractor(
+                    contractor_id, require_confirmed_number_release=True,
+                )
+            else:
+                deactivated = await deactivate_contractor(contractor_id)
         except Exception as e:
             logger.error(f"Deactivate failed for {contractor_id}: {e}")
             if strict_external:

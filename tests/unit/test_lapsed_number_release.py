@@ -104,6 +104,7 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
     system: dict[str, dict] = {"number_release": {"observation_started_at": time.time() - 45 * DAY}}
     sms: list[tuple] = []
     deactivated: list[str] = []
+    release_confirmation_flags: list[bool] = []
     last_calls: dict[str, object] = {}
     on_lookup: dict[str, object] = {}
     apple: dict[str, object] = {}
@@ -116,7 +117,10 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
         sms.append((account["owner_phone"], body, account["twilio_number"]))
         return True
 
-    async def fake_deactivate(contractor_id, user_requested=False):
+    async def fake_deactivate(
+        contractor_id, user_requested=False, *, require_confirmed_number_release=False,
+    ):
+        release_confirmation_flags.append(require_confirmed_number_release)
         deactivated.append(contractor_id)
         store[contractor_id]["active"] = False
         return True
@@ -146,6 +150,7 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
     monkeypatch.setattr(number_release.settings, "lapsed_number_release_enabled", True)
     return SimpleNamespace(
         store=store, system=system, sms=sms, deactivated=deactivated,
+        release_confirmation_flags=release_confirmation_flags,
         last_calls=last_calls, on_lookup=on_lookup, apple=apple, apple_calls=apple_calls,
     )
 
@@ -365,6 +370,7 @@ async def test_external_expired_sweep_uses_a_bounded_persisted_cursor(harness):
     assert first == {"cursor": "gone4"}
     assert second == {"cursor": None}
     assert harness.deactivated == [f"gone{index}" for index in range(6)]
+    assert harness.release_confirmation_flags == [True] * 6
 
 
 @pytest.mark.asyncio
@@ -373,11 +379,34 @@ async def test_external_expired_sweep_holds_on_uncertain_deactivation(harness, m
     now = time.time()
     harness.store["gone1"] = _deleted_app(now)
 
-    async def uncertain_deactivate(contractor_id, user_requested=False):
+    async def uncertain_deactivate(
+        contractor_id, user_requested=False, *, require_confirmed_number_release=False,
+    ):
+        assert require_confirmed_number_release is True
         harness.deactivated.append(contractor_id)  # provider boundary was crossed
         raise RuntimeError("profile update timed out")
 
     monkeypatch.setattr(number_release, "deactivate_contractor", uncertain_deactivate)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="deactivation outcome"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == ["gone1"]
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_unconfirmed_release(harness, monkeypatch):
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def unconfirmed_deactivate(
+        contractor_id, user_requested=False, *, require_confirmed_number_release=False,
+    ):
+        assert require_confirmed_number_release is True
+        harness.deactivated.append(contractor_id)
+        return False
+
+    monkeypatch.setattr(number_release, "deactivate_contractor", unconfirmed_deactivate)
 
     with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="deactivation outcome"):
         await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)

@@ -70,10 +70,10 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
 - A failed/uncertain job becomes `needs_attention`; an old `running` entry
   is also held. Neither is automatically replayed. Existing per-item
   post-call and estimate claims remain authoritative. The external expired
-  contractor sweep also propagates an uncertain release notice or
-  deactivation result, because Twilio or Firestore may already have observed
-  part of that action. A quarantined post-call item does not stop the global
-  scan.
+  contractor sweep also propagates an uncertain release notice, Twilio lookup,
+  or deactivation result, because Twilio or Firestore may already have
+  observed part of that action. A quarantined post-call item does not stop the
+  global scan.
 - Pending/in-progress post-call cursors and estimate cursors are persisted
   across requests. Cold starts cannot repeatedly starve later documents.
 - External orphan cleanup reads at most 25 RTDB keys plus its current boundary;

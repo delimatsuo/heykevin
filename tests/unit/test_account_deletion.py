@@ -380,6 +380,28 @@ async def test_release_missing_number_records_anomaly(monkeypatch, fake_twilio):
 
 
 @pytest.mark.asyncio
+async def test_strict_release_reports_empty_twilio_lookup_as_unconfirmed(monkeypatch, fake_twilio):
+    """The external-worker ledger needs a hold, not legacy best-effort success."""
+    updates = []
+    fake_twilio.lookup_result = []
+
+    async def fake_get_contractor(cid):
+        return _contractor(contractor_id=cid)
+
+    async def fake_update(cid, fields):
+        updates.append((cid, fields))
+        return True
+
+    monkeypatch.setattr(contractors_db, "get_contractor", fake_get_contractor)
+    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
+
+    confirmed = await contractors_db.release_twilio_number("c1", require_confirmed=True)
+
+    assert confirmed is False
+    assert updates[0][1]["number_release_anomaly"]["number"] == "+15559999999"
+
+
+@pytest.mark.asyncio
 async def test_release_twilio_failure_propagates_without_touching_profile(
     monkeypatch, fake_twilio
 ):
@@ -422,6 +444,30 @@ async def test_deactivate_stamps_deactivated_at(monkeypatch):
     _cid, fields = updates[0]
     assert fields["active"] is False
     assert fields.get("deactivated_at"), "deactivation must be stamped for audit"
+
+
+@pytest.mark.asyncio
+async def test_strict_deactivation_surfaces_an_unconfirmed_release(monkeypatch):
+    """It still records deactivation, but the external caller must hold its job."""
+    updates = []
+
+    async def fake_release(cid, *, require_confirmed=False):
+        assert require_confirmed is True
+        return False
+
+    async def fake_update(cid, fields):
+        updates.append((cid, fields))
+        return True
+
+    monkeypatch.setattr(contractors_db, "release_twilio_number", fake_release)
+    monkeypatch.setattr(contractors_db, "update_contractor", fake_update)
+
+    confirmed = await contractors_db.deactivate_contractor(
+        "c1", require_confirmed_number_release=True,
+    )
+
+    assert confirmed is False
+    assert updates[0][1]["active"] is False
 
 
 # ---------------------------------------------------------------------------

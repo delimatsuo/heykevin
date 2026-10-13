@@ -865,8 +865,15 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
     return purchased.phone_number
 
 
-async def release_twilio_number(contractor_id: str) -> bool:
-    """Release a contractor's Twilio phone number and clear it from their profile."""
+async def release_twilio_number(contractor_id: str, *, require_confirmed: bool = False) -> bool:
+    """Release a contractor's Twilio phone number and clear it from their profile.
+
+    The legacy result stays compatible for callers that only need the profile
+    transition: an empty Twilio lookup is recorded as an anomaly and returns
+    success after the profile is cleared.  A ledger-backed caller can require
+    a confirmed provider result instead; it receives ``False`` for that
+    anomaly and must hold the work for reconciliation.
+    """
     from twilio.rest import Client
     from app.config import settings
 
@@ -926,19 +933,34 @@ async def release_twilio_number(contractor_id: str) -> bool:
         # twilio_number field it replaces.
         updates["number_release_anomaly"] = {"at": int(time.time()), "number": twilio_number}
 
-    # Clear the number from the contractor profile
+    # Clear the number from the contractor profile.  This preserves the
+    # historical anomaly record and lets a human reconcile the original
+    # number even though the normal profile field is cleared.
     await update_contractor(contractor_id, updates)
-    return True
+    return bool(numbers) or not require_confirmed
 
 
-async def deactivate_contractor(contractor_id: str, user_requested: bool = False) -> bool:
+async def deactivate_contractor(
+    contractor_id: str,
+    user_requested: bool = False,
+    *,
+    require_confirmed_number_release: bool = False,
+) -> bool:
     """Deactivate a contractor account and release their Twilio number.
 
     user_requested=True is set ONLY by the user's own DELETE endpoint and
     stamps deletion_requested_at — the sole consent signal the data purge
     accepts. System deactivations (deleted-app cleanup) must never set it.
     """
-    await release_twilio_number(contractor_id)
+    if require_confirmed_number_release:
+        release_confirmed = await release_twilio_number(
+            contractor_id, require_confirmed=True,
+        )
+    else:
+        # Preserve the legacy call signature and best-effort behavior for
+        # customer-initiated and embedded-system deactivations.
+        await release_twilio_number(contractor_id)
+        release_confirmed = True
     updates = {"active": False, "deactivated_at": int(time.time())}
     if user_requested:
         updates["deletion_requested_at"] = int(time.time())
@@ -949,7 +971,10 @@ async def deactivate_contractor(contractor_id: str, user_requested: bool = False
     from app.middleware.auth import invalidate_contractor_tokens
     invalidate_contractor_tokens(contractor_id)
     logger.info(f"Contractor deactivated: {contractor_id}")
-    return True
+    # A standard user/system deactivation retains its historical best-effort
+    # result.  The external worker opts into the stricter signal so an
+    # unconfirmed provider outcome is never written as a completed ledger job.
+    return release_confirmed if require_confirmed_number_release else True
 
 
 async def list_contractors() -> list:

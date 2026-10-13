@@ -165,6 +165,8 @@ enum AppStoreScreenshotFixtures {
     static var isNativeUIReview: Bool {
         scenario != nil && ProcessInfo.processInfo.environment["KEVIN_NATIVE_UI_REVIEW"] == "1"
     }
+    #else
+    static var isNativeUIReview: Bool { false }
     #endif
 
     /// Fixed anchor time for deterministic screenshots.
@@ -702,6 +704,7 @@ struct AppStoreScreenshotRoot: View {
             ContentView()
                 .environmentObject(appState)
         case .brazilUnavailable:
+            #if DEBUG
             OnboardingView(
                 isRecoveryMode: false,
                 initialStep: .phoneEntry,
@@ -710,6 +713,10 @@ struct AppStoreScreenshotRoot: View {
                 initialErrorMessage: String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
             )
             .environmentObject(appState)
+            #else
+            OnboardingView()
+            .environmentObject(appState)
+            #endif
         case .businessDetail, .personalDetail:
             NavigationStack {
                 CallDetailView(

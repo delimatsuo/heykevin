@@ -145,6 +145,7 @@
 		55C15FE7B191D1F576798620 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		57B3C8756C2E01CD336DC4AB /* SignupPhoneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignupPhoneTests.swift; sourceTree = "<group>"; };
 		5B8F3D0C955D71321170BC03 /* InfoPlist.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = InfoPlist.strings; path = "pt-BR.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		5DE4B6CB9A81B78F6E28C578 /* KevinStaging.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KevinStaging.entitlements; sourceTree = "<group>"; };
 		61C468E7CC1598CBD5EEFF63 /* ActiveCallCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveCallCard.swift; sourceTree = "<group>"; };
 		62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
 		68B2CDD06B01EAAE824F1B2D /* PhoneFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneFormatter.swift; sourceTree = "<group>"; };
@@ -252,6 +253,7 @@
 			children = (
 				75E7CE6639F7C036F139197C /* Info.plist */,
 				1CE0EB11F52756367AE9E873 /* Kevin.entitlements */,
+				5DE4B6CB9A81B78F6E28C578 /* KevinStaging.entitlements */,
 				0D7B880F361308E971A34589 /* Localizable.xcstrings */,
 				EA4F50F9BE60CBE958B7212B /* Products.storekit */,
 				6BFDF63DCEDBFBF85C6C733A /* App */,
@@ -763,7 +765,7 @@
 				APP_ENV = staging;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				BACKEND_URL = "https://kevin-api-staging-l63rergg7a-uc.a.run.app";
-				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Kevin/KevinStaging.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 45;
@@ -978,7 +980,7 @@
 				APP_ENV = staging;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				BACKEND_URL = "https://kevin-api-staging-l63rergg7a-uc.a.run.app";
-				CODE_SIGN_ENTITLEMENTS = Kevin/Kevin.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Kevin/KevinStaging.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 45;

@@ -268,18 +268,24 @@ The following setup facts were checked on October 13:
 | --- | --- |
 | Staging API | Restored to embedded workers, warm, healthy |
 | Staging Twilio number | Existing number ending 0993 routes to staging and one staging contractor; dedicated test ownership still needs confirmation |
-| Installed iPhone app | Unverified; phone unavailable during inspection |
+| Installed iPhone app | Connected developer build 1.3.4 (45); its backend and signed entitlement are not exposed in device metadata |
 | App backend | Baked into `BackendURL`; there is no runtime environment switch or label |
-| TestFlight | Does not establish the backend; historical build 1.3.4 (45) was production |
-| Push environment | Staging uses sandbox APNs; source entitlement says production, so inspect the actual signed app before testing |
-| Local cached app | No `Kevin.app` found in the current project's standard build-products cache |
+| TestFlight | Does not establish the backend; version/build alone is insufficient and no matching physical-device archive is locally available |
+| Push environment | Local candidate gives Debug and Staging a development entitlement matching sandbox APNs; Release retains production |
+| Staging source validation | XcodeGen, resolved Debug/Staging settings, and unsigned generic-iPhone Staging and Release builds passed |
 
-Connect and unlock the iPhone for read-only installed-build inspection. Match
-its version and build to a signed artifact and verify `BackendURL` and APNs
-entitlements. The configurations share the same bundle identifier and
-Keychain namespace, so any later installation must account for the existing
-production app and credentials. No app was installed or signed, and no real
-call, push change, SMS or number purchase was initiated in this follow-up.
+The connected app is a developer build, but device metadata does not expose
+its `BackendURL` or signed APNs entitlement. The local candidate now gives
+Debug and `Kevin Staging` a separate development entitlement and keeps Release
+on the production entitlement. It also fixes a compile-only screenshot-fixture
+path that blocked release-like Staging builds; screenshot scenarios remain
+disabled outside Debug. XcodeGen generation, settings resolution, and unsigned
+generic-iPhone Staging and Release builds passed.
+
+The configurations share the same bundle identifier and Keychain namespace, so
+any later installation must account for the existing app and credentials. No
+app was signed or installed, and no real call, push change, SMS or number
+purchase was initiated in this follow-up.
 
 Before another worker pilot, bind its exact candidate and a new one-build
 CI/GCP envelope, confirm the device and dedicated test account, and reconcile

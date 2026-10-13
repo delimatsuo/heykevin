@@ -999,17 +999,40 @@
     "known_facts": [
       "App backend is baked into Info.plist; no runtime staging switch or visible environment label.",
       "Debug and Kevin Staging target staging; normal Kevin archive targets production.",
-      "Historical TestFlight1.3.4(45) was production; installed build remains unverified.",
+      "Historical TestFlight1.3.4(45) was production, but a version/build match alone cannot identify an installed app's backend.",
       "Configurations share com.kevin.callscreen and a Keychain namespace.",
-      "Current source declares production APNs entitlement; isolated staging runtime requires sandbox APNs.",
+      "The local staging candidate now assigns a development APNs entitlement to Debug and Staging while Release retains production; it is unsigned and not installed.",
       "One staging-owned number ending0993 routes to staging and maps to one staging contractor; no explicit test marker."
     ],
     "next_checks": [
-      "Connect and unlock owner iPhone for installed-build metadata inspection.",
-      "Verify signed app BackendURL and APNs entitlement against a matching archived artifact; version alone is insufficient.",
+      "After explicit device/code-signing authorization, sign and install the known staging candidate, then verify its signed BackendURL and APNs entitlement; device metadata and version alone are insufficient.",
       "Confirm dedicated test account ownership and consent for caller before any call.",
       "Prepare a development-signed staging build if needed; account for shared bundle and credentials before installation."
     ],
+    "device_read_only_inspection": {
+      "date": "2026-10-13",
+      "installed_bundle": "com.kevin.callscreen",
+      "installed_version": "1.3.4",
+      "installed_build": "45",
+      "developer_built": true,
+      "container_accessible": true,
+      "environment": "undetermined",
+      "evidence_limit": "Device metadata does not expose Info.plist BackendURL or signed APNs entitlements. No matching physical-device app bundle or archived signed artifact was found in the checked Xcode caches.",
+      "privacy_boundary": "No app-container contents, logs, account data, recordings or call data were read."
+    },
+    "local_staging_source_preparation": {
+      "staging_entitlement": "development",
+      "release_entitlement": "production",
+      "resolved_debug_and_staging_backend": "https://kevin-api-staging-l63rergg7a-uc.a.run.app",
+      "resolved_release_backend": "https://kevin-api-752910912062.us-central1.run.app",
+      "xcodegen": "generated successfully",
+      "unsigned_generic_iphone_builds": [
+        "Kevin Staging / Staging / iphoneos / CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED",
+        "Kevin / Release / iphoneos / CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
+      ],
+      "fixture_compile_fix": "A debug-only screenshot initializer was guarded for release-like Staging builds; screenshot scenarios remain disabled outside DEBUG.",
+      "not_performed": "No signing, installation, archive, TestFlight upload, push change or call qualification."
+    },
     "not_authorized_or_performed": [
       "No iOS installation, archive, TestFlight upload, APNs flag change, number purchase, SMS send, or real call."
     ]

@@ -803,9 +803,9 @@ async def record_inbound_call_evidence(
     This narrow path is intentionally separate from the normal profile updater:
     a webhook has a strict response budget, while a number-release reservation
     needs the inbound event to cancel or hold its nonce in the same transaction.
-    We use one Firestore transaction attempt with explicit read and commit
-    deadlines. An aborted or deadline-exceeded attempt reports False so the
-    webhook can use its controlled direct-ring fallback.
+    We use one Firestore transaction attempt with explicit begin, read,
+    commit, and rollback deadlines. An aborted or deadline-exceeded attempt
+    reports False so the webhook can use its controlled direct-ring fallback.
     """
     if (
         not isinstance(contractor_id, str)
@@ -825,11 +825,82 @@ async def record_inbound_call_evidence(
     doc_ref = db.collection(COLLECTION).document(contractor_id)
 
     def _write() -> bool:
+        # A live webhook cannot give each Firestore RPC a full deadline: begin,
+        # read, and commit are one safety operation. Keep a single budget and
+        # fail closed when any part cannot finish in it.
+        deadline = time.monotonic() + float(rpc_timeout)
+
+        def _remaining_timeout() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Inbound call safety transaction exceeded its deadline")
+            return remaining
+
+        def _begin(transaction: Any) -> None:
+            """Begin one bounded Firestore transaction.
+
+            google-cloud-firestore 2.21.0 exposes a public bounded commit and
+            read API, but its public transaction decorator begins and commits
+            with service-default timeouts. The webhook must bound all three
+            RPCs, so use the pinned client's transaction wire shape directly.
+            This is deliberately single-attempt: an uncertain state-changing
+            outcome goes to direct ring-through, never AI screening.
+            """
+            if transaction.in_progress:
+                raise ValueError("Inbound call safety transaction already in progress")
+            client = transaction._client
+            response = client._firestore_api.begin_transaction(
+                request={
+                    "database": client._database_string,
+                    "options": transaction._options_protobuf(None),
+                },
+                metadata=client._rpc_metadata,
+                timeout=_remaining_timeout(),
+            )
+            transaction._id = response.transaction
+
+        def _commit(transaction: Any) -> None:
+            if not transaction.in_progress:
+                raise ValueError("Inbound call safety transaction was not started")
+            client = transaction._client
+            response = client._firestore_api.commit(
+                request={
+                    "database": client._database_string,
+                    "writes": transaction._write_pbs,
+                    "transaction": transaction._id,
+                },
+                metadata=client._rpc_metadata,
+                timeout=_remaining_timeout(),
+            )
+            transaction._clean_up()
+            transaction.write_results = list(response.write_results)
+            transaction.commit_time = response.commit_time
+
+        def _rollback(transaction: Any) -> None:
+            if not transaction.in_progress:
+                return
+            client = transaction._client
+            # A failed commit may have reached Firestore. Do not retry it; send
+            # the caller to the safe fallback and make a short best-effort
+            # rollback of any transaction that is still open.
+            rollback_timeout = min(0.05, float(rpc_timeout))
+            try:
+                client._firestore_api.rollback(
+                    request={
+                        "database": client._database_string,
+                        "transaction": transaction._id,
+                    },
+                    metadata=client._rpc_metadata,
+                    timeout=rollback_timeout,
+                )
+            finally:
+                transaction._clean_up()
+
         # Avoid opening a Firestore transaction on the common hourly-throttled
         # path. A recent committed stamp already makes any quiet-number claim
         # fail its guard; if release state is present, proceed to the
         # transaction so this specific call can cancel or hold it.
-        preflight = doc_ref.get(timeout=float(rpc_timeout))
+        preflight = doc_ref.get(timeout=_remaining_timeout())
         if not preflight.exists:
             return False
         preflight_data = preflight.to_dict() or {}
@@ -847,18 +918,27 @@ async def record_inbound_call_evidence(
             # Lightweight local fakes may not accept Firestore's optional
             # transaction setting; production always receives max_attempts=1.
             transaction = db.transaction()
-        snapshot = doc_ref.get(transaction=transaction, timeout=float(rpc_timeout))
-        if not snapshot.exists:
-            return False
-        data = snapshot.to_dict() or {}
-        outcome = apply_release_aware_contractor_update(
-            transaction,
-            doc_ref,
-            data,
-            {"last_inbound_call_at": float(seen_at)},
-        )
-        transaction.commit(timeout=float(rpc_timeout))
-        return outcome is not ReleaseAwareMutationResult.HELD
+        try:
+            _begin(transaction)
+            snapshot = doc_ref.get(
+                transaction=transaction,
+                timeout=_remaining_timeout(),
+            )
+            if not snapshot.exists:
+                _rollback(transaction)
+                return False
+            data = snapshot.to_dict() or {}
+            outcome = apply_release_aware_contractor_update(
+                transaction,
+                doc_ref,
+                data,
+                {"last_inbound_call_at": float(seen_at)},
+            )
+            _commit(transaction)
+            return outcome is not ReleaseAwareMutationResult.HELD
+        except Exception:
+            _rollback(transaction)
+            raise
 
     try:
         return await loop.run_in_executor(None, _write)

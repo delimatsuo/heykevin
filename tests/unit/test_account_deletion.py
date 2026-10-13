@@ -30,6 +30,10 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from google.auth.credentials import AnonymousCredentials
+from google.cloud.firestore_v1 import Client as FirestoreClient
+from google.cloud.firestore_v1.document import DocumentReference
+from google.protobuf.timestamp_pb2 import Timestamp
 
 from app.api import contractors as contractors_api
 from app.db import contractors as contractors_db
@@ -412,8 +416,39 @@ def _install_in_memory_contractor_store(monkeypatch, state: dict):
         def document(self, _contractor_id):
             return ref
 
+    class _FirestoreApi:
+        def begin_transaction(self, *, request, metadata, timeout):
+            return SimpleNamespace(transaction=b"in-memory-release")
+
+        def commit(self, *, request, metadata, timeout):
+            return SimpleNamespace(write_results=(), commit_time=None)
+
+        def rollback(self, *, request, metadata, timeout):
+            return SimpleNamespace()
+
+    class _FirestoreClient:
+        _database_string = "projects/test/databases/(default)"
+        _rpc_metadata = ()
+        _firestore_api = _FirestoreApi()
+
     class _Transaction:
-        write_results = ()
+        def __init__(self):
+            self._id = None
+            self._write_pbs = []
+            self._client = _FirestoreClient()
+            self.write_results = ()
+            self.commit_time = None
+
+        @property
+        def in_progress(self):
+            return self._id is not None
+
+        def _options_protobuf(self, _retry_id):
+            return {}
+
+        def _clean_up(self):
+            self._id = None
+            self._write_pbs = []
 
         def update(self, doc_ref, updates):
             doc_ref.update(updates)
@@ -425,12 +460,111 @@ def _install_in_memory_contractor_store(monkeypatch, state: dict):
         def collection(self, _collection):
             return _Collection()
 
-        def transaction(self):
+        def transaction(self, *args, **kwargs):
             return _Transaction()
 
     monkeypatch.setattr(contractors_db, "get_firestore_client", _Db)
     monkeypatch.setattr(contractors_db.firestore, "transactional", lambda fn: fn)
     return state
+
+
+class _InboundSafetySnapshot:
+    exists = True
+
+    def __init__(self, data):
+        self._data = dict(data)
+
+    def to_dict(self):
+        return dict(self._data)
+
+
+class _BoundedInboundFirestoreApi:
+    """Credential-free wire double for a real Firestore Transaction object."""
+
+    def __init__(self, *, commit_error=None):
+        self.begin_calls = []
+        self.commit_calls = []
+        self.rollback_calls = []
+        self.commit_error = commit_error
+
+    def begin_transaction(self, *, request, metadata, timeout):
+        self.begin_calls.append((request, metadata, timeout))
+        return SimpleNamespace(transaction=b"bounded-inbound-safety")
+
+    def commit(self, *, request, metadata, timeout):
+        self.commit_calls.append((request, metadata, timeout))
+        if self.commit_error is not None:
+            raise self.commit_error
+        return SimpleNamespace(write_results=(), commit_time=Timestamp())
+
+    def rollback(self, *, request, metadata, timeout):
+        self.rollback_calls.append((request, metadata, timeout))
+        return SimpleNamespace()
+
+
+def _real_inbound_safety_client(api):
+    client = FirestoreClient(
+        project="inbound-safety-test",
+        credentials=AnonymousCredentials(),
+    )
+    # The real SDK transaction object is important: it rejects a document
+    # read before begin(), which an in-memory transaction double cannot see.
+    client._firestore_api_internal = api
+    return client
+
+
+def _patch_inbound_safety_document_reads(monkeypatch, calls):
+    def get(_self, transaction=None, timeout=None):
+        calls.append((transaction, timeout))
+        if transaction is not None:
+            assert transaction.in_progress
+        return _InboundSafetySnapshot({
+            "active": True,
+            "twilio_number": "+15559999999",
+            "last_inbound_call_at": None,
+        })
+
+    monkeypatch.setattr(DocumentReference, "get", get)
+
+
+@pytest.mark.asyncio
+async def test_inbound_evidence_starts_real_transaction_with_bounded_wire_rpcs(monkeypatch):
+    api = _BoundedInboundFirestoreApi()
+    client = _real_inbound_safety_client(api)
+    document_reads = []
+    _patch_inbound_safety_document_reads(monkeypatch, document_reads)
+    monkeypatch.setattr(contractors_db, "get_firestore_client", lambda: client)
+
+    assert await contractors_db.record_inbound_call_evidence("c1", 5000.0, rpc_timeout=0.1)
+
+    assert len(document_reads) == 2
+    assert document_reads[0][0] is None
+    assert document_reads[1][0] is not None
+    assert len(api.begin_calls) == 1
+    assert len(api.commit_calls) == 1
+    assert api.commit_calls[0][0]["transaction"] == b"bounded-inbound-safety"
+    assert api.rollback_calls == []
+    for _request, _metadata, timeout in [*api.begin_calls, *api.commit_calls]:
+        assert 0 < timeout <= 0.1
+    assert all(0 < timeout <= 0.1 for _transaction, timeout in document_reads)
+
+
+@pytest.mark.asyncio
+async def test_inbound_evidence_does_not_retry_an_uncertain_commit(monkeypatch):
+    api = _BoundedInboundFirestoreApi(commit_error=RuntimeError("ambiguous commit"))
+    client = _real_inbound_safety_client(api)
+    document_reads = []
+    _patch_inbound_safety_document_reads(monkeypatch, document_reads)
+    monkeypatch.setattr(contractors_db, "get_firestore_client", lambda: client)
+
+    assert not await contractors_db.record_inbound_call_evidence("c1", 5000.0, rpc_timeout=0.1)
+
+    assert len(api.begin_calls) == 1
+    assert len(api.commit_calls) == 1
+    assert len(api.rollback_calls) == 1
+    assert api.rollback_calls[0][0]["transaction"] == b"bounded-inbound-safety"
+    for _request, _metadata, timeout in [*api.begin_calls, *api.commit_calls, *api.rollback_calls]:
+        assert 0 < timeout <= 0.1
 
 
 @pytest.mark.asyncio

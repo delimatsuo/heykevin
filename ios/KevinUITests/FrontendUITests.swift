@@ -470,9 +470,9 @@ final class FrontendUITests: XCTestCase {
         wait(for: [follows], timeout: 5)
     }
 
-    // MARK: - 12. Brazil Phone Entry & Unavailable Qualification Review Scenario
+    // MARK: - 12. Brazil Market Availability Review Scenario
 
-    func testBrazilPhoneUnavailableScenario() throws {
+    func testBrazilMarketUnavailableScenario() throws {
         let app = XCUIApplication()
         app.launchEnvironment["APP_STORE_SCREENSHOT_SCENARIO"] = "brazil-unavailable"
         app.launchEnvironment["KEVIN_NATIVE_UI_REVIEW"] = "1"
@@ -481,19 +481,17 @@ final class FrontendUITests: XCTestCase {
         app.launch()
         self.currentApp = app
 
-        // 1. Verify country picker displays Brazil (+55)
-        let countryPrefix = app.staticTexts["+55"]
-        XCTAssertTrue(countryPrefix.waitForExistence(timeout: 5), "Brazil dialing prefix +55 must be visible")
-
-        // 2. Verify phone text field contains the fixture phone number (11987654321)
-        let phoneField = app.textFields.firstMatch
-        XCTAssertTrue(phoneField.waitForExistence(timeout: 5), "Phone text field must be visible")
-
-        // 3. Verify Portuguese unavailable message is displayed
+        // 1. Verify the dedicated Portuguese availability screen is displayed.
         let unavailableMessage = app.staticTexts["Kevin ainda não está disponível no Brasil. Estamos preparando o serviço."]
         XCTAssertTrue(unavailableMessage.waitForExistence(timeout: 5), "Portuguese unavailable error message must be displayed")
+        XCTAssertTrue(app.staticTexts["Brasil"].exists, "The unavailable country must be named")
+        XCTAssertTrue(app.buttons["Escolher outro país"].exists, "A traveler must be able to choose their number country")
 
-        // 4. Verify no purchase / setup buttons are present (e.g. Subscribe, Try Free, Setup)
+        // 2. No phone form is shown for an unavailable market.
+        XCTAssertFalse(app.staticTexts["+55"].exists)
+        XCTAssertFalse(app.textFields.firstMatch.exists)
+
+        // 3. No purchase or setup buttons are present.
         XCTAssertFalse(app.buttons["Subscribe"].exists)
         XCTAssertFalse(app.buttons["Assinar"].exists)
         XCTAssertFalse(app.buttons["Try Free"].exists)

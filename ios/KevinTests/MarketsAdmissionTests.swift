@@ -672,6 +672,28 @@ final class MarketsAdmissionTests: XCTestCase {
             .unavailable(message: "Kevin is not yet available in Brazil. We are preparing the service."),
             "The legacy route fallback must not open Brazilian onboarding"
         )
+        XCTAssertEqual(
+            SignupAdmission.evaluate(countryCode: "DE", result: result),
+            .unavailable(message: "Kevin is not yet available in this country. We are preparing the service."),
+            "A device in an unsupported country must not silently inherit the legacy US path"
+        )
+    }
+
+    @MainActor
+    func testDirectSignInNewAccountBackReturnsToSignInBeforePhoneEntry() {
+        switch OnboardingView.countrySelectionBackStep(for: .signIn) {
+        case .signIn:
+            break
+        default:
+            XCTFail("A new account discovered from direct sign-in must return to sign-in, not bypass the market check through phone entry")
+        }
+
+        switch OnboardingView.countrySelectionBackStep(for: .phoneEntry) {
+        case .phoneEntry:
+            break
+        default:
+            XCTFail("Changing country from the existing phone form should return to that form")
+        }
     }
 
     func testAPIClientCreateContractorTransmitsCountryCode() async throws {

@@ -32,6 +32,12 @@ struct OnboardingView: View {
     @State private var signupContinuation: SignupContinuation?
     @State private var kevinNumber = ""
     @State private var errorMessage = ""
+    @State private var marketCountryCode: String?
+    @State private var marketAdmission: SignupAdmissionStatus?
+    @State private var marketCheckID = UUID()
+    @State private var marketAdmissionDestination: MarketAdmissionDestination = .signIn
+    @State private var countrySelectionReturnDestination: CountrySelectionReturnDestination = .welcome
+    @State private var newSignupAdmissionCountryCode: String?
 
     #if DEBUG
     init(
@@ -39,13 +45,17 @@ struct OnboardingView: View {
         initialStep: OnboardingStep = .welcome,
         initialCountryCode: String = SignupCountry.suggestedCountry(),
         initialPhoneNumber: String = "",
-        initialErrorMessage: String = ""
+        initialErrorMessage: String = "",
+        initialMarketCountryCode: String? = nil,
+        initialMarketAdmission: SignupAdmissionStatus? = nil
     ) {
         self.isRecoveryMode = isRecoveryMode
         _step = State(initialValue: isRecoveryMode ? .signIn : initialStep)
         _selectedCountryCode = State(initialValue: initialCountryCode)
         _phoneNumber = State(initialValue: initialPhoneNumber)
         _errorMessage = State(initialValue: initialErrorMessage)
+        _marketCountryCode = State(initialValue: initialMarketCountryCode)
+        _marketAdmission = State(initialValue: initialMarketAdmission)
     }
     #else
     init(isRecoveryMode: Bool = false) {
@@ -82,7 +92,36 @@ struct OnboardingView: View {
     private let businessProductID = "com.kevin.callscreen.business.monthly"
 
     enum OnboardingStep {
-        case welcome, signIn, phoneEntry, modeSelect, businessInfo, contactsPermission, personalInfo, provisioning, forwarding, done
+        case welcome, countrySelection, marketAvailability, signIn, phoneEntry, modeSelect, businessInfo, contactsPermission, personalInfo, provisioning, forwarding, done
+    }
+
+    private enum MarketAdmissionDestination: Equatable {
+        case signIn
+        case phoneEntry
+    }
+
+    /// Where Back returns from the country picker. This is deliberately
+    /// separate from where an *allowed* market check proceeds: a person who
+    /// entered through sign-in may proceed to phone entry after a check, but
+    /// must not reach phone entry by simply backing out of that check.
+    enum CountrySelectionReturnDestination {
+        case welcome
+        case signIn
+        case phoneEntry
+    }
+
+    @MainActor
+    static func countrySelectionBackStep(
+        for destination: CountrySelectionReturnDestination
+    ) -> OnboardingStep {
+        switch destination {
+        case .welcome:
+            .welcome
+        case .signIn:
+            .signIn
+        case .phoneEntry:
+            .phoneEntry
+        }
     }
 
     let serviceTypes = ["plumbing", "electrical", "hvac", "general"]
@@ -96,6 +135,10 @@ struct OnboardingView: View {
                     switch step {
                     case .welcome:
                         welcomeStep
+                    case .countrySelection:
+                        countrySelectionStep
+                    case .marketAvailability:
+                        marketAvailabilityStep
                     case .signIn:
                         signInStep
                     case .phoneEntry:
@@ -120,6 +163,7 @@ struct OnboardingView: View {
             }
         }
         .onDisappear {
+            marketCheckID = UUID()
             if appState.sessionState != .ready, let revision = signInAttemptRevision,
                AccountRestoreCoordinator.shared.activeAttemptRevision == revision {
                 AccountRestoreCoordinator.shared.cancelAttempt()
@@ -192,7 +236,7 @@ struct OnboardingView: View {
 
             VStack(spacing: HKSpace.sm) {
                 Button {
-                    step = .signIn
+                    beginNewSignup()
                 } label: {
                     Text(String(localized: "Get started"))
                 }
@@ -234,6 +278,253 @@ struct OnboardingView: View {
             }
             Spacer(minLength: 0)
         }
+    }
+
+    // MARK: - Mobile Number Country
+
+    private var deviceRegionCountryCode: String? {
+        SignupCountry.deviceRegionCode()
+    }
+
+    private var marketCountryName: String {
+        guard let marketCountryCode else {
+            return String(localized: "your mobile-number country")
+        }
+        return SignupCountry.localizedName(forCode: marketCountryCode)
+    }
+
+    private var countrySelectionStep: some View {
+        ScrollView {
+            VStack(spacing: HKSpace.lg) {
+                Spacer(minLength: HKSpace.xl)
+
+                KevinMark(size: 64)
+
+                VStack(spacing: HKSpace.sm) {
+                    Text(String(localized: "Where is your mobile number from?"))
+                        .font(.system(size: 28, weight: .bold))
+                        .multilineTextAlignment(.center)
+
+                    Text(String(localized: "Choose the country that issued the mobile number you’ll use with Kevin. Your device region is only a suggestion."))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                }
+
+                if let deviceRegionCountryCode {
+                    VStack(alignment: .leading, spacing: HKSpace.sm) {
+                        Text(String(localized: "Suggested from this device"))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        countrySelectionButton(
+                            countryCode: deviceRegionCountryCode,
+                            badgeText: String(localized: "Suggested")
+                        )
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: HKSpace.sm) {
+                    Text(String(localized: "Choose a different country"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(SignupCountry.supported.filter { $0.code != deviceRegionCountryCode }) { country in
+                        countrySelectionButton(countryCode: country.code)
+                    }
+                }
+
+                Text(String(localized: "If your mobile number’s country is not shown, Kevin cannot set up that number yet."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, HKSpace.md)
+
+                VStack(spacing: HKSpace.sm) {
+                    Button {
+                        leaveCountrySelection()
+                    } label: {
+                        Text(String(localized: "Back"))
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+
+                    if marketAdmissionDestination == .signIn {
+                        Button {
+                            enterSignIn()
+                        } label: {
+                            Text(String(localized: "Already a member? Sign in"))
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.bottom, HKSpace.md)
+        }
+    }
+
+    private func countrySelectionButton(countryCode: String, badgeText: String? = nil) -> some View {
+        let country = SignupCountry.forCode(countryCode)
+        let countryName = country?.localizedName() ?? SignupCountry.localizedName(forCode: countryCode)
+
+        return Button {
+            checkMarketAvailability(for: countryCode)
+        } label: {
+            HStack(spacing: HKSpace.md) {
+                if let country {
+                    Text(country.flagEmoji)
+                        .font(.title2)
+                } else {
+                    Image(systemName: "globe")
+                        .font(.title3)
+                        .foregroundStyle(.hkBlue)
+                        .frame(width: 24)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(countryName)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    if let country {
+                        Text(country.dialingPrefix)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                if let badgeText {
+                    Text(badgeText)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(HKSpace.md)
+            .background(Color(.secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(String(localized: "Checks whether Kevin is available for this mobile-number country."))
+    }
+
+    private var marketAvailabilityStep: some View {
+        VStack(spacing: HKSpace.lg) {
+            Spacer()
+
+            KevinMark(size: 64)
+
+            marketAvailabilityContent
+
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var marketAvailabilityContent: some View {
+        if let marketAdmission {
+            switch marketAdmission {
+            case .allowed:
+                ProgressView()
+                    .accessibilityLabel(String(localized: "Continuing"))
+            case .unavailable(let message):
+                Image(systemName: "globe.badge.chevron.backward")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(.hkBlue)
+
+                VStack(spacing: HKSpace.sm) {
+                    Text(marketCountryName)
+                        .font(.title.bold())
+                        .multilineTextAlignment(.center)
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                Text(String(localized: "Availability follows the country that issued your mobile number. If you are traveling, choose that number’s country to check it."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .padding(.horizontal, HKSpace.sm)
+
+                availabilityActions(retryCountryCode: nil)
+            case .checkFailed(let message):
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(.orange)
+
+                VStack(spacing: HKSpace.sm) {
+                    Text(String(localized: "Couldn’t check availability"))
+                        .font(.title.bold())
+                        .multilineTextAlignment(.center)
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                Text(String(localized: "No account has been created. Try again or choose a different mobile-number country."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .padding(.horizontal, HKSpace.sm)
+
+                availabilityActions(retryCountryCode: marketCountryCode)
+            }
+        } else {
+            ProgressView()
+                .controlSize(.large)
+            Text(String(localized: "Checking availability…"))
+                .font(.title3.weight(.semibold))
+            Text(marketCountryName)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func availabilityActions(retryCountryCode: String?) -> some View {
+        VStack(spacing: HKSpace.sm) {
+            if let retryCountryCode {
+                Button {
+                    checkMarketAvailability(for: retryCountryCode)
+                } label: {
+                    Text(String(localized: "Try again"))
+                }
+                .buttonStyle(HKDarkPrimaryButtonStyle())
+            }
+
+            Button {
+                showCountrySelection()
+            } label: {
+                Text(String(localized: "Choose a different country"))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+
+            if marketAdmissionDestination == .signIn {
+                Button {
+                    enterSignIn()
+                } label: {
+                    Text(String(localized: "Already a member? Sign in"))
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.top, HKSpace.sm)
     }
 
     // MARK: - Sign In with Apple
@@ -329,8 +620,11 @@ struct OnboardingView: View {
                 Menu {
                     ForEach(SignupCountry.supported) { country in
                         Button {
-                            selectedCountryCode = country.code
+                            guard selectedCountryCode != country.code else { return }
                             errorMessage = ""
+                            marketAdmissionDestination = .phoneEntry
+                            countrySelectionReturnDestination = .phoneEntry
+                            checkMarketAvailability(for: country.code)
                         } label: {
                             Text("\(country.flagEmoji) \(country.localizedName()) (\(country.dialingPrefix))")
                         }
@@ -1053,6 +1347,86 @@ struct OnboardingView: View {
 
     // MARK: - Logic
 
+    /// Starts new-account onboarding with an explicit number-country choice.
+    /// The device region is displayed as a hint in that choice, never applied
+    /// as a silent substitute for the user's mobile-number country.
+    @MainActor
+    private func beginNewSignup() {
+        marketAdmissionDestination = .signIn
+        countrySelectionReturnDestination = .welcome
+        newSignupAdmissionCountryCode = nil
+        showCountrySelection()
+    }
+
+    @MainActor
+    private func showCountrySelection() {
+        marketCheckID = UUID()
+        marketAdmission = nil
+        errorMessage = ""
+        step = .countrySelection
+    }
+
+    @MainActor
+    private func leaveCountrySelection() {
+        marketCheckID = UUID()
+        marketAdmission = nil
+        errorMessage = ""
+        if countrySelectionReturnDestination == .welcome {
+            newSignupAdmissionCountryCode = nil
+        }
+        step = Self.countrySelectionBackStep(for: countrySelectionReturnDestination)
+    }
+
+    @MainActor
+    private func enterSignIn() {
+        marketCheckID = UUID()
+        marketAdmission = nil
+        errorMessage = ""
+        newSignupAdmissionCountryCode = nil
+        step = .signIn
+    }
+
+    /// Checks the selected number country before the user can enter a new
+    /// account flow. The final admission checks before account creation remain
+    /// in place as a defense against stale UI state or a later country change.
+    @MainActor
+    private func checkMarketAvailability(for untrustedCountryCode: String) {
+        guard let countryCode = SignupCountry.normalizedCountryCode(untrustedCountryCode) else {
+            showCountrySelection()
+            return
+        }
+
+        let checkID = UUID()
+        marketCheckID = checkID
+        marketCountryCode = countryCode
+        marketAdmission = nil
+        errorMessage = ""
+        if marketAdmissionDestination == .signIn {
+            newSignupAdmissionCountryCode = nil
+        }
+        step = .marketAvailability
+
+        Task { @MainActor in
+            let admission = await SignupAdmission.checkAvailability(countryCode: countryCode)
+            guard marketCheckID == checkID, marketCountryCode == countryCode else { return }
+
+            switch admission {
+            case .allowed:
+                if marketAdmissionDestination == .phoneEntry,
+                   selectedCountryCode != countryCode {
+                    phoneNumber = ""
+                }
+                selectedCountryCode = countryCode
+                if marketAdmissionDestination == .signIn {
+                    newSignupAdmissionCountryCode = countryCode
+                }
+                step = marketAdmissionDestination == .phoneEntry ? .phoneEntry : .signIn
+            case .unavailable, .checkFailed:
+                marketAdmission = admission
+            }
+        }
+    }
+
     private func handleSignIn(_ result: Result<ASAuthorization, Error>) {
         guard !isLoading else { return }
         switch result {
@@ -1094,7 +1468,21 @@ struct OnboardingView: View {
                     appState.appleUserId = credential.user
                     appState.appleIdentityToken = token
                     if !name.isEmpty { ownerName = name }
-                    step = .phoneEntry
+                    if newSignupAdmissionCountryCode == selectedCountryCode {
+                        // A new account reached Apple sign-in from the explicit
+                        // country check. Consume that authorization before phone
+                        // entry so a later direct sign-in cannot reuse it.
+                        newSignupAdmissionCountryCode = nil
+                        step = .phoneEntry
+                    } else {
+                        // "Already a member" is still allowed to restore an
+                        // existing account, but a person whom the server does
+                        // not recognize as existing must choose and pass a
+                        // number-country check before seeing phone entry.
+                        marketAdmissionDestination = .phoneEntry
+                        countrySelectionReturnDestination = .signIn
+                        showCountrySelection()
+                    }
                 case .authFailed(let message), .notFound(let message), .failed(let message): errorMessage = message
                 case .superseded: break
                 }

@@ -655,10 +655,11 @@ struct AppStoreScreenshotRoot: View {
             if scenario == .brazilUnavailable {
                 OnboardingView(
                     isRecoveryMode: false,
-                    initialStep: .phoneEntry,
-                    initialCountryCode: "BR",
-                    initialPhoneNumber: "11987654321",
-                    initialErrorMessage: String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
+                    initialStep: .marketAvailability,
+                    initialMarketCountryCode: "BR",
+                    initialMarketAdmission: .unavailable(
+                        message: String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
+                    )
                 )
                 .environmentObject(appState)
             } else {
@@ -707,10 +708,11 @@ struct AppStoreScreenshotRoot: View {
             #if DEBUG
             OnboardingView(
                 isRecoveryMode: false,
-                initialStep: .phoneEntry,
-                initialCountryCode: "BR",
-                initialPhoneNumber: "11987654321",
-                initialErrorMessage: String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
+                initialStep: .marketAvailability,
+                initialMarketCountryCode: "BR",
+                initialMarketAdmission: .unavailable(
+                    message: String(localized: "Kevin is not yet available in Brazil. We are preparing the service.")
+                )
             )
             .environmentObject(appState)
             #else

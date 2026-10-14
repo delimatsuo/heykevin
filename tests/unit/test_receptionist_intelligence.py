@@ -4166,9 +4166,9 @@ async def test_voice_pipeline_disables_claude_thinking_to_prevent_response_trunc
 @pytest.mark.asyncio
 async def test_voice_pipeline_waits_longer_before_flushing_incomplete_unpunctuated_clause():
     """When Deepgram emits an unpunctuated mid-sentence final segment
-    ('I said that I have a client' with speech_final=False), the fallback timer
-    must use UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS so the second half of the
-    caller's sentence ('sync. Can you send someone?') merges into one turn.
+    ('I said that I have a client'), premature speech_final=True and UtteranceEnd
+    signals must defer to UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS so the second
+    half of the caller's sentence ('sync. Can you send someone?') merges into one turn.
     """
     processed: list[str] = []
     flushed = asyncio.Event()
@@ -4183,12 +4183,15 @@ async def test_voice_pipeline_waits_longer_before_flushing_incomplete_unpunctuat
                 return json.dumps({
                     "channel": {"alternatives": [{"transcript": "I said that I have a client"}]},
                     "is_final": True,
-                    "speech_final": False,
+                    "speech_final": True,
                 })
             if self._step == 2:
-                # Longer than UTTERANCE_END_FALLBACK_SECONDS (0.03s), shorter than
+                await asyncio.sleep(0.02)
+                return json.dumps({"type": "UtteranceEnd"})
+            if self._step == 3:
+                # Total elapsed > UTTERANCE_END_FALLBACK_SECONDS (0.03s), shorter than
                 # UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS (0.12s).
-                await asyncio.sleep(0.055)
+                await asyncio.sleep(0.035)
                 return json.dumps({
                     "channel": {"alternatives": [{"transcript": "sync. Can you send someone?"}]},
                     "is_final": True,

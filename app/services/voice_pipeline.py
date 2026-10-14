@@ -1187,8 +1187,11 @@ class VoicePipeline:
                 msg_type = data.get("type", "")
                 if msg_type == "UtteranceEnd":
                     if self._utterance_buffer:
-                        logger.info("UtteranceEnd received — processing buffer")
-                        await self._flush_utterance()
+                        if self._utterance_has_terminal_punctuation():
+                            logger.info("UtteranceEnd received — processing buffer")
+                            await self._flush_utterance()
+                        elif not self._utterance_flush_task or self._utterance_flush_task.done():
+                            self._schedule_utterance_flush_timer()
                     continue
 
                 # Skip non-transcript messages
@@ -1222,7 +1225,10 @@ class VoicePipeline:
                 if not transcript:
                     # Empty final — Deepgram detected silence
                     if speech_final and self._utterance_buffer:
-                        await self._flush_utterance()
+                        if self._utterance_has_terminal_punctuation():
+                            await self._flush_utterance()
+                        else:
+                            self._schedule_utterance_flush_timer()
                     continue
 
                 _log_voice_event(
@@ -1261,8 +1267,10 @@ class VoicePipeline:
                 # Show each segment in transcript immediately (real-time feel)
                 await self.on_transcript("Caller", transcript)
 
-                # If speech_final, the caller is done — process the full utterance
-                if speech_final:
+                # If speech_final on a punctuated sentence, the caller is done —
+                # process the full utterance immediately; for unpunctuated mid-clause
+                # pauses, defer to the incomplete-clause fallback timer.
+                if speech_final and self._utterance_has_terminal_punctuation():
                     await self._flush_utterance()
                 else:
                     self._schedule_utterance_flush_timer()
@@ -1347,15 +1355,19 @@ class VoicePipeline:
             task.cancel()
         self._utterance_flush_task = None
 
+    def _utterance_has_terminal_punctuation(self) -> bool:
+        buffer = getattr(self, "_utterance_buffer", None) or []
+        if not buffer:
+            return False
+        last_segment = str(buffer[-1]).strip()
+        return bool(last_segment and last_segment[-1] in ".?!…？！。")
+
     def _utterance_flush_timeout_seconds(self) -> float:
         base_timeout = float(getattr(self, "UTTERANCE_END_FALLBACK_SECONDS", 0.85))
         if base_timeout <= 0:
             return base_timeout
         buffer = getattr(self, "_utterance_buffer", None) or []
-        if not buffer:
-            return base_timeout
-        last_segment = str(buffer[-1]).strip()
-        if last_segment and last_segment[-1] in ".?!…？！。":
+        if not buffer or self._utterance_has_terminal_punctuation():
             return base_timeout
         instance_dict = getattr(self, "__dict__", {})
         if (

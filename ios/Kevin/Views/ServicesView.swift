@@ -40,8 +40,16 @@ struct ServicesView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(service.name)
                                     .font(.body)
-                                if service.priceMin == service.priceMax {
+                                if service.priceMin <= 0 && service.priceMax <= 0 {
+                                    Text(String(localized: "No price listed"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else if service.priceMin == service.priceMax || service.priceMax <= 0 {
                                     Text(String(localized: "$\(service.priceMin)"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else if service.priceMin <= 0 {
+                                    Text(String(localized: "Up to $\(service.priceMax)"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 } else {
@@ -61,9 +69,9 @@ struct ServicesView: View {
         .navigationTitle(String(localized: "Services & Pricing"))
         .alert(String(localized: "Add Service"), isPresented: $showAddService) {
             TextField(String(localized: "Service name"), text: $newName)
-            TextField(String(localized: "Min price"), text: $newPriceMin)
+            TextField(String(localized: "Min price (optional)"), text: $newPriceMin)
                 .keyboardType(.numberPad)
-            TextField(String(localized: "Max price"), text: $newPriceMax)
+            TextField(String(localized: "Max price (optional)"), text: $newPriceMax)
                 .keyboardType(.numberPad)
             Button(String(localized: "Add")) {
                 addService()

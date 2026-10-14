@@ -839,7 +839,9 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         appleIdentityToken: String = "",
         businessAddress: String = "",
         businessCity: String = "",
-        declaredOnboardingIntent: String? = nil
+        declaredOnboardingIntent: String? = nil,
+        services: [[String: Any]]? = nil,
+        knowledge: String? = nil
     ) async throws -> [String: Any]? {
         do {
             let url = URL(string: "\(baseURL)/api/contractors")!
@@ -873,6 +875,15 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
             let trimmedCity = businessCity.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedCity.isEmpty {
                 body["business_city"] = trimmedCity
+            }
+            if let services, !services.isEmpty {
+                body["services"] = services
+            }
+            if let knowledge {
+                let trimmedKnowledge = knowledge.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedKnowledge.isEmpty {
+                    body["knowledge"] = trimmedKnowledge
+                }
             }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             authorize(&request)

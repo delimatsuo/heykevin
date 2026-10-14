@@ -1,6 +1,8 @@
 import SwiftUI
 import AuthenticationServices
 import StoreKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 /// User-facing text for a failed `RegulatoryAddress.validate` result.
 private func regulatoryAddressErrorMessage(for result: RegulatoryAddress.ValidationResult) -> String {
@@ -38,6 +40,15 @@ struct OnboardingView: View {
     @State private var marketAdmissionDestination: MarketAdmissionDestination = .signIn
     @State private var countrySelectionReturnDestination: CountrySelectionReturnDestination = .welcome
     @State private var newSignupAdmissionCountryCode: String?
+    @State private var servicesDraft = OnboardingServicesDraft()
+    @State private var draftServiceName = ""
+    @State private var draftServiceMinPrice = ""
+    @State private var draftServiceMaxPrice = ""
+    @State private var showServicesFileImporter = false
+    @State private var selectedPriceListPhoto: PhotosPickerItem?
+    @State private var servicesUploadMessage = ""
+    @State private var isExtractingPriceList = false
+    @State private var didSkipServicesStep = false
 
     #if DEBUG
     init(
@@ -92,7 +103,7 @@ struct OnboardingView: View {
     private let businessProductID = "com.kevin.callscreen.business.monthly"
 
     enum OnboardingStep {
-        case welcome, countrySelection, marketAvailability, signIn, phoneEntry, modeSelect, businessInfo, contactsPermission, personalInfo, provisioning, forwarding, done
+        case welcome, countrySelection, marketAvailability, signIn, phoneEntry, modeSelect, businessInfo, businessServices, contactsPermission, personalInfo, provisioning, forwarding, done
     }
 
     private enum MarketAdmissionDestination: Equatable {
@@ -147,6 +158,8 @@ struct OnboardingView: View {
                         modeSelectStep
                     case .businessInfo:
                         businessInfoStep
+                    case .businessServices:
+                        businessServicesStep
                     case .contactsPermission:
                         contactsPermissionStep
                     case .personalInfo:
@@ -1056,27 +1069,267 @@ struct OnboardingView: View {
 
             Button {
                 selectedMode = "business"
-                if appState.hasBusinessEntitlement {
-                    step = .contactsPermission
-                } else {
-                    Task {
-                        let prepared = await prepareBusinessDraftProfile()
-                        if prepared {
-                            showPaywall = true
-                        }
-                    }
-                }
+                errorMessage = ""
+                step = .businessServices
             } label: {
-                Text(appState.hasBusinessEntitlement
-                     ? String(localized: "Continue")
-                     : String(localized: "Start Business Trial"))
+                Text(String(localized: "Continue"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(ownerName.isEmpty || businessName.isEmpty)
+            .disabled(ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    // MARK: - Business Services & Price List (Optional)
+
+    private var businessServicesStep: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                HStack {
+                    Button {
+                        errorMessage = ""
+                        step = .businessInfo
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.caption.weight(.bold))
+                            Text(String(localized: "Back"))
+                                .font(.subheadline)
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+
+                    Text(String(localized: "Optional"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.hkBlue)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.hkBlue.opacity(0.12)))
+
+                    Spacer()
+
+                    Button {
+                        proceedFromBusinessServices(skipServices: true)
+                    } label: {
+                        Text(String(localized: "Skip"))
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isLoading || isExtractingPriceList)
+                }
+
+                VStack(spacing: 8) {
+                    Text(String(localized: "Services & Price List"))
+                        .font(.title.bold())
+                        .multilineTextAlignment(.center)
+
+                    Text(String(localized: "Type the services you offer, add optional prices, or upload a price list. You can skip this and edit anytime in Settings."))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                }
+
+                // Type a service + optional price range
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(String(localized: "Add a Service (Optional)"))
+                        .font(.subheadline.weight(.semibold))
+
+                    TextField(String(localized: "Service name (e.g. Drain cleaning)"), text: $draftServiceName)
+                        .textFieldStyle(.roundedBorder)
+
+                    HStack(spacing: 8) {
+                        TextField(String(localized: "Min $ (optional)"), text: $draftServiceMinPrice)
+                            .textFieldStyle(.roundedBorder)
+                            .keyboardType(.numberPad)
+
+                        TextField(String(localized: "Max $ (optional)"), text: $draftServiceMaxPrice)
+                            .textFieldStyle(.roundedBorder)
+                            .keyboardType(.numberPad)
+
+                        Button {
+                            commitTypedDraftService()
+                        } label: {
+                            Text(String(localized: "Add"))
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                .padding()
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                // Upload a price list or services document / photo
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(String(localized: "Upload Services or Price List (Optional)"))
+                        .font(.subheadline.weight(.semibold))
+
+                    HStack(spacing: 10) {
+                        Button {
+                            showServicesFileImporter = true
+                        } label: {
+                            Label(String(localized: "Upload File"), systemImage: "doc.badge.plus")
+                                .font(.subheadline.weight(.medium))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isExtractingPriceList || isLoading)
+
+                        PhotosPicker(
+                            selection: $selectedPriceListPhoto,
+                            matching: .images
+                        ) {
+                            Label(String(localized: "Upload Photo"), systemImage: "photo.badge.plus")
+                                .font(.subheadline.weight(.medium))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isExtractingPriceList || isLoading)
+                    }
+
+                    Text(String(localized: "Supports PDF, CSV, TXT, or a photo of your price sheet."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if isExtractingPriceList {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.85)
+                            Text(String(localized: "Reading price list…"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if !servicesUploadMessage.isEmpty {
+                        Text(servicesUploadMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding()
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                // Added / imported services list
+                if !servicesDraft.items.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(String(localized: "Your Services (\(servicesDraft.items.count))"))
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            if let uploadedName = servicesDraft.uploadedFileName {
+                                Text(uploadedName)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+
+                        ForEach(servicesDraft.items) { entry in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.name)
+                                        .font(.subheadline.weight(.medium))
+                                    Text(entry.formattedPrice ?? String(localized: "No price listed"))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    servicesDraft.removeEntry(id: entry.id)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(String(localized: "Remove \(entry.name)"))
+                            }
+                            .padding(.vertical, 6)
+                            Divider()
+                        }
+                    }
+                    .padding()
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+
+                // Optional freeform notes
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(localized: "Additional Notes or Pricing Details (Optional)"))
+                        .font(.subheadline.weight(.semibold))
+
+                    TextField(
+                        String(localized: "e.g. $89 service call fee waived with repair, free estimates…"),
+                        text: $servicesDraft.additionalNotes,
+                        axis: .vertical
+                    )
+                    .lineLimit(2...5)
+                    .textFieldStyle(.roundedBorder)
+                }
+                .padding()
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                if !errorMessage.isEmpty {
+                    Text(errorMessage)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                }
+
+                VStack(spacing: 12) {
+                    Button {
+                        proceedFromBusinessServices(skipServices: false)
+                    } label: {
+                        if isLoading {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                        } else {
+                            Text(appState.hasBusinessEntitlement
+                                 ? String(localized: "Continue")
+                                 : String(localized: "Start Business Trial"))
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isLoading || isExtractingPriceList)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+
+                    Button(String(localized: "Skip for now")) {
+                        proceedFromBusinessServices(skipServices: true)
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .disabled(isLoading || isExtractingPriceList)
+                    .padding(.bottom, 8)
+                }
+            }
+        }
+        .fileImporter(
+            isPresented: $showServicesFileImporter,
+            allowedContentTypes: [.pdf, .commaSeparatedText, .plainText, .text, .image],
+            allowsMultipleSelection: false
+        ) { result in
+            handleServicesFileImport(result)
+        }
+        .onChange(of: selectedPriceListPhoto) { _, newItem in
+            guard let newItem else { return }
+            Task { await handlePriceListPhotoSelection(newItem) }
         }
     }
 
@@ -1645,6 +1898,7 @@ struct OnboardingView: View {
 
         // Reuse existing contractor if we have one, otherwise create new
         let existingContractorId = appState.contractorId
+        var existingProfileKnowledge: String?
 
         // Fast-path: contractor already exists and the profile already has a Kevin
         // number. Persist the selected mode before finishing onboarding, but avoid
@@ -1660,6 +1914,7 @@ struct OnboardingView: View {
                 isLoading = false
                 return
             }
+            existingProfileKnowledge = profile["knowledge"] as? String
             guard appState.currentAuthContext() == initialAuth,
                   appState.appleUserId == initialAppleUserId else {
                 isLoading = false
@@ -1749,12 +2004,21 @@ struct OnboardingView: View {
         let opAppleUserId: String
         let patchProfileClosure: (() async throws -> Bool)?
         let patchFailureMessage: String
+        let servicesPayloadForBusiness = (mode == "business") ? effectiveServicesPayload : nil
+        let knowledgeForBusiness = (mode == "business") ? effectiveKnowledgeMarkdown : nil
 
         if !existingContractorId.isEmpty {
             // Pre-existing unassigned account: construct optional patch closure using captured token
             var updateBody: [String: Any] = ["mode": mode]
             if !resolvedOwnerName.isEmpty { updateBody["owner_name"] = resolvedOwnerName }
             if !bizName.isEmpty { updateBody["business_name"] = bizName }
+            if let servicesPayloadForBusiness { updateBody["services"] = servicesPayloadForBusiness }
+            if let mergedKnowledge = OnboardingServicesDraft.mergeKnowledge(
+                existing: existingProfileKnowledge,
+                additionalSection: knowledgeForBusiness
+            ) {
+                updateBody["knowledge"] = mergedKnowledge
+            }
 
             opAuthContext = initialAuth
             opAppleUserId = initialAppleUserId
@@ -1800,7 +2064,7 @@ struct OnboardingView: View {
                 return
             }
 
-            let createOutcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, currentCountry, resolvedOwnerName, bizName, svcType, resolvedBusinessAddress, resolvedBusinessCity, mode] in
+            let createOutcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, currentCountry, resolvedOwnerName, bizName, svcType, resolvedBusinessAddress, resolvedBusinessCity, mode, servicesPayloadForBusiness, knowledgeForBusiness] in
                 try await SignupAdmission.runIfAllowed(
                     status: admission,
                     snapshot: originSnapshot,
@@ -1824,7 +2088,9 @@ struct OnboardingView: View {
                         appleIdentityToken: appState.appleIdentityToken,
                         businessAddress: resolvedBusinessAddress,
                         businessCity: resolvedBusinessCity,
-                        declaredOnboardingIntent: mode
+                        declaredOnboardingIntent: mode,
+                        services: servicesPayloadForBusiness,
+                        knowledge: knowledgeForBusiness
                     )
                 }
             }
@@ -1985,11 +2251,143 @@ struct OnboardingView: View {
         await provision(mode: selectedMode)
     }
 
+    private var effectiveServicesPayload: [[String: Any]]? {
+        guard !didSkipServicesStep else { return nil }
+        let payload = servicesDraft.servicesPayload
+        return payload.isEmpty ? nil : payload
+    }
+
+    private var effectiveKnowledgeMarkdown: String? {
+        guard !didSkipServicesStep else { return nil }
+        let markdown = servicesDraft.knowledgeMarkdown
+        return markdown.isEmpty ? nil : markdown
+    }
+
+    private func commitTypedDraftService() {
+        let added = servicesDraft.addTypedEntry(
+            name: draftServiceName,
+            minPriceText: draftServiceMinPrice,
+            maxPriceText: draftServiceMaxPrice
+        )
+        if added {
+            draftServiceName = ""
+            draftServiceMinPrice = ""
+            draftServiceMaxPrice = ""
+        }
+    }
+
+    private func handleServicesFileImport(_ result: Result<[URL], Error>) {
+        errorMessage = ""
+        servicesUploadMessage = ""
+        switch result {
+        case .failure:
+            servicesUploadMessage = String(localized: "Could not open the selected file.")
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            isExtractingPriceList = true
+            Task {
+                let gainedAccess = url.startAccessingSecurityScopedResource()
+                defer {
+                    if gainedAccess { url.stopAccessingSecurityScopedResource() }
+                }
+                let fileName = url.lastPathComponent
+                let ext = url.pathExtension.lowercased()
+                let fileData = try? Data(contentsOf: url)
+                let extractedText: String = if let fileData {
+                    await OnboardingServicesDraft.extractText(from: fileData, pathExtension: ext)
+                } else {
+                    ""
+                }
+
+                await MainActor.run {
+                    isExtractingPriceList = false
+                    let trimmed = extractedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else {
+                        servicesUploadMessage = String(localized: "Could not read text from \(fileName). Try typing your services or another file.")
+                        return
+                    }
+                    let count = servicesDraft.importUploadedText(trimmed, fileName: fileName)
+                    if count > 0 {
+                        servicesUploadMessage = String(localized: "Added \(count) service(s) from \(fileName).")
+                    } else {
+                        servicesUploadMessage = String(localized: "No new services found in \(fileName).")
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func handlePriceListPhotoSelection(_ item: PhotosPickerItem) async {
+        errorMessage = ""
+        servicesUploadMessage = ""
+        isExtractingPriceList = true
+        defer {
+            isExtractingPriceList = false
+            selectedPriceListPhoto = nil
+        }
+        guard let data = try? await item.loadTransferable(type: Data.self), !data.isEmpty else {
+            servicesUploadMessage = String(localized: "Could not load the selected photo.")
+            return
+        }
+        let text = await OnboardingServicesDraft.extractText(from: data, pathExtension: "jpg")
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            servicesUploadMessage = String(localized: "No readable text found in photo. You can type services above.")
+            return
+        }
+        let count = servicesDraft.importUploadedText(trimmed, fileName: String(localized: "Price sheet photo"))
+        if count > 0 {
+            servicesUploadMessage = String(localized: "Added \(count) service(s) from photo.")
+        } else {
+            servicesUploadMessage = String(localized: "No new services found in photo.")
+        }
+    }
+
+    @MainActor
+    private func proceedFromBusinessServices(skipServices: Bool) {
+        selectedMode = "business"
+        errorMessage = ""
+        didSkipServicesStep = skipServices
+        if !skipServices, !draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            commitTypedDraftService()
+        }
+        if appState.hasBusinessEntitlement {
+            if !appState.contractorId.isEmpty && (effectiveServicesPayload != nil || effectiveKnowledgeMarkdown != nil) {
+                Task {
+                    let ready = await prepareBusinessDraftProfile()
+                    if ready {
+                        step = .contactsPermission
+                    }
+                }
+            } else {
+                step = .contactsPermission
+            }
+        } else {
+            Task {
+                let ready = await prepareBusinessDraftProfile()
+                if ready {
+                    showPaywall = true
+                }
+            }
+        }
+    }
+
     @MainActor
     private func prepareBusinessDraftProfile() async -> Bool {
         isLoading = true
         errorMessage = ""
         defer { isLoading = false }
+
+        let servicesToSave = effectiveServicesPayload
+        let knowledgeToSave = effectiveKnowledgeMarkdown
+
+        var profilePatchBody: [String: Any] = [
+            "owner_name": ownerName,
+            "business_name": businessName,
+            "service_type": serviceType,
+        ]
+        if let servicesToSave { profilePatchBody["services"] = servicesToSave }
 
         if appState.contractorId.isEmpty {
             let currentCountry = selectedCountryCode
@@ -2019,7 +2417,7 @@ struct OnboardingView: View {
                 return false
             }
 
-            let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, ownerName, businessName, serviceType, currentCountry] in
+            let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, ownerName, businessName, serviceType, currentCountry, servicesToSave, knowledgeToSave] in
                 try await SignupAdmission.runIfAllowed(
                     status: admission,
                     snapshot: originSnapshot,
@@ -2041,7 +2439,9 @@ struct OnboardingView: View {
                         countryCode: currentCountry,
                         appleUserId: appState.appleUserId,
                         appleIdentityToken: appState.appleIdentityToken,
-                        declaredOnboardingIntent: "business"
+                        declaredOnboardingIntent: "business",
+                        services: servicesToSave,
+                        knowledge: knowledgeToSave
                     )
                 }
             }
@@ -2069,12 +2469,23 @@ struct OnboardingView: View {
             if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
                 APIClient.shared.contractorToken = apiToken
             }
+            if let knowledgeToSave {
+                let existingKnowledge: String?
+                if result?["existing"] as? Bool == true,
+                   let existingProfile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
+                    existingKnowledge = existingProfile["knowledge"] as? String
+                } else {
+                    existingKnowledge = nil
+                }
+                if let merged = OnboardingServicesDraft.mergeKnowledge(
+                    existing: existingKnowledge,
+                    additionalSection: knowledgeToSave
+                ) {
+                    profilePatchBody["knowledge"] = merged
+                }
+            }
             do {
-                let updated = try await APIClient.shared.patchContractor(contractorId, body: [
-                    "owner_name": ownerName,
-                    "business_name": businessName,
-                    "service_type": serviceType,
-                ])
+                let updated = try await APIClient.shared.patchContractor(contractorId, body: profilePatchBody)
                 if !updated {
                     errorMessage = String(localized: "Failed to save your business profile. Please try again.")
                     return false
@@ -2084,12 +2495,18 @@ struct OnboardingView: View {
                 return false
             }
         } else {
+            if let knowledgeToSave {
+                let existingProfile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId)
+                let existingKnowledge = existingProfile?["knowledge"] as? String
+                if let merged = OnboardingServicesDraft.mergeKnowledge(
+                    existing: existingKnowledge,
+                    additionalSection: knowledgeToSave
+                ) {
+                    profilePatchBody["knowledge"] = merged
+                }
+            }
             do {
-                let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: [
-                    "owner_name": ownerName,
-                    "business_name": businessName,
-                    "service_type": serviceType,
-                ])
+                let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: profilePatchBody)
                 if !updated {
                     errorMessage = String(localized: "Failed to save your business profile. Please try again.")
                     return false
@@ -2120,19 +2537,36 @@ struct OnboardingView: View {
         authContext: CallAuthContext,
         onCommit: (@MainActor () -> Void)? = nil
     ) async -> PaywallCompletionResult {
-        await BusinessActivationOperation.activate(
+        let servicesToSave = effectiveServicesPayload
+        let knowledgeToSave = effectiveKnowledgeMarkdown
+        return await BusinessActivationOperation.activate(
             capturedAuth: authContext,
             currentAuth: { appState.currentAuthContext() },
             hasBusinessEntitlement: { appState.hasBusinessEntitlement },
             patch: { contractorId, _, bearerToken in
-                try await APIClient.shared.patchContractor(
+                var patchBody: [String: Any] = [
+                    "owner_name": ownerName,
+                    "business_name": businessName,
+                    "service_type": serviceType,
+                    "mode": "business",
+                ]
+                if let servicesToSave { patchBody["services"] = servicesToSave }
+                if let knowledgeToSave {
+                    let existingProfile = await APIClient.shared.getContractorProfile(
+                        contractorId: contractorId,
+                        bearerToken: bearerToken
+                    )
+                    let existingKnowledge = existingProfile?["knowledge"] as? String
+                    if let merged = OnboardingServicesDraft.mergeKnowledge(
+                        existing: existingKnowledge,
+                        additionalSection: knowledgeToSave
+                    ) {
+                        patchBody["knowledge"] = merged
+                    }
+                }
+                return try await APIClient.shared.patchContractor(
                     contractorId,
-                    body: [
-                        "owner_name": ownerName,
-                        "business_name": businessName,
-                        "service_type": serviceType,
-                        "mode": "business",
-                    ],
+                    body: patchBody,
                     bearerToken: bearerToken
                 )
             },

@@ -4009,3 +4009,111 @@ async def test_voice_pipeline_interim_speech_resets_utterance_fallback_timer():
     await pipeline.stop()
 
     assert processed == ["I want to replace an old toilet."]
+
+
+@pytest.mark.asyncio
+async def test_gemini_receive_loop_defers_live_intake_refresh_until_turn_complete():
+    """Live intake context updates must not send BidiGenerateContentClientContent
+    while modelTurn is actively streaming (which interrupts active generation
+    and runs before Kevin's spoken question is credited at turnComplete).
+    """
+    sent_during_generation: list[dict] = []
+
+    class _StreamingGeminiWebSocket(_FakeGeminiWebSocket):
+        def __init__(self, pipeline_ref: GeminiPipeline, messages: list[dict]):
+            super().__init__()
+            self._pipeline_ref = pipeline_ref
+            self._messages = [json.dumps(m) for m in messages]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> str:
+            if not self._messages:
+                raise StopAsyncIteration
+            return self._messages.pop(0)
+
+        async def send(self, raw: str) -> None:
+            await super().send(raw)
+            if self._pipeline_ref._model_turn_generating:
+                sent_during_generation.append(json.loads(raw))
+
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="caller-id-ending-8667",
+    )
+    pipeline._connected = True
+    audio_b64 = base64.b64encode(b"\x00\x00" * 160).decode("ascii")
+    ws = _StreamingGeminiWebSocket(
+        pipeline,
+        [
+            {
+                "serverContent": {
+                    "inputTranscription": {"text": "Hi, my name is Jonathan."},
+                }
+            },
+            {
+                "serverContent": {
+                    "modelTurn": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "audio/pcm;rate=24000",
+                                    "data": audio_b64,
+                                }
+                            }
+                        ]
+                    },
+                    "outputTranscription": {
+                        "text": "Hi Jonathan, what may I have your name?"
+                    },
+                }
+            },
+            {
+                "serverContent": {
+                    "turnComplete": True,
+                }
+            },
+        ],
+    )
+    pipeline._ws = ws
+    await pipeline._send_opening_intake_instructions()
+    ws.sent_payloads.clear()
+
+    await pipeline._receive_loop()
+
+    assert sent_during_generation == []
+    assert len(ws.sent_payloads) == 1
+    refresh_payload = ws.sent_payloads[0]
+    assert refresh_payload["client_content"]["turn_complete"] is False
+    refresh_text = refresh_payload["client_content"]["turns"][0]["parts"][0]["text"]
+    assert "Allowed slots: service_object." in refresh_text
+
+
+@pytest.mark.asyncio
+async def test_gemini_3_live_intake_uses_client_content_turn_complete_false():
+    """On Gemini 3.1 (e.g. PublicDemoGeminiPipeline on +16178550993),
+    realtime_input.text counts as user activity and triggers a second spoken
+    turn; non-spoken live-intake context updates must use client_content with
+    turn_complete=False while spoken instructions keep realtime_input.text.
+    """
+    from app.services.public_demo_pipeline import PublicDemoGeminiPipeline
+
+    pipeline = PublicDemoGeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+
+    await pipeline._send_greeting()
+    await pipeline._send_opening_intake_instructions()
+
+    assert len(pipeline._ws.sent_payloads) == 2
+    assert "realtime_input" in pipeline._ws.sent_payloads[0]
+    assert pipeline._ws.sent_payloads[1]["client_content"]["turn_complete"] is False
+
+

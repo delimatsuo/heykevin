@@ -4009,4 +4009,3 @@ async def test_voice_pipeline_interim_speech_resets_utterance_fallback_timer():
     await pipeline.stop()
 
     assert processed == ["I want to replace an old toilet."]
-

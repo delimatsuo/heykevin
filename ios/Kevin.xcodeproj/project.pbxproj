@@ -23,6 +23,7 @@
 		2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */; };
 		3264B76455C462BEC0EE7B26 /* JobberManagementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A4F0AF71A55BF0D143D708 /* JobberManagementTests.swift */; };
 		32E28E1C8F27DA9EB56FEEAC /* AccountDeletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3218F28F84345FE46322FFD3 /* AccountDeletion.swift */; };
+		36420701C5474C5BD1AE1D6F /* OnboardingServicesDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D728FCE96527FBC245039E1 /* OnboardingServicesDraftTests.swift */; };
 		3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */; };
 		3A44D6826E83FD5CF68A2448 /* PaywallPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC12C2202F43FA069F313BB /* PaywallPolicy.swift */; };
 		479B0649B257EABB4768194C /* RegulatoryAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51D990DFEA3460D9F31B5803 /* RegulatoryAddress.swift */; };
@@ -40,6 +41,7 @@
 		713D90BFE7D394C1B628B965 /* AppStateOwnershipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C3EADDA5E5E888AB9E19746 /* AppStateOwnershipTests.swift */; };
 		743FFFBC8C4065FBD249C582 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 9789C39B3615CCF463FEBAE2 /* InfoPlist.strings */; };
 		749058137B64FB76AC18E966 /* ServiceBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = E43840C604A53B5958A85097 /* ServiceBinding.swift */; };
+		7B4083FC3798F6852296E0DE /* OnboardingServicesDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72360B62F6E469A25EF6497D /* OnboardingServicesDraft.swift */; };
 		815E9BDBDC728918C771FE09 /* LiveCallObserverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9C60ADD184DE388F0BB4232 /* LiveCallObserverTests.swift */; };
 		822102F6EF03D8BEE9017F00 /* AccountSessionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2345BB4B1D2F87A8CE81CF04 /* AccountSessionState.swift */; };
 		88326DB2981EE8204F7F53F6 /* TwilioVoice in Frameworks */ = {isa = PBXBuildFile; productRef = B6285136CEE3E2F4A0EDE506 /* TwilioVoice */; };
@@ -133,6 +135,7 @@
 		3A2A0D24F186B7C5637BD6D5 /* OwnerSMSPreference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnerSMSPreference.swift; sourceTree = "<group>"; };
 		3BD273B6152CAAEC298060FA /* Markets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markets.swift; sourceTree = "<group>"; };
 		3C3EADDA5E5E888AB9E19746 /* AppStateOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateOwnershipTests.swift; sourceTree = "<group>"; };
+		3D728FCE96527FBC245039E1 /* OnboardingServicesDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingServicesDraftTests.swift; sourceTree = "<group>"; };
 		401DA3ECE84C842B701BC783 /* CallActionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallActionCoordinator.swift; sourceTree = "<group>"; };
 		40B745FA4D84858230574C78 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		46C836A2F442C95376CE1544 /* PushRegistrationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushRegistrationCoordinator.swift; sourceTree = "<group>"; };
@@ -151,6 +154,7 @@
 		68B2CDD06B01EAAE824F1B2D /* PhoneFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneFormatter.swift; sourceTree = "<group>"; };
 		69C8CE051BFA7F3186E45B9B /* PaywallFlowCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallFlowCoordinator.swift; sourceTree = "<group>"; };
 		6BA706F99F80397D1BEB9B52 /* ServicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServicesView.swift; sourceTree = "<group>"; };
+		72360B62F6E469A25EF6497D /* OnboardingServicesDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingServicesDraft.swift; sourceTree = "<group>"; };
 		75E7CE6639F7C036F139197C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		7649463A1EF80FC5B392E6B1 /* ProvisioningOperationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningOperationTests.swift; sourceTree = "<group>"; };
 		7D5BA48FE5494D5FC061B7B7 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallView.swift; sourceTree = "<group>"; };
@@ -294,6 +298,7 @@
 				E9C60ADD184DE388F0BB4232 /* LiveCallObserverTests.swift */,
 				802178E5E94D96F1CED67E5C /* MarketsAdmissionTests.swift */,
 				C0D4DE4C8F970089D5E1D7A9 /* NotificationEntryTests.swift */,
+				3D728FCE96527FBC245039E1 /* OnboardingServicesDraftTests.swift */,
 				97A370961228A61EA03ED1C9 /* OwnerSMSPreferenceTests.swift */,
 				494AB4716A815E7A63DCAC02 /* PaywallFlowTests.swift */,
 				7649463A1EF80FC5B392E6B1 /* ProvisioningOperationTests.swift */,
@@ -394,6 +399,7 @@
 				51E42394C57DA12EBCEF3607 /* FrontendNavigation.swift */,
 				EF45FC3A8CD34E02E43AD820 /* JobberManagement.swift */,
 				3BD273B6152CAAEC298060FA /* Markets.swift */,
+				72360B62F6E469A25EF6497D /* OnboardingServicesDraft.swift */,
 				3A2A0D24F186B7C5637BD6D5 /* OwnerSMSPreference.swift */,
 				FAC12C2202F43FA069F313BB /* PaywallPolicy.swift */,
 				E43840C604A53B5958A85097 /* ServiceBinding.swift */,
@@ -540,6 +546,7 @@
 				815E9BDBDC728918C771FE09 /* LiveCallObserverTests.swift in Sources */,
 				5EA4124A788A436E94558F6C /* MarketsAdmissionTests.swift in Sources */,
 				6D000293A21F09A44362D0A8 /* NotificationEntryTests.swift in Sources */,
+				36420701C5474C5BD1AE1D6F /* OnboardingServicesDraftTests.swift in Sources */,
 				93C3A09C7EFBDA7B690B5E15 /* OwnerSMSPreferenceTests.swift in Sources */,
 				DD9F0C335B34D0C66B510513 /* PaywallFlowTests.swift in Sources */,
 				0114226FCE506B6A9E8D049B /* ProvisioningOperationTests.swift in Sources */,
@@ -586,6 +593,7 @@
 				BDD86EC278FFF225F73A8773 /* KeychainManager.swift in Sources */,
 				FC8F8078E613ED44B1E7008A /* LiveCallObserver.swift in Sources */,
 				FD7710F8014CCED3E31228D1 /* Markets.swift in Sources */,
+				7B4083FC3798F6852296E0DE /* OnboardingServicesDraft.swift in Sources */,
 				6E591A2E51F727C78074B843 /* OnboardingView.swift in Sources */,
 				E801930869DF11D1155E193F /* OwnerSMSPreference.swift in Sources */,
 				D6BC1935FC705C7FDBBF684F /* PaywallFlowCoordinator.swift in Sources */,

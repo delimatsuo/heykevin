@@ -106,6 +106,161 @@ async def _enforce_apple_identity(
         raise HTTPException(status_code=401, detail="Apple authentication required")
 
 
+class ServiceItem(BaseModel):
+    name: str = Field(max_length=100)
+    price_min: int = Field(default=0, ge=0, le=100000)
+    price_max: int = Field(default=0, ge=0, le=100000)
+
+
+class ServicesList(BaseModel):
+    services: list[ServiceItem] = Field(max_length=50)
+
+
+class ParsePriceListRequest(BaseModel):
+    raw_text: str = Field(default="", max_length=50000)
+    notes: str = Field(default="", max_length=5000)
+    save: bool = Field(default=False)
+
+
+def _sanitize_services_list(services: list) -> list[dict]:
+    """Sanitize service names, deduplicate case-insensitively, and normalize optional min/max prices."""
+    import re
+
+    sanitized: list[dict] = []
+    seen_names: set[str] = set()
+    for s in (services or []):
+        if len(sanitized) >= 50:
+            break
+        raw_name = s.name if hasattr(s, "name") else (s.get("name", "") if isinstance(s, dict) else "")
+        clean_name = re.sub(r"[^\w\s\-\./&,()]", "", str(raw_name)).strip()[:100]
+        if not clean_name:
+            continue
+        key = clean_name.lower()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        pmin = int(s.price_min if hasattr(s, "price_min") else (s.get("price_min", 0) if isinstance(s, dict) else 0))
+        pmax = int(s.price_max if hasattr(s, "price_max") else (s.get("price_max", 0) if isinstance(s, dict) else 0))
+        pmin = max(0, min(100000, pmin))
+        pmax = max(0, min(100000, pmax))
+        if pmin > 0 and pmax == 0:
+            pmax = pmin
+        elif pmax > 0 and pmin > pmax:
+            pmin, pmax = pmax, pmin
+        sanitized.append({
+            "name": clean_name,
+            "price_min": pmin,
+            "price_max": pmax,
+        })
+    return sanitized
+
+
+def parse_services_and_prices_text(raw_text: str) -> list[dict]:
+    """Deterministically parse services and optional prices from CSV, markdown, or plain text."""
+    import csv
+    import io
+    import re
+
+    if not raw_text or not raw_text.strip():
+        return []
+
+    header_tokens = {
+        "service", "services", "service name", "item", "description",
+        "price", "pricing", "min", "max", "min price", "max price", "rate", "cost",
+    }
+    extracted: list[dict] = []
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Strip leading bullet markers
+        line = re.sub(r"^[\-\*\u2022\d\.\)\s]+", "", line).strip()
+        if not line:
+            continue
+
+        # 1. Check CSV / TSV style row if comma or tab separated without prose
+        if ("," in line or "\t" in line) and not re.search(r"\$\s*\d+\s*[\-\u2013]\s*\$?\s*\d+", line):
+            delimiter = "\t" if "\t" in line else ","
+            try:
+                cols = [c.strip().strip('"').strip("'") for c in next(csv.reader(io.StringIO(line), delimiter=delimiter))]
+            except Exception:
+                cols = [c.strip() for c in line.split(delimiter)]
+            cols = [c for c in cols if c != ""]
+            if cols:
+                if all(c.lower() in header_tokens for c in cols):
+                    continue
+                name_col = cols[0]
+                nums: list[int] = []
+                for col in cols[1:3]:
+                    found = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", col)
+                    for num_str in found:
+                        val = int(float(num_str.replace(",", "")))
+                        nums.append(val)
+                if nums:
+                    pmin = nums[0]
+                    pmax = nums[1] if len(nums) > 1 else pmin
+                    extracted.append({"name": name_col, "price_min": pmin, "price_max": pmax})
+                    continue
+                elif len(cols) == 1:
+                    extracted.append({"name": name_col, "price_min": 0, "price_max": 0})
+                    continue
+
+        # 2. Check inline price range or single price: e.g. "Drain cleaning ($150 - $250)" or "Faucet repair: $150"
+        range_match = re.search(
+            r"^(?P<name>.+?)\s*(?:[\(\:\-\u2013\u2014\|]\s*|\s+)\$?\s*(?P<min>\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:[\-\u2013\u2014]|to)\s*\$?\s*(?P<max>\d+(?:,\d{3})*(?:\.\d+)?)\s*\)?$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if range_match:
+            name_part = range_match.group("name").strip(" -–—:|()")
+            pmin = int(float(range_match.group("min").replace(",", "")))
+            pmax = int(float(range_match.group("max").replace(",", "")))
+            extracted.append({"name": name_part, "price_min": pmin, "price_max": pmax})
+            continue
+
+        single_price_match = re.search(
+            r"^(?P<name>.+?)\s*(?:[\(\:\-\u2013\u2014\|]\s*|\s+)\$\s*(?P<price>\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:/\w+|\+)?\s*\)?$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if single_price_match:
+            name_part = single_price_match.group("name").strip(" -–—:|()")
+            price_val = int(float(single_price_match.group("price").replace(",", "")))
+            extracted.append({"name": name_part, "price_min": price_val, "price_max": price_val})
+            continue
+
+        # 3. Plain service line without price
+        if line.lower() not in header_tokens:
+            extracted.append({"name": line, "price_min": 0, "price_max": 0})
+
+    return _sanitize_services_list(extracted)
+
+
+def format_services_knowledge_markdown(services: list[dict], notes: str = "") -> str:
+    """Format sanitized services and optional notes into a knowledge base markdown block."""
+    sections: list[str] = []
+    if services:
+        lines = ["## Services"]
+        for s in services[:50]:
+            name = s.get("name", "")
+            pmin = int(s.get("price_min", 0) or 0)
+            pmax = int(s.get("price_max", 0) or 0)
+            if pmin > 0 and pmax > pmin:
+                lines.append(f"- {name} (${pmin}-${pmax})")
+            elif pmin > 0:
+                lines.append(f"- {name} (${pmin})")
+            elif pmax > 0:
+                lines.append(f"- {name} (up to ${pmax})")
+            else:
+                lines.append(f"- {name}")
+        sections.append("\n".join(lines))
+    clean_notes = (notes or "").strip()
+    if clean_notes:
+        sections.append(f"## Pricing & Service Notes\n{clean_notes}")
+    return "\n\n".join(sections)[:10000]
+
+
 class ContractorCreate(BaseModel):
     business_name: str = Field(max_length=200)
     owner_name: str = Field(max_length=100)
@@ -123,6 +278,8 @@ class ContractorCreate(BaseModel):
     business_hours_start: str = "07:00"
     business_hours_end: str = "18:00"
     home_base_address: str = Field(default="", max_length=500)
+    services: Optional[list[ServiceItem]] = Field(default=None, max_length=50)
+    knowledge: Optional[str] = Field(default=None, max_length=10000)
     # Acquisition measurement onboarding intent (optional, 'personal' or 'business')
     declared_onboarding_intent: Optional[str] = Field(default=None, max_length=20)
     # International fields
@@ -170,6 +327,7 @@ class ContractorUpdate(BaseModel):
     home_base_address: Optional[str] = Field(default=None, max_length=500)
     callback_sla_minutes: Optional[int] = None
     knowledge: Optional[str] = Field(default=None, max_length=10000)
+    services: Optional[list[ServiceItem]] = Field(default=None, max_length=50)
     ring_through_contacts: Optional[bool] = None
     sit_tone_enabled: Optional[bool] = None
     auto_reply_sms: Optional[bool] = None
@@ -216,16 +374,6 @@ class ImportWebsiteRequest(BaseModel):
 
 class KnowledgeUpdate(BaseModel):
     knowledge: str = Field(max_length=10000)
-
-
-class ServiceItem(BaseModel):
-    name: str = Field(max_length=100)
-    price_min: int = Field(ge=0, le=100000)
-    price_max: int = Field(ge=0, le=100000)
-
-
-class ServicesList(BaseModel):
-    services: list[ServiceItem] = Field(max_length=50)
 
 
 @router.get("")
@@ -472,6 +620,12 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     data = body.dict()
     # Don't persist the raw Apple identity token in Firestore.
     data.pop("apple_identity_token", None)
+    if data.get("services") is not None:
+        data["services"] = _sanitize_services_list(body.services or [])
+    else:
+        data.pop("services", None)
+    if data.get("knowledge") is None:
+        data.pop("knowledge", None)
     if data.get("mode") in ("business", "businessPro"):
         # Business profile details may be collected before purchase, but the
         # runtime mode is not activated until StoreKit verification grants a
@@ -693,6 +847,8 @@ async def api_owner_sms_consent(contractor_id: str, body: OwnerSmsConsentRequest
 async def api_update_contractor(contractor_id: str, body: ContractorUpdate, request: Request):
     require_contractor_access(request, contractor_id)
     updates = {k: v for k, v in body.dict().items() if v is not None and k not in PROTECTED_FIELDS}
+    if "services" in updates:
+        updates["services"] = _sanitize_services_list(body.services or [])
     if not updates:
         return {"status": "no changes"}
 
@@ -812,20 +968,30 @@ async def api_get_services(contractor_id: str, request: Request):
 async def api_update_services(contractor_id: str, body: ServicesList, request: Request):
     """Replace a contractor's service/pricing list."""
     require_contractor_access(request, contractor_id)
-    import re
-    # Sanitize service names to prevent prompt injection
-    sanitized = []
-    for s in body.services:
-        clean_name = re.sub(r'[^\w\s\-\./&,()]', '', s.name)[:100]
-        sanitized.append({
-            "name": clean_name,
-            "price_min": s.price_min,
-            "price_max": s.price_max,
-        })
+    sanitized = _sanitize_services_list(body.services)
     _require_profile_update(
         await update_contractor(contractor_id, {"services": sanitized})
     )
     return {"status": "ok", "count": len(sanitized)}
+
+
+@router.post("/{contractor_id}/parse-price-list")
+async def api_parse_price_list(contractor_id: str, body: ParsePriceListRequest, request: Request):
+    """Parse an uploaded or pasted services / price list into structured services and knowledge."""
+    require_contractor_access(request, contractor_id)
+    services = parse_services_and_prices_text(body.raw_text)
+    knowledge = format_services_knowledge_markdown(services, notes=body.notes)
+    if body.save:
+        updates: dict = {"services": services}
+        if knowledge:
+            updates["knowledge"] = knowledge
+        _require_profile_update(await update_contractor(contractor_id, updates))
+    return {
+        "status": "ok",
+        "services": services,
+        "knowledge": knowledge,
+        "count": len(services),
+    }
 
 
 def _require_profile_update(updated: bool) -> None:

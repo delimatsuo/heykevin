@@ -256,16 +256,22 @@ def _sanitize_prompt_field(text: str, max_length: int = 5000) -> str:
 
 
 def _format_services_for_prompt(services: list) -> str:
-    """Format services list for injection into system prompt. Cap at 20."""
+    """Format priced services list for injection into system prompt. Cap at 20."""
     if not services:
         return ""
     lines = []
     for s in services[:20]:
         name = _sanitize_prompt_field(s.get("name", ""), max_length=200)
-        pmin = s.get("price_min", 0)
-        pmax = s.get("price_max", 0)
-        if pmin == pmax:
+        if not name:
+            continue
+        pmin = int(s.get("price_min", 0) or 0)
+        pmax = int(s.get("price_max", 0) or 0)
+        if pmin <= 0 and pmax <= 0:
+            continue
+        if pmin > 0 and (pmax <= 0 or pmin == pmax):
             lines.append(f"- {name}: ${pmin}")
+        elif pmin <= 0 and pmax > 0:
+            lines.append(f"- {name}: up to ${pmax}")
         else:
             lines.append(f"- {name}: ${pmin}-${pmax}")
     return "\n".join(lines)
@@ -458,7 +464,8 @@ If they ask about a service NOT listed, use the out-of-scope workflow below.
     services_section = ""
     if services:
         formatted = _format_services_for_prompt(services)
-        services_section = f"""
+        if formatted:
+            services_section = f"""
 
 SERVICE PRICING (use these for estimates when relevant):
 {formatted}

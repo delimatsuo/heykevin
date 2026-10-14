@@ -603,6 +603,14 @@ RULES:
     )
 
     base_prompt += (
+        "\n\nSPEECH-TO-TEXT TOLERANCE: Caller speech is transcribed from 8kHz phone audio "
+        "and may contain phonetic homophones or near-misses for trade and fixture terms "
+        "(for example, \"client sync\" or \"clocked sync\" for \"clogged sink\"). "
+        "When a phrase is an obvious phonetic match for an in-scope issue for this business, "
+        "interpret it naturally as that issue instead of asking the caller what they mean."
+    )
+
+    base_prompt += (
         "\n\nLANGUAGE: You speak all languages fluently. Start in English. "
         "If the caller speaks a different language, switch to that language immediately and continue the entire conversation in their language. "
         "Match the caller's language — never force them to speak English. Detect the language from their first words."
@@ -614,6 +622,107 @@ ELEVENLABS_VOICE_ID = "cjVigY5qzO86Huf0OWal"  # Eric — Smooth, Trustworthy, Am
 ELEVENLABS_VOICE_ID_SPANISH = "onwK4e9ZLuTAKqWW03F9"  # Daniel — Multilingual male
 ELEVENLABS_MODEL_DEFAULT = "eleven_flash_v2_5"
 ELEVENLABS_MODEL_MULTILINGUAL = "eleven_multilingual_v2"
+
+_PLUMBING_DEEPGRAM_KEYTERMS = (
+    "clogged sink",
+    "clogged drain",
+    "clogged toilet",
+    "leaky faucet",
+    "burst pipe",
+    "water heater",
+    "shut-off valve",
+    "garbage disposal",
+    "sewer line",
+    "standing water",
+    "drain cleaning",
+    "plumbing",
+)
+_ELECTRICAL_DEEPGRAM_KEYTERMS = (
+    "circuit breaker",
+    "electrical panel",
+    "outlet",
+    "wiring",
+)
+
+
+def _claude_thinking_config(model: object) -> dict[str, str]:
+    """Return a model-compatible low-latency thinking configuration."""
+    normalized = str(model or "").strip().lower()
+    if "sonnet-5-5" in normalized or "sonnet-5.5" in normalized:
+        return {"type": "between_tools"}
+    return {"type": "disabled"}
+
+
+def _build_deepgram_keyterms(config: Optional[dict] = None) -> list[str]:
+    """Return bounded, deduplicated Deepgram nova-3 keyterms for business calls."""
+    config = config or {}
+    mode = config.get("effective_mode") or effective_mode(config)
+    if mode == "personal":
+        return []
+
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: object) -> None:
+        if not isinstance(raw, str):
+            return
+        normalized = unicodedata.normalize("NFKC", raw).replace("’", "'")
+        cleaned_chars = [
+            ch if (ch.isalnum() or ch in " '-") else " "
+            for ch in normalized
+        ]
+        cleaned = " ".join("".join(cleaned_chars).split()).strip(" '-")
+        if not cleaned or len(cleaned) < 2 or len(cleaned) > 40:
+            return
+        lowered = cleaned.casefold()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        terms.append(cleaned)
+
+    service_type = config.get("service_type", "")
+    if isinstance(service_type, str) and service_type.lower() not in {
+        "general",
+        "personal",
+        "business",
+        "kevin",
+    }:
+        _add(service_type)
+
+    for service in (config.get("services") or [])[:10]:
+        if isinstance(service, dict):
+            _add(service.get("name", ""))
+
+    profile_blob = " ".join(
+        str(config.get(key, "") or "")
+        for key in ("business_name", "service_type", "knowledge")
+    ).casefold()
+    service_blob = " ".join(t.casefold() for t in terms)
+    combined_blob = f"{profile_blob} {service_blob}"
+
+    is_plumbing = any(
+        token in combined_blob
+        for token in ("plumb", "drain", "pipe", "faucet", "sink", "toilet", "sewer", "water heater")
+    )
+    is_electrical = any(
+        token in combined_blob
+        for token in ("electr", "breaker", "panel", "wiring", "outlet")
+    )
+
+    default_candidates: tuple[str, ...] = ()
+    if is_plumbing and not is_electrical:
+        default_candidates = _PLUMBING_DEEPGRAM_KEYTERMS
+    elif is_electrical and not is_plumbing:
+        default_candidates = _ELECTRICAL_DEEPGRAM_KEYTERMS
+    elif is_plumbing and is_electrical:
+        default_candidates = _PLUMBING_DEEPGRAM_KEYTERMS + _ELECTRICAL_DEEPGRAM_KEYTERMS
+
+    for default_term in default_candidates:
+        _add(default_term)
+        if len(terms) >= 24:
+            break
+
+    return terms[:24]
 
 
 class VoicePipeline:
@@ -634,6 +743,7 @@ class VoicePipeline:
     CALLER_SILENCE_GOODBYE_SECONDS = 1
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
     UTTERANCE_END_FALLBACK_SECONDS = 0.85
+    UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS = 2.6
 
     def __init__(
         self,
@@ -979,14 +1089,18 @@ class VoicePipeline:
         Key parameters:
         - encoding=mulaw, sample_rate=8000: accept Twilio's raw audio directly
         - interim_results=true: required for speech_final detection
-        - endpointing=400: finalize after 400ms silence. Lower values feel more
-          conversational but risk truncating mid-sentence pauses; 400ms is the
-          tightest setting that still rides through natural breaths and
-          hesitation in our testing.
-        - utterance_end_ms=1000: fallback end-of-utterance signal
+        - endpointing=500: finalize after 500ms silence so mid-sentence breaths
+          do not split a caller's clause in half
+        - utterance_end_ms=1200: fallback end-of-utterance signal
+        - keyterm: trade and contractor service vocabulary to prevent 8kHz PSTN
+          homophone misrecognitions (e.g. "clogged sink" -> "client sync")
         - speech_final marks the TRUE end of an utterance (not just is_final)
         """
         try:
+            from urllib.parse import quote
+
+            keyterms = _build_deepgram_keyterms(getattr(self, "_contractor_config", None))
+            keyterm_query = "".join(f"&keyterm={quote(term)}" for term in keyterms)
             url = (
                 "wss://api.deepgram.com/v1/listen"
                 "?model=nova-3"
@@ -996,9 +1110,10 @@ class VoicePipeline:
                 "&punctuate=true"
                 "&smart_format=true"
                 "&interim_results=true"
-                "&endpointing=400"
-                "&utterance_end_ms=1000"
+                "&endpointing=500"
+                "&utterance_end_ms=1200"
                 "&language=multi"
+                f"{keyterm_query}"
             )
 
             # Cancel old receive task before creating a new one (prevents duplicate loops)
@@ -1072,8 +1187,11 @@ class VoicePipeline:
                 msg_type = data.get("type", "")
                 if msg_type == "UtteranceEnd":
                     if self._utterance_buffer:
-                        logger.info("UtteranceEnd received — processing buffer")
-                        await self._flush_utterance()
+                        if self._utterance_has_terminal_punctuation():
+                            logger.info("UtteranceEnd received — processing buffer")
+                            await self._flush_utterance()
+                        elif not self._utterance_flush_task or self._utterance_flush_task.done():
+                            self._schedule_utterance_flush_timer()
                     continue
 
                 # Skip non-transcript messages
@@ -1107,7 +1225,10 @@ class VoicePipeline:
                 if not transcript:
                     # Empty final — Deepgram detected silence
                     if speech_final and self._utterance_buffer:
-                        await self._flush_utterance()
+                        if self._utterance_has_terminal_punctuation():
+                            await self._flush_utterance()
+                        else:
+                            self._schedule_utterance_flush_timer()
                     continue
 
                 _log_voice_event(
@@ -1146,8 +1267,10 @@ class VoicePipeline:
                 # Show each segment in transcript immediately (real-time feel)
                 await self.on_transcript("Caller", transcript)
 
-                # If speech_final, the caller is done — process the full utterance
-                if speech_final:
+                # If speech_final on a punctuated sentence, the caller is done —
+                # process the full utterance immediately; for unpunctuated mid-clause
+                # pauses, defer to the incomplete-clause fallback timer.
+                if speech_final and self._utterance_has_terminal_punctuation():
                     await self._flush_utterance()
                 else:
                     self._schedule_utterance_flush_timer()
@@ -1232,9 +1355,38 @@ class VoicePipeline:
             task.cancel()
         self._utterance_flush_task = None
 
+    def _utterance_has_terminal_punctuation(self) -> bool:
+        buffer = getattr(self, "_utterance_buffer", None) or []
+        if not buffer:
+            return False
+        last_segment = str(buffer[-1]).strip()
+        return bool(last_segment and last_segment[-1] in ".?!…？！。")
+
+    def _utterance_flush_timeout_seconds(self) -> float:
+        base_timeout = float(getattr(self, "UTTERANCE_END_FALLBACK_SECONDS", 0.85))
+        if base_timeout <= 0:
+            return base_timeout
+        buffer = getattr(self, "_utterance_buffer", None) or []
+        if not buffer or self._utterance_has_terminal_punctuation():
+            return base_timeout
+        instance_dict = getattr(self, "__dict__", {})
+        if (
+            "UTTERANCE_END_FALLBACK_SECONDS" in instance_dict
+            and "UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS" not in instance_dict
+        ):
+            return base_timeout
+        incomplete_timeout = float(
+            getattr(
+                self,
+                "UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS",
+                max(base_timeout, 2.6),
+            )
+        )
+        return max(base_timeout, incomplete_timeout)
+
     def _schedule_utterance_flush_timer(self) -> None:
         self._cancel_utterance_flush_timer()
-        timeout = getattr(self, "UTTERANCE_END_FALLBACK_SECONDS", 0.85)
+        timeout = self._utterance_flush_timeout_seconds()
         if timeout <= 0 or not getattr(self, "_connected", True):
             return
         self._utterance_flush_task = asyncio.create_task(
@@ -1861,7 +2013,8 @@ class VoicePipeline:
 
                 request_body = {
                     "model": settings.anthropic_model,
-                    "max_tokens": 200 if use_tools else 100,
+                    "max_tokens": 250 if use_tools else 180,
+                    "thinking": _claude_thinking_config(settings.anthropic_model),
                     "system": system_prompt,
                     "messages": self._conversation[-20:],
                 }

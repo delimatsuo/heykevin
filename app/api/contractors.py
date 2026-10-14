@@ -174,8 +174,8 @@ def parse_services_and_prices_text(raw_text: str) -> list[dict]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        # Strip leading bullet markers
-        line = re.sub(r"^[\-\*\u2022\d\.\)\s]+", "", line).strip()
+        # Strip leading bullet markers (-, *, •) or numbered list markers (1., 2)) without stripping "24/7"
+        line = re.sub(r"^(?:[\-\*\u2022]+|\d+[\.\)])\s*", "", line).strip()
         if not line:
             continue
 
@@ -983,8 +983,15 @@ async def api_parse_price_list(contractor_id: str, body: ParsePriceListRequest, 
     knowledge = format_services_knowledge_markdown(services, notes=body.notes)
     if body.save:
         updates: dict = {"services": services}
-        if knowledge:
-            updates["knowledge"] = knowledge
+        clean_notes = (body.notes or "").strip()
+        if clean_notes:
+            notes_section = f"## Pricing & Service Notes\n{clean_notes}"
+            existing = await get_contractor(contractor_id)
+            existing_knowledge = ((existing or {}).get("knowledge") or "").strip()
+            if existing_knowledge and notes_section not in existing_knowledge:
+                updates["knowledge"] = f"{existing_knowledge}\n\n{notes_section}"[:10000]
+            elif not existing_knowledge:
+                updates["knowledge"] = notes_section[:10000]
         _require_profile_update(await update_contractor(contractor_id, updates))
     return {
         "status": "ok",

@@ -139,14 +139,47 @@ async def test_patch_contractor_accepts_services_and_knowledge(monkeypatch):
     assert "Drain Cleaning" in captured["updates"]["knowledge"]
 
 
+def test_parse_services_preserves_leading_digits_and_handles_quoted_csv_commas():
+    raw = """
+    1. Drain Cleaning: $95 - $185
+    2) Leak Detection: $150
+    24/7 Emergency Service: $250
+    3D Remodel Rendering
+    Water Heater Replacement,"$1,200","$1,800"
+    """
+    parsed = contractors_api.parse_services_and_prices_text(raw)
+    assert parsed == [
+        {"name": "Drain Cleaning", "price_min": 95, "price_max": 185},
+        {"name": "Leak Detection", "price_min": 150, "price_max": 150},
+        {"name": "24/7 Emergency Service", "price_min": 250, "price_max": 250},
+        {"name": "3D Remodel Rendering", "price_min": 0, "price_max": 0},
+        {"name": "Water Heater Replacement", "price_min": 1200, "price_max": 1800},
+    ]
+
+
+def test_voice_pipeline_pricing_cap_applied_after_filtering_unpriced_services():
+    services = [
+        {"name": f"Unpriced Service {i}", "price_min": 0, "price_max": 0}
+        for i in range(25)
+    ] + [
+        {"name": "Main Line Hydro Jetting", "price_min": 350, "price_max": 600},
+    ]
+    pricing_block = _format_services_for_prompt(services)
+    assert "- Main Line Hydro Jetting: $350-$600" in pricing_block
+
+
 @pytest.mark.asyncio
 async def test_api_parse_price_list_returns_services_and_optionally_persists(monkeypatch):
     updated_calls = []
+
+    async def fake_get_contractor(cid):
+        return {"id": cid, "knowledge": "## Business Hours\nMon-Fri 8am-5pm"}
 
     async def fake_update_contractor(cid, updates):
         updated_calls.append((cid, updates))
         return True
 
+    monkeypatch.setattr(contractors_api, "get_contractor", fake_get_contractor)
     monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
 
     body = contractors_api.ParsePriceListRequest(
@@ -167,4 +200,6 @@ async def test_api_parse_price_list_returns_services_and_optionally_persists(mon
         {"name": "Water Heater Install", "price_min": 1200, "price_max": 1800},
         {"name": "General Inspection", "price_min": 0, "price_max": 0},
     ]
+    assert "## Business Hours\nMon-Fri 8am-5pm" in updated_calls[0][1]["knowledge"]
     assert "Licensed and insured." in updated_calls[0][1]["knowledge"]
+

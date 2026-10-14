@@ -144,7 +144,7 @@ struct OnboardingServicesDraft: Equatable, Sendable {
             pattern: #"\$\s*\d+\s*[\-–—]\s*\$?\s*\d+"#
         )
         let bulletStripRegex = try? NSRegularExpression(
-            pattern: #"^[\-\*•\d\.\)\s]+"#
+            pattern: #"^(?:[\-\*•]+|\d+[\.\)])\s*"#
         )
 
         for rawLine in trimmed.components(separatedBy: .newlines) {
@@ -168,10 +168,10 @@ struct OnboardingServicesDraft: Equatable, Sendable {
                 return inlineRangeCheckRegex.firstMatch(in: line, range: nsRange) != nil
             }()
 
-            // 1. CSV / TSV row
+            // 1. CSV / TSV row (quote-aware)
             if (line.contains(",") || line.contains("\t")) && !hasInlineDollarRange {
                 let separator: Character = line.contains("\t") ? "\t" : ","
-                let cols = line.split(separator: separator, omittingEmptySubsequences: false)
+                let cols = splitCSVRow(line, delimiter: separator)
                     .map {
                         $0.trimmingCharacters(in: .whitespacesAndNewlines)
                             .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
@@ -291,6 +291,37 @@ struct OnboardingServicesDraft: Equatable, Sendable {
         }
     }
 
+    static func splitCSVRow(_ line: String, delimiter: Character) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var inQuotes = false
+        let chars = Array(line)
+        var idx = 0
+        while idx < chars.count {
+            let ch = chars[idx]
+            if ch == "\"" {
+                if inQuotes, idx + 1 < chars.count, chars[idx + 1] == "\"" {
+                    current.append("\"")
+                    idx += 2
+                    continue
+                }
+                inQuotes.toggle()
+                idx += 1
+                continue
+            }
+            if ch == delimiter && !inQuotes {
+                fields.append(current)
+                current = ""
+                idx += 1
+                continue
+            }
+            current.append(ch)
+            idx += 1
+        }
+        fields.append(current)
+        return fields
+    }
+
     var servicesPayload: [[String: Any]] {
         items.prefix(Self.maxItems).map { item in
             [
@@ -301,28 +332,28 @@ struct OnboardingServicesDraft: Equatable, Sendable {
         }
     }
 
+    /// Freeform notes section for the contractor knowledge base.
+    /// Structured services are stored in `services` (via `servicesPayload`) rather than
+    /// duplicated into `knowledge`, so subsequent edits or deletions in `ServicesView`
+    /// never leave stale prices in `knowledge`.
     var knowledgeMarkdown: String {
-        var sections: [String] = []
-        if !items.isEmpty {
-            var lines = ["## Services"]
-            for item in items.prefix(Self.maxItems) {
-                if item.priceMin > 0 && item.priceMax > item.priceMin {
-                    lines.append("- \(item.name) ($\(item.priceMin)-$\(item.priceMax))")
-                } else if item.priceMin > 0 {
-                    lines.append("- \(item.name) ($\(item.priceMin))")
-                } else if item.priceMax > 0 {
-                    lines.append("- \(item.name) (up to $\(item.priceMax))")
-                } else {
-                    lines.append("- \(item.name)")
-                }
-            }
-            sections.append(lines.joined(separator: "\n"))
-        }
         let cleanNotes = additionalNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !cleanNotes.isEmpty {
-            sections.append("## Pricing & Service Notes\n\(cleanNotes)")
+        guard !cleanNotes.isEmpty else { return "" }
+        let section = "## Pricing & Service Notes\n\(cleanNotes)"
+        return String(section.prefix(Self.maxKnowledgeLength))
+    }
+
+    static func mergeKnowledge(existing: String?, additionalSection: String?) -> String? {
+        let cleanAddition = (additionalSection ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanAddition.isEmpty else { return nil }
+        let cleanExisting = (existing ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanExisting.isEmpty {
+            return String(cleanAddition.prefix(maxKnowledgeLength))
         }
-        let combined = sections.joined(separator: "\n\n")
-        return String(combined.prefix(Self.maxKnowledgeLength))
+        if cleanExisting.contains(cleanAddition) {
+            return cleanExisting
+        }
+        let combined = "\(cleanExisting)\n\n\(cleanAddition)"
+        return String(combined.prefix(maxKnowledgeLength))
     }
 }

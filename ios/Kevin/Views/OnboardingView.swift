@@ -1898,6 +1898,7 @@ struct OnboardingView: View {
 
         // Reuse existing contractor if we have one, otherwise create new
         let existingContractorId = appState.contractorId
+        var existingProfileKnowledge: String?
 
         // Fast-path: contractor already exists and the profile already has a Kevin
         // number. Persist the selected mode before finishing onboarding, but avoid
@@ -1913,6 +1914,7 @@ struct OnboardingView: View {
                 isLoading = false
                 return
             }
+            existingProfileKnowledge = profile["knowledge"] as? String
             guard appState.currentAuthContext() == initialAuth,
                   appState.appleUserId == initialAppleUserId else {
                 isLoading = false
@@ -2011,7 +2013,12 @@ struct OnboardingView: View {
             if !resolvedOwnerName.isEmpty { updateBody["owner_name"] = resolvedOwnerName }
             if !bizName.isEmpty { updateBody["business_name"] = bizName }
             if let servicesPayloadForBusiness { updateBody["services"] = servicesPayloadForBusiness }
-            if let knowledgeForBusiness { updateBody["knowledge"] = knowledgeForBusiness }
+            if let mergedKnowledge = OnboardingServicesDraft.mergeKnowledge(
+                existing: existingProfileKnowledge,
+                additionalSection: knowledgeForBusiness
+            ) {
+                updateBody["knowledge"] = mergedKnowledge
+            }
 
             opAuthContext = initialAuth
             opAppleUserId = initialAppleUserId
@@ -2381,7 +2388,6 @@ struct OnboardingView: View {
             "service_type": serviceType,
         ]
         if let servicesToSave { profilePatchBody["services"] = servicesToSave }
-        if let knowledgeToSave { profilePatchBody["knowledge"] = knowledgeToSave }
 
         if appState.contractorId.isEmpty {
             let currentCountry = selectedCountryCode
@@ -2463,6 +2469,21 @@ struct OnboardingView: View {
             if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
                 APIClient.shared.contractorToken = apiToken
             }
+            if let knowledgeToSave {
+                let existingKnowledge: String?
+                if result?["existing"] as? Bool == true,
+                   let existingProfile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
+                    existingKnowledge = existingProfile["knowledge"] as? String
+                } else {
+                    existingKnowledge = nil
+                }
+                if let merged = OnboardingServicesDraft.mergeKnowledge(
+                    existing: existingKnowledge,
+                    additionalSection: knowledgeToSave
+                ) {
+                    profilePatchBody["knowledge"] = merged
+                }
+            }
             do {
                 let updated = try await APIClient.shared.patchContractor(contractorId, body: profilePatchBody)
                 if !updated {
@@ -2474,6 +2495,16 @@ struct OnboardingView: View {
                 return false
             }
         } else {
+            if let knowledgeToSave {
+                let existingProfile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId)
+                let existingKnowledge = existingProfile?["knowledge"] as? String
+                if let merged = OnboardingServicesDraft.mergeKnowledge(
+                    existing: existingKnowledge,
+                    additionalSection: knowledgeToSave
+                ) {
+                    profilePatchBody["knowledge"] = merged
+                }
+            }
             do {
                 let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: profilePatchBody)
                 if !updated {
@@ -2520,7 +2551,19 @@ struct OnboardingView: View {
                     "mode": "business",
                 ]
                 if let servicesToSave { patchBody["services"] = servicesToSave }
-                if let knowledgeToSave { patchBody["knowledge"] = knowledgeToSave }
+                if let knowledgeToSave {
+                    let existingProfile = await APIClient.shared.getContractorProfile(
+                        contractorId: contractorId,
+                        bearerToken: bearerToken
+                    )
+                    let existingKnowledge = existingProfile?["knowledge"] as? String
+                    if let merged = OnboardingServicesDraft.mergeKnowledge(
+                        existing: existingKnowledge,
+                        additionalSection: knowledgeToSave
+                    ) {
+                        patchBody["knowledge"] = merged
+                    }
+                }
                 return try await APIClient.shared.patchContractor(
                     contractorId,
                     body: patchBody,

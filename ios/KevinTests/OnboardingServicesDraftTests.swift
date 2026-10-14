@@ -34,10 +34,13 @@ final class OnboardingServicesDraftTests: XCTestCase {
         - Water Heater Flush: $140 - $220
         * Slab Leak Detection | $250
         Repipe Consultation
+        1. Sewer Line Repair: $800 - $1500
+        24/7 Emergency Service: $250
+        Water Heater Install,"$1,200","$1,800"
         """
 
         let entries = OnboardingServicesDraft.parseUploadedText(sample)
-        XCTAssertEqual(entries.count, 4)
+        XCTAssertEqual(entries.count, 7)
         XCTAssertEqual(entries[0].name, "Drain Cleaning")
         XCTAssertEqual(entries[0].priceMin, 95)
         XCTAssertEqual(entries[0].priceMax, 185)
@@ -53,6 +56,18 @@ final class OnboardingServicesDraftTests: XCTestCase {
         XCTAssertEqual(entries[3].name, "Repipe Consultation")
         XCTAssertEqual(entries[3].priceMin, 0)
         XCTAssertEqual(entries[3].priceMax, 0)
+
+        XCTAssertEqual(entries[4].name, "Sewer Line Repair")
+        XCTAssertEqual(entries[4].priceMin, 800)
+        XCTAssertEqual(entries[4].priceMax, 1500)
+
+        XCTAssertEqual(entries[5].name, "24/7 Emergency Service")
+        XCTAssertEqual(entries[5].priceMin, 250)
+        XCTAssertEqual(entries[5].priceMax, 250)
+
+        XCTAssertEqual(entries[6].name, "Water Heater Install")
+        XCTAssertEqual(entries[6].priceMin, 1200)
+        XCTAssertEqual(entries[6].priceMax, 1800)
     }
 
     func testImportUploadedTextDeduplicatesCaseInsensitivelyAndBuildsPayloadAndMarkdown() {
@@ -67,6 +82,9 @@ final class OnboardingServicesDraftTests: XCTestCase {
         XCTAssertEqual(draft.items.count, 3)
         XCTAssertEqual(draft.uploadedFileName, "prices.csv")
 
+        // Without additionalNotes, knowledgeMarkdown is empty so structured services aren't duplicated in knowledge
+        XCTAssertEqual(draft.knowledgeMarkdown, "")
+
         draft.additionalNotes = "$89 service call waived with repair."
 
         let payload = draft.servicesPayload
@@ -79,12 +97,16 @@ final class OnboardingServicesDraftTests: XCTestCase {
         XCTAssertEqual(payload[2]["price_max"] as? Int, 0)
 
         let markdown = draft.knowledgeMarkdown
-        XCTAssertTrue(markdown.contains("## Services"))
-        XCTAssertTrue(markdown.contains("- Drain Cleaning ($95-$185)"))
-        XCTAssertTrue(markdown.contains("- Sewer Camera Inspection ($199)"))
-        XCTAssertTrue(markdown.contains("- General Plumbing Repair"))
-        XCTAssertFalse(markdown.contains("General Plumbing Repair ($0"))
-        XCTAssertTrue(markdown.contains("$89 service call waived with repair."))
+        XCTAssertFalse(markdown.contains("## Services"))
+        XCTAssertFalse(markdown.contains("Drain Cleaning"))
+        XCTAssertTrue(markdown.contains("## Pricing & Service Notes\n$89 service call waived with repair."))
+
+        // Merging preserves existing knowledge
+        let merged = OnboardingServicesDraft.mergeKnowledge(
+            existing: "## Hours\nMon-Fri 8am-5pm",
+            additionalSection: markdown
+        )
+        XCTAssertEqual(merged, "## Hours\nMon-Fri 8am-5pm\n\n## Pricing & Service Notes\n$89 service call waived with repair.")
     }
 
     func testEmptyDraftProducesEmptyKnowledgeAndEmptyPayload() {

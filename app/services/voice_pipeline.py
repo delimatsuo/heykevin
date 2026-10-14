@@ -256,11 +256,13 @@ def _sanitize_prompt_field(text: str, max_length: int = 5000) -> str:
 
 
 def _format_services_for_prompt(services: list) -> str:
-    """Format priced services list for injection into system prompt. Cap at 20."""
+    """Format priced services list for injection into system prompt. Cap at 20 priced items."""
     if not services:
         return ""
     lines = []
-    for s in services[:20]:
+    for s in services:
+        if len(lines) >= 20:
+            break
         name = _sanitize_prompt_field(s.get("name", ""), max_length=200)
         if not name:
             continue

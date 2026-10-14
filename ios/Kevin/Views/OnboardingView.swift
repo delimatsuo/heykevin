@@ -1921,16 +1921,9 @@ struct OnboardingView: View {
             if let existing = profile["twilio_number"] as? String,
                !existing.isEmpty {
                 do {
-                    var fastPathBody: [String: Any] = ["mode": mode]
-                    if !resolvedOwnerName.isEmpty { fastPathBody["owner_name"] = resolvedOwnerName }
-                    if !bizName.isEmpty { fastPathBody["business_name"] = bizName }
-                    if mode == "business" {
-                        if let svcPayload = effectiveServicesPayload { fastPathBody["services"] = svcPayload }
-                        if let knowledgeMd = effectiveKnowledgeMarkdown { fastPathBody["knowledge"] = knowledgeMd }
-                    }
                     let updated = try await APIClient.shared.patchContractor(
                         initialAuth.contractorId,
-                        body: fastPathBody,
+                        body: ["mode": mode],
                         bearerToken: initialAuth.bearerToken
                     )
                     guard appState.currentAuthContext() == initialAuth,
@@ -2353,7 +2346,16 @@ struct OnboardingView: View {
             commitTypedDraftService()
         }
         if appState.hasBusinessEntitlement {
-            step = .contactsPermission
+            if !appState.contractorId.isEmpty && (effectiveServicesPayload != nil || effectiveKnowledgeMarkdown != nil) {
+                Task {
+                    let ready = await prepareBusinessDraftProfile()
+                    if ready {
+                        step = .contactsPermission
+                    }
+                }
+            } else {
+                step = .contactsPermission
+            }
         } else {
             Task {
                 let ready = await prepareBusinessDraftProfile()

@@ -4115,5 +4115,3 @@ async def test_gemini_3_live_intake_uses_client_content_turn_complete_false():
     assert len(pipeline._ws.sent_payloads) == 2
     assert "realtime_input" in pipeline._ws.sent_payloads[0]
     assert pipeline._ws.sent_payloads[1]["client_content"]["turn_complete"] is False
-
-

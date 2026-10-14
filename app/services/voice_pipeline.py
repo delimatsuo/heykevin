@@ -623,7 +623,7 @@ ELEVENLABS_VOICE_ID_SPANISH = "onwK4e9ZLuTAKqWW03F9"  # Daniel — Multilingual 
 ELEVENLABS_MODEL_DEFAULT = "eleven_flash_v2_5"
 ELEVENLABS_MODEL_MULTILINGUAL = "eleven_multilingual_v2"
 
-_DEFAULT_DEEPGRAM_TRADE_KEYTERMS = (
+_PLUMBING_DEEPGRAM_KEYTERMS = (
     "clogged sink",
     "clogged drain",
     "clogged toilet",
@@ -636,25 +636,45 @@ _DEFAULT_DEEPGRAM_TRADE_KEYTERMS = (
     "standing water",
     "drain cleaning",
     "plumbing",
+)
+_ELECTRICAL_DEEPGRAM_KEYTERMS = (
     "circuit breaker",
     "electrical panel",
+    "outlet",
+    "wiring",
 )
-_KEYTERM_ALLOWED_RE = re.compile(r"[^a-zA-Z0-9 '\-]+")
+
+
+def _claude_thinking_config(model: object) -> dict[str, str]:
+    """Return a model-compatible low-latency thinking configuration."""
+    normalized = str(model or "").strip().lower()
+    if "sonnet-5-5" in normalized or "sonnet-5.5" in normalized:
+        return {"type": "between_tools"}
+    return {"type": "disabled"}
 
 
 def _build_deepgram_keyterms(config: Optional[dict] = None) -> list[str]:
-    """Return bounded, deduplicated Deepgram nova-3 keyterms for trade speech."""
+    """Return bounded, deduplicated Deepgram nova-3 keyterms for business calls."""
     config = config or {}
+    mode = config.get("effective_mode") or effective_mode(config)
+    if mode == "personal":
+        return []
+
     terms: list[str] = []
     seen: set[str] = set()
 
     def _add(raw: object) -> None:
         if not isinstance(raw, str):
             return
-        cleaned = " ".join(_KEYTERM_ALLOWED_RE.sub(" ", raw).split()).strip()
-        if not cleaned or len(cleaned) < 3 or len(cleaned) > 40:
+        normalized = unicodedata.normalize("NFKC", raw).replace("’", "'")
+        cleaned_chars = [
+            ch if (ch.isalnum() or ch in " '-") else " "
+            for ch in normalized
+        ]
+        cleaned = " ".join("".join(cleaned_chars).split()).strip(" '-")
+        if not cleaned or len(cleaned) < 2 or len(cleaned) > 40:
             return
-        lowered = cleaned.lower()
+        lowered = cleaned.casefold()
         if lowered in seen:
             return
         seen.add(lowered)
@@ -673,7 +693,31 @@ def _build_deepgram_keyterms(config: Optional[dict] = None) -> list[str]:
         if isinstance(service, dict):
             _add(service.get("name", ""))
 
-    for default_term in _DEFAULT_DEEPGRAM_TRADE_KEYTERMS:
+    profile_blob = " ".join(
+        str(config.get(key, "") or "")
+        for key in ("business_name", "service_type", "knowledge")
+    ).casefold()
+    service_blob = " ".join(t.casefold() for t in terms)
+    combined_blob = f"{profile_blob} {service_blob}"
+
+    is_plumbing = any(
+        token in combined_blob
+        for token in ("plumb", "drain", "pipe", "faucet", "sink", "toilet", "sewer", "water heater")
+    )
+    is_electrical = any(
+        token in combined_blob
+        for token in ("electr", "breaker", "panel", "wiring", "outlet")
+    )
+
+    default_candidates: tuple[str, ...] = ()
+    if is_plumbing and not is_electrical:
+        default_candidates = _PLUMBING_DEEPGRAM_KEYTERMS
+    elif is_electrical and not is_plumbing:
+        default_candidates = _ELECTRICAL_DEEPGRAM_KEYTERMS
+    elif is_plumbing and is_electrical:
+        default_candidates = _PLUMBING_DEEPGRAM_KEYTERMS + _ELECTRICAL_DEEPGRAM_KEYTERMS
+
+    for default_term in default_candidates:
         _add(default_term)
         if len(terms) >= 24:
             break
@@ -1958,7 +2002,7 @@ class VoicePipeline:
                 request_body = {
                     "model": settings.anthropic_model,
                     "max_tokens": 250 if use_tools else 180,
-                    "thinking": {"type": "disabled"},
+                    "thinking": _claude_thinking_config(settings.anthropic_model),
                     "system": system_prompt,
                     "messages": self._conversation[-20:],
                 }

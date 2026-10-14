@@ -4158,6 +4158,10 @@ async def test_voice_pipeline_disables_claude_thinking_to_prevent_response_trunc
     assert request_bodies[0]["thinking"] == {"type": "disabled"}
     assert request_bodies[0]["max_tokens"] >= 180
 
+    monkeypatch.setattr(voice_pipeline_module.settings, "anthropic_model", "claude-sonnet-5-5")
+    await pipeline._handle_caller_speech("It is backing up in the kitchen.")
+    assert request_bodies[1]["thinking"] == {"type": "between_tools"}
+
 
 @pytest.mark.asyncio
 async def test_voice_pipeline_waits_longer_before_flushing_incomplete_unpunctuated_clause():
@@ -4227,9 +4231,11 @@ async def test_voice_pipeline_waits_longer_before_flushing_incomplete_unpunctuat
 @pytest.mark.asyncio
 async def test_voice_pipeline_deepgram_url_includes_trade_and_service_keyterms(monkeypatch):
     """Deepgram nova-3 on 8kHz mulaw PSTN audio needs trade and service keyterms
-    so 'clogged sink' is not decoded as 'client sync'.
+    so 'clogged sink' is not decoded as 'client sync', while preserving Unicode
+    and excluding trade keyterms from personal mode.
     """
     import app.services.voice_pipeline as voice_pipeline_module
+    from app.services.voice_pipeline import _build_deepgram_keyterms
 
     connected_urls: list[str] = []
 
@@ -4264,6 +4270,15 @@ async def test_voice_pipeline_deepgram_url_includes_trade_and_service_keyterms(m
     assert "endpointing=500" in connected_urls[0]
     assert "keyterm=clogged%20sink" in connected_urls[0]
     assert "keyterm=Faucet%20replacement" in connected_urls[0]
+    assert "keyterm=circuit%20breaker" not in connected_urls[0]
+
+    assert _build_deepgram_keyterms({"mode": "personal", "effective_mode": "personal"}) == []
+    multilingual_terms = _build_deepgram_keyterms({
+        "effective_mode": "business",
+        "services": [{"name": "Réparation d’évier"}, {"name": "水道修理"}],
+    })
+    assert "Réparation d'évier" in multilingual_terms
+    assert "水道修理" in multilingual_terms
 
 
 def test_business_prompt_includes_stt_phonetic_homophone_tolerance():

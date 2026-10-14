@@ -3883,75 +3883,17 @@ async def test_gemini_live_intake_instructions_do_not_complete_turn_or_trigger_s
 
 
 @pytest.mark.asyncio
-async def test_voice_pipeline_flushes_unfinalized_utterance_buffer_after_fallback_timeout():
-    """Live staging regression (CA2afb7ac0): VoIP comfort noise prevented
-    Deepgram speech_final=True and UtteranceEnd from firing promptly after
-    is_final=True, stalling caller turns for 2.27s–5.14s.
-    """
-    transcripts: list[tuple[str, str]] = []
-    processed: list[str] = []
-    flushed = asyncio.Event()
-
-    class _StreamWebSocket:
-        def __init__(self, messages: list[str]):
-            self._messages = list(messages)
-
-        async def recv(self) -> str:
-            if self._messages:
-                return self._messages.pop(0)
-            await asyncio.sleep(1.0)
-            raise asyncio.CancelledError
-
-        async def send(self, _data: str) -> None:
-            return None
-
-        async def close(self) -> None:
-            return None
-
-    async def on_transcript(speaker: str, text: str) -> None:
-        transcripts.append((speaker, text))
-
-    pipeline = VoicePipeline(
-        on_audio_out=_noop_audio,
-        on_transcript=on_transcript,
-        call_sid="CA_test",
-        contractor_config=_plumbing_config(),
-    )
-    pipeline.UTTERANCE_END_FALLBACK_SECONDS = 0.03
-    pipeline._connected = True
-
-    async def fake_process_utterance(text: str) -> None:
-        processed.append(text)
-        flushed.set()
-
-    pipeline._process_utterance = fake_process_utterance
-    pipeline._deepgram_ws = _StreamWebSocket([
-        json.dumps({
-            "channel": {"alternatives": [{"transcript": "No, that's it for now."}]},
-            "is_final": True,
-            "speech_final": False,
-        }),
-    ])
-
-    receive_task = asyncio.create_task(pipeline._deepgram_receive_loop())
-    await asyncio.wait_for(flushed.wait(), timeout=0.5)
-    receive_task.cancel()
-    await pipeline.stop()
-
-    assert transcripts == [("Caller", "No, that's it for now.")]
-    assert processed == ["No, that's it for now."]
-    assert pipeline._utterance_buffer == []
-
-
-@pytest.mark.asyncio
-async def test_voice_pipeline_interim_speech_resets_utterance_fallback_timer():
-    """Active interim transcripts must push back the fallback flush timer so a
-    caller pausing briefly mid-sentence is not cut off before finishing.
+async def test_voice_pipeline_accumulates_nonfinal_segments_until_speech_final_or_utterance_end():
+    """VoicePipeline must rely on Deepgram's native speech_final and UtteranceEnd
+    signals without custom fallback timers or punctuation gates, so mid-sentence
+    clauses ('I said that I have a client' + 'sync. Can you send someone?') stay
+    together and unpunctuated short replies ('Jonathan') flush immediately on
+    speech_final=True.
     """
     processed: list[str] = []
-    flushed = asyncio.Event()
+    second_turn_flushed = asyncio.Event()
 
-    class _PacedStreamWebSocket:
+    class _NativeDeepgramWebSocket:
         def __init__(self):
             self._step = 0
 
@@ -3959,21 +3901,24 @@ async def test_voice_pipeline_interim_speech_resets_utterance_fallback_timer():
             self._step += 1
             if self._step == 1:
                 return json.dumps({
-                    "channel": {"alternatives": [{"transcript": "I want to replace"}]},
+                    "channel": {"alternatives": [{"transcript": "I said that I have a client"}]},
                     "is_final": True,
                     "speech_final": False,
                 })
             if self._step == 2:
-                await asyncio.sleep(0.025)
+                await asyncio.sleep(0.02)
                 return json.dumps({
-                    "channel": {"alternatives": [{"transcript": "an old"}]},
-                    "is_final": False,
+                    "channel": {"alternatives": [{"transcript": "sync. Can you send someone?"}]},
+                    "is_final": True,
                     "speech_final": False,
                 })
             if self._step == 3:
-                await asyncio.sleep(0.025)
+                await asyncio.sleep(0.01)
+                return json.dumps({"type": "UtteranceEnd"})
+            if self._step == 4:
+                await asyncio.sleep(0.01)
                 return json.dumps({
-                    "channel": {"alternatives": [{"transcript": "an old toilet."}]},
+                    "channel": {"alternatives": [{"transcript": "Jonathan"}]},
                     "is_final": True,
                     "speech_final": True,
                 })
@@ -3992,23 +3937,25 @@ async def test_voice_pipeline_interim_speech_resets_utterance_fallback_timer():
         call_sid="CA_test",
         contractor_config=_plumbing_config(),
     )
-    pipeline.UTTERANCE_END_FALLBACK_SECONDS = 0.04
     pipeline._connected = True
 
     async def fake_process_utterance(text: str) -> None:
         processed.append(text)
-        flushed.set()
+        if len(processed) >= 2:
+            second_turn_flushed.set()
 
     pipeline._process_utterance = fake_process_utterance
-    pipeline._deepgram_ws = _PacedStreamWebSocket()
+    pipeline._deepgram_ws = _NativeDeepgramWebSocket()
 
     receive_task = asyncio.create_task(pipeline._deepgram_receive_loop())
-    await asyncio.wait_for(flushed.wait(), timeout=0.5)
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(second_turn_flushed.wait(), timeout=0.5)
     receive_task.cancel()
     await pipeline.stop()
 
-    assert processed == ["I want to replace an old toilet."]
+    assert processed == [
+        "I said that I have a client sync. Can you send someone?",
+        "Jonathan",
+    ]
 
 
 @pytest.mark.asyncio
@@ -4164,74 +4111,6 @@ async def test_voice_pipeline_disables_claude_thinking_to_prevent_response_trunc
 
 
 @pytest.mark.asyncio
-async def test_voice_pipeline_waits_longer_before_flushing_incomplete_unpunctuated_clause():
-    """When Deepgram emits an unpunctuated mid-sentence final segment
-    ('I said that I have a client'), premature speech_final=True and UtteranceEnd
-    signals must defer to UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS so the second
-    half of the caller's sentence ('sync. Can you send someone?') merges into one turn.
-    """
-    processed: list[str] = []
-    flushed = asyncio.Event()
-
-    class _MidSentencePauseWebSocket:
-        def __init__(self):
-            self._step = 0
-
-        async def recv(self) -> str:
-            self._step += 1
-            if self._step == 1:
-                return json.dumps({
-                    "channel": {"alternatives": [{"transcript": "I said that I have a client"}]},
-                    "is_final": True,
-                    "speech_final": True,
-                })
-            if self._step == 2:
-                await asyncio.sleep(0.02)
-                return json.dumps({"type": "UtteranceEnd"})
-            if self._step == 3:
-                # Total elapsed > UTTERANCE_END_FALLBACK_SECONDS (0.03s), shorter than
-                # UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS (0.12s).
-                await asyncio.sleep(0.035)
-                return json.dumps({
-                    "channel": {"alternatives": [{"transcript": "sync. Can you send someone?"}]},
-                    "is_final": True,
-                    "speech_final": True,
-                })
-            await asyncio.sleep(1.0)
-            raise asyncio.CancelledError
-
-        async def send(self, _data: str) -> None:
-            return None
-
-        async def close(self) -> None:
-            return None
-
-    pipeline = VoicePipeline(
-        on_audio_out=_noop_audio,
-        on_transcript=_noop_transcript,
-        call_sid="CA_test",
-        contractor_config=_plumbing_config(),
-    )
-    pipeline.UTTERANCE_END_FALLBACK_SECONDS = 0.03
-    pipeline.UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS = 0.12
-    pipeline._connected = True
-
-    async def fake_process_utterance(text: str) -> None:
-        processed.append(text)
-        flushed.set()
-
-    pipeline._process_utterance = fake_process_utterance
-    pipeline._deepgram_ws = _MidSentencePauseWebSocket()
-
-    receive_task = asyncio.create_task(pipeline._deepgram_receive_loop())
-    await asyncio.wait_for(flushed.wait(), timeout=0.5)
-    receive_task.cancel()
-    await pipeline.stop()
-
-    assert processed == ["I said that I have a client sync. Can you send someone?"]
-
-
-@pytest.mark.asyncio
 async def test_voice_pipeline_deepgram_url_includes_trade_and_service_keyterms(monkeypatch):
     """Deepgram nova-3 on 8kHz mulaw PSTN audio needs trade and service keyterms
     so 'clogged sink' is not decoded as 'client sync', while preserving Unicode
@@ -4270,7 +4149,8 @@ async def test_voice_pipeline_deepgram_url_includes_trade_and_service_keyterms(m
 
     assert ok is True
     assert len(connected_urls) == 1
-    assert "endpointing=500" in connected_urls[0]
+    assert "endpointing=400" in connected_urls[0]
+    assert "utterance_end_ms=1000" in connected_urls[0]
     assert "keyterm=clogged%20sink" in connected_urls[0]
     assert "keyterm=Faucet%20replacement" in connected_urls[0]
     assert "keyterm=circuit%20breaker" not in connected_urls[0]

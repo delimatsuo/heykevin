@@ -742,8 +742,6 @@ class VoicePipeline:
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
     CALLER_SILENCE_GOODBYE_SECONDS = 1
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
-    UTTERANCE_END_FALLBACK_SECONDS = 0.85
-    UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS = 2.6
 
     def __init__(
         self,
@@ -799,7 +797,6 @@ class VoicePipeline:
 
         # Utterance accumulation: collect is_final segments until speech_final
         self._utterance_buffer: list[str] = []
-        self._utterance_flush_task: Optional[asyncio.Task] = None
 
         # Serialization: only one Claude→TTS cycle at a time
         self._response_lock = asyncio.Lock()
@@ -1051,7 +1048,6 @@ class VoicePipeline:
 
     async def stop(self):
         self._connected = False
-        self._cancel_utterance_flush_timer()
         if getattr(self, '_urgency_task', None):
             self._urgency_task.cancel()
         self._audio_input_ready.set()
@@ -1089,9 +1085,11 @@ class VoicePipeline:
         Key parameters:
         - encoding=mulaw, sample_rate=8000: accept Twilio's raw audio directly
         - interim_results=true: required for speech_final detection
-        - endpointing=500: finalize after 500ms silence so mid-sentence breaths
-          do not split a caller's clause in half
-        - utterance_end_ms=1200: fallback end-of-utterance signal
+        - endpointing=400: finalize after 400ms silence. Lower values feel more
+          conversational but risk truncating mid-sentence pauses; 400ms is the
+          tightest setting that still rides through natural breaths and
+          hesitation in our testing.
+        - utterance_end_ms=1000: fallback end-of-utterance signal
         - keyterm: trade and contractor service vocabulary to prevent 8kHz PSTN
           homophone misrecognitions (e.g. "clogged sink" -> "client sync")
         - speech_final marks the TRUE end of an utterance (not just is_final)
@@ -1110,8 +1108,8 @@ class VoicePipeline:
                 "&punctuate=true"
                 "&smart_format=true"
                 "&interim_results=true"
-                "&endpointing=500"
-                "&utterance_end_ms=1200"
+                "&endpointing=400"
+                "&utterance_end_ms=1000"
                 "&language=multi"
                 f"{keyterm_query}"
             )
@@ -1187,11 +1185,8 @@ class VoicePipeline:
                 msg_type = data.get("type", "")
                 if msg_type == "UtteranceEnd":
                     if self._utterance_buffer:
-                        if self._utterance_has_terminal_punctuation():
-                            logger.info("UtteranceEnd received — processing buffer")
-                            await self._flush_utterance()
-                        elif not self._utterance_flush_task or self._utterance_flush_task.done():
-                            self._schedule_utterance_flush_timer()
+                        logger.info("UtteranceEnd received — processing buffer")
+                        await self._flush_utterance()
                     continue
 
                 # Skip non-transcript messages
@@ -1215,9 +1210,6 @@ class VoicePipeline:
                         if self.on_clear_audio:
                             await self.on_clear_audio()
 
-                    if not is_final and self._utterance_buffer:
-                        self._schedule_utterance_flush_timer()
-
                 # Skip interim results (not final) — we only use finals
                 if not is_final:
                     continue
@@ -1225,10 +1217,7 @@ class VoicePipeline:
                 if not transcript:
                     # Empty final — Deepgram detected silence
                     if speech_final and self._utterance_buffer:
-                        if self._utterance_has_terminal_punctuation():
-                            await self._flush_utterance()
-                        else:
-                            self._schedule_utterance_flush_timer()
+                        await self._flush_utterance()
                     continue
 
                 _log_voice_event(
@@ -1267,13 +1256,9 @@ class VoicePipeline:
                 # Show each segment in transcript immediately (real-time feel)
                 await self.on_transcript("Caller", transcript)
 
-                # If speech_final on a punctuated sentence, the caller is done —
-                # process the full utterance immediately; for unpunctuated mid-clause
-                # pauses, defer to the incomplete-clause fallback timer.
-                if speech_final and self._utterance_has_terminal_punctuation():
+                # If speech_final, the caller is done — process the full utterance
+                if speech_final:
                     await self._flush_utterance()
-                else:
-                    self._schedule_utterance_flush_timer()
 
         except asyncio.CancelledError:
             pass
@@ -1349,68 +1334,8 @@ class VoicePipeline:
             if self.on_clear_audio:
                 asyncio.create_task(self.on_clear_audio())
 
-    def _cancel_utterance_flush_timer(self) -> None:
-        task = getattr(self, "_utterance_flush_task", None)
-        if task and not task.done() and task is not asyncio.current_task():
-            task.cancel()
-        self._utterance_flush_task = None
-
-    def _utterance_has_terminal_punctuation(self) -> bool:
-        buffer = getattr(self, "_utterance_buffer", None) or []
-        if not buffer:
-            return False
-        last_segment = str(buffer[-1]).strip()
-        return bool(last_segment and last_segment[-1] in ".?!…？！。")
-
-    def _utterance_flush_timeout_seconds(self) -> float:
-        base_timeout = float(getattr(self, "UTTERANCE_END_FALLBACK_SECONDS", 0.85))
-        if base_timeout <= 0:
-            return base_timeout
-        buffer = getattr(self, "_utterance_buffer", None) or []
-        if not buffer or self._utterance_has_terminal_punctuation():
-            return base_timeout
-        instance_dict = getattr(self, "__dict__", {})
-        if (
-            "UTTERANCE_END_FALLBACK_SECONDS" in instance_dict
-            and "UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS" not in instance_dict
-        ):
-            return base_timeout
-        incomplete_timeout = float(
-            getattr(
-                self,
-                "UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS",
-                max(base_timeout, 2.6),
-            )
-        )
-        return max(base_timeout, incomplete_timeout)
-
-    def _schedule_utterance_flush_timer(self) -> None:
-        self._cancel_utterance_flush_timer()
-        timeout = self._utterance_flush_timeout_seconds()
-        if timeout <= 0 or not getattr(self, "_connected", True):
-            return
-        self._utterance_flush_task = asyncio.create_task(
-            self._utterance_flush_watchdog(timeout)
-        )
-
-    async def _utterance_flush_watchdog(self, timeout: float) -> None:
-        try:
-            await asyncio.sleep(timeout)
-            if not getattr(self, "_connected", True):
-                return
-            if self._utterance_buffer:
-                _log_voice_event(
-                    "utterance_fallback_flush",
-                    getattr(self, "_call_sid", ""),
-                    segments=len(self._utterance_buffer),
-                )
-                await self._flush_utterance()
-        except asyncio.CancelledError:
-            pass
-
     async def _flush_utterance(self):
         """Combine accumulated segments and process as one complete utterance."""
-        self._cancel_utterance_flush_timer()
         if not self._utterance_buffer:
             return
 

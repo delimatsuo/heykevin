@@ -202,4 +202,3 @@ async def test_api_parse_price_list_returns_services_and_optionally_persists(mon
     ]
     assert "## Business Hours\nMon-Fri 8am-5pm" in updated_calls[0][1]["knowledge"]
     assert "Licensed and insured." in updated_calls[0][1]["knowledge"]
-

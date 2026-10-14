@@ -191,6 +191,7 @@ class GeminiPipeline:
         self._message_taking_pending = False
         self._message_response_allowed = False
         self._assistant_instruction_pending = False
+        self._live_intake_refresh_pending = False
         self._silence_check_task = None
         self._unavailable_task = None
         self._unavailable_said = False
@@ -356,14 +357,19 @@ class GeminiPipeline:
         """Return the bounded default greeting and caller disclosure."""
         return build_greeting_text(self._contractor_config, self._after_hours)
 
-    def _build_text_instruction_payload(self, text: str) -> dict:
+    def _build_text_instruction_payload(
+        self,
+        text: str,
+        *,
+        turn_complete: bool = True,
+    ) -> dict:
         """Build the model-version-specific payload for an instruction turn."""
-        if self._model.startswith("gemini-3"):
+        if self._model.startswith("gemini-3") and turn_complete:
             return {"realtime_input": {"text": text}}
         return {
             "client_content": {
                 "turns": [{"role": "user", "parts": [{"text": text}]}],
-                "turn_complete": True,
+                "turn_complete": turn_complete,
             }
         }
 
@@ -671,6 +677,7 @@ class GeminiPipeline:
         self._current_turn_suppressed = False
         self._model_turn_generating = False
         self._assistant_instruction_pending = False
+        self._live_intake_refresh_pending = False
         self._message_taking_pending = False
         self._message_response_allowed = False
         if getattr(self, '_turn_complete_event', None) is not None:
@@ -750,10 +757,11 @@ class GeminiPipeline:
         try:
             self._invalidate_tool_task("reconnect")
             if self._caller_transcript_buf:
-                await self._flush_caller_transcript()
+                await self._flush_caller_transcript(defer_live_intake=True)
             self._interrupt_speaking = True
             self._audio_epoch += 1
             self._assistant_instruction_pending = False
+            self._live_intake_refresh_pending = False
             self._current_turn_suppressed = False
             self._model_turn_generating = False
             self._message_response_allowed = False
@@ -860,6 +868,7 @@ class GeminiPipeline:
                     self._audio_epoch += 1
                     self._response_end_mark_pending = None
                     self._assistant_instruction_pending = False
+                    self._live_intake_refresh_pending = False
                     self._model_turn_generating = False
                     self._current_turn_suppressed = False
                     if getattr(self, '_turn_complete_event', None) is not None:
@@ -890,6 +899,8 @@ class GeminiPipeline:
 
                 # Handle model turn (audio output)
                 model_turn = server_content.get("modelTurn", {})
+                if model_turn.get("parts"):
+                    self._model_turn_generating = True
                 for part in model_turn.get("parts", []):
                     inline_data = part.get("inlineData", {})
                     if inline_data.get("mimeType", "").startswith("audio/"):
@@ -928,7 +939,7 @@ class GeminiPipeline:
 
                 # Flush caller transcript when Kevin starts speaking (turn boundary)
                 if model_turn.get("parts") and self._caller_transcript_buf:
-                    await self._flush_caller_transcript()
+                    await self._flush_caller_transcript(defer_live_intake=True)
 
                 # Handle turn completion — Gemini finished generating. Audio
                 # playout may still be draining through the paced queue.
@@ -945,6 +956,7 @@ class GeminiPipeline:
                         async with self._audio_output_lock:
                             await self._clear_audio_queue()
                         self._assistant_instruction_pending = False
+                        self._live_intake_refresh_pending = False
                         self._reset_response_metrics()
                         continue
                     if interrupted_turn:
@@ -956,10 +968,12 @@ class GeminiPipeline:
                         async with self._audio_output_lock:
                             await self._clear_audio_queue()
                             self._interrupt_speaking = False
+                        self._live_intake_refresh_pending = False
                         self._log_interrupted_response_turn()
                     self._assistant_instruction_pending = False
                     if overflowed_turn:
                         self._audio_backlog_overflowed = False
+                        self._live_intake_refresh_pending = False
                         if (
                             self._audio_backlog_recoveries
                             >= self.MAX_AUDIO_BACKLOG_RECOVERIES
@@ -995,6 +1009,10 @@ class GeminiPipeline:
                         said_goodbye = await self._flush_kevin_transcript(
                             detect_goodbye=True
                         )
+                        if not said_goodbye and getattr(
+                            self, "_live_intake_refresh_pending", False
+                        ):
+                            await self._refresh_live_intake_after_caller()
                         if self._response_first_audio_at > 0:
                             self._log_response_turn_latency("")
                         await self._maybe_send_response_end_playback_mark()
@@ -1019,7 +1037,7 @@ class GeminiPipeline:
                 if function_calls:
                     # Flush any pending caller transcript before tool execution
                     if self._caller_transcript_buf:
-                        await self._flush_caller_transcript()
+                        await self._flush_caller_transcript(defer_live_intake=True)
                     self._schedule_tool_calls(function_calls)
 
         except asyncio.CancelledError:
@@ -1364,7 +1382,11 @@ class GeminiPipeline:
         lines = self._transcript_lines[-limit:]
         return "\n".join(lines)[-4000:]
 
-    async def _flush_caller_transcript(self):
+    async def _flush_caller_transcript(
+        self,
+        *,
+        defer_live_intake: bool = False,
+    ):
         """Flush buffered caller transcript fragments as one message."""
         fragment_count = len(self._caller_transcript_buf)
         full_text = "".join(self._caller_transcript_buf)
@@ -1393,6 +1415,12 @@ class GeminiPipeline:
                     self._unavailable_task = asyncio.create_task(self._unavailable_timer())
                 from app.services.urgent_handoff import start_urgency_task
                 start_urgency_task(self, self.on_urgency_detected, full_text)
+
+        if defer_live_intake or getattr(self, "_model_turn_generating", False):
+            if self._live_intake is not None:
+                self._live_intake._credit_kevin_turns = True
+            self._live_intake_refresh_pending = True
+            return
 
         await self._refresh_live_intake_after_caller()
 
@@ -1841,17 +1869,29 @@ class GeminiPipeline:
             return False
         return waiting
 
-    async def _send_client_instruction(self, text: str) -> bool:
+    async def _send_client_instruction(
+        self,
+        text: str,
+        *,
+        turn_complete: bool = True,
+    ) -> bool:
         if not self._ws or not getattr(self, "_connected", False):
             return False
-        self._assistant_instruction_pending = True
+        if turn_complete:
+            self._assistant_instruction_pending = True
         try:
             await self._ws.send(
-                json.dumps(self._build_text_instruction_payload(text))
+                json.dumps(
+                    self._build_text_instruction_payload(
+                        text,
+                        turn_complete=turn_complete,
+                    )
+                )
             )
             return True
         except Exception:
-            self._assistant_instruction_pending = False
+            if turn_complete:
+                self._assistant_instruction_pending = False
             raise
 
     def _intake_injection_allowed(self) -> bool:
@@ -1877,7 +1917,14 @@ class GeminiPipeline:
 
     async def _refresh_live_intake_after_caller(self) -> None:
         if not self._intake_injection_allowed():
+            self._live_intake_refresh_pending = False
             return
+        if getattr(self, "_model_turn_generating", False):
+            if self._live_intake is not None:
+                self._live_intake._credit_kevin_turns = True
+            self._live_intake_refresh_pending = True
+            return
+        self._live_intake_refresh_pending = False
         try:
             text = self._live_intake.after_caller_turn()
         except Exception as error:
@@ -1901,7 +1948,7 @@ class GeminiPipeline:
 
     async def _send_live_intake_text(self, text: str) -> None:
         try:
-            await self._send_client_instruction(text)
+            await self._send_client_instruction(text, turn_complete=False)
         except Exception as error:
             self._log_voice_timing(
                 "intake_instruction_error",

@@ -633,6 +633,7 @@ class VoicePipeline:
     CALLER_SILENCE_CHECK_INTERVAL_SECONDS = 1
     CALLER_SILENCE_GOODBYE_SECONDS = 1
     OWNER_AVAILABILITY_TIMEOUT_SECONDS = 30
+    UTTERANCE_END_FALLBACK_SECONDS = 0.85
 
     def __init__(
         self,
@@ -688,6 +689,7 @@ class VoicePipeline:
 
         # Utterance accumulation: collect is_final segments until speech_final
         self._utterance_buffer: list[str] = []
+        self._utterance_flush_task: Optional[asyncio.Task] = None
 
         # Serialization: only one Claude→TTS cycle at a time
         self._response_lock = asyncio.Lock()
@@ -939,6 +941,7 @@ class VoicePipeline:
 
     async def stop(self):
         self._connected = False
+        self._cancel_utterance_flush_timer()
         if getattr(self, '_urgency_task', None):
             self._urgency_task.cancel()
         self._audio_input_ready.set()
@@ -1094,6 +1097,9 @@ class VoicePipeline:
                         if self.on_clear_audio:
                             await self.on_clear_audio()
 
+                    if not is_final and self._utterance_buffer:
+                        self._schedule_utterance_flush_timer()
+
                 # Skip interim results (not final) — we only use finals
                 if not is_final:
                     continue
@@ -1143,6 +1149,8 @@ class VoicePipeline:
                 # If speech_final, the caller is done — process the full utterance
                 if speech_final:
                     await self._flush_utterance()
+                else:
+                    self._schedule_utterance_flush_timer()
 
         except asyncio.CancelledError:
             pass
@@ -1218,8 +1226,39 @@ class VoicePipeline:
             if self.on_clear_audio:
                 asyncio.create_task(self.on_clear_audio())
 
+    def _cancel_utterance_flush_timer(self) -> None:
+        task = getattr(self, "_utterance_flush_task", None)
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        self._utterance_flush_task = None
+
+    def _schedule_utterance_flush_timer(self) -> None:
+        self._cancel_utterance_flush_timer()
+        timeout = getattr(self, "UTTERANCE_END_FALLBACK_SECONDS", 0.85)
+        if timeout <= 0 or not getattr(self, "_connected", True):
+            return
+        self._utterance_flush_task = asyncio.create_task(
+            self._utterance_flush_watchdog(timeout)
+        )
+
+    async def _utterance_flush_watchdog(self, timeout: float) -> None:
+        try:
+            await asyncio.sleep(timeout)
+            if not getattr(self, "_connected", True):
+                return
+            if self._utterance_buffer:
+                _log_voice_event(
+                    "utterance_fallback_flush",
+                    getattr(self, "_call_sid", ""),
+                    segments=len(self._utterance_buffer),
+                )
+                await self._flush_utterance()
+        except asyncio.CancelledError:
+            pass
+
     async def _flush_utterance(self):
         """Combine accumulated segments and process as one complete utterance."""
+        self._cancel_utterance_flush_timer()
         if not self._utterance_buffer:
             return
 

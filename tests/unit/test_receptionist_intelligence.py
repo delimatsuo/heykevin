@@ -3833,3 +3833,180 @@ async def test_gemini_greeting_and_intake_consistency_for_trusted_returning_call
     assert "- Caller identity is unknown." not in intake_text
     assert "the caller's name" in intake_text
     assert "Allowed slots: service_action." in intake_text
+
+
+@pytest.mark.asyncio
+async def test_gemini_live_intake_instructions_do_not_complete_turn_or_trigger_self_talk():
+    """Live staging regression (CA201cbc7f, CA254a5f54): sending client_content
+    with turn_complete=True for _send_opening_intake_instructions() and
+    _refresh_live_intake_after_caller() forced Gemini native audio to generate
+    a second unprompted spoken turn (roleplaying a fake caller and answering it).
+    """
+    pipeline = GeminiPipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+        caller_phone="caller-id-ending-8667",
+    )
+    pipeline._connected = True
+    pipeline._ws = _FakeGeminiWebSocket()
+
+    await pipeline._send_greeting()
+    await pipeline._send_opening_intake_instructions()
+
+    assert len(pipeline._ws.sent_payloads) == 2
+    greeting_payload = pipeline._ws.sent_payloads[0]
+    opening_intake_payload = pipeline._ws.sent_payloads[1]
+
+    assert greeting_payload["client_content"]["turn_complete"] is True
+    assert opening_intake_payload["client_content"]["turn_complete"] is False
+    assert pipeline._assistant_instruction_pending is False
+
+    pipeline._kevin_transcript_buf = [
+        "Hi, thank you for calling Matsuo Plumbing. My name is Kevin. How can I help you?"
+    ]
+    await pipeline._flush_kevin_transcript()
+    assert pipeline._waiting_on_caller() is True
+
+    pipeline._caller_transcript_buf = ["Hi, I need a toilet replacement."]
+    await pipeline._flush_caller_transcript()
+
+    refresh_payload = pipeline._ws.sent_payloads[-1]
+    assert refresh_payload["client_content"]["turn_complete"] is False
+    assert pipeline._assistant_instruction_pending is False
+
+    await pipeline._send_client_instruction("Are you still there?")
+    spoken_instruction_payload = pipeline._ws.sent_payloads[-1]
+    assert spoken_instruction_payload["client_content"]["turn_complete"] is True
+    assert pipeline._assistant_instruction_pending is True
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_flushes_unfinalized_utterance_buffer_after_fallback_timeout():
+    """Live staging regression (CA2afb7ac0): VoIP comfort noise prevented
+    Deepgram speech_final=True and UtteranceEnd from firing promptly after
+    is_final=True, stalling caller turns for 2.27s–5.14s.
+    """
+    transcripts: list[tuple[str, str]] = []
+    processed: list[str] = []
+    flushed = asyncio.Event()
+
+    class _StreamWebSocket:
+        def __init__(self, messages: list[str]):
+            self._messages = list(messages)
+
+        async def recv(self) -> str:
+            if self._messages:
+                return self._messages.pop(0)
+            await asyncio.sleep(1.0)
+            raise asyncio.CancelledError
+
+        async def send(self, _data: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def on_transcript(speaker: str, text: str) -> None:
+        transcripts.append((speaker, text))
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=on_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline.UTTERANCE_END_FALLBACK_SECONDS = 0.03
+    pipeline._connected = True
+
+    async def fake_process_utterance(text: str) -> None:
+        processed.append(text)
+        flushed.set()
+
+    pipeline._process_utterance = fake_process_utterance
+    pipeline._deepgram_ws = _StreamWebSocket([
+        json.dumps({
+            "channel": {"alternatives": [{"transcript": "No, that's it for now."}]},
+            "is_final": True,
+            "speech_final": False,
+        }),
+    ])
+
+    receive_task = asyncio.create_task(pipeline._deepgram_receive_loop())
+    await asyncio.wait_for(flushed.wait(), timeout=0.5)
+    receive_task.cancel()
+    await pipeline.stop()
+
+    assert transcripts == [("Caller", "No, that's it for now.")]
+    assert processed == ["No, that's it for now."]
+    assert pipeline._utterance_buffer == []
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_interim_speech_resets_utterance_fallback_timer():
+    """Active interim transcripts must push back the fallback flush timer so a
+    caller pausing briefly mid-sentence is not cut off before finishing.
+    """
+    processed: list[str] = []
+    flushed = asyncio.Event()
+
+    class _PacedStreamWebSocket:
+        def __init__(self):
+            self._step = 0
+
+        async def recv(self) -> str:
+            self._step += 1
+            if self._step == 1:
+                return json.dumps({
+                    "channel": {"alternatives": [{"transcript": "I want to replace"}]},
+                    "is_final": True,
+                    "speech_final": False,
+                })
+            if self._step == 2:
+                await asyncio.sleep(0.025)
+                return json.dumps({
+                    "channel": {"alternatives": [{"transcript": "an old"}]},
+                    "is_final": False,
+                    "speech_final": False,
+                })
+            if self._step == 3:
+                await asyncio.sleep(0.025)
+                return json.dumps({
+                    "channel": {"alternatives": [{"transcript": "an old toilet."}]},
+                    "is_final": True,
+                    "speech_final": True,
+                })
+            await asyncio.sleep(1.0)
+            raise asyncio.CancelledError
+
+        async def send(self, _data: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline.UTTERANCE_END_FALLBACK_SECONDS = 0.04
+    pipeline._connected = True
+
+    async def fake_process_utterance(text: str) -> None:
+        processed.append(text)
+        flushed.set()
+
+    pipeline._process_utterance = fake_process_utterance
+    pipeline._deepgram_ws = _PacedStreamWebSocket()
+
+    receive_task = asyncio.create_task(pipeline._deepgram_receive_loop())
+    await asyncio.wait_for(flushed.wait(), timeout=0.5)
+    await asyncio.sleep(0.05)
+    receive_task.cancel()
+    await pipeline.stop()
+
+    assert processed == ["I want to replace an old toilet."]
+

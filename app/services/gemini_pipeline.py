@@ -356,14 +356,19 @@ class GeminiPipeline:
         """Return the bounded default greeting and caller disclosure."""
         return build_greeting_text(self._contractor_config, self._after_hours)
 
-    def _build_text_instruction_payload(self, text: str) -> dict:
+    def _build_text_instruction_payload(
+        self,
+        text: str,
+        *,
+        turn_complete: bool = True,
+    ) -> dict:
         """Build the model-version-specific payload for an instruction turn."""
         if self._model.startswith("gemini-3"):
             return {"realtime_input": {"text": text}}
         return {
             "client_content": {
                 "turns": [{"role": "user", "parts": [{"text": text}]}],
-                "turn_complete": True,
+                "turn_complete": turn_complete,
             }
         }
 
@@ -1841,17 +1846,29 @@ class GeminiPipeline:
             return False
         return waiting
 
-    async def _send_client_instruction(self, text: str) -> bool:
+    async def _send_client_instruction(
+        self,
+        text: str,
+        *,
+        turn_complete: bool = True,
+    ) -> bool:
         if not self._ws or not getattr(self, "_connected", False):
             return False
-        self._assistant_instruction_pending = True
+        if turn_complete:
+            self._assistant_instruction_pending = True
         try:
             await self._ws.send(
-                json.dumps(self._build_text_instruction_payload(text))
+                json.dumps(
+                    self._build_text_instruction_payload(
+                        text,
+                        turn_complete=turn_complete,
+                    )
+                )
             )
             return True
         except Exception:
-            self._assistant_instruction_pending = False
+            if turn_complete:
+                self._assistant_instruction_pending = False
             raise
 
     def _intake_injection_allowed(self) -> bool:
@@ -1901,7 +1918,7 @@ class GeminiPipeline:
 
     async def _send_live_intake_text(self, text: str) -> None:
         try:
-            await self._send_client_instruction(text)
+            await self._send_client_instruction(text, turn_complete=False)
         except Exception as error:
             self._log_voice_timing(
                 "intake_instruction_error",

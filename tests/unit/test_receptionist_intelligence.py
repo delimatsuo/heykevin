@@ -4272,4 +4272,3 @@ def test_business_prompt_includes_stt_phonetic_homophone_tolerance():
     assert "SPEECH-TO-TEXT TOLERANCE" in prompt
     assert '"client sync"' in prompt
     assert '"clogged sink"' in prompt
-

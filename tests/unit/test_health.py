@@ -16,6 +16,7 @@ from app import main
 @pytest.mark.asyncio
 async def test_health_includes_deploy_identity_without_secrets(monkeypatch):
     monkeypatch.setattr(main.settings, "environment", "staging")
+    monkeypatch.setattr(main.settings, "background_worker_mode", "embedded")
     monkeypatch.setenv("K_SERVICE", "kevin-api-staging")
     monkeypatch.setenv("K_REVISION", "kevin-api-staging-00028-suv")
     monkeypatch.setenv("DEPLOY_SHA", "abc123def456")
@@ -28,6 +29,7 @@ async def test_health_includes_deploy_identity_without_secrets(monkeypatch):
         "service": "kevin-api-staging",
         "revision": "kevin-api-staging-00028-suv",
         "deploy_sha": "abc123def456",
+        "worker_mode": "embedded",
         "gemini_live_staging_safety_controls_enabled": True,
         "gemini_live_model_tools_enabled": False,
         "gemini_live_automatic_terminal_actions_enabled": False,

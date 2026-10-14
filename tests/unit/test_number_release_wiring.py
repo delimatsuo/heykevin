@@ -32,23 +32,49 @@ def test_startup_and_shutdown_handlers_are_registered():
     assert [h.__name__ for h in app_main.app.router.on_shutdown] == ["shutdown"]
 
 
-def test_cleanup_loop_delegates_to_the_tested_sweep():
-    src = inspect.getsource(app_main._expired_contractor_cleanup)
-    assert "run_expired_contractor_cleanup_once" in src
-    assert "asyncio.sleep(6 * 3600)" in src
+@pytest.mark.asyncio
+async def test_cleanup_loop_delegates_to_the_tested_sweep(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import background_maintenance, number_release
+    run = AsyncMock()
+    monkeypatch.setattr(number_release, "run_expired_contractor_cleanup_once", run)
+    await background_maintenance.expired_contractors_once()
+    run.assert_awaited_once_with()
+    delegated = AsyncMock()
+    monkeypatch.setattr(app_main, "_periodic_maintenance", delegated)
+    await app_main._expired_contractor_cleanup()
+    delegated.assert_awaited_once_with("expired_contractors_once", 6 * 3600)
 
 
-def test_startup_schedules_the_cleanup_loop():
-    src = inspect.getsource(app_main.startup)
-    assert "_expired_contractor_cleanup()" in src
+@pytest.mark.asyncio
+async def test_startup_schedules_the_cleanup_loop(monkeypatch):
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(app_main.settings, "background_worker_mode", "embedded")
+    monkeypatch.setattr(app_main, "validate_runtime_safety", lambda: None)
+    for field in ("twilio_account_sid", "twilio_auth_token", "anthropic_api_key",
+                  "deepgram_api_key", "elevenlabs_api_key", "api_bearer_token"):
+        monkeypatch.setattr(app_main.settings, field, "fictional")
+    monkeypatch.setattr(app_main, "_housekeeping_tasks", {})
+    cleanup = AsyncMock()
+    cleanup.__name__ = "_expired_contractor_cleanup"
+    monkeypatch.setattr(app_main, "_expired_contractor_cleanup", cleanup)
+    try:
+        await app_main.startup()
+        assert "_expired_contractor_cleanup" in app_main._housekeeping_tasks
+    finally:
+        await app_main.shutdown()
 
 
-def test_incoming_call_stamps_inbound_evidence_before_the_subscription_gate():
-    """Calls on expired accounts must be stamped, so the stamp has to precede the gate."""
+def test_incoming_call_awaits_deadline_bounded_evidence_before_the_subscription_gate():
+    """A release race needs a real transaction, while routing keeps its deadline."""
     src = inspect.getsource(twilio_incoming.handle_incoming_call)
-    stamp = src.index("_record_inbound_call_evidence(contractor_id, time.time())")
+    stamp = src.index("_record_inbound_call_evidence(")
     gate = src.index("evaluate_subscription_access(contractor, now)")
     assert stamp < gate
+    assert "asyncio.wait_for(" in src
+    assert "INBOUND_EVIDENCE_RPC_TIMEOUT_SECONDS" in inspect.getsource(twilio_incoming)
+    assert "asyncio.create_task(_record_inbound_call_evidence" not in src
+    assert "direct ring fallback" in src
 
 
 def test_inbound_stamp_helper_is_a_module_level_coroutine():
@@ -58,28 +84,60 @@ def test_inbound_stamp_helper_is_a_module_level_coroutine():
 
 
 @pytest.mark.asyncio
-async def test_inbound_stamp_writes_and_throttles(monkeypatch):
+async def test_inbound_stamp_uses_the_deadline_aware_database_helper(monkeypatch):
     now = time.time()
-    doc = {"last_inbound_call_at": None}
-    writes: list[dict] = []
+    calls = []
 
-    async def fake_get(cid):
-        return dict(doc)
-
-    async def fake_update(cid, updates):
-        writes.append(updates)
-        doc.update(updates)
+    async def fake_record(contractor_id, seen_at, *, rpc_timeout):
+        calls.append((contractor_id, seen_at, rpc_timeout))
         return True
 
     import app.db.contractors as contractors
-    monkeypatch.setattr(contractors, "get_contractor", fake_get)
-    monkeypatch.setattr(contractors, "update_contractor", fake_update)
+    monkeypatch.setattr(contractors, "record_inbound_call_evidence", fake_record)
 
-    await twilio_incoming._record_inbound_call_evidence("c1", now)
-    await twilio_incoming._record_inbound_call_evidence("c1", now + 60)  # inside the hourly throttle
-    await twilio_incoming._record_inbound_call_evidence("c1", now + 3601)
+    assert await twilio_incoming._record_inbound_call_evidence("c1", now)
+    assert calls == [(
+        "c1",
+        now,
+        twilio_incoming.INBOUND_EVIDENCE_RPC_TIMEOUT_SECONDS,
+    )]
 
-    assert writes == [{"last_inbound_call_at": now}, {"last_inbound_call_at": now + 3601}]
+
+@pytest.mark.asyncio
+async def test_inbound_stamp_timeout_returns_controlled_direct_ring(monkeypatch):
+    class _Request:
+        async def form(self):
+            return {
+                "CallSid": "CA-stamp-timeout",
+                "From": "+15555550100",
+                "To": "+15555550199",
+            }
+
+    async def fake_lookup(_number):
+        return {
+            "contractor_id": "c1",
+            "owner_name": "Owner",
+            "owner_phone": "+15555550123",
+            "business_name": "Test Business",
+        }
+
+    async def slow_record(*_args, **_kwargs):
+        await __import__("asyncio").sleep(0.1)
+        return True
+
+    import app.db.contractors as contractors
+    monkeypatch.setattr(contractors, "get_contractor_by_twilio_number", fake_lookup)
+    monkeypatch.setattr(contractors, "record_inbound_call_evidence", slow_record)
+    monkeypatch.setattr(twilio_incoming, "INBOUND_EVIDENCE_TIMEOUT_SECONDS", 0.01)
+
+    started = time.monotonic()
+    response = await twilio_incoming.handle_incoming_call(_Request(), None)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.08
+    assert response.status_code == 200
+    assert b"<Dial" in response.body
+    assert b"+15555550123" in response.body
 
 
 # --- latest_call_timestamp -------------------------------------------------

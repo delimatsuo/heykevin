@@ -445,3 +445,33 @@ async def post_call_worker_loop() -> None:
                 exception_type=type(error).__name__,
             )
         await asyncio.sleep(WORKER_INTERVAL_SECONDS)
+
+
+async def run_bounded_post_calls_once(continuation: dict) -> dict:
+    """One pending handoff and a bounded fair uncertain-claim scan.
+
+    Cursor state is returned to the durable job ledger, never process globals.
+    Existing per-item claims remain the sole authority for side effects.
+    """
+    result = {}
+    for status, limit in (("pending", 1), ("in_progress", 25)):
+        cursor = continuation.get(status)
+        ids = await handoff_db.list_handoff_ids(status, limit=limit, start_after=cursor)
+        if not ids and cursor:
+            ids = await handoff_db.list_handoff_ids(status, limit=limit, start_after=None)
+        result[status] = ids[-1] if ids else None
+        for call_sid in ids:
+            if status == "pending":
+                # Terminal per-item quarantine is a handled outcome. Advancing
+                # past it prevents one poisoned handoff starving later calls.
+                await run_post_call_handoff(call_sid)
+            else:
+                claimed = await handoff_db.claim_handoff(call_sid)
+                if claimed:
+                    await handoff_db.mark_needs_attention(call_sid, "invalid_reclaim")
+                    raise RuntimeError("Unexpected in-progress reclaim")
+                handoff = await handoff_db.get_handoff(call_sid) or {}
+                if handoff.get("status") == "needs_attention":
+                    await _mirror_status(call_sid, "needs_attention", failure_code=str(
+                        handoff.get("failure_code") or "uncertain"))
+    return result

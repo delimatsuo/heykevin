@@ -3,10 +3,14 @@
 import asyncio
 import math
 import secrets
+from contextvars import ContextVar
 import time
 import uuid as _uuid
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from app.db.firestore_client import get_firestore_client
 from app.utils.logging import get_logger, redact_phone
@@ -14,6 +18,18 @@ from app.utils.logging import get_logger, redact_phone
 logger = get_logger(__name__)
 
 COLLECTION = "contractors"
+NUMBER_RELEASE_CLAIM_FIELD = "number_release_claim"
+NUMBER_RELEASE_CLAIM_RESERVED = "reserved"
+NUMBER_RELEASE_CLAIM_DELETING = "deleting"
+NUMBER_RELEASE_CLAIM_CANCELLED = "cancelled"
+NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION = "needs_attention"
+NUMBER_RELEASE_CONFLICT_FIELD = "number_release_conflict"
+# ``reserved`` has not crossed the irreversible provider DELETE. A process
+# crash in that interval must not strand an otherwise safe number forever, so
+# a fresh, still-eligible worker may replace an abandoned reservation after
+# this short lease. The prior nonce can no longer cross the delete boundary
+# after replacement.
+NUMBER_RELEASE_RESERVATION_TTL_SECONDS = 5 * 60
 
 PROTECTED_FIELDS = frozenset({
     # Subscription billing — written only by App Store webhook / subscription service
@@ -39,6 +55,11 @@ PROTECTED_FIELDS = frozenset({
     # trigger erasure of an account that never asked for it.
     "deletion_requested_at",
     "number_released_at",
+    # A strict external release reserves this server-owned fence before its
+    # irreversible provider boundary. Client writes must never create, clear,
+    # or disguise an in-flight release claim.
+    NUMBER_RELEASE_CLAIM_FIELD,
+    NUMBER_RELEASE_CONFLICT_FIELD,
     # Reconciliation signal for a number Twilio no longer lists but we
     # believed we owned; a client that could clear it could hide a billing
     # anomaly.
@@ -595,16 +616,754 @@ async def create_contractor(data: dict) -> str:
     return contractor_id
 
 
-async def update_contractor(contractor_id: str, updates: dict) -> bool:
-    """Update contractor profile fields."""
+class ReleaseAwareMutationResult(str, Enum):
+    """Result of a root-profile write while a number-release lock exists."""
+
+    APPLIED = "applied"
+    CANCELLED = "cancelled"
+    HELD = "held"
+
+
+_RELEASE_CONFLICT_DEFERRED_FIELDS = frozenset({
+    # These are the safety signals an operator needs to reconcile a release
+    # that crossed the provider boundary. Keep this deliberately narrow:
+    # profile content, tokens, phone numbers, and knowledge must not be copied
+    # into a conflict record.
+    "active",
+    "subscription_status",
+    "subscription_tier",
+    "subscription_expires",
+    "subscription_original_transaction_id",
+    "subscription_auto_renews",
+    "subscription_renewal_status_signed_at_ms",
+    "subscription_forwarded_from",
+    "deleted_app_detected_at",
+    "forwarding_last_seen_at",
+    "last_inbound_call_at",
+})
+
+# A scalar deferred_updates field is useful for the operator's current view,
+# but cannot safely establish order when App Store notifications arrive late.
+# Keep a small immutable history of entitlement updates too, so a held EXPIRED
+# event never erases evidence of a held DID_RENEW event.
+_RELEASE_CONFLICT_ENTITLEMENT_FIELDS = frozenset({
+    "subscription_status",
+    "subscription_tier",
+    "subscription_expires",
+    "subscription_original_transaction_id",
+    "subscription_auto_renews",
+    "subscription_renewal_status_signed_at_ms",
+    "subscription_forwarded_from",
+})
+_RELEASE_CONFLICT_EVENT_LIMIT = 8
+
+
+
+def _release_conflict_payload(
+    state: str,
+    updates: dict,
+    *,
+    prior: dict | None = None,
+) -> dict:
+    """Build a non-sensitive durable record of a blocked profile mutation.
+
+    The root profile must remain untouched once a delete is in progress, but
+    losing an App Store renewal or a call-safety timestamp would make manual
+    reconciliation guess at a real event. Preserve only the narrow,
+    server-owned set of entitlement and safety values needed to resolve it.
+    """
+    payload = {
+        "at": int(time.time()),
+        "phase": state,
+        "kind": "profile_mutation",
+        "fields": sorted(str(key) for key in updates)[:32],
+    }
+    deferred_updates = {}
+    if isinstance(prior, dict):
+        previous_deferred = prior.get("deferred_updates")
+        if isinstance(previous_deferred, dict):
+            deferred_updates.update(previous_deferred)
+    deferred_updates.update({
+        field: updates[field]
+        for field in _RELEASE_CONFLICT_DEFERRED_FIELDS
+        if field in updates
+    })
+    if deferred_updates:
+        payload["deferred_updates"] = deferred_updates
+
+    entitlement_updates = {
+        field: updates[field]
+        for field in _RELEASE_CONFLICT_ENTITLEMENT_FIELDS
+        if field in updates
+    }
+    events: list[dict] = []
+    if isinstance(prior, dict):
+        raw_events = prior.get("deferred_subscription_events")
+        if isinstance(raw_events, list):
+            for raw_event in raw_events[-_RELEASE_CONFLICT_EVENT_LIMIT:]:
+                if not isinstance(raw_event, dict):
+                    continue
+                raw_updates = raw_event.get("updates")
+                if not isinstance(raw_updates, dict):
+                    continue
+                safe_updates = {
+                    field: raw_updates[field]
+                    for field in _RELEASE_CONFLICT_ENTITLEMENT_FIELDS
+                    if field in raw_updates
+                }
+                if not safe_updates:
+                    continue
+                raw_at = raw_event.get("at")
+                events.append({
+                    "at": raw_at if isinstance(raw_at, (int, float)) else None,
+                    "updates": safe_updates,
+                })
+    if entitlement_updates:
+        # Redeliveries commonly repeat the exact payload. Dedupe adjacent
+        # identical events without rewriting an earlier observed timestamp.
+        if not events or events[-1]["updates"] != entitlement_updates:
+            events.append({"at": payload["at"], "updates": entitlement_updates})
+    if events:
+        payload["deferred_subscription_events"] = events[-_RELEASE_CONFLICT_EVENT_LIMIT:]
+    return payload
+
+
+def apply_release_aware_contractor_update(
+    transaction,
+    doc_ref,
+    data: dict,
+    updates: dict,
+) -> ReleaseAwareMutationResult:
+    """Apply a contractor update without letting it race an owned release.
+
+    A safety-relevant write during ``reserved`` is real evidence, so it is
+    committed together with cancellation of the pending release. Once the
+    state machine reaches ``deleting``, the write is held and a durable
+    conflict moves the release to ``needs_attention``.
+    """
+    if not isinstance(data, dict) or not isinstance(updates, dict):
+        return ReleaseAwareMutationResult.HELD
+    if NUMBER_RELEASE_CLAIM_FIELD in updates:
+        return ReleaseAwareMutationResult.HELD
+
+    raw_claim = data.get(NUMBER_RELEASE_CLAIM_FIELD)
+    if raw_claim is None:
+        transaction.update(doc_ref, updates)
+        return ReleaseAwareMutationResult.APPLIED
+    if not isinstance(raw_claim, dict):
+        transaction.update(doc_ref, {
+            NUMBER_RELEASE_CONFLICT_FIELD: _release_conflict_payload("malformed", updates),
+        })
+        return ReleaseAwareMutationResult.HELD
+
+    state = raw_claim.get("state", NUMBER_RELEASE_CLAIM_RESERVED)
+    if state == NUMBER_RELEASE_CLAIM_RESERVED:
+        cancelled = dict(raw_claim)
+        cancelled.update({
+            "state": NUMBER_RELEASE_CLAIM_CANCELLED,
+            "cancelled_at": int(time.time()),
+        })
+        transaction.update(doc_ref, {
+            **updates,
+            NUMBER_RELEASE_CLAIM_FIELD: cancelled,
+        })
+        return ReleaseAwareMutationResult.CANCELLED
+
+    if state == NUMBER_RELEASE_CLAIM_CANCELLED:
+        # Cancellation makes the reservation terminal. A later worker may
+        # claim again after it has evaluated the new profile state.
+        transaction.update(doc_ref, updates)
+        return ReleaseAwareMutationResult.APPLIED
+
+    held = dict(raw_claim)
+    if state == NUMBER_RELEASE_CLAIM_DELETING:
+        held.update({
+            "state": NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION,
+            "held_at": int(time.time()),
+        })
+    transaction.update(doc_ref, {
+        NUMBER_RELEASE_CLAIM_FIELD: held,
+        NUMBER_RELEASE_CONFLICT_FIELD: _release_conflict_payload(
+            state,
+            updates,
+            prior=data.get(NUMBER_RELEASE_CONFLICT_FIELD),
+        ),
+    })
+    return ReleaseAwareMutationResult.HELD
+
+
+async def record_inbound_call_evidence(
+    contractor_id: str,
+    seen_at: float,
+    *,
+    rpc_timeout: float = 0.75,
+) -> bool:
+    """Transactionally record a live inbound call with real Firestore deadlines.
+
+    This narrow path is intentionally separate from the normal profile updater:
+    a webhook has a strict response budget, while a number-release reservation
+    needs the inbound event to cancel or hold its nonce in the same transaction.
+    We use one Firestore transaction attempt with explicit begin, read,
+    commit, and rollback deadlines. An aborted or deadline-exceeded attempt
+    reports False so the webhook can use its controlled direct-ring fallback.
+    """
+    if (
+        not isinstance(contractor_id, str)
+        or not contractor_id
+        or not isinstance(seen_at, (int, float))
+        or isinstance(seen_at, bool)
+        or not math.isfinite(seen_at)
+        or not isinstance(rpc_timeout, (int, float))
+        or isinstance(rpc_timeout, bool)
+        or not math.isfinite(rpc_timeout)
+        or rpc_timeout <= 0
+    ):
+        return False
+
     db = get_firestore_client()
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None,
-        lambda: db.collection(COLLECTION).document(contractor_id).update(updates)
-    )
-    logger.info(f"Contractor updated: {contractor_id}")
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+
+    def _write() -> bool:
+        # A live webhook cannot give each Firestore RPC a full deadline: begin,
+        # read, and commit are one safety operation. Keep a single budget and
+        # fail closed when any part cannot finish in it.
+        deadline = time.monotonic() + float(rpc_timeout)
+
+        def _remaining_timeout() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Inbound call safety transaction exceeded its deadline")
+            return remaining
+
+        def _begin(transaction: Any) -> None:
+            """Begin one bounded Firestore transaction.
+
+            google-cloud-firestore 2.21.0 exposes a public bounded commit and
+            read API, but its public transaction decorator begins and commits
+            with service-default timeouts. The webhook must bound all three
+            RPCs, so use the pinned client's transaction wire shape directly.
+            ``timeout`` alone does not disable GAPIC's default retry wrapper,
+            so every wire call below also passes ``retry=None``. This is
+            deliberately single-attempt: an uncertain state-changing outcome
+            goes to direct ring-through, never AI screening.
+            """
+            if transaction.in_progress:
+                raise ValueError("Inbound call safety transaction already in progress")
+            client = transaction._client
+            response = client._firestore_api.begin_transaction(
+                request={
+                    "database": client._database_string,
+                    "options": transaction._options_protobuf(None),
+                },
+                metadata=client._rpc_metadata,
+                retry=None,
+                timeout=_remaining_timeout(),
+            )
+            transaction._id = response.transaction
+
+        def _commit(transaction: Any) -> None:
+            if not transaction.in_progress:
+                raise ValueError("Inbound call safety transaction was not started")
+            client = transaction._client
+            response = client._firestore_api.commit(
+                request={
+                    "database": client._database_string,
+                    "writes": transaction._write_pbs,
+                    "transaction": transaction._id,
+                },
+                metadata=client._rpc_metadata,
+                retry=None,
+                timeout=_remaining_timeout(),
+            )
+            transaction._clean_up()
+            transaction.write_results = list(response.write_results)
+            transaction.commit_time = response.commit_time
+
+        def _rollback(transaction: Any) -> None:
+            if not transaction.in_progress:
+                return
+            client = transaction._client
+            # A failed commit may have reached Firestore. Do not retry it; send
+            # the caller to the safe fallback and make a short best-effort
+            # rollback of any transaction that is still open.
+            rollback_timeout = min(0.05, float(rpc_timeout))
+            try:
+                client._firestore_api.rollback(
+                    request={
+                        "database": client._database_string,
+                        "transaction": transaction._id,
+                    },
+                    metadata=client._rpc_metadata,
+                    retry=None,
+                    timeout=rollback_timeout,
+                )
+            finally:
+                transaction._clean_up()
+
+        # Avoid opening a Firestore transaction on the common hourly-throttled
+        # path. A recent committed stamp already makes any quiet-number claim
+        # fail its guard; if release state is present, proceed to the
+        # transaction so this specific call can cancel or hold it.
+        preflight = doc_ref.get(retry=None, timeout=_remaining_timeout())
+        if not preflight.exists:
+            return False
+        preflight_data = preflight.to_dict() or {}
+        previous = preflight_data.get("last_inbound_call_at") or 0
+        if (
+            preflight_data.get(NUMBER_RELEASE_CLAIM_FIELD) is None
+            and isinstance(previous, (int, float))
+            and seen_at - previous < 3600
+        ):
+            return True
+
+        try:
+            transaction = db.transaction(max_attempts=1)
+        except TypeError:
+            # Lightweight local fakes may not accept Firestore's optional
+            # transaction setting; production always receives max_attempts=1.
+            transaction = db.transaction()
+        try:
+            _begin(transaction)
+            snapshot = doc_ref.get(
+                transaction=transaction,
+                retry=None,
+                timeout=_remaining_timeout(),
+            )
+            if not snapshot.exists:
+                _rollback(transaction)
+                return False
+            data = snapshot.to_dict() or {}
+            outcome = apply_release_aware_contractor_update(
+                transaction,
+                doc_ref,
+                data,
+                {"last_inbound_call_at": float(seen_at)},
+            )
+            _commit(transaction)
+            return outcome is not ReleaseAwareMutationResult.HELD
+        except Exception:
+            _rollback(transaction)
+            raise
+
+    try:
+        return await loop.run_in_executor(None, _write)
+    except Exception as e:
+        logger.warning(
+            "Inbound call safety transaction failed: contractor=%s error=%s",
+            contractor_id,
+            type(e).__name__,
+        )
+        return False
+
+
+async def update_contractor(contractor_id: str, updates: dict) -> bool:
+    """Update a contractor while respecting an in-flight number release.
+
+    The common path covers inbound-call evidence, device registration,
+    subscription webhooks, and API profile updates. A safety update made while
+    a release is reserved is retained and cancels that release; a post-delete
+    boundary mutation is durably held for reconciliation.
+    """
+    if (
+        not isinstance(contractor_id, str)
+        or not contractor_id
+        or not isinstance(updates, dict)
+        or NUMBER_RELEASE_CLAIM_FIELD in updates
+    ):
+        return False
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+
+    @firestore.transactional
+    def _txn(transaction) -> ReleaseAwareMutationResult:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return ReleaseAwareMutationResult.HELD
+        return apply_release_aware_contractor_update(
+            transaction, doc_ref, snapshot.to_dict() or {}, updates,
+        )
+
+    outcome = await loop.run_in_executor(None, lambda: _txn(db.transaction()))
+    if outcome is ReleaseAwareMutationResult.HELD:
+        logger.warning("Contractor update held by strict number release: %s", contractor_id)
+        return False
+    if outcome is ReleaseAwareMutationResult.CANCELLED:
+        logger.info("Contractor update cancelled pending number release: %s", contractor_id)
+    else:
+        logger.info("Contractor updated: %s", contractor_id)
     return True
+
+
+@dataclass(frozen=True)
+class StrictNumberReleaseClaim:
+    """Opaque ownership token for one Twilio release attempt.
+
+    ``update_time`` is audit metadata only. The durable nonce and phase are
+    the release linearization contract; unrelated profile writes no longer
+    turn a confirmed provider deletion into an avoidable stale-version hold.
+    """
+
+    nonce: str
+    update_time: Any = None
+    state: str = NUMBER_RELEASE_CLAIM_RESERVED
+
+
+def _claim_nonce_matches(data: dict, nonce: str, *, state: str | None = None) -> bool:
+    claim = data.get(NUMBER_RELEASE_CLAIM_FIELD)
+    matches = (
+        isinstance(claim, dict)
+        and isinstance(claim.get("nonce"), str)
+        and secrets.compare_digest(claim["nonce"], nonce)
+    )
+    if not matches:
+        return False
+    if state is None:
+        return True
+    return claim.get("state", NUMBER_RELEASE_CLAIM_RESERVED) == state
+
+
+def _reserved_claim_is_reclaimable(claim: dict) -> bool:
+    """Whether a provider-free reservation is old enough for safe replacement.
+
+    ``deleting`` is intentionally never reclaimable: a crash there leaves the
+    Twilio outcome unknown and requires reconciliation.  A malformed timestamp
+    also fails closed rather than turning an unrecognized claim into a retry.
+    """
+    if claim.get("state", NUMBER_RELEASE_CLAIM_RESERVED) != NUMBER_RELEASE_CLAIM_RESERVED:
+        return False
+    claimed_at = claim.get("claimed_at")
+    if (
+        not isinstance(claimed_at, (int, float))
+        or isinstance(claimed_at, bool)
+        or not math.isfinite(claimed_at)
+    ):
+        return False
+    return time.time() - float(claimed_at) >= NUMBER_RELEASE_RESERVATION_TTL_SECONDS
+
+
+def _committed_claim_update_time(transaction) -> Any:
+    """Return an optional post-commit version for diagnostics only."""
+    write_results = getattr(transaction, "write_results", ())
+    if len(write_results) != 1:
+        return None
+    update_time = getattr(write_results[0], "update_time", None)
+    if update_time is None:
+        return None
+    try:
+        return DatetimeWithNanoseconds.from_timestamp_pb(update_time)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _cancel_release_claim(transaction, doc_ref, data: dict, *, kind: str) -> None:
+    """Make a reserved release terminal when its observed state changed."""
+    claim = dict(data[NUMBER_RELEASE_CLAIM_FIELD])
+    claim.update({
+        "state": NUMBER_RELEASE_CLAIM_CANCELLED,
+        "cancelled_at": int(time.time()),
+    })
+    transaction.update(doc_ref, {
+        NUMBER_RELEASE_CLAIM_FIELD: claim,
+        NUMBER_RELEASE_CONFLICT_FIELD: {
+            "at": int(time.time()),
+            "phase": NUMBER_RELEASE_CLAIM_RESERVED,
+            "kind": kind,
+        },
+    })
+
+
+def _hold_release_claim(
+    transaction,
+    doc_ref,
+    data: dict,
+    *,
+    kind: str,
+    extra_updates: dict | None = None,
+) -> None:
+    """Put a nonce-owned release into a durable reconciliation state."""
+    claim = dict(data[NUMBER_RELEASE_CLAIM_FIELD])
+    claim.update({
+        "state": NUMBER_RELEASE_CLAIM_NEEDS_ATTENTION,
+        "held_at": int(time.time()),
+    })
+    updates = {
+        NUMBER_RELEASE_CLAIM_FIELD: claim,
+        NUMBER_RELEASE_CONFLICT_FIELD: {
+            "at": int(time.time()),
+            "phase": data[NUMBER_RELEASE_CLAIM_FIELD].get("state"),
+            "kind": kind,
+        },
+    }
+    if extra_updates:
+        updates.update(extra_updates)
+    transaction.update(doc_ref, updates)
+
+
+async def claim_strict_number_release(
+    contractor_id: str,
+    *,
+    strict_precondition: Callable[[dict], bool],
+) -> Optional[StrictNumberReleaseClaim]:
+    """Atomically reserve one release before any Twilio operation.
+
+    A later profile write either cancels ``reserved`` while retaining its new
+    safety evidence, or holds a ``deleting`` claim for reconciliation. A
+    cancelled claim can be replaced only after a fresh eligibility evaluation.
+    """
+    if not isinstance(contractor_id, str) or not contractor_id or not callable(strict_precondition):
+        return None
+
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    nonce = secrets.token_urlsafe(24)
+    loop = asyncio.get_running_loop()
+
+    @firestore.transactional
+    def claim(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if not isinstance(data, dict):
+            return False
+        existing = data.get(NUMBER_RELEASE_CLAIM_FIELD)
+        if isinstance(existing, dict):
+            existing_state = existing.get("state", NUMBER_RELEASE_CLAIM_RESERVED)
+            if (
+                existing_state != NUMBER_RELEASE_CLAIM_CANCELLED
+                and not _reserved_claim_is_reclaimable(existing)
+            ):
+                return False
+        elif existing is not None:
+            return False
+        expected_number = data.get("twilio_number")
+        if not isinstance(expected_number, str) or not expected_number:
+            return False
+        try:
+            eligible = strict_precondition(data) is True
+        except Exception:
+            logger.exception(
+                "Strict Twilio release claim precondition failed for contractor %s",
+                contractor_id,
+            )
+            return False
+        if not eligible:
+            return False
+        transaction.update(doc_ref, {
+            NUMBER_RELEASE_CLAIM_FIELD: {
+                "nonce": nonce,
+                "state": NUMBER_RELEASE_CLAIM_RESERVED,
+                "claimed_at": int(time.time()),
+                "expected_twilio_number": expected_number,
+            },
+        })
+        return True
+
+    transaction = db.transaction()
+
+    def commit_claim() -> tuple[bool, Any]:
+        claimed = claim(transaction)
+        return claimed, _committed_claim_update_time(transaction) if claimed else None
+
+    claimed, update_time = await loop.run_in_executor(None, commit_claim)
+    if not claimed:
+        return None
+    return StrictNumberReleaseClaim(
+        nonce=nonce,
+        update_time=update_time,
+        state=NUMBER_RELEASE_CLAIM_RESERVED,
+    )
+
+
+async def begin_strict_number_release_delete(
+    contractor_id: str,
+    claim: StrictNumberReleaseClaim,
+    *,
+    strict_precondition: Callable[[dict], bool],
+) -> Optional[StrictNumberReleaseClaim]:
+    """Atomically cross the local point of no return before Twilio DELETE.
+
+    This is the release linearization point. It requires the same nonce,
+    ``reserved`` phase, expected phone binding, and a fresh full safety
+    predicate, then changes only the claim phase to ``deleting``.
+    """
+    if (
+        not isinstance(contractor_id, str)
+        or not contractor_id
+        or not isinstance(claim, StrictNumberReleaseClaim)
+        or claim.state != NUMBER_RELEASE_CLAIM_RESERVED
+        or not callable(strict_precondition)
+    ):
+        return None
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    loop = asyncio.get_running_loop()
+
+    @firestore.transactional
+    def begin(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if not _claim_nonce_matches(
+            data, claim.nonce, state=NUMBER_RELEASE_CLAIM_RESERVED,
+        ):
+            return False
+        stored_claim = data[NUMBER_RELEASE_CLAIM_FIELD]
+        expected_number = stored_claim.get("expected_twilio_number")
+        if (
+            not isinstance(expected_number, str)
+            or not expected_number
+            or data.get("twilio_number") != expected_number
+        ):
+            _cancel_release_claim(transaction, doc_ref, data, kind="release_binding_changed")
+            return False
+        try:
+            eligible = strict_precondition(data) is True
+        except Exception:
+            logger.exception(
+                "Strict Twilio release delete precondition failed for contractor %s",
+                contractor_id,
+            )
+            eligible = False
+        if not eligible:
+            _cancel_release_claim(transaction, doc_ref, data, kind="release_precondition_changed")
+            return False
+        deleting = dict(stored_claim)
+        deleting.update({
+            "state": NUMBER_RELEASE_CLAIM_DELETING,
+            "deleting_at": int(time.time()),
+        })
+        transaction.update(doc_ref, {NUMBER_RELEASE_CLAIM_FIELD: deleting})
+        return True
+
+    transaction = db.transaction()
+
+    def commit_begin() -> tuple[bool, Any]:
+        began = begin(transaction)
+        return began, _committed_claim_update_time(transaction) if began else None
+
+    began, update_time = await loop.run_in_executor(None, commit_begin)
+    if not began:
+        return None
+    return StrictNumberReleaseClaim(
+        nonce=claim.nonce,
+        update_time=update_time,
+        state=NUMBER_RELEASE_CLAIM_DELETING,
+    )
+
+
+async def hold_strict_number_release(
+    contractor_id: str,
+    claim: StrictNumberReleaseClaim,
+    *,
+    anomaly: dict | None = None,
+) -> bool:
+    """Preserve an owned strict claim for operator reconciliation."""
+    if (
+        not isinstance(contractor_id, str)
+        or not contractor_id
+        or not isinstance(claim, StrictNumberReleaseClaim)
+    ):
+        return False
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    loop = asyncio.get_running_loop()
+
+    @firestore.transactional
+    def hold(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if not _claim_nonce_matches(data, claim.nonce, state=claim.state):
+            return False
+        _hold_release_claim(
+            transaction,
+            doc_ref,
+            data,
+            kind="provider_outcome_uncertain",
+            extra_updates={"number_release_anomaly": anomaly} if anomaly is not None else None,
+        )
+        return True
+
+    return await loop.run_in_executor(None, lambda: hold(db.transaction()))
+
+
+async def finalize_strict_number_release(
+    contractor_id: str,
+    claim: StrictNumberReleaseClaim,
+    release_updates: dict,
+    *,
+    strict_precondition: Callable[[dict], bool],
+    deactivate_profile: bool,
+    deactivation_updates: dict | None = None,
+) -> bool:
+    """Conditionally commit a confirmed release and optional deactivation.
+
+    Firestore cannot join Twilio's DELETE. The nonce-owned ``deleting`` phase
+    is therefore retained until this transaction verifies the live safety
+    predicate again and atomically commits the profile transition.
+    """
+    if (
+        not isinstance(contractor_id, str)
+        or not contractor_id
+        or not isinstance(claim, StrictNumberReleaseClaim)
+        or claim.state != NUMBER_RELEASE_CLAIM_DELETING
+        or not isinstance(release_updates, dict)
+        or not callable(strict_precondition)
+        or not isinstance(deactivate_profile, bool)
+        or (deactivation_updates is not None and not isinstance(deactivation_updates, dict))
+    ):
+        return False
+    db = get_firestore_client()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+    loop = asyncio.get_running_loop()
+
+    @firestore.transactional
+    def finalize(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if not _claim_nonce_matches(
+            data, claim.nonce, state=NUMBER_RELEASE_CLAIM_DELETING,
+        ):
+            return False
+        stored_claim = data[NUMBER_RELEASE_CLAIM_FIELD]
+        expected_number = stored_claim.get("expected_twilio_number")
+        try:
+            eligible = strict_precondition(data) is True
+        except Exception:
+            logger.exception(
+                "Strict Twilio release finalization precondition failed for contractor %s",
+                contractor_id,
+            )
+            eligible = False
+        if (
+            not isinstance(expected_number, str)
+            or data.get("twilio_number") != expected_number
+            or not eligible
+        ):
+            _hold_release_claim(transaction, doc_ref, data, kind="release_finalization_conflict")
+            return False
+        updates = {
+            **release_updates,
+            NUMBER_RELEASE_CLAIM_FIELD: None,
+        }
+        if deactivate_profile:
+            updates.update({
+                "active": False,
+                "deactivated_at": int(time.time()),
+            })
+            if deactivation_updates:
+                updates.update(deactivation_updates)
+        transaction.update(doc_ref, updates)
+        return True
+
+    return await loop.run_in_executor(None, lambda: finalize(db.transaction()))
 
 
 async def _create_regulatory_bundle(client, loop, country_code: str, business_name: str, address: str, city: str) -> str:
@@ -865,29 +1624,81 @@ async def provision_twilio_number(contractor_id: str, country_code: str = "US", 
     return purchased.phone_number
 
 
-async def release_twilio_number(contractor_id: str) -> bool:
-    """Release a contractor's Twilio phone number and clear it from their profile."""
+async def release_twilio_number(
+    contractor_id: str,
+    *,
+    require_confirmed: bool = False,
+    strict_precondition: Callable[[dict], bool] | None = None,
+    strict_release_claim: StrictNumberReleaseClaim | None = None,
+    deactivate_profile: bool = False,
+    deactivation_updates: dict | None = None,
+) -> bool:
+    """Release a Twilio number through one nonce-owned state machine.
+
+    Every provider DELETE, including manual and embedded cleanup paths, first
+    reserves the contractor and atomically enters ``deleting``.  A release
+    only becomes visible in the profile through conditional finalization.
+    That prevents two paths from deleting the same number and keeps a live
+    call or subscription update from being silently overwritten.
+    """
     from twilio.rest import Client
     from app.config import settings
 
-    contractor = await get_contractor(contractor_id)
-    if not contractor or not contractor.get("twilio_number"):
-        logger.warning(f"No Twilio number to release for contractor {contractor_id}")
+    if deactivation_updates is not None and not isinstance(deactivation_updates, dict):
+        return False
+    if strict_release_claim is not None and (
+        not require_confirmed or strict_precondition is None
+    ):
+        logger.error(
+            "Strict Twilio release claim lacks its confirmed precondition for contractor %s",
+            contractor_id,
+        )
         return False
 
+    contractor = await get_contractor(contractor_id)
+    if not contractor or not isinstance(contractor.get("twilio_number"), str) or not contractor.get("twilio_number"):
+        logger.warning("No Twilio number to release for contractor %s", contractor_id)
+        return False
     twilio_number = contractor["twilio_number"]
+
+    def release_precondition(candidate: dict) -> bool:
+        if not isinstance(candidate, dict) or candidate.get("twilio_number") != twilio_number:
+            return False
+        if strict_precondition is None:
+            return True
+        try:
+            return strict_precondition(candidate) is True
+        except Exception:
+            logger.exception(
+                "Strict Twilio release precondition failed for contractor %s; preserving profile",
+                contractor_id,
+            )
+            return False
+
+    if not release_precondition(contractor):
+        logger.warning(
+            "Twilio release precondition changed for contractor %s; preserving profile",
+            contractor_id,
+        )
+        return False
+
+    # Manual account deletion, phone-number release, embedded cleanup, and
+    # the strict external worker all acquire this same ownership token. The
+    # external worker supplies its already-claimed token; every other entry
+    # point claims a current number binding here.
+    release_claim = strict_release_claim
+    if release_claim is None:
+        release_claim = await claim_strict_number_release(
+            contractor_id, strict_precondition=release_precondition,
+        )
+    if release_claim is None:
+        logger.warning("Twilio release is already owned or held for contractor %s", contractor_id)
+        return False
+
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-    loop = asyncio.get_event_loop()
-
-    # Find the number SID
-    numbers = await loop.run_in_executor(
-        None,
-        lambda: client.incoming_phone_numbers.list(phone_number=twilio_number, limit=1)
-    )
-
-    from twilio.base.exceptions import TwilioRestException
-
-    updates = {
+    loop = asyncio.get_running_loop()
+    anomaly = {"at": int(time.time()), "number": twilio_number}
+    release_updates = {
         "twilio_number": "",
         "number_released_at": int(time.time()),
         "provisioned_country_code": None,
@@ -895,60 +1706,139 @@ async def release_twilio_number(contractor_id: str) -> bool:
         "number_type": None,
         "number_capabilities": None,
     }
-    if numbers:
-        try:
-            await loop.run_in_executor(
-                None,
-                lambda: numbers[0].delete()
-            )
-            logger.info(f"Released Twilio number {redact_phone(twilio_number)} for contractor {contractor_id}")
-        except TwilioRestException as e:
-            if e.status != 404:
-                raise
-            # A concurrent release (second device, retry racing a slow first
-            # request) already deleted it between our list and delete. The
-            # desired end state holds; this is not an anomaly.
-            logger.info(
-                f"Twilio number {redact_phone(twilio_number)} for contractor {contractor_id} "
-                f"already released by a concurrent request"
-            )
-    else:
-        # A number we believe we own but Twilio does not list is an anomaly,
-        # not a success: it may be a format mismatch on a number that still
-        # bills. Record it on the document so reconciliation can find it.
-        logger.error(
-            f"Twilio number {redact_phone(twilio_number)} for contractor {contractor_id} "
-            f"not found in Twilio account; clearing profile and recording anomaly"
-        )
-        # The doc clears the number and the log redacts it, so the anomaly
-        # record itself must carry the number or reconciliation has no key.
-        # Server-only field (PROTECTED_FIELDS), same sensitivity as the
-        # twilio_number field it replaces.
-        updates["number_release_anomaly"] = {"at": int(time.time()), "number": twilio_number}
 
-    # Clear the number from the contractor profile
-    await update_contractor(contractor_id, updates)
+    try:
+        numbers = await loop.run_in_executor(
+            None,
+            lambda: client.incoming_phone_numbers.list(phone_number=twilio_number, limit=1),
+        )
+    except Exception:
+        # A reservation has already been made. Do not let a retry guess
+        # whether Twilio processed a request that failed locally.
+        await hold_strict_number_release(contractor_id, release_claim, anomaly=anomaly)
+        raise
+
+    if not numbers:
+        logger.error(
+            "Twilio number %s for contractor %s not found in Twilio account; recording release anomaly",
+            redact_phone(twilio_number), contractor_id,
+        )
+        if require_confirmed:
+            await hold_strict_number_release(contractor_id, release_claim, anomaly=anomaly)
+            return False
+        # Legacy callers historically clear a missing provider binding. Keep
+        # that behavior, but cross the same local ownership boundary first.
+        deleting_claim = await begin_strict_number_release_delete(
+            contractor_id, release_claim, strict_precondition=release_precondition,
+        )
+        if deleting_claim is None:
+            return False
+        release_updates["number_release_anomaly"] = anomaly
+    else:
+        deleting_claim = await begin_strict_number_release_delete(
+            contractor_id, release_claim, strict_precondition=release_precondition,
+        )
+        if deleting_claim is None:
+            return False
+        try:
+            deleted = await loop.run_in_executor(None, numbers[0].delete)
+        except Exception as error:
+            from twilio.base.exceptions import TwilioRestException
+
+            if isinstance(error, TwilioRestException) and error.status == 404:
+                # Twilio confirms the desired provider state already holds.
+                deleted = True
+                logger.info(
+                    "Twilio number %s for contractor %s was already released",
+                    redact_phone(twilio_number), contractor_id,
+                )
+            else:
+                await hold_strict_number_release(
+                    contractor_id, deleting_claim, anomaly=anomaly,
+                )
+                raise
+        if deleted is not True:
+            logger.error(
+                "Twilio release result unconfirmed for contractor %s; preserving profile for reconciliation",
+                contractor_id,
+            )
+            await hold_strict_number_release(
+                contractor_id, deleting_claim, anomaly=anomaly,
+            )
+            return False
+
+    finalized = await finalize_strict_number_release(
+        contractor_id,
+        deleting_claim,
+        release_updates,
+        strict_precondition=release_precondition,
+        deactivate_profile=deactivate_profile,
+        deactivation_updates=deactivation_updates,
+    )
+    if not finalized:
+        # If finalization itself observed a conflict it has already moved the
+        # claim to needs_attention. This best-effort hold covers transaction
+        # failures before that durable transition.
+        await hold_strict_number_release(contractor_id, deleting_claim, anomaly=anomaly)
+        return False
+
+    logger.info(
+        "Released Twilio number %s for contractor %s",
+        redact_phone(twilio_number), contractor_id,
+    )
     return True
 
 
-async def deactivate_contractor(contractor_id: str, user_requested: bool = False) -> bool:
-    """Deactivate a contractor account and release their Twilio number.
+async def deactivate_contractor(
+    contractor_id: str,
+    user_requested: bool = False,
+    *,
+    require_confirmed_number_release: bool = False,
+    strict_number_release_precondition: Callable[[dict], bool] | None = None,
+    strict_number_release_claim: StrictNumberReleaseClaim | None = None,
+) -> bool:
+    """Deactivate an account only after its number transition is settled."""
+    contractor = await get_contractor(contractor_id)
+    if contractor is None:
+        return False
 
-    user_requested=True is set ONLY by the user's own DELETE endpoint and
-    stamps deletion_requested_at — the sole consent signal the data purge
-    accepts. System deactivations (deleted-app cleanup) must never set it.
-    """
-    await release_twilio_number(contractor_id)
-    updates = {"active": False, "deactivated_at": int(time.time())}
+    deactivation_updates: dict[str, Any] = {}
     if user_requested:
-        updates["deletion_requested_at"] = int(time.time())
-    await update_contractor(contractor_id, updates)
-    # Drop this instance's cached token mappings so the deleted account's
-    # token stops authenticating here immediately. Other warm instances keep
-    # their entry until recycle — a bounded, documented residual.
+        # This remains the sole account-erasure consent signal.
+        deactivation_updates["deletion_requested_at"] = int(time.time())
+
+    has_twilio_number = isinstance(contractor.get("twilio_number"), str) and bool(
+        contractor.get("twilio_number"),
+    )
+    if has_twilio_number:
+        release_kwargs: dict[str, Any] = {
+            "require_confirmed": require_confirmed_number_release,
+            "deactivate_profile": True,
+            "deactivation_updates": deactivation_updates,
+        }
+        if strict_number_release_precondition is not None:
+            release_kwargs["strict_precondition"] = strict_number_release_precondition
+        if strict_number_release_claim is not None:
+            release_kwargs["strict_release_claim"] = strict_number_release_claim
+        released = await release_twilio_number(contractor_id, **release_kwargs)
+        if not released:
+            # A live route stays intact when Twilio or Firestore is uncertain.
+            return False
+    else:
+        updates = {
+            "active": False,
+            "deactivated_at": int(time.time()),
+            **deactivation_updates,
+        }
+        if not await update_contractor(contractor_id, updates):
+            return False
+
+    # Drop this instance's cached token mappings only after the final profile
+    # transition succeeded. Other warm instances retain their cache until
+    # recycle, the existing bounded residual.
     from app.middleware.auth import invalidate_contractor_tokens
     invalidate_contractor_tokens(contractor_id)
-    logger.info(f"Contractor deactivated: {contractor_id}")
+    logger.info("Contractor deactivated: %s", contractor_id)
     return True
 
 
@@ -963,23 +1853,45 @@ async def list_contractors() -> list:
     return [{"contractor_id": d.id, **d.to_dict()} for d in docs]
 
 
-async def activate_subscription_entitlement(
+class SubscriptionEntitlementActivationOutcome(str, Enum):
+    """Outcome for a verified entitlement write at a release-state boundary."""
+
+    APPLIED = "applied"
+    RELEASE_CONFLICT = "release_conflict"
+    REJECTED = "rejected"
+
+
+_last_subscription_entitlement_activation: ContextVar[
+    SubscriptionEntitlementActivationOutcome | None
+] = ContextVar("last_subscription_entitlement_activation", default=None)
+
+
+def take_subscription_entitlement_activation_outcome(
+) -> SubscriptionEntitlementActivationOutcome | None:
+    """Consume the typed result of the boolean compatibility wrapper.
+
+    Existing callers use the boolean helper. The subscription verifier needs to
+    distinguish its release-state hold from a malformed entitlement, without
+    changing that public boolean contract.
+    """
+    outcome = _last_subscription_entitlement_activation.get()
+    _last_subscription_entitlement_activation.set(None)
+    return outcome
+
+
+async def activate_subscription_entitlement_with_outcome(
     contractor_id: str,
     tier: str,
     expires_ts: float,
     original_transaction_id: str,
     expected_subscription_uuid: str,
-) -> bool:
-    """Atomically set direct verified entitlement on an active contractor.
+) -> SubscriptionEntitlementActivationOutcome:
+    """Apply a verified entitlement and distinguish a release hold from rejection.
 
-    Inside the transaction:
-    - re-read the contractor document;
-    - require active is True and exact expected subscription_uuid;
-    - atomically set tier/status/expiry, the current subscription_original_transaction_id,
-      and clear stale subscription_forwarded_from provenance;
-    - if the live current original ID differs from the new original ID, reset
-      subscription_auto_renews and subscription_renewal_status_signed_at_ms to None;
-    - if it is the same receipt chain, preserve its renewal observation and clock.
+    A verified StoreKit transaction that races the irreversible number-release
+    boundary must remain unfinished on the device. Returning a typed conflict
+    lets the API send a retryable response while the durable reconciliation
+    record keeps the entitlement data for an operator.
     """
     import math
     if (
@@ -996,7 +1908,7 @@ async def activate_subscription_entitlement(
         or not math.isfinite(expires_ts)
         or expires_ts <= 0
     ):
-        return False
+        return SubscriptionEntitlementActivationOutcome.REJECTED
 
     from google.cloud import firestore as fs
 
@@ -1005,15 +1917,15 @@ async def activate_subscription_entitlement(
     loop = asyncio.get_event_loop()
 
     @fs.transactional
-    def _txn(transaction) -> bool:
+    def _txn(transaction) -> SubscriptionEntitlementActivationOutcome:
         snapshot = doc_ref.get(transaction=transaction)
         if not snapshot.exists:
-            return False
+            return SubscriptionEntitlementActivationOutcome.REJECTED
         data = snapshot.to_dict() or {}
         if data.get("active") is not True:
-            return False
+            return SubscriptionEntitlementActivationOutcome.REJECTED
         if data.get("subscription_uuid") != expected_subscription_uuid:
-            return False
+            return SubscriptionEntitlementActivationOutcome.REJECTED
 
         current_original_id = data.get("subscription_original_transaction_id")
         updates = {
@@ -1027,11 +1939,34 @@ async def activate_subscription_entitlement(
             updates["subscription_auto_renews"] = None
             updates["subscription_renewal_status_signed_at_ms"] = None
 
-        transaction.update(doc_ref, updates)
-        return True
+        mutation = apply_release_aware_contractor_update(
+            transaction, doc_ref, data, updates,
+        )
+        if mutation is ReleaseAwareMutationResult.HELD:
+            return SubscriptionEntitlementActivationOutcome.RELEASE_CONFLICT
+        return SubscriptionEntitlementActivationOutcome.APPLIED
 
     transaction = db.transaction()
     return await loop.run_in_executor(None, lambda: _txn(transaction))
+
+
+async def activate_subscription_entitlement(
+    contractor_id: str,
+    tier: str,
+    expires_ts: float,
+    original_transaction_id: str,
+    expected_subscription_uuid: str,
+) -> bool:
+    """Backward-compatible boolean wrapper for entitlement callers."""
+    outcome = await activate_subscription_entitlement_with_outcome(
+        contractor_id,
+        tier,
+        expires_ts,
+        original_transaction_id,
+        expected_subscription_uuid,
+    )
+    _last_subscription_entitlement_activation.set(outcome)
+    return outcome is SubscriptionEntitlementActivationOutcome.APPLIED
 
 
 class BindingBackfillOutcome(str, Enum):
@@ -1041,6 +1976,7 @@ class BindingBackfillOutcome(str, Enum):
     FINGERPRINT_MISMATCH = "fingerprint_mismatch"
     UUID_MISMATCH = "uuid_mismatch"
     NOT_FOUND_OR_INACTIVE = "not_found_or_inactive"
+    RELEASE_CONFLICT = "release_conflict"
 
 
 def is_missing_or_malformed_binding(binding: Any) -> bool:
@@ -1138,28 +2074,40 @@ async def conditionally_backfill_subscription_binding(
         clean_orig = original_transaction_id.strip()
 
         if not isinstance(current_original, str) or not current_original.strip():
-            transaction.update(
+            outcome = apply_release_aware_contractor_update(
+                transaction,
                 doc_ref,
+                data,
                 {
                     "subscription_original_transaction_id": clean_orig,
                     "subscription_auto_renews": None,
                     "subscription_renewal_status_signed_at_ms": None,
                 },
             )
-            return BindingBackfillOutcome.REPAIRED
+            return (
+                BindingBackfillOutcome.REPAIRED
+                if outcome is not ReleaseAwareMutationResult.HELD
+                else BindingBackfillOutcome.RELEASE_CONFLICT
+            )
 
         if current_original.strip() == clean_orig:
             if current_original == clean_orig:
                 return BindingBackfillOutcome.IDEMPOTENT_SAME
-            transaction.update(
+            outcome = apply_release_aware_contractor_update(
+                transaction,
                 doc_ref,
+                data,
                 {
                     "subscription_original_transaction_id": clean_orig,
                     "subscription_auto_renews": None,
                     "subscription_renewal_status_signed_at_ms": None,
                 },
             )
-            return BindingBackfillOutcome.REPAIRED
+            return (
+                BindingBackfillOutcome.REPAIRED
+                if outcome is not ReleaseAwareMutationResult.HELD
+                else BindingBackfillOutcome.RELEASE_CONFLICT
+            )
 
         return BindingBackfillOutcome.SUPERSEDED
 
@@ -1225,11 +2173,16 @@ async def record_active_renewal_status(
             if signed_at_ms <= stored_clock:
                 return False
 
-        transaction.update(doc_ref, {
-            "subscription_auto_renews": auto_renews,
-            "subscription_renewal_status_signed_at_ms": signed_at_ms,
-        })
-        return True
+        outcome = apply_release_aware_contractor_update(
+            transaction,
+            doc_ref,
+            data,
+            {
+                "subscription_auto_renews": auto_renews,
+                "subscription_renewal_status_signed_at_ms": signed_at_ms,
+            },
+        )
+        return outcome is not ReleaseAwareMutationResult.HELD
 
     transaction = db.transaction()
     return await loop.run_in_executor(None, lambda: _txn(transaction))

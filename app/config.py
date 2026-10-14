@@ -189,6 +189,21 @@ class Settings(DotenvProtectedBaseSettings):
     firestore_project_id: str = ""
     firebase_database_url: str = PRODUCTION_FIREBASE_DATABASE_URL
 
+    # Private staging background worker; embedded remains the production default.
+    background_worker_mode: str = "embedded"
+    background_worker_scheduler_audience: str = ""
+    background_worker_scheduler_service_account_email: str = ""
+    # An operator-generated, non-secret generation identifier binds one bounded
+    # staging cutover. It is required only when external worker mode is used.
+    background_worker_cutover_generation: str = ""
+
+    @field_validator("background_worker_mode")
+    @classmethod
+    def _validate_background_worker_mode(cls, value: str) -> str:
+        if value not in {"embedded", "external"}:
+            raise ValueError("BACKGROUND_WORKER_MODE must be embedded or external")
+        return value
+
     # App
     environment: str = "development"
     apns_sandbox: bool = True  # Use APNs sandbox endpoint; set to false for App Store builds
@@ -275,8 +290,43 @@ def decode_transcript_encryption_key(raw: str) -> bytes | None:
 
 def validate_runtime_safety(*, public_demo_entrypoint: bool = False) -> None:
     """Fail fast when an environment is pointed at the wrong runtime resources."""
-    env = (settings.environment or "").strip().lower()
+    configured_env = settings.environment
+    env = (configured_env or "").strip().lower()
     errors: list[str] = []
+    # Runtime branches intentionally compare the configured value directly.
+    # Reject aliases rather than allowing validation to normalize one value
+    # while startup selects a different branch.
+    if configured_env != env:
+        errors.append("ENVIRONMENT must be a trimmed lower-case runtime name")
+    if settings.background_worker_mode not in {"embedded", "external"}:
+        errors.append("BACKGROUND_WORKER_MODE must be embedded or external")
+    if settings.background_worker_mode == "external":
+        if env != "staging":
+            errors.append("External background workers require ENVIRONMENT=staging")
+        if settings.allow_production_resources_in_non_production:
+            errors.append("External background workers forbid production resource overrides")
+        configured_generation = settings.background_worker_cutover_generation
+        generation = configured_generation.strip()
+        if (
+            generation != configured_generation
+            or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{15,127}", generation)
+        ):
+            errors.append(
+                "BACKGROUND_WORKER_CUTOVER_GENERATION must be a 16-128 character "
+                "non-secret identifier when external workers are enabled"
+            )
+        # These loops have not received a bounded external-worker contract.
+        # Refuse a configuration that would silently stop them during cutover.
+        for enabled, setting in (
+            (settings.purge_enabled, "PURGE_ENABLED"),
+            (settings.service_request_recovery_enabled, "SERVICE_REQUEST_RECOVERY_ENABLED"),
+            (settings.jobber_disconnect_recovery_enabled, "JOBBER_DISCONNECT_RECOVERY_ENABLED"),
+        ):
+            if enabled:
+                errors.append(
+                    f"External background workers require {setting}=false until its loop is separately migrated"
+                )
+
 
     parent_breaker_fields = (
         settings.public_demo_breaker_twilio_parent_account_sid,

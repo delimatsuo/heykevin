@@ -10,7 +10,10 @@ from app.db.contractors import get_contractor
 from app.db.firestore_client import get_firestore_client
 from app.services.ai_estimate import analyze_media
 from app.services.estimate_media import make_watch_url, read_media
-from app.services.estimate_notifications import send_estimate_notifications
+from app.services.estimate_notifications import (
+    EstimateNotificationOutcomeUncertain,
+    send_estimate_notifications,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -19,6 +22,27 @@ COLLECTION = "estimates"
 MAX_ANALYSIS_ATTEMPTS = 3
 WORKER_INTERVAL_SECONDS = 30.0
 DEFAULT_LEASE_SECONDS = 300.0
+_EXTERNAL_NOTIFICATION_PENDING = "pending_external"
+_EXTERNAL_NOTIFICATION_SENT = "sent"
+_EXTERNAL_NOTIFICATION_NEEDS_ATTENTION = "needs_attention"
+
+
+def _notification_available(data: dict) -> bool:
+    """Whether an estimate has no settled or held notification outcome."""
+    return not bool(data.get("notified_at")) and data.get("notification_state") is None
+
+
+def _claim_notification_updates(data: dict, now: float, *, strict_external: bool) -> tuple[bool, dict]:
+    """Produce a notification claim without pre-claiming strict delivery."""
+    should_notify = _notification_available(data)
+    if not should_notify:
+        return False, {}
+    if strict_external:
+        return True, {
+            "notification_state": _EXTERNAL_NOTIFICATION_PENDING,
+            "notification_claimed_at": now,
+        }
+    return True, {"notified_at": now}
 
 
 def claim_reanalysis_or_fail(
@@ -26,12 +50,14 @@ def claim_reanalysis_or_fail(
     doc_ref,
     now: float,
     lease_seconds: float = DEFAULT_LEASE_SECONDS,
+    *,
+    strict_external: bool = False,
 ) -> tuple[str, dict]:
     """Atomically check lease expiry and either re-claim or mark failed.
 
     Returns (action, data) where action is one of:
       - "reclaimed": lease expired, attempts < MAX, incremented attempts and set fresh lease
-      - "failed_notify": attempts >= MAX, marked failed, claimed notification rights (notified_at set)
+      - "failed_notify": attempts >= MAX, marked failed, claimed notification rights
       - "failed_no_notify": attempts >= MAX, marked failed, notification was already sent
       - "noop": doc not exists, not processing, or lease not expired
     """
@@ -50,13 +76,14 @@ def claim_reanalysis_or_fail(
 
         attempts = data.get("attempts") or 0
         if attempts >= MAX_ANALYSIS_ATTEMPTS:
-            should_notify = not bool(data.get("notified_at"))
+            should_notify, notification_updates = _claim_notification_updates(
+                data, now, strict_external=strict_external,
+            )
             updates = {
                 "status": "failed",
                 "completed_at": now,
             }
-            if should_notify:
-                updates["notified_at"] = now
+            updates.update(notification_updates)
             transaction.update(doc_ref, updates)
             data.update(updates)
             return "failed_notify" if should_notify else "failed_no_notify", data
@@ -79,6 +106,8 @@ def claim_notification_and_complete(
     media_id: str,
     result: dict,
     now: float,
+    *,
+    strict_external: bool = False,
 ) -> tuple[bool, bool, dict]:
     """Atomically complete processing and claim notification rights.
 
@@ -95,14 +124,15 @@ def claim_notification_and_complete(
         if data.get("status") != "processing" or data.get("media_id") != media_id:
             return False, False, data
 
-        should_notify = not bool(data.get("notified_at"))
+        should_notify, notification_updates = _claim_notification_updates(
+            data, now, strict_external=strict_external,
+        )
         updates = {
             "status": "complete",
             "result": result,
             "completed_at": now,
         }
-        if should_notify:
-            updates["notified_at"] = now
+        updates.update(notification_updates)
 
         transaction.update(doc_ref, updates)
         data.update(updates)
@@ -116,6 +146,8 @@ def claim_notification_and_fail(
     doc_ref,
     media_id: str,
     now: float,
+    *,
+    strict_external: bool = False,
 ) -> tuple[bool, bool, dict]:
     """Atomically fail processing and claim notification rights.
 
@@ -132,13 +164,14 @@ def claim_notification_and_fail(
         if data.get("status") != "processing" or data.get("media_id") != media_id:
             return False, False, data
 
-        should_notify = not bool(data.get("notified_at"))
+        should_notify, notification_updates = _claim_notification_updates(
+            data, now, strict_external=strict_external,
+        )
         updates = {
             "status": "failed",
             "completed_at": now,
         }
-        if should_notify:
-            updates["notified_at"] = now
+        updates.update(notification_updates)
 
         transaction.update(doc_ref, updates)
         data.update(updates)
@@ -147,22 +180,187 @@ def claim_notification_and_fail(
     return _tx(tx)
 
 
-async def run_pending_estimates_once(now: Optional[float] = None) -> None:
+def confirm_external_notification(db, doc_ref, now: float) -> bool:
+    """Record confirmed strict-worker delivery after all intended sends finish."""
+    tx = db.transaction()
+
+    @transactional
+    def _tx(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if (
+            data.get("status") not in {"complete", "failed"}
+            or data.get("notification_state") != _EXTERNAL_NOTIFICATION_PENDING
+            or bool(data.get("notified_at"))
+        ):
+            return False
+        transaction.update(doc_ref, {
+            "notification_state": _EXTERNAL_NOTIFICATION_SENT,
+            "notified_at": now,
+        })
+        return True
+
+    return _tx(tx)
+
+
+def hold_external_notification(db, doc_ref, now: float) -> bool:
+    """Durably mark a strict notification for manual reconciliation."""
+    tx = db.transaction()
+
+    @transactional
+    def _tx(transaction) -> bool:
+        snapshot = doc_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if data.get("notification_state") != _EXTERNAL_NOTIFICATION_PENDING:
+            return False
+        transaction.update(doc_ref, {
+            "notification_state": _EXTERNAL_NOTIFICATION_NEEDS_ATTENTION,
+            "notification_uncertain_at": now,
+        })
+        return True
+
+    return _tx(tx)
+
+
+async def _send_claimed_estimate_notifications(
+    db,
+    doc_ref,
+    *,
+    strict_external: bool,
+    expected_contractor_id: str,
+    notification_kwargs: dict,
+) -> None:
+    """Send a claimed estimate notification and settle its strict state.
+
+    A strict worker intentionally does not retry after a provider boundary. If
+    a send or its subsequent Firestore confirmation is uncertain, the estimate
+    and outer worker ledger both remain available for operator reconciliation.
+    """
+    async def hold_for_reconciliation(message: str) -> None:
+        try:
+            held = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: hold_external_notification(db, doc_ref, time.time()),
+            )
+            if not held:
+                logger.error("Failed to record external estimate notification hold")
+        except Exception as hold_error:
+            logger.error(
+                "Failed to record external estimate notification hold: %s",
+                type(hold_error).__name__,
+            )
+        raise EstimateNotificationOutcomeUncertain(message)
+
+    if not strict_external:
+        await send_estimate_notifications(**notification_kwargs)
+        return
+
+    # The first contractor read happens before media I/O and model analysis.
+    # Do not use it across the external SMS boundary: a caller can have been
+    # deactivated, reassigned, or removed from compliant texting meanwhile.
+    # Re-read immediately before delivery and replace all owner/sender details
+    # supplied to the notification service with that authoritative profile.
+    if not isinstance(expected_contractor_id, str) or not expected_contractor_id:
+        await hold_for_reconciliation(
+            "Estimate notification contractor identity is uncertain"
+        )
+
+    try:
+        contractor = await get_contractor(expected_contractor_id)
+    except Exception as error:
+        try:
+            await hold_for_reconciliation(
+                "Estimate notification contractor identity is uncertain"
+            )
+        except EstimateNotificationOutcomeUncertain as held_error:
+            raise held_error from error
+
+    if (
+        not isinstance(contractor, dict)
+        or contractor.get("contractor_id") != expected_contractor_id
+        or contractor.get("active") is not True
+        or contractor.get("sms_compliance_status") != "approved"
+    ):
+        await hold_for_reconciliation(
+            "Estimate notification contractor identity is uncertain"
+        )
+
+    notification_kwargs = {**notification_kwargs, "contractor": contractor}
+
+    try:
+        await send_estimate_notifications(**notification_kwargs, strict=True)
+    except Exception as error:
+        try:
+            await hold_for_reconciliation("Estimate notification outcome is uncertain")
+        except EstimateNotificationOutcomeUncertain as held_error:
+            raise held_error from error
+
+    try:
+        confirmed = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: confirm_external_notification(db, doc_ref, time.time()),
+        )
+    except Exception as error:
+        confirmed = False
+        confirmation_error = error
+    else:
+        confirmation_error = None
+    if confirmed:
+        return
+
+    try:
+        await hold_for_reconciliation("Estimate notification confirmation is uncertain")
+    except EstimateNotificationOutcomeUncertain as held_error:
+        raise held_error from confirmation_error
+
+
+async def run_pending_estimates_once(
+    now: Optional[float] = None, *, page_size: int | None = None,
+    max_analyses: int | None = None, continuation: dict | None = None,
+) -> dict | None:
     """Scan for processing estimates with expired leases, re-claim, and re-run analysis."""
+    bounded = page_size is not None
+    # A bounded pass is only called by the ledger-backed external worker. Its
+    # notification side effects must be explicitly settled before the parent
+    # job can become completed; embedded/API callers retain legacy behavior.
+    strict_external = bounded
+    if bounded and (not 1 <= page_size <= 25 or max_analyses != 1):
+        raise ValueError("External estimate recovery requires page_size <= 25 and max_analyses=1")
+    cursor = (continuation or {}).get("processing") if bounded else None
+    next_cursor = cursor
+    admitted = 0
     current_time = now if now is not None else time.time()
     db = get_firestore_client()
 
     def _fetch_processing_docs():
         query = db.collection(COLLECTION).where("status", "==", "processing")
-        return list(query.stream())
+        if not bounded:
+            return list(query.stream())
+        query = query.order_by("__name__")
+        if cursor:
+            query = query.start_after({"__name__": db.collection(COLLECTION).document(cursor)})
+        docs = list(query.limit(page_size).stream())
+        if not docs and cursor:
+            docs = list(db.collection(COLLECTION).where("status", "==", "processing")
+                        .order_by("__name__").limit(page_size).stream())
+        return docs
 
     try:
         docs = await asyncio.get_running_loop().run_in_executor(None, _fetch_processing_docs)
     except Exception as e:
         logger.error("Error checking pending estimates: %s", type(e).__name__)
+        if bounded:
+            raise
         return
 
+    if bounded and not docs:
+        return {"processing": None}
     for doc in docs:
+        if bounded and admitted >= max_analyses:
+            break
+        next_cursor = doc.id
         token_hash = doc.id
         doc_ref = doc.reference
 
@@ -174,15 +372,21 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
         try:
             action, claim_data = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: claim_reanalysis_or_fail(db, doc_ref, current_time),
+                lambda: claim_reanalysis_or_fail(
+                    db, doc_ref, current_time, strict_external=strict_external,
+                ),
             )
         except Exception as e:
             logger.error("Failed to execute claim transaction for %s: %s", token_hash[:8], type(e).__name__)
+            if bounded:
+                raise
             continue
 
         if action in ("noop", "failed_no_notify"):
             continue
 
+        if bounded:
+            admitted += 1
         media_id = claim_data.get("media_id", "")
         object_path = claim_data.get("media_object_path", "")
         contractor_id = claim_data.get("contractor_id", "")
@@ -197,13 +401,18 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
                 MAX_ANALYSIS_ATTEMPTS,
             )
             watch_url = make_watch_url(media_id) if (media_id and object_path) else ""
-            await send_estimate_notifications(
-                caller_phone=caller_phone,
-                contractor=contractor,
-                call_sid=call_sid,
-                token_hash=token_hash,
-                is_failure=True,
-                watch_url=watch_url,
+            await _send_claimed_estimate_notifications(
+                db, doc_ref,
+                strict_external=strict_external,
+                expected_contractor_id=contractor_id,
+                notification_kwargs={
+                    "caller_phone": caller_phone,
+                    "contractor": contractor,
+                    "call_sid": call_sid,
+                    "token_hash": token_hash,
+                    "is_failure": True,
+                    "watch_url": watch_url,
+                },
             )
             continue
 
@@ -221,15 +430,22 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
             now_fail = time.time()
             accepted, should_notify, _ = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: claim_notification_and_fail(db, doc_ref, media_id, now_fail),
+                lambda: claim_notification_and_fail(
+                    db, doc_ref, media_id, now_fail, strict_external=strict_external,
+                ),
             )
             if accepted and should_notify:
-                await send_estimate_notifications(
-                    caller_phone=caller_phone,
-                    contractor=contractor,
-                    call_sid=call_sid,
-                    token_hash=token_hash,
-                    is_failure=True,
+                await _send_claimed_estimate_notifications(
+                    db, doc_ref,
+                    strict_external=strict_external,
+                    expected_contractor_id=contractor_id,
+                    notification_kwargs={
+                        "caller_phone": caller_phone,
+                        "contractor": contractor,
+                        "call_sid": call_sid,
+                        "token_hash": token_hash,
+                        "is_failure": True,
+                    },
                 )
             continue
 
@@ -251,18 +467,27 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
             now_finish = time.time()
             accepted, should_notify, _ = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: claim_notification_and_complete(db, doc_ref, media_id, result, now_finish),
+                lambda: claim_notification_and_complete(
+                    db, doc_ref, media_id, result, now_finish, strict_external=strict_external,
+                ),
             )
             if accepted and should_notify:
                 watch_url = make_watch_url(media_id) if media_id else ""
-                await send_estimate_notifications(
-                    caller_phone=caller_phone,
-                    contractor=contractor,
-                    call_sid=call_sid,
-                    token_hash=token_hash,
-                    result=result,
-                    watch_url=watch_url,
+                await _send_claimed_estimate_notifications(
+                    db, doc_ref,
+                    strict_external=strict_external,
+                    expected_contractor_id=contractor_id,
+                    notification_kwargs={
+                        "caller_phone": caller_phone,
+                        "contractor": contractor,
+                        "call_sid": call_sid,
+                        "token_hash": token_hash,
+                        "result": result,
+                        "watch_url": watch_url,
+                    },
                 )
+        except EstimateNotificationOutcomeUncertain:
+            raise
         except Exception as error:
             logger.error(
                 "Recovery failed for estimate %s: %s",
@@ -274,24 +499,34 @@ async def run_pending_estimates_once(now: Optional[float] = None) -> None:
                 try:
                     accepted, should_notify, _ = await asyncio.get_running_loop().run_in_executor(
                         None,
-                        lambda: claim_notification_and_fail(db, doc_ref, media_id, now_err),
+                        lambda: claim_notification_and_fail(
+                            db, doc_ref, media_id, now_err, strict_external=strict_external,
+                        ),
                     )
                     if accepted and should_notify:
                         watch_url = make_watch_url(media_id) if (media_id and object_path) else ""
-                        await send_estimate_notifications(
-                            caller_phone=caller_phone,
-                            contractor=contractor,
-                            call_sid=call_sid,
-                            token_hash=token_hash,
-                            is_failure=True,
-                            watch_url=watch_url,
+                        await _send_claimed_estimate_notifications(
+                            db, doc_ref,
+                            strict_external=strict_external,
+                            expected_contractor_id=contractor_id,
+                            notification_kwargs={
+                                "caller_phone": caller_phone,
+                                "contractor": contractor,
+                                "call_sid": call_sid,
+                                "token_hash": token_hash,
+                                "is_failure": True,
+                                "watch_url": watch_url,
+                            },
                         )
+                except EstimateNotificationOutcomeUncertain:
+                    raise
                 except Exception as e:
                     logger.error(
                         "Failed to mark estimate %s as failed after recovery error: %s",
                         token_hash[:8],
                         type(e).__name__,
                     )
+    return {"processing": next_cursor} if bounded else None
 
 
 async def estimate_worker_loop() -> None:

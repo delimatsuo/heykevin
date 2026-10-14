@@ -45,7 +45,7 @@ class _FakeDocumentRef:
         self._subcollections = subcollections
         return self
 
-    def get(self):
+    def get(self, transaction=None):
         if self._doc is not None:
             return self._doc
         import datetime
@@ -100,6 +100,11 @@ class _FakeCollection:
         return list(self._docs)
 
 
+class _FakeTransaction:
+    def update(self, ref, updates):
+        ref.update(updates)
+
+
 class _FakeFirestore:
     def __init__(
         self,
@@ -131,6 +136,14 @@ class _FakeFirestore:
 
     def collection(self, name: str):
         return self._collections.setdefault(name, _FakeCollection([]))
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+@pytest.fixture(autouse=True)
+def _immediate_admin_transactions(monkeypatch):
+    monkeypatch.setattr(admin_api.firestore, "transactional", lambda fn: fn)
 
 
 def _admin_request():
@@ -224,6 +237,55 @@ async def test_admin_contractor_detail_masks_secrets_and_summarizes_device(monke
         "updated_at": 123,
     }
     assert response["diagnostics"] == [{"severity": "info", "code": "no_recent_calls"}]
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_exposes_safe_number_release_reconciliation_summary(monkeypatch):
+    fake_db = _FakeFirestore([
+        _FakeDoc("contractor-1", {
+            "active": True,
+            "number_release_claim": {
+                "state": "needs_attention",
+                "nonce": "private-nonce",
+                "expected_twilio_number": "+15550001111",
+                "claimed_at": 10,
+                "deleting_at": 11,
+                "held_at": 12,
+            },
+            "number_release_conflict": {
+                "at": 13,
+                "phase": "deleting",
+                "kind": "profile_mutation",
+                "fields": ["subscription_status"],
+                "deferred_updates": {
+                    "subscription_status": "active",
+                    "subscription_original_transaction_id": "private-receipt",
+                },
+                "deferred_subscription_events": [{
+                    "at": 13,
+                    "updates": {
+                        "subscription_status": "active",
+                        "subscription_original_transaction_id": "private-receipt",
+                    },
+                }],
+            },
+        }),
+    ])
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+
+    response = await admin_api.admin_get_contractor_detail("contractor-1", _admin_request())
+
+    summary = response["contractor"]["number_release_reconciliation"]
+    assert summary["state"] == "needs_attention"
+    assert summary["deferred_updates"] == {"subscription_status": "active"}
+    assert summary["deferred_subscription_events"] == [{
+        "at": 13,
+        "updates": {"subscription_status": "active"},
+    }]
+    assert "number_release_claim" not in response["contractor"]
+    assert "number_release_conflict" not in response["contractor"]
+    assert "private-nonce" not in repr(summary)
+    assert "private-receipt" not in repr(summary)
 
 
 @pytest.mark.asyncio

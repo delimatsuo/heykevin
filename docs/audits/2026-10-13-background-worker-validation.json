@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-13T15:13:13.503249+00:00",
+  "scope": "Kevin-only; staging-only worker candidate; embedded remains default",
+  "base_commit": "2c345b4eb370946b7ae72ca088609e158830fa07",
+  "branch": "codex/cloud-run-worker-costs-20261013",
+  "source_manifest": {
+    "app/config.py": "bfa176a033d7bb2d826c007c02c89a5292b1f2cf88df0403f5e963dde0a12c0e",
+    "app/db/background_jobs.py": "76a9b35823185f700e9f3c7ae52ab8363fd3239bfdc02032f85b130b1827710b",
+    "app/main.py": "3f4723e73ea325b46ee223cfbb7b0721937d4b4a2488a92ef229cc642f946797",
+    "app/middleware/worker_auth.py": "8762781b08bdada86f33eeb2fd10b6b8ea079cd61eb255fbe59435c0ce69ad53",
+    "app/services/background_dispatch.py": "bad406b3ad8f886681c7d0cccbad95a317c30f98d288d2333d361500a66b6d88",
+    "app/services/background_maintenance.py": "802161636e5ee75be64b89e9ae765cf68f87d2a17777bce3e0d7ca5970b5acca",
+    "app/services/estimate_worker.py": "bff0e50fe17d2d57b3c4ae0194bc2a4ee7134e7b6e2a7e5922fa07f318b223b2",
+    "app/services/post_call_handoff.py": "4a16512ba3474e33fb6e3717e4afdf7a15f3f7c4ce9012f29552ffa6b144a4fa",
+    "app/worker_main.py": "27e04fb9dde8873ef2ea869013232c3c025e5f10ebfe648a477667f999083cf3",
+    "app/worker_runner.py": "eb1964687fcbbb540cd5d6bff57ee2419ac6d4f9de158e130d6930be2652855d",
+    "tests/unit/test_background_dispatch.py": "f56e604eae8d42999cfdca3f9898f67540d43b1b8c06ac93dec57302c58973de",
+    "tests/unit/test_background_jobs.py": "1b4d2193027c21cde23587fb170c237ec67c5f7e56379caed4ae4cbefec964ec",
+    "tests/unit/test_background_maintenance.py": "91eada34df5addb94d86391c1ef180154fe453795816f7fa4d81f60d0b4a0412",
+    "tests/unit/test_health.py": "cf28c35e3ff9b0bae4eb39c625847d0a6e69b9e2eb05daef0954c3c10bbcdcb6",
+    "tests/unit/test_jobber_disconnect_receiver.py": "03cc8a8f19b6ebc6ff19f3fbc50d7f5fa0d1c39ba30a2b72abdbd16a91d811f7",
+    "tests/unit/test_number_release_wiring.py": "75cd92491d6b8c4b806f9693ca2706b55aa5dd58a1810ad041ee267455988815",
+    "tests/unit/test_voice_bakeoff_session_driver.py": "926439c90a7c8d3d3fa17f4c721d980e187c695887950c6175b7f6c6397e2f70",
+    "tests/unit/test_voice_bakeoff_turn_composition.py": "58b141a1ce2cb96bdf956f96308b0db8ec714ef9652e8f5cc94b7bd833a9f8a4",
+    "tests/unit/test_worker_lifecycle.py": "72c5a05df2b87f16b0f4360dd68d25e0c180a7c1047166b561aa7e4445c38a66",
+    "tests/unit/test_worker_main.py": "ab40b0c3ec4668a8eba59025fb8fcb1655c94b086e6a9273727cada11cf2a8aa"
+  },
+  "validation": {
+    "executor": "Root agent; builder and reviewer did not grade their own work",
+    "python": "3.12.13",
+    "environment": "KEVIN_DISABLE_DOTENV=1; env -i; empty temporary CLOUDSDK_CONFIG; sandbox-exec denies network-outbound",
+    "full_suite": {
+      "command": "python -m pytest --tb=short -q -o faulthandler_timeout=90 tests",
+      "passed": 9285,
+      "skipped": 1,
+      "failed": 0,
+      "warnings": 44,
+      "seconds": 168.91
+    },
+    "focused_after_mutation_restoration": {
+      "passed": 357,
+      "failed": 0,
+      "warnings": 8,
+      "seconds": 4.05,
+      "coverage": [
+        "new worker maintenance, dispatch, ledger, auth and lifecycle",
+        "post-call and estimate recovery",
+        "number release, paid trial guards and purge",
+        "owner call actions, Twilio status and media ingress",
+        "health metadata and sealed bakeoff call-route guards"
+      ]
+    },
+    "quality": {
+      "ruff_E9_F63_F7_F82": "pass",
+      "compileall_app_tests": "pass",
+      "git_diff_check": "pass"
+    },
+    "mutation_checks": [
+      {
+        "guard": "completion_nonce",
+        "detected": true,
+        "restored_exact_source": true
+      },
+      {
+        "guard": "uncertain_work_replay",
+        "detected": true,
+        "restored_exact_source": true
+      },
+      {
+        "guard": "oidc_invoker_email",
+        "detected": true,
+        "restored_exact_source": true
+      },
+      {
+        "guard": "closed_stdout_descendant_cleanup",
+        "detected": true,
+        "restored_exact_source": true
+      }
+    ],
+    "adversarial_probes": [
+      "duplicate claims across independent stores",
+      "late stale nonce cannot finish newer claim",
+      "repeated cancellation during admission and process cleanup",
+      "child ignores SIGTERM, retains stdout or closes stdout",
+      "protocol overflow cannot create unbounded output capture",
+      "temporary estimate failure does not starve later work",
+      "persisted cursors survive process restart",
+      "real Google JWT signature verification and tampering rejection",
+      "empty real Firestore SDK batch response fails closed",
+      "enabled acquisition measurement settles through actual worker runner/executor lifetime",
+      "trial activation rechecked transactionally",
+      "refreshed RTDB active call survives stale cleanup snapshot"
+    ],
+    "earlier_attempts": "One full run was stopped after local ADC was detected despite env-i; outbound sandbox denied access. Isolating CLOUDSDK_CONFIG fixed the environment. Next full run had 3 intentional health/hash assertion mismatches; expectations were updated after independent lifecycle review. Final full and focused results above are clean."
+  },
+  "independent_review": {
+    "model": "gpt-6-astra, high, fresh context",
+    "source_verdict": "pass after fixes; zero open findings",
+    "runbook_verdict": "pass after fixes; zero open findings",
+    "reviewed_main_sha256": "3f4723e73ea325b46ee223cfbb7b0721937d4b4a2488a92ef229cc642f946797",
+    "findings_remediated": [
+      "SIGTERM-ignoring descendants with closed stdout",
+      "authoritative server snapshot rather than synthetic local-time fallback",
+      "six-job cutover must require omitted-worker flags false",
+      "separate later scale-down time/cost envelope",
+      "no destructive revision deletion; verified zero old embedded instances"
+    ],
+    "graph_reduction": {
+      "discovery_expected": 2,
+      "discovery_returned": 2,
+      "review_expected": 2,
+      "review_returned": 2,
+      "open_findings": 0
+    }
+  },
+  "provider_observation": {
+    "project": "kevin-491315",
+    "region": "us-central1",
+    "gcp_cli_reauthentication": "refreshed and verified",
+    "production": {
+      "service": "kevin-api",
+      "revision": "kevin-api-00277-neb",
+      "deploy_sha": "b62eea38d9ab5656fb8d809fb872f05d9c81147d",
+      "cpu": "1",
+      "memory": "512Mi",
+      "cpu_throttling": false,
+      "revision_min": 1,
+      "traffic_percent": 100
+    },
+    "staging": {
+      "service": "kevin-api-staging",
+      "revision": "kevin-api-staging-00185-xec",
+      "deploy_sha": "5a1236d7d0aaa187b5bf1d951c8765d83d9d8117",
+      "cpu": "1",
+      "memory": "512Mi",
+      "cpu_throttling": false,
+      "service_min": 1,
+      "revision_min": 1,
+      "traffic_percent": 100,
+      "firestore_project": "kevin-staging-491315",
+      "acquisition_measurement_enabled": true,
+      "omitted_worker_flags": "unset; source defaults false"
+    },
+    "scheduler_and_tasks_apis_enabled": false,
+    "mutations_in_this_worker_slice": [],
+    "prior_container_cleanup": "285 approved images removed in separate audit slice; 89 protected images retained; no additional deletion authorized by this candidate"
+  },
+  "github_read_only_preflight": {
+    "repository": "delimatsuo/heykevin",
+    "owner_and_billing_owner": "delimatsuo (User)",
+    "visibility": "public",
+    "required_check": "Test",
+    "strict": true,
+    "underlying_jobs": [
+      "Python suite 1/7",
+      "Python suite 2/7",
+      "Python suite 3/7",
+      "Python suite 4/7",
+      "Python suite 5/7",
+      "Python suite 6/7",
+      "Python suite 7/7",
+      "Python quality",
+      "Test"
+    ],
+    "trigger": "pull_request to main/staging; push only staging; manual deploy dispatch",
+    "candidate_feature_branch_push_triggers_workflow": false,
+    "runner": "ubuntu-latest standard Linux",
+    "ci_hard_max_job_minutes": 125,
+    "ci_gross_upper_usd": 0.75,
+    "ci_expected_actions_charge_usd": 0,
+    "representative_successful_run": 38106975686,
+    "representative_rounded_job_minutes": 10,
+    "representative_gross_usd": 0.06,
+    "active_or_queued_or_waiting_or_pending_runs": 0,
+    "other_open_prs": [
+      292
+    ],
+    "october_portfolio_reported_net_usd": 0.68754787,
+    "october_kevin_gross_usd": 1.602,
+    "october_kevin_net_usd": 0,
+    "cache_count": 5,
+    "cache_bytes": 295865010,
+    "artifact_count": 0,
+    "automatic_ai_review_billing": "unknown; absence of billed entries or rulesets does not establish disabled/free",
+    "proposed_combined_actions_ai_ceiling_usd": 1,
+    "admission": "Await exact final-SHA authorization; re-check AI cost exposure before triggering. Do not proceed if combined charge cannot fit the approved ceiling.",
+    "published_or_triggered_by_this_slice": false
+  },
+  "activation_status": {
+    "source_local": "validated and independently reviewed",
+    "ci": "not triggered",
+    "deployment": "not performed",
+    "live_call_qualification": "not performed",
+    "runtime_savings": "not realized or measured"
+  },
+  "proposed_pilot": {
+    "runbook": "docs/cloud-run-background-workers.md",
+    "worker_service": "kevin-background-staging",
+    "max_hours": 24,
+    "incremental_gcp_ceiling_usd": 5,
+    "scheduler_jobs": 6,
+    "new_keyless_scheduler_identity": true,
+    "private_worker_min_instances": 0,
+    "private_worker_max_instances": 2,
+    "staging_api_min_instances": 1,
+    "staging_api_cpu_throttling": false,
+    "production_changes": false,
+    "old_revision_deletion": false,
+    "scale_to_zero_api": "separate later qualified and authorized phase"
+  },
+  "remaining": [
+    "exact-SHA hosted Actions/AI spend admission",
+    "bounded staging cloud provisioning/deployment envelope",
+    "actual private IAM/OIDC and duplicate-delivery qualification",
+    "verified termination of every old embedded staging instance",
+    "resource, cost and backlog measurement",
+    "owner real test-call and shutdown/handoff qualification before API scale reduction"
+  ]
+}

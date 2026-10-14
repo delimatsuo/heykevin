@@ -41,13 +41,30 @@ class _Snap:
 class _Query:
     def __init__(self, store: dict):
         self._store = store
+        self._cursor = ""
+        self._limit = None
 
     def where(self, *_a, **_k):
         return self
 
+    def order_by(self, *_a, **_k):
+        return self
+
+    def start_after(self, value):
+        cursor = value["__name__"]
+        self._cursor = getattr(cursor, "_id", cursor)
+        return self
+
+    def limit(self, value):
+        self._limit = value
+        return self
+
     def stream(self):
         # Snapshot semantics: copies taken at query time, like a real stream.
-        return iter([_Snap(i, dict(d)) for i, d in self._store.items()])
+        items = [(i, d) for i, d in sorted(self._store.items()) if i > self._cursor]
+        if self._limit is not None:
+            items = items[:self._limit]
+        return iter([_Snap(i, dict(d)) for i, d in items])
 
 
 class _DocRef:
@@ -87,6 +104,8 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
     system: dict[str, dict] = {"number_release": {"observation_started_at": time.time() - 45 * DAY}}
     sms: list[tuple] = []
     deactivated: list[str] = []
+    release_confirmation_flags: list[bool] = []
+    release_claims: list[str] = []
     last_calls: dict[str, object] = {}
     on_lookup: dict[str, object] = {}
     apple: dict[str, object] = {}
@@ -99,7 +118,19 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
         sms.append((account["owner_phone"], body, account["twilio_number"]))
         return True
 
-    async def fake_deactivate(contractor_id, user_requested=False):
+    async def fake_deactivate(
+        contractor_id,
+        user_requested=False,
+        *,
+        require_confirmed_number_release=False,
+        strict_number_release_precondition=None,
+        strict_number_release_claim=None,
+    ):
+        release_confirmation_flags.append(require_confirmed_number_release)
+        if strict_number_release_precondition is not None:
+            assert strict_number_release_precondition(store[contractor_id]) is True
+        if require_confirmed_number_release:
+            assert strict_number_release_claim is not None
         deactivated.append(contractor_id)
         store[contractor_id]["active"] = False
         return True
@@ -120,15 +151,22 @@ def _build_harness(monkeypatch, *, fake_apple: bool = True):
             raise value
         return value
 
+    async def fake_claim(contractor_id, *, strict_precondition):
+        assert strict_precondition(store[contractor_id]) is True
+        release_claims.append(contractor_id)
+        return object()
+
     monkeypatch.setattr(number_release, "get_firestore_client", lambda: _Db({"contractors": store, "system": system}))
     monkeypatch.setattr("app.services.owner_sms.send_owner_sms", fake_sms)
     monkeypatch.setattr(number_release, "deactivate_contractor", fake_deactivate)
+    monkeypatch.setattr(number_release, "claim_strict_number_release", fake_claim)
     monkeypatch.setattr(number_release, "latest_call_timestamp", fake_latest)
     if fake_apple:
         monkeypatch.setattr(number_release, "_apple_subscription_statuses", fake_apple_statuses)
     monkeypatch.setattr(number_release.settings, "lapsed_number_release_enabled", True)
     return SimpleNamespace(
         store=store, system=system, sms=sms, deactivated=deactivated,
+        release_confirmation_flags=release_confirmation_flags, release_claims=release_claims,
         last_calls=last_calls, on_lookup=on_lookup, apple=apple, apple_calls=apple_calls,
     )
 
@@ -334,6 +372,162 @@ async def test_lapsed_releases_are_capped_per_run_but_deleted_app_releases_are_n
     assert result["lapsed_released"] == number_release.LAPSED_RELEASE_MAX_PER_RUN
     assert result["deleted_app_released"] == 1
     assert len(harness.deactivated) == number_release.LAPSED_RELEASE_MAX_PER_RUN + 1
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_uses_a_bounded_persisted_cursor(harness):
+    now = time.time()
+    for index in range(6):
+        harness.store[f"gone{index}"] = _deleted_app(now)
+
+    first = await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+    second = await number_release.run_bounded_expired_contractor_cleanup_once(first, page_size=5, now=now)
+
+    assert first == {"cursor": "gone4"}
+    assert second == {"cursor": None}
+    assert harness.deactivated == [f"gone{index}" for index in range(6)]
+    assert harness.release_confirmation_flags == [True] * 6
+    assert harness.release_claims == [f"gone{index}" for index in range(6)]
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_uncertain_deactivation(harness, monkeypatch):
+    """A release may have reached Twilio before its profile update failed."""
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def uncertain_deactivate(
+        contractor_id,
+        user_requested=False,
+        *,
+        require_confirmed_number_release=False,
+        strict_number_release_precondition=None,
+        strict_number_release_claim=None,
+    ):
+        assert require_confirmed_number_release is True
+        assert strict_number_release_precondition is not None
+        assert strict_number_release_claim is not None
+        harness.deactivated.append(contractor_id)  # provider boundary was crossed
+        raise RuntimeError("profile update timed out")
+
+    monkeypatch.setattr(number_release, "deactivate_contractor", uncertain_deactivate)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="deactivation outcome"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == ["gone1"]
+    assert len(harness.sms) == 1
+    assert "processing release" in harness.sms[0][1]
+    assert "has been released" not in harness.sms[0][1]
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_unconfirmed_release(harness, monkeypatch):
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def unconfirmed_deactivate(
+        contractor_id,
+        user_requested=False,
+        *,
+        require_confirmed_number_release=False,
+        strict_number_release_precondition=None,
+        strict_number_release_claim=None,
+    ):
+        assert require_confirmed_number_release is True
+        assert strict_number_release_precondition is not None
+        assert strict_number_release_claim is not None
+        harness.deactivated.append(contractor_id)
+        return False
+
+    monkeypatch.setattr(number_release, "deactivate_contractor", unconfirmed_deactivate)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="deactivation outcome"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == ["gone1"]
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_unsuccessful_release_notice(harness, monkeypatch):
+    """A false SMS result can also follow an indeterminate provider request."""
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def unsuccessful_sms(contractor_id, body):
+        return False
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", unsuccessful_sms)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="SMS outcome"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == []
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_when_inbound_evidence_arrives_after_notice(harness, monkeypatch):
+    now = time.time()
+    harness.store["gone1"] = _deleted_app(now)
+
+    async def sms_records_inbound(contractor_id, body):
+        account = harness.store[contractor_id]
+        harness.sms.append((account["owner_phone"], body, account["twilio_number"]))
+        account["last_inbound_call_at"] = time.time()
+        return True
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", sms_records_inbound)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="eligibility changed"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == []
+    assert len(harness.sms) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_when_subscription_changes_after_notice(harness, monkeypatch):
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now)
+
+    async def sms_activates_subscription(contractor_id, body):
+        account = harness.store[contractor_id]
+        harness.sms.append((account["owner_phone"], body, account["twilio_number"]))
+        account["subscription_status"] = "active"
+        return True
+
+    monkeypatch.setattr("app.services.owner_sms.send_owner_sms", sms_activates_subscription)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="eligibility changed"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert harness.deactivated == []
+    assert len(harness.sms) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_expired_sweep_holds_on_evidence_during_post_notice_lookup(harness, monkeypatch):
+    """The final raw read catches a change after async eligibility lookup starts."""
+    now = time.time()
+    harness.store["lapsed1"] = _lapsed(now)
+    lookup_count = 0
+
+    async def late_inbound_lookup(contractor_id):
+        nonlocal lookup_count
+        lookup_count += 1
+        # The third lookup is the post-notice fresh candidate. Its document
+        # read already happened, so old code continued from a stale dict.
+        if lookup_count == 3:
+            harness.store[contractor_id]["last_inbound_call_at"] = time.time()
+        return None
+
+    monkeypatch.setattr(number_release, "latest_call_timestamp", late_inbound_lookup)
+
+    with pytest.raises(number_release.NumberReleaseOutcomeUncertain, match="eligibility changed"):
+        await number_release.run_bounded_expired_contractor_cleanup_once({}, page_size=5, now=now)
+
+    assert lookup_count == 3
+    assert harness.deactivated == []
 
 
 @pytest.mark.asyncio

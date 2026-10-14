@@ -1,0 +1,1222 @@
+{
+  "schema_version": 1,
+  "status": "pilot_stopped_and_closed; estimate_failure_unresolved",
+  "recorded_at": "2026-10-13T16:17:38.079527+00:00",
+  "scope": "Kevin staging only; production unchanged; staging warm throughout",
+  "candidate_sha": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+  "base_sha": "2c345b4eb370946b7ae72ca088609e158830fa07",
+  "branch": "codex/cloud-run-worker-costs-20261013",
+  "authorization": {
+    "actions_and_ai_usd_max": 1,
+    "gcp_incremental_usd_max": 5,
+    "pilot_max_hours": 24,
+    "supervised_schedule_stop": "2026-10-13T16:10:00Z",
+    "supervised_closeout_deadline": "2026-10-13T16:20:00Z",
+    "production_change_authorized": false,
+    "api_scale_to_zero_authorized": false
+  },
+  "ci": {
+    "run_id": 38421770589,
+    "url": "https://github.com/delimatsuo/heykevin/actions/runs/38421770589",
+    "conclusion": "success",
+    "dispatch_count": 1,
+    "retries": 0,
+    "candidate_verified": true,
+    "python_shard_pass_counts": [
+      879,
+      1017,
+      987,
+      4167,
+      898,
+      683,
+      655
+    ],
+    "total_python_passed": 9286,
+    "quality": "passed",
+    "Test": "passed",
+    "staging_deploy": "success",
+    "production_deploy": "skipped",
+    "pr_opened": false,
+    "ai_reviews_requested": 0,
+    "pr_hold": "Automatic PR AI review charges could not be bounded under US$1; exact-candidate manual staging workflow avoided PR events."
+  },
+  "local_validation": "2026-10-13-background-worker-validation.json",
+  "build": {
+    "id": "e2f8bc02-6ec5-4473-8f18-62b9ea9f2612",
+    "status": "SUCCESS",
+    "start": "2026-10-13T15:27:13.366811636Z",
+    "finish": "2026-10-13T15:30:32.608248Z",
+    "image": "us-central1-docker.pkg.dev/kevin-491315/cloud-run-source-deploy/kevin-api-staging@sha256:ce5d26e6f615d9ade7733b1122926ba17b68c0b94ed2b0b34f9f1c9936203bfa",
+    "build_count": 1
+  },
+  "cutover_safety": {
+    "original_staging_revision": "kevin-api-staging-00185-xec",
+    "candidate_embedded_revision": "kevin-api-staging-00187-zud",
+    "external_revision": "kevin-api-staging-00189-qiy",
+    "old_process_shutdown_complete": [
+      "2026-10-13T15:31:44.396Z",
+      "2026-10-13T15:37:34.382Z",
+      "2026-10-13T15:37:37.984Z"
+    ],
+    "fresh_old_revision_instance_zero_observations": {
+      "00185": "2026-10-13T15:39:00Z",
+      "00187": "2026-10-13T15:40:00Z"
+    },
+    "old_traffic_and_tags_removed_before_scheduler_invoker_grant": true,
+    "old_revisions_deleted": false,
+    "baseline_active_calls": 0,
+    "baseline_post_call_pending": 0,
+    "baseline_post_call_in_progress": 0,
+    "baseline_post_call_needs_attention": 7,
+    "baseline_estimates_processing": 0
+  },
+  "live_configuration_snapshot": {
+    "kevin-api": {
+      "latest_ready_revision": "projects/kevin-491315/locations/us-central1/services/kevin-api/revisions/kevin-api-00277-neb",
+      "create_time": "2026-03-25T18:03:18.387990Z",
+      "update_time": "2026-09-30T16:54:50.231190Z",
+      "traffic": [
+        {
+          "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+          "revision": "kevin-api-00277-neb",
+          "percent": 100
+        }
+      ],
+      "uri": "https://kevin-api-l63rergg7a-uc.a.run.app",
+      "service_scaling": {
+        "maxInstanceCount": 20
+      },
+      "revision_scaling": {
+        "minInstanceCount": 1,
+        "maxInstanceCount": 10
+      },
+      "concurrency": 10,
+      "timeout": "300s",
+      "runtime_identity": "kevin-api-production-runtime@kevin-491315.iam.gserviceaccount.com",
+      "image": "us-central1-docker.pkg.dev/kevin-491315/cloud-run-source-deploy/kevin-api@sha256:4de7793d07cb17bb800d4141d9c5ba920b65454ae8b018b9ccb69b0225247135",
+      "resources": {
+        "limits": {
+          "cpu": "1",
+          "memory": "512Mi"
+        },
+        "startupCpuBoost": true
+      },
+      "command": null,
+      "args": null,
+      "environment": {
+        "ENVIRONMENT": "production",
+        "DEPLOY_SHA": "b62eea38d9ab5656fb8d809fb872f05d9c81147d",
+        "FIRESTORE_PROJECT_ID": "kevin-491315",
+        "FIREBASE_DATABASE_URL": "https://kevin-491315-rtdb.firebaseio.com",
+        "APNS_SANDBOX": "false",
+        "APPSTORE_ENVIRONMENT": "production",
+        "BACKGROUND_WORKER_MODE": null,
+        "BACKGROUND_WORKER_SCHEDULER_AUDIENCE": null,
+        "BACKGROUND_WORKER_SCHEDULER_SERVICE_ACCOUNT_EMAIL": null,
+        "PURGE_ENABLED": null,
+        "SERVICE_REQUEST_RECOVERY_ENABLED": null,
+        "JOBBER_DISCONNECT_RECOVERY_ENABLED": null
+      }
+    },
+    "kevin-api-staging": {
+      "latest_ready_revision": "projects/kevin-491315/locations/us-central1/services/kevin-api-staging/revisions/kevin-api-staging-00189-qiy",
+      "create_time": "2026-04-09T17:38:26.747274Z",
+      "update_time": "2026-10-13T15:35:29.853841Z",
+      "traffic": [
+        {
+          "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+          "revision": "kevin-api-staging-00189-qiy",
+          "percent": 100,
+          "tag": "staging",
+          "uri": "https://staging---kevin-api-staging-l63rergg7a-uc.a.run.app"
+        }
+      ],
+      "uri": "https://kevin-api-staging-l63rergg7a-uc.a.run.app",
+      "service_scaling": {
+        "minInstanceCount": 1,
+        "maxInstanceCount": 20
+      },
+      "revision_scaling": {
+        "minInstanceCount": 1,
+        "maxInstanceCount": 20
+      },
+      "concurrency": 10,
+      "timeout": "300s",
+      "runtime_identity": "kevin-api-staging-runtime@kevin-491315.iam.gserviceaccount.com",
+      "image": "us-central1-docker.pkg.dev/kevin-491315/cloud-run-source-deploy/kevin-api-staging@sha256:ce5d26e6f615d9ade7733b1122926ba17b68c0b94ed2b0b34f9f1c9936203bfa",
+      "resources": {
+        "limits": {
+          "cpu": "1",
+          "memory": "512Mi"
+        },
+        "startupCpuBoost": true
+      },
+      "command": null,
+      "args": null,
+      "environment": {
+        "ENVIRONMENT": "staging",
+        "DEPLOY_SHA": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+        "FIRESTORE_PROJECT_ID": "kevin-staging-491315",
+        "FIREBASE_DATABASE_URL": "https://kevin-staging-491315-rtdb.firebaseio.com",
+        "APNS_SANDBOX": "true",
+        "APPSTORE_ENVIRONMENT": "sandbox",
+        "BACKGROUND_WORKER_MODE": "external",
+        "BACKGROUND_WORKER_SCHEDULER_AUDIENCE": null,
+        "BACKGROUND_WORKER_SCHEDULER_SERVICE_ACCOUNT_EMAIL": null,
+        "PURGE_ENABLED": null,
+        "SERVICE_REQUEST_RECOVERY_ENABLED": null,
+        "JOBBER_DISCONNECT_RECOVERY_ENABLED": null
+      }
+    },
+    "kevin-background-staging": {
+      "latest_ready_revision": "projects/kevin-491315/locations/us-central1/services/kevin-background-staging/revisions/kevin-background-staging-00001-rk2",
+      "create_time": "2026-10-13T15:33:39.492502Z",
+      "update_time": "2026-10-13T15:33:39.492502Z",
+      "traffic": [
+        {
+          "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST",
+          "revision": "kevin-background-staging-00001-rk2",
+          "percent": 100
+        }
+      ],
+      "uri": "https://kevin-background-staging-l63rergg7a-uc.a.run.app",
+      "service_scaling": {
+        "maxInstanceCount": 2
+      },
+      "revision_scaling": {
+        "maxInstanceCount": 2
+      },
+      "concurrency": 1,
+      "timeout": "300s",
+      "runtime_identity": "kevin-api-staging-runtime@kevin-491315.iam.gserviceaccount.com",
+      "image": "us-central1-docker.pkg.dev/kevin-491315/cloud-run-source-deploy/kevin-api-staging@sha256:ce5d26e6f615d9ade7733b1122926ba17b68c0b94ed2b0b34f9f1c9936203bfa",
+      "resources": {
+        "limits": {
+          "cpu": "1",
+          "memory": "512Mi"
+        },
+        "cpuIdle": true
+      },
+      "command": [
+        "python"
+      ],
+      "args": [
+        "-m",
+        "uvicorn",
+        "app.worker_main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080"
+      ],
+      "environment": {
+        "ENVIRONMENT": "staging",
+        "DEPLOY_SHA": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+        "FIRESTORE_PROJECT_ID": "kevin-staging-491315",
+        "FIREBASE_DATABASE_URL": "https://kevin-staging-491315-rtdb.firebaseio.com",
+        "APNS_SANDBOX": "true",
+        "APPSTORE_ENVIRONMENT": "sandbox",
+        "BACKGROUND_WORKER_MODE": "external",
+        "BACKGROUND_WORKER_SCHEDULER_AUDIENCE": "https://kevin-background-staging-l63rergg7a-uc.a.run.app",
+        "BACKGROUND_WORKER_SCHEDULER_SERVICE_ACCOUNT_EMAIL": "kevin-background-scheduler@kevin-491315.iam.gserviceaccount.com",
+        "PURGE_ENABLED": null,
+        "SERVICE_REQUEST_RECOVERY_ENABLED": null,
+        "JOBBER_DISCONNECT_RECOVERY_ENABLED": null
+      }
+    }
+  },
+  "scheduler_configurations_before_cleanup": [
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-estimates",
+      "description": "Approved ec6b8c1 staging pilot; pause and settle before 2026-10-13T16:20:00Z",
+      "schedule": "* * * * *",
+      "timeZone": "UTC",
+      "state": "ENABLED",
+      "attemptDeadline": "300s",
+      "retryConfig": {
+        "maxRetryDuration": "0s",
+        "minBackoffDuration": "5s",
+        "maxBackoffDuration": "3600s",
+        "maxDoublings": 5
+      },
+      "httpTarget": {
+        "uri": "https://kevin-background-staging-l63rergg7a-uc.a.run.app/tasks/estimates",
+        "httpMethod": "POST",
+        "oidcToken": {
+          "serviceAccountEmail": "kevin-background-scheduler@kevin-491315.iam.gserviceaccount.com",
+          "audience": "https://kevin-background-staging-l63rergg7a-uc.a.run.app"
+        },
+        "body": "e30=",
+        "headers": {
+          "User-Agent": "Google-Cloud-Scheduler",
+          "Content-Type": "application/json"
+        }
+      }
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-post-calls",
+      "description": "Approved ec6b8c1 staging pilot; pause and settle before 2026-10-13T16:20:00Z",
+      "schedule": "* * * * *",
+      "timeZone": "UTC",
+      "state": "ENABLED",
+      "attemptDeadline": "300s",
+      "retryConfig": {
+        "maxRetryDuration": "0s",
+        "minBackoffDuration": "5s",
+        "maxBackoffDuration": "3600s",
+        "maxDoublings": 5
+      },
+      "httpTarget": {
+        "uri": "https://kevin-background-staging-l63rergg7a-uc.a.run.app/tasks/post_calls",
+        "httpMethod": "POST",
+        "oidcToken": {
+          "serviceAccountEmail": "kevin-background-scheduler@kevin-491315.iam.gserviceaccount.com",
+          "audience": "https://kevin-background-staging-l63rergg7a-uc.a.run.app"
+        },
+        "body": "e30=",
+        "headers": {
+          "User-Agent": "Google-Cloud-Scheduler",
+          "Content-Type": "application/json"
+        }
+      }
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-orphan-calls",
+      "description": "Approved ec6b8c1 staging pilot; pause and settle before 2026-10-13T16:20:00Z",
+      "schedule": "*/5 * * * *",
+      "timeZone": "UTC",
+      "state": "ENABLED",
+      "attemptDeadline": "300s",
+      "retryConfig": {
+        "maxRetryDuration": "0s",
+        "minBackoffDuration": "5s",
+        "maxBackoffDuration": "3600s",
+        "maxDoublings": 5
+      },
+      "httpTarget": {
+        "uri": "https://kevin-background-staging-l63rergg7a-uc.a.run.app/tasks/orphan_calls",
+        "httpMethod": "POST",
+        "oidcToken": {
+          "serviceAccountEmail": "kevin-background-scheduler@kevin-491315.iam.gserviceaccount.com",
+          "audience": "https://kevin-background-staging-l63rergg7a-uc.a.run.app"
+        },
+        "body": "e30=",
+        "headers": {
+          "Content-Type": "application/json",
+          "User-Agent": "Google-Cloud-Scheduler"
+        }
+      }
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-call-retention",
+      "description": "Approved ec6b8c1 staging pilot; pause and settle before 2026-10-13T16:20:00Z",
+      "schedule": "7 */6 * * *",
+      "timeZone": "UTC",
+      "state": "ENABLED",
+      "attemptDeadline": "300s",
+      "retryConfig": {
+        "maxRetryDuration": "0s",
+        "minBackoffDuration": "5s",
+        "maxBackoffDuration": "3600s",
+        "maxDoublings": 5
+      },
+      "httpTarget": {
+        "uri": "https://kevin-background-staging-l63rergg7a-uc.a.run.app/tasks/call_retention",
+        "httpMethod": "POST",
+        "oidcToken": {
+          "serviceAccountEmail": "kevin-background-scheduler@kevin-491315.iam.gserviceaccount.com",
+          "audience": "https://kevin-background-staging-l63rergg7a-uc.a.run.app"
+        },
+        "body": "e30=",
+        "headers": {
+          "Content-Type": "application/json",
+          "User-Agent": "Google-Cloud-Scheduler"
+        }
+      }
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-lapsed-trials",
+      "description": "Approved ec6b8c1 staging pilot; pause and settle before 2026-10-13T16:20:00Z",
+      "schedule": "17 */6 * * *",
+      "timeZone": "UTC",
+      "state": "ENABLED",
+      "attemptDeadline": "300s",
+      "retryConfig": {
+        "maxRetryDuration": "0s",
+        "minBackoffDuration": "5s",
+        "maxBackoffDuration": "3600s",
+        "maxDoublings": 5
+      },
+      "httpTarget": {
+        "uri": "https://kevin-background-staging-l63rergg7a-uc.a.run.app/tasks/lapsed_trials",
+        "httpMethod": "POST",
+        "oidcToken": {
+          "serviceAccountEmail": "kevin-background-scheduler@kevin-491315.iam.gserviceaccount.com",
+          "audience": "https://kevin-background-staging-l63rergg7a-uc.a.run.app"
+        },
+        "body": "e30=",
+        "headers": {
+          "User-Agent": "Google-Cloud-Scheduler",
+          "Content-Type": "application/json"
+        }
+      }
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-expired-contractors",
+      "description": "Approved ec6b8c1 staging pilot; pause and settle before 2026-10-13T16:20:00Z",
+      "schedule": "27 */6 * * *",
+      "timeZone": "UTC",
+      "state": "ENABLED",
+      "attemptDeadline": "300s",
+      "retryConfig": {
+        "maxRetryDuration": "0s",
+        "minBackoffDuration": "5s",
+        "maxBackoffDuration": "3600s",
+        "maxDoublings": 5
+      },
+      "httpTarget": {
+        "uri": "https://kevin-background-staging-l63rergg7a-uc.a.run.app/tasks/expired_contractors",
+        "httpMethod": "POST",
+        "oidcToken": {
+          "serviceAccountEmail": "kevin-background-scheduler@kevin-491315.iam.gserviceaccount.com",
+          "audience": "https://kevin-background-staging-l63rergg7a-uc.a.run.app"
+        },
+        "body": "e30=",
+        "headers": {
+          "User-Agent": "Google-Cloud-Scheduler",
+          "Content-Type": "application/json"
+        }
+      }
+    }
+  ],
+  "ledger_snapshot": {
+    "post_calls": {
+      "updateTime": "2026-10-13T16:00:36.089092Z",
+      "status": "running",
+      "started_at": {
+        "doubleValue": 1791907235.408262
+      },
+      "next_due_at": {
+        "integerValue": "1791907260"
+      },
+      "nonce_sha256": "a287e04876b4e042e6c7056870271cce510a636b65aa7398659ae533962b039a"
+    },
+    "estimates": {
+      "updateTime": "2026-10-13T15:59:11.762976Z",
+      "status": "completed",
+      "started_at": {
+        "doubleValue": 1791907148.403238
+      },
+      "next_due_at": {
+        "integerValue": "1791907200"
+      },
+      "nonce_sha256": "5f5bd0ca84d4c46f989e0bd129df47bbcba0bdd1e8b04820f9aae1a24146ac24"
+    },
+    "orphan_calls": {
+      "updateTime": "2026-10-13T16:00:04.400512Z",
+      "status": "completed",
+      "started_at": {
+        "doubleValue": 1791907200.404492
+      },
+      "next_due_at": {
+        "integerValue": "1791907500"
+      },
+      "nonce_sha256": "5f6c531b53a40d6b4954a8d85f3b1eccd24b892aa1d481e2b0a32b14a3a6f07b"
+    },
+    "call_retention": {
+      "updateTime": "2026-10-13T15:49:22.985310Z",
+      "status": "completed",
+      "started_at": {
+        "doubleValue": 1791906559.341871
+      },
+      "next_due_at": {
+        "integerValue": "1791914400"
+      },
+      "nonce_sha256": "878be97abc1750665068c949f82e12b7b0a255588cfd0cc84adf0f317182675e"
+    },
+    "lapsed_trials": {
+      "updateTime": "2026-10-13T15:49:32.495513Z",
+      "status": "completed",
+      "started_at": {
+        "doubleValue": 1791906569.343089
+      },
+      "next_due_at": {
+        "integerValue": "1791914400"
+      },
+      "nonce_sha256": "69af712c1f60f401ba103b57b0bd0c78c7ca2343e8fd69e79ecfad63993bef2b"
+    },
+    "expired_contractors": {
+      "updateTime": "2026-10-13T15:49:41.727491Z",
+      "status": "completed",
+      "started_at": {
+        "doubleValue": 1791906578.345188
+      },
+      "next_due_at": {
+        "integerValue": "1791914400"
+      },
+      "nonce_sha256": "d3f21dd6ce87e6ce9c84d48a219108f247b59d054a80fed3eeeac09a142bff57"
+    }
+  },
+  "worker_request_receipts": [
+    {
+      "timestamp": "2026-10-13T15:34:37.523353Z",
+      "status": 403,
+      "task": "health",
+      "latency": "0s",
+      "instance_suffix": ""
+    },
+    {
+      "timestamp": "2026-10-13T15:42:15.467409Z",
+      "status": 403,
+      "task": "post_calls",
+      "latency": "0s",
+      "instance_suffix": ""
+    },
+    {
+      "timestamp": "2026-10-13T15:43:09.745701Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "4.710786491s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:48:55.350678Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "3.984820750s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:49:10.557745Z",
+      "status": 200,
+      "task": "orphan_calls",
+      "latency": "3.216499402s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:49:19.953596Z",
+      "status": 200,
+      "task": "call_retention",
+      "latency": "3.038404761s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:49:29.510186Z",
+      "status": 200,
+      "task": "lapsed_trials",
+      "latency": "2.992347515s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:49:38.701915Z",
+      "status": 200,
+      "task": "expired_contractors",
+      "latency": "3.032005625s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:50:36.251359Z",
+      "status": 200,
+      "task": "call_retention",
+      "latency": "0.187056296s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:50:37.155550Z",
+      "status": 200,
+      "task": "call_retention",
+      "latency": "0.315805293s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:51:00.203562Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "3.083697299s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:51:01.000659Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "12.658770940s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:52:08.747445Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "4.141597707s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:52:13.691758Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "3.538810749s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:53:06.444217Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "3.939064264s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:53:09.113044Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "3.403051035s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:53:29.215607Z",
+      "status": 200,
+      "task": "orphan_calls",
+      "latency": "2.855040341s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:53:31.661925Z",
+      "status": 200,
+      "task": "orphan_calls",
+      "latency": "0.180150175s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:54:14.575114Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "3.849466412s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:54:16.947339Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.670285317s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:55:18.002773Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "3.013531250s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:55:18.591079Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.730162016s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:56:06.283569Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "3.621063208s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T15:56:11.435913Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.927742719s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:57:09.114213Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "2.509281050s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:57:13.498503Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "3.120901220s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:58:08.125391Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "2.685879636s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:58:11.176832Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.474657554s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:59:08.903898Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.843855458s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T15:59:10.494649Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "3.100581470s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T16:00:01.029945Z",
+      "status": 200,
+      "task": "orphan_calls",
+      "latency": "3.354842250s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:00:35.825429Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "2.844258540s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:00:40.107923Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.678477836s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:01:04.055228Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "2.888292126s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:01:05.817126Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "4.003996316s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T16:02:11.511039Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.897055804s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:02:13.847065Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "4.273163554s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T16:03:07.013509Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.530851496s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:03:08.890209Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "3.182546669s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T16:04:07.465001Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "2.812827729s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:04:10.915289Z",
+      "status": 200,
+      "task": "estimates",
+      "latency": "2.542484867s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:05:08.060699Z",
+      "status": 200,
+      "task": "orphan_calls",
+      "latency": "2.493031558s",
+      "instance_suffix": "94d912f21e76"
+    },
+    {
+      "timestamp": "2026-10-13T16:05:09.166223Z",
+      "status": 200,
+      "task": "post_calls",
+      "latency": "4.199480949s",
+      "instance_suffix": "3c9200801f80"
+    },
+    {
+      "timestamp": "2026-10-13T16:05:12.530204Z",
+      "status": 503,
+      "task": "estimates",
+      "latency": "5.279426162s",
+      "instance_suffix": "94d912f21e76"
+    }
+  ],
+  "smoke": {
+    "staging_health": "passed exact candidate external mode",
+    "static_admin_assets": "passed",
+    "authenticated_admin_api": "not run; no admin token supplied"
+  },
+  "incidents": [
+    {
+      "event": "Cloud Run create API rejected name in body",
+      "http_status": 400,
+      "effect": "No resource created; corrected request omitted body.name."
+    },
+    {
+      "event": "Manual Scheduler run while PAUSED rejected",
+      "effect": "No delivery; enabled before bounded manual probe."
+    },
+    {
+      "event": "First scheduled delivery denied before app",
+      "http_status": 403,
+      "time": "2026-10-13T15:42:15.467409Z",
+      "resolution": "Next scheduled request succeeded at15:43:09.745701Z with no IAM policy widening. Timing is consistent with IAM propagation; root cause is not conclusively established."
+    },
+    {
+      "event": "Scheduler identity impersonation permission denied",
+      "effect": "No TokenCreator role granted; actual Scheduler delivery used."
+    },
+    {
+      "event": "Estimates scheduled pass held after HTTP503",
+      "request_start": "2026-10-13T16:05:12.530204Z",
+      "request_latency_seconds": 5.279426162,
+      "ledger_status": "needs_attention",
+      "ledger_started_unix": 1791907512.442259,
+      "ledger_update_time": "2026-10-13T16:05:17.801824Z",
+      "nonce_sha256": "b45303a380d4ba153c249acf0baeffdecdfff2e17256fa5843dcb13964d8a706",
+      "monitor_pause_readback": "2026-10-13T16:05:47.295249Z",
+      "paused_jobs": 6,
+      "automatic_replay_performed": false,
+      "held_ledger_modified": false,
+      "cause": "Unresolved: child failure versus completion failure not distinguished by deployed telemetry.",
+      "immediate_response": "All schedules paused; inspect empty collection and request settlement before restoring embedded workers."
+    }
+  ],
+  "owner_call_setup": {
+    "device": "iPhone unavailable at15:55UTC; awaiting connection for read-only inspection",
+    "app_backend": "Build-time; no runtime switch or environment label",
+    "historical_testflight_build_45": "production backend",
+    "staging_number_suffix": "0993",
+    "separate_twilio_account_verified": true,
+    "current_staging_voice_webhook_verified": true,
+    "matching_staging_contractors": 1,
+    "explicit_test_marker_found": false,
+    "app_push_configuration": "Shared source entitlement production, staging backend APNS_SANDBOX=true; installed signed entitlement unverified",
+    "real_call_tests": "not performed"
+  },
+  "cost": {
+    "conservative_planning_reserve_usd": 1.5,
+    "remaining_from_gcp_envelope_estimate_usd": 3.5,
+    "expected_actions_runner_charge_usd": 0,
+    "actual_posted_pilot_charge": null,
+    "reserve_is_final_billing": false,
+    "monthly_savings_realized": false,
+    "metrics_refresh": {
+      "window_start": "2026-10-13T15:33:00Z",
+      "latest_metrics": "2026-10-13T16:01:00Z",
+      "queried_at": "2026-10-13T16:02:00Z",
+      "worker_billable_instance_seconds": 96,
+      "worker_requests": {
+        "200": 31,
+        "403": 2,
+        "5xx": 0
+      },
+      "worker_recorded_compute_and_requests_estimate_usd": 0.0024372,
+      "worker_startups": 2,
+      "worker_startup_max_observed_seconds": 8.662101,
+      "worker_highest_interval_mean_memory_percent": 30.07393,
+      "staging_api_instance_seconds": 2968.55492502,
+      "staging_api_incremental_compute_estimate_usd": 0.02448254,
+      "latest_api_instances": 1,
+      "estimate_not_final_billed_charge": true
+    },
+    "final_worker_metrics": {
+      "recorded_at": "2026-10-13T16:17:38.079510+00:00",
+      "latest_metric": "2026-10-13T16:17:00Z",
+      "reported_billable_instance_seconds": 139.1,
+      "recorded_compute_and_requests_estimate_usd": 0.003529875,
+      "actual_invoice_charge": null,
+      "startup_and_metric_lag_limitation": true
+    }
+  },
+  "qualification_limits": [
+    "Empty recovery queues do not prove nonempty recovery or call correctness.",
+    "Live cancellation during admission/completion and uncertain commit acknowledgement were not injected; these have local adversarial coverage.",
+    "No API scale-to-zero or production deployment authorized in this pilot.",
+    "No customer calls, recording/transcript reads, new number purchases, or manually initiated SMS.",
+    "Pilot uncovered a real held estimates execution; external workers are not approved for sustained operation. Sanitized failure-stage telemetry is needed before another candidate pilot."
+  ],
+  "closeout": {
+    "verified_at": "2026-10-13T16:15:22Z",
+    "before_deadline": true,
+    "independent_reviewer": "worker_isolation_review",
+    "independent_provider_reads": 6,
+    "staging": {
+      "revision": "kevin-api-staging-00191-jim",
+      "deploy_sha": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+      "health": "ok",
+      "worker_mode": "embedded",
+      "traffic_percent": 100,
+      "traffic_tags": [
+        "staging"
+      ],
+      "service_min": 1,
+      "revision_min": 1,
+      "cpu_throttling": false
+    },
+    "production": {
+      "revision": "kevin-api-00277-neb",
+      "deploy_sha": "b62eea38d9ab5656fb8d809fb872f05d9c81147d",
+      "health": "ok",
+      "traffic_percent": 100,
+      "revision_min": 1,
+      "cpu_throttling": false,
+      "matches_baseline": true
+    },
+    "scheduler_jobs_in_region": 0,
+    "pilot_worker_invoker_binding_present": false,
+    "estimate_hold_preserved": {
+      "status": "needs_attention",
+      "nonce_sha256": "b45303a380d4ba153c249acf0baeffdecdfff2e17256fa5843dcb13964d8a706",
+      "update_time": "2026-10-13T16:05:17.801824Z"
+    },
+    "retained_resources": [
+      "private min0 request-billed worker with no pilot invocation permission",
+      "keyless scheduler service account",
+      "six private ledger documents including hold",
+      "candidate and rollback images/revisions"
+    ],
+    "scheduler_api": "enabled with zero jobs",
+    "realized_cloud_run_savings": false,
+    "later_scale_readback": {
+      "worker": {
+        "revision": "kevin-background-staging-00001-rk2",
+        "time": "2026-10-13T16:22:00Z",
+        "active": 0,
+        "idle": 0
+      },
+      "old_external_api": {
+        "revision": "kevin-api-staging-00189-qiy",
+        "time": "2026-10-13T16:20:00Z",
+        "active": 0,
+        "idle": 0
+      },
+      "warm_embedded_api": {
+        "revision": "kevin-api-staging-00191-jim",
+        "time": "2026-10-13T16:22:00Z",
+        "active": 2,
+        "idle": 0
+      },
+      "note": "The extra warm API instance is retained by Cloud Run during rollout/idle retention; configured minima remain one. No realized API savings claimed."
+    }
+  },
+  "duplicate_delivery_probes": {
+    "completed_slot": {
+      "job": "call_retention",
+      "extra_manual_dispatches": 2,
+      "unchanged_update_time": "2026-10-13T15:49:22.985310Z",
+      "unchanged_nonce_sha256": "878be97abc1750665068c949f82e12b7b0a255588cfd0cc84adf0f317182675e",
+      "result": "No new claim"
+    },
+    "overlapping_two_instances": {
+      "job": "orphan_calls",
+      "manual_dispatches": 2,
+      "requests": [
+        {
+          "timestamp": "2026-10-13T15:53:29.215607Z",
+          "status": 200,
+          "task": "orphan_calls",
+          "latency": "2.855040341s",
+          "instance_suffix": "3c9200801f80"
+        },
+        {
+          "timestamp": "2026-10-13T15:53:31.661925Z",
+          "status": 200,
+          "task": "orphan_calls",
+          "latency": "0.180150175s",
+          "instance_suffix": "94d912f21e76"
+        }
+      ],
+      "result": "One claim completed at15:53:32.070271Z; overlapping second-instance request returned200 in0.180s without a second admission in the same300-second slot",
+      "new_claim_nonce_sha256": "897b405f3aaeae78a98a9e837bf200aa4da7bef697993873955ec5cdb27d807f",
+      "next_due_unix": 1791906900
+    },
+    "business_effect_exactly_once_proven": false
+  },
+  "source_manifest_unchanged_during_pilot": true,
+  "sampled_memory_verification": {
+    "nonempty_points": 28,
+    "latest": "2026-10-13T16:02:00Z",
+    "highest_interval_mean": 0.3007392883300781,
+    "highest_occupied_finite_bucket_upper": null,
+    "all_sample_points_finite_bound": false,
+    "sampled_distribution_only_not_continuous_peak": true
+  },
+  "independent_closeout_review": {
+    "reviewer": "worker_isolation_review",
+    "verdict": "Acceptable with conditions",
+    "required_sequence": [
+      "Pause and verify all six schedules",
+      "Drain admitted requests and resolve any new uncertainty",
+      "Retain sanitized recreatable job configurations",
+      "Delete only six pilot Scheduler jobs and verify absence",
+      "Remove only pilot scheduler invoker binding",
+      "Restore same candidate image in embedded mode; keep both API minima1 and CPUalways"
+    ],
+    "preserve": [
+      "all historical ledger entries and seven quarantines",
+      "all pre-existing revisions and images",
+      "production configuration"
+    ],
+    "provider_queries_by_reviewer": 0,
+    "evidence_limit": "Reviewer inspected source and runbook; live state supplied by root requires final independent readback."
+  },
+  "call_qualification_setup": {
+    "source_checked": [
+      "ios/project.yml:21",
+      "ios/project.yml:71",
+      "ios/Kevin/Services/APIClient.swift:318",
+      "ios/Kevin/Services/KeychainManager.swift:20",
+      "DEPLOY-SETUP.md:128",
+      "docs/releases/2026-09-30-acquisition-rollout.md:74"
+    ],
+    "known_facts": [
+      "App backend is baked into Info.plist; no runtime staging switch or visible environment label.",
+      "Debug and Kevin Staging target staging; normal Kevin archive targets production.",
+      "Historical TestFlight1.3.4(45) was production, but a version/build match alone cannot identify an installed app's backend.",
+      "Configurations share com.kevin.callscreen and a Keychain namespace.",
+      "The local staging candidate now assigns a development APNs entitlement to Debug and Staging while Release retains production; it is unsigned and not installed.",
+      "One staging-owned number ending0993 routes to staging and maps to one staging contractor; no explicit test marker."
+    ],
+    "next_checks": [
+      "After explicit device/code-signing authorization, sign and install the known staging candidate, then verify its signed BackendURL and APNs entitlement; device metadata and version alone are insufficient.",
+      "Confirm dedicated test account ownership and consent for caller before any call.",
+      "Prepare a development-signed staging build if needed; account for shared bundle and credentials before installation."
+    ],
+    "device_read_only_inspection": {
+      "date": "2026-10-13",
+      "installed_bundle": "com.kevin.callscreen",
+      "installed_version": "1.3.4",
+      "installed_build": "45",
+      "developer_built": true,
+      "container_accessible": true,
+      "environment": "undetermined",
+      "evidence_limit": "Device metadata does not expose Info.plist BackendURL or signed APNs entitlements. No matching physical-device app bundle or archived signed artifact was found in the checked Xcode caches.",
+      "privacy_boundary": "No app-container contents, logs, account data, recordings or call data were read."
+    },
+    "local_staging_source_preparation": {
+      "staging_entitlement": "development",
+      "release_entitlement": "production",
+      "resolved_debug_and_staging_backend": "https://kevin-api-staging-l63rergg7a-uc.a.run.app",
+      "resolved_release_backend": "https://kevin-api-752910912062.us-central1.run.app",
+      "xcodegen": "generated successfully",
+      "unsigned_generic_iphone_builds": [
+        "Kevin Staging / Staging / iphoneos / CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED",
+        "Kevin / Release / iphoneos / CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
+      ],
+      "fixture_compile_fix": "A debug-only screenshot initializer was guarded for release-like Staging builds; screenshot scenarios remain disabled outside DEBUG.",
+      "not_performed": "No signing, installation, archive, TestFlight upload, push change or call qualification."
+    },
+    "not_authorized_or_performed": [
+      "No iOS installation, archive, TestFlight upload, APNs flag change, number purchase, SMS send, or real call."
+    ]
+  },
+  "scheduler_cleanup": [
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-estimates",
+      "deleted_and_404_verified_at": "2026-10-13T16:10:24.882577+00:00"
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-post-calls",
+      "deleted_and_404_verified_at": "2026-10-13T16:10:25.814713+00:00"
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-orphan-calls",
+      "deleted_and_404_verified_at": "2026-10-13T16:10:27.333746+00:00"
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-call-retention",
+      "deleted_and_404_verified_at": "2026-10-13T16:10:28.194642+00:00"
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-lapsed-trials",
+      "deleted_and_404_verified_at": "2026-10-13T16:10:29.097996+00:00"
+    },
+    {
+      "name": "projects/kevin-491315/locations/us-central1/jobs/kevin-worker-staging-expired-contractors",
+      "deleted_and_404_verified_at": "2026-10-13T16:10:29.952954+00:00"
+    }
+  ],
+  "invoker_cleanup": {
+    "pilot_binding_removed": true,
+    "verified_at": "2026-10-13T16:10:31.527958+00:00",
+    "policy_bindings_after": []
+  },
+  "hold_reconciliation": {
+    "recorded_at": "2026-10-13T16:11:24.492971+00:00",
+    "estimate_total_count_snapshots": [
+      {
+        "requested_readTime": "2026-10-13T16:05:12.442259Z",
+        "total": 0,
+        "readTimes": [
+          "2026-10-13T16:05:12.442259Z"
+        ]
+      },
+      {
+        "requested_readTime": "2026-10-13T16:05:17.801824Z",
+        "total": 0,
+        "readTimes": [
+          "2026-10-13T16:05:17.801824Z"
+        ]
+      },
+      {
+        "requested_readTime": null,
+        "total": 0,
+        "readTimes": [
+          "2026-10-13T16:11:22.532964Z"
+        ]
+      }
+    ],
+    "staging_http_methods_since_1600": {},
+    "staging_mutating_requests_since_1600": 0,
+    "project_logging_exclusion_count": 0,
+    "worker_latest_instance_samples": [
+      {
+        "state": "active",
+        "point": {
+          "interval": {
+            "startTime": "2026-10-13T16:10:00Z",
+            "endTime": "2026-10-13T16:10:00Z"
+          },
+          "value": {
+            "int64Value": "0"
+          }
+        }
+      },
+      {
+        "state": "idle",
+        "point": {
+          "interval": {
+            "startTime": "2026-10-13T16:10:00Z",
+            "endTime": "2026-10-13T16:10:00Z"
+          },
+          "value": {
+            "int64Value": "2"
+          }
+        }
+      }
+    ]
+  },
+  "rollback_preflight": {
+    "at": "2026-10-13T16:12:32.184710+00:00",
+    "ledgers": {
+      "post_calls": {
+        "status": "completed",
+        "updateTime": "2026-10-13T16:05:13.357968Z",
+        "nonce_sha256": "bb12ab6a75bbcf6c619cda039840c0c550039b02148f03e642ea82d26af0d2e7"
+      },
+      "estimates": {
+        "status": "needs_attention",
+        "updateTime": "2026-10-13T16:05:17.801824Z",
+        "nonce_sha256": "b45303a380d4ba153c249acf0baeffdecdfff2e17256fa5843dcb13964d8a706"
+      },
+      "orphan_calls": {
+        "status": "completed",
+        "updateTime": "2026-10-13T16:05:10.563974Z",
+        "nonce_sha256": "9af8a013343088ed17034caa632728af893e01245ca938ed6adcd04f7521883b"
+      },
+      "call_retention": {
+        "status": "completed",
+        "updateTime": "2026-10-13T15:49:22.985310Z",
+        "nonce_sha256": "878be97abc1750665068c949f82e12b7b0a255588cfd0cc84adf0f317182675e"
+      },
+      "lapsed_trials": {
+        "status": "completed",
+        "updateTime": "2026-10-13T15:49:32.495513Z",
+        "nonce_sha256": "69af712c1f60f401ba103b57b0bd0c78c7ca2343e8fd69e79ecfad63993bef2b"
+      },
+      "expired_contractors": {
+        "status": "completed",
+        "updateTime": "2026-10-13T15:49:41.727491Z",
+        "nonce_sha256": "d3f21dd6ce87e6ce9c84d48a219108f247b59d054a80fed3eeeac09a142bff57"
+      }
+    },
+    "post_call_counts": {
+      "pending": 0,
+      "in_progress": 0,
+      "needs_attention": 7
+    },
+    "active_calls": 0,
+    "bounded_execution_drain": "Last worker response completed16:05:17.810Z; all6jobs paused16:05:47;5-minute maximum passed; fresh16:10metricsactive0; no schedules or invoker."
+  },
+  "embedded_restore": {
+    "revision": "kevin-api-staging-00191-jim",
+    "at": "2026-10-13T16:13:04.389925+00:00",
+    "image_unchanged": true,
+    "all_other_environment_values_unchanged": true,
+    "tag_health": {
+      "status": "ok",
+      "environment": "staging",
+      "service": "kevin-api-staging",
+      "revision": "kevin-api-staging-00191-jim",
+      "deploy_sha": "ec6b8c1246c8f27a690c39876981dc5acf04c6ef",
+      "worker_mode": "embedded"
+    }
+  },
+  "final_worker_request_summary": {
+    "counts_by_status": {
+      "403": 2,
+      "200": 41,
+      "503": 1
+    },
+    "successful_by_task": {
+      "post_calls": 16,
+      "estimates": 15,
+      "orphan_calls": 5,
+      "call_retention": 3,
+      "lapsed_trials": 1,
+      "expired_contractors": 1
+    },
+    "latest_request_start": "2026-10-13T16:05:12.530204Z",
+    "max_latency_seconds": 12.65877094,
+    "does_not_infer_business_side_effects_from_http_200": true
+  },
+  "later_service_readback": {
+    "at_utc": "2026-10-13T16:37:35.047844+00:00",
+    "production_revision": "kevin-api-00277-neb",
+    "production_sha": "b62eea38d9ab5656fb8d809fb872f05d9c81147d",
+    "staging_revision": "kevin-api-staging-00191-jim",
+    "staging_mode": "embedded",
+    "staging_traffic_percent": 100,
+    "staging_minima": {
+      "service": 1,
+      "revision": 1
+    },
+    "latest_staging_instance_sample": {
+      "at_utc": "2026-10-13T16:36:00Z",
+      "active": 1,
+      "idle": 0
+    },
+    "worker_revision": "kevin-background-staging-00001-rk2",
+    "worker_min": 0,
+    "worker_max": 2,
+    "worker_cpu_idle": true,
+    "diagnostic_candidate_deployed": false
+  }
+}

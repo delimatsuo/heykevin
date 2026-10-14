@@ -306,6 +306,48 @@ async def test_verify_endpoint_fails_closed_when_apple_unreachable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_verify_endpoint_release_reconciliation_is_retryable(monkeypatch):
+    """A verified purchase held by release reconciliation is never marked terminal."""
+    async def fake_get_processed(*_):
+        return None
+
+    async def fake_get_binding(*_):
+        return None
+
+    async def fake_strict(*_):
+        return sub_service.VerificationResult(ok=True, transaction={"transactionId": "tx-held"})
+
+    async def fake_update(*_):
+        return sub_service.SubscriptionUpdateResult(
+            sub_service.SubscriptionUpdateOutcome.RETRYABLE,
+            reason="number_release_reconciliation",
+        )
+
+    async def fail_mark(*_):
+        raise AssertionError("held verification must not be persisted as terminal")
+
+    monkeypatch.setattr(sub_service, "get_processed_transaction", fake_get_processed)
+    monkeypatch.setattr(apple_tx_db, "get_transaction_binding", fake_get_binding)
+    monkeypatch.setattr(sub_service, "verify_transaction_strict", fake_strict)
+    monkeypatch.setattr(sub_service, "update_subscription_from_transaction", fake_update)
+    monkeypatch.setattr(sub_service, "mark_transaction_seen", fail_mark)
+
+    response = await sub_api.verify_subscription(
+        sub_api.VerifyRequest(transaction_id="tx-held", contractor_id="c1"),
+        _FakeRequest("c1"),
+    )
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "60"
+    payload = __import__("json").loads(bytes(response.body).decode())
+    assert payload == {
+        "status": "retryable",
+        "reason": "number_release_reconciliation",
+        "retry_after_seconds": 60,
+    }
+
+
+@pytest.mark.asyncio
 async def test_verify_endpoint_duplicate_transaction_bypasses_rate_limit(monkeypatch):
     """Idempotent StoreKit retries must not be rejected by the verify limiter."""
 

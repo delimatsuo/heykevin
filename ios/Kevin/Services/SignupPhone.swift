@@ -28,11 +28,35 @@ struct SignupCountry: Identifiable, Equatable, Hashable, Sendable {
     }
 
     func localizedName(locale: Locale = .current) -> String {
-        locale.localizedString(forRegionCode: code) ?? code
+        Self.localizedName(forCode: code, locale: locale)
+    }
+
+    /// Returns a normalized ISO 3166-1 alpha-2 country code only. Keeping this
+    /// strict prevents a device locale, a malformed API value, or a UI draft
+    /// from becoming an implied onboarding country.
+    static func normalizedCountryCode(_ code: String?) -> String? {
+        guard let code else { return nil }
+        let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard normalized.count == 2,
+              normalized.allSatisfy({ $0.isASCII && $0.isLetter }) else {
+            return nil
+        }
+        return normalized
+    }
+
+    /// The device region is a presentation hint only. New onboarding must
+    /// never turn an unsupported region into a different country's number.
+    static func deviceRegionCode(locale: Locale = .current) -> String? {
+        normalizedCountryCode(locale.region?.identifier)
+    }
+
+    static func localizedName(forCode code: String, locale: Locale = .current) -> String {
+        let normalized = normalizedCountryCode(code) ?? code
+        return locale.localizedString(forRegionCode: normalized) ?? normalized
     }
 
     static func suggestedCountry(locale: Locale = .current) -> String {
-        guard let region = locale.region?.identifier.uppercased() else {
+        guard let region = deviceRegionCode(locale: locale) else {
             return "US"
         }
         if supported.contains(where: { $0.code == region }) {

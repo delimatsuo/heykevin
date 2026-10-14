@@ -252,10 +252,19 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
             assignedNumber: dict["twilio_number"] as? String,
             hasAssignedNumber: true
         )
-        // Missing/malformed Canadian consent metadata must never inherit legacy true.
-        consentRequired = consentCountry == "CA"
-            ? (OwnerSMSParsingHelper.strictBool(dict["owner_sms_consent_required"]) ?? true)
-            : (OwnerSMSParsingHelper.strictBool(dict["owner_sms_consent_required"]) ?? false)
+        let serverConsentRequired = OwnerSMSParsingHelper.strictBool(dict["owner_sms_consent_required"])
+        // A Canadian profile without this explicit capability marker belongs to
+        // a backend that predates the dedicated consent transaction. Do not
+        // offer an opt-in action that can never be confirmed; keep SMS settings
+        // unavailable until the server can enforce and acknowledge consent.
+        if consentCountry == "CA", serverConsentRequired == nil {
+            consentRequired = false
+            isLoaded = false
+            isUnsupportedBackend = true
+            loadError = Self.unavailableNotice
+            return
+        }
+        consentRequired = serverConsentRequired ?? false
         // Match server identity precedence: a present canonical companion is
         // authoritative, including when malformed. Never fall back around it.
         let ownerIdentity = dict.keys.contains("owner_phone_e164")

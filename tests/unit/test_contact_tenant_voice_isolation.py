@@ -75,9 +75,16 @@ async def _run_incoming_call(
         captured.update(kwargs)
         recorded.set()
 
+    async def record_inbound_evidence(*_args, **_kwargs) -> bool:
+        return True
+
     monkeypatch.setattr(
         "app.db.contractors.get_contractor_by_twilio_number",
         get_contractor_by_twilio_number,
+    )
+    monkeypatch.setattr(
+        "app.db.contractors.record_inbound_call_evidence",
+        record_inbound_evidence,
     )
     monkeypatch.setattr("app.db.calls.get_call_history", get_call_history)
     monkeypatch.setattr("app.services.circuit_breaker.is_circuit_open", lambda: False)

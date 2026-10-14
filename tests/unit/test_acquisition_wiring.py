@@ -307,7 +307,6 @@ async def test_create_contractor_initializes_unknown_intent_and_roundtrips_reduc
 
 
 @pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
-    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
     ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
 ])
 @pytest.mark.asyncio
@@ -348,7 +347,6 @@ async def test_twilio_evidence_helpers_order_with_held_measurement(
 
 
 @pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
-    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
     ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
 ])
 @pytest.mark.asyncio
@@ -398,7 +396,6 @@ async def test_twilio_evidence_helpers_recent_stamp_throttle_and_thrown_measurem
 
 
 @pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
-    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
     ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
 ])
 @pytest.mark.asyncio
@@ -432,7 +429,6 @@ async def test_twilio_evidence_helpers_cancellation_during_held_lookup_prevents_
 
 
 @pytest.mark.parametrize("helper_name, helper_fn, legacy_field, measurement_attr", [
-    ("inbound", twilio_incoming._record_inbound_call_evidence, "last_inbound_call_at", "record_inbound_call_measurement"),
     ("forwarding", twilio_incoming._record_forwarding_evidence, "forwarding_last_seen_at", "record_forwarded_call_measurement"),
 ])
 @pytest.mark.asyncio
@@ -467,6 +463,98 @@ async def test_twilio_evidence_helpers_cancellation_during_held_update_prevents_
         await task
 
     assert len(measurement_called) == 0
+
+
+@pytest.mark.asyncio
+async def test_inbound_evidence_acknowledges_before_optional_measurement(monkeypatch):
+    """The bounded safety transaction settles before acquisition work begins."""
+    stamps = []
+    entered_measurement = asyncio.Event()
+    release_measurement = asyncio.Event()
+
+    async def fake_stamp(contractor_id, seen_at, *, rpc_timeout):
+        stamps.append((contractor_id, seen_at, rpc_timeout))
+        return True
+
+    async def held_measurement(contractor_id, seen_at):
+        assert stamps == [(
+            contractor_id,
+            seen_at,
+            twilio_incoming.INBOUND_EVIDENCE_RPC_TIMEOUT_SECONDS,
+        )]
+        entered_measurement.set()
+        await release_measurement.wait()
+
+    monkeypatch.setattr("app.db.contractors.record_inbound_call_evidence", fake_stamp)
+    monkeypatch.setattr(
+        "app.services.acquisition.record_inbound_call_measurement",
+        held_measurement,
+    )
+
+    task = asyncio.create_task(
+        twilio_incoming._record_inbound_call_evidence("cnt_1", 5000.0)
+    )
+    try:
+        await asyncio.wait_for(entered_measurement.wait(), timeout=1.0)
+        assert len(stamps) == 1
+    finally:
+        release_measurement.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_inbound_evidence_skips_measurement_when_stamp_is_unacknowledged(monkeypatch):
+    """A failed safety write cannot become an attribution measurement."""
+    measurement_calls = []
+
+    async def unacknowledged_stamp(*_args, **_kwargs):
+        return False
+
+    async def record_measurement(*args):
+        measurement_calls.append(args)
+
+    monkeypatch.setattr(
+        "app.db.contractors.record_inbound_call_evidence", unacknowledged_stamp,
+    )
+    monkeypatch.setattr(
+        "app.services.acquisition.record_inbound_call_measurement", record_measurement,
+    )
+
+    assert not await twilio_incoming._record_inbound_call_evidence("cnt_2", 5000.0)
+    assert measurement_calls == []
+
+
+@pytest.mark.asyncio
+async def test_inbound_evidence_cancellation_during_held_stamp_prevents_measurement(monkeypatch):
+    """Cancelling a held safety call cannot start background acquisition work."""
+    entered_stamp = asyncio.Event()
+    release_stamp = asyncio.Event()
+    measurement_calls = []
+
+    async def held_stamp(*_args, **_kwargs):
+        entered_stamp.set()
+        await release_stamp.wait()
+        return True
+
+    async def record_measurement(*args):
+        measurement_calls.append(args)
+
+    monkeypatch.setattr("app.db.contractors.record_inbound_call_evidence", held_stamp)
+    monkeypatch.setattr(
+        "app.services.acquisition.record_inbound_call_measurement", record_measurement,
+    )
+
+    task = asyncio.create_task(
+        twilio_incoming._record_inbound_call_evidence("cnt_cancel_stamp", 5000.0)
+    )
+    try:
+        await asyncio.wait_for(entered_stamp.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert measurement_calls == []
+    finally:
+        release_stamp.set()
 
 
 # ---------------------------------------------------------------------------

@@ -415,13 +415,23 @@ extension OwnerSMSPreferenceTests {
         return state
     }
 
-    func testCanadianLegacyTrueRequiresConsentAndCannotUseGenericToggle() {
-        for value: Any? in [nil, true, "false", 0] {
+    func testCanadianExplicitConsentRequirementCannotUseGenericToggle() {
+        var state = hydratedCanadian(canadianProfile(required: true))
+        XCTAssertTrue(state.confirmedEnabled)
+        XCTAssertTrue(state.consentRequired)
+        XCTAssertFalse(state.displayedEnabled)
+        XCTAssertNotNil(state.consentSnapshot(auth: canadianAuth))
+        XCTAssertNil(state.beginSave(targetEnabled: true, auth: canadianAuth))
+    }
+
+    func testCanadianMissingOrMalformedConsentCapabilityDoesNotOfferBrokenOptIn() {
+        for value: Any? in [nil, "false", 0] {
             var state = hydratedCanadian(canadianProfile(required: value))
-            XCTAssertTrue(state.confirmedEnabled)
-            XCTAssertTrue(state.consentRequired)
-            XCTAssertFalse(state.displayedEnabled)
-            XCTAssertNotNil(state.consentSnapshot(auth: canadianAuth))
+            XCTAssertFalse(state.isLoaded)
+            XCTAssertTrue(state.isUnsupportedBackend)
+            XCTAssertEqual(state.loadError, OwnerSMSPreferenceState.unavailableNotice)
+            XCTAssertNil(state.consentSnapshot(auth: canadianAuth))
+            XCTAssertNil(state.beginSave(targetEnabled: false, auth: canadianAuth))
             XCTAssertNil(state.beginSave(targetEnabled: true, auth: canadianAuth))
         }
     }

@@ -7,6 +7,7 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "test-user-number")
 
 import pytest
+from fastapi import HTTPException
 from types import SimpleNamespace
 from app.db.contractors import PROTECTED_FIELDS
 from app.api import contractors as contractors_api
@@ -264,3 +265,31 @@ async def test_patch_contractor_strips_telephony_service_binding_fields(monkeypa
     assert "number_type" not in captured_updates
     assert "number_capabilities" not in captured_updates
     assert "service_binding" not in captured_updates
+
+
+@pytest.mark.asyncio
+async def test_held_profile_mutations_return_reconciliation_conflict(monkeypatch):
+    """Services and knowledge endpoints never claim a held write was saved."""
+    async def held_update(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(contractors_api, "update_contractor", held_update)
+
+    request = _admin_request()
+    with pytest.raises(HTTPException) as services_error:
+        await contractors_api.api_update_services(
+            "contractor-1",
+            contractors_api.ServicesList(services=[
+                contractors_api.ServiceItem(name="Repair", price_min=10, price_max=20),
+            ]),
+            request,
+        )
+    assert getattr(services_error.value, "status_code", None) == 409
+
+    with pytest.raises(HTTPException) as knowledge_error:
+        await contractors_api.api_update_knowledge(
+            "contractor-1",
+            contractors_api.KnowledgeUpdate(knowledge="Fictional business knowledge"),
+            request,
+        )
+    assert getattr(knowledge_error.value, "status_code", None) == 409

@@ -1,6 +1,246 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Where is your mobile number from?" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "¿De qué país es tu número de móvil?"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "De qual país é o seu número de celular?"
+          }
+        }
+      }
+    },
+    "Choose the country that issued the mobile number you’ll use with Kevin. Your device region is only a suggestion." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Elige el país que emitió el número de móvil que usarás con Kevin. La región de tu dispositivo es solo una sugerencia."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Escolha o país que emitiu o número de celular que você usará com o Kevin. A região do dispositivo é apenas uma sugestão."
+          }
+        }
+      }
+    },
+    "Suggested from this device" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sugerido por este dispositivo"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sugerido por este dispositivo"
+          }
+        }
+      }
+    },
+    "Suggested" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sugerido"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sugerido"
+          }
+        }
+      }
+    },
+    "Choose a different country" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Elegir otro país"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Escolher outro país"
+          }
+        }
+      }
+    },
+    "If your mobile number’s country is not shown, Kevin cannot set up that number yet." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Si el país de tu número de móvil no aparece, Kevin aún no puede configurar ese número."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se o país do seu número de celular não estiver listado, o Kevin ainda não poderá configurar esse número."
+          }
+        }
+      }
+    },
+    "Checks whether Kevin is available for this mobile-number country." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Comprueba si Kevin está disponible para este país del número de móvil."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verifica se o Kevin está disponível para este país do número de celular."
+          }
+        }
+      }
+    },
+    "your mobile-number country" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "el país de tu número de móvil"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "o país do seu número de celular"
+          }
+        }
+      }
+    },
+    "Availability follows the country that issued your mobile number. If you are traveling, choose that number’s country to check it." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La disponibilidad depende del país que emitió tu número de móvil. Si estás de viaje, elige el país de ese número para comprobarlo."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A disponibilidade depende do país que emitiu seu número de celular. Se você estiver viajando, escolha o país desse número para verificar."
+          }
+        }
+      }
+    },
+    "Couldn’t check availability" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudo comprobar la disponibilidad"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não foi possível verificar a disponibilidade"
+          }
+        }
+      }
+    },
+    "No account has been created. Try again or choose a different mobile-number country." : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se ha creado ninguna cuenta. Inténtalo de nuevo o elige otro país para el número de móvil."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nenhuma conta foi criada. Tente novamente ou escolha outro país para o número de celular."
+          }
+        }
+      }
+    },
+    "Checking availability…" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Comprobando disponibilidad…"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verificando disponibilidade…"
+          }
+        }
+      }
+    },
+    "Try again" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Inténtalo de nuevo"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tentar novamente"
+          }
+        }
+      }
+    },
+    "Back" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Atrás"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voltar"
+          }
+        }
+      }
+    },
+    "Continuing" : {
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Continuando"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Continuando"
+          }
+        }
+      }
+    },
     "Could not reconnect your account. Please try again." : {
       "localizations" : {
         "es" : {

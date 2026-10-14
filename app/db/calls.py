@@ -337,8 +337,14 @@ async def latest_call_timestamp(contractor_id: str) -> Optional[Any]:
     return (docs[0].to_dict() or {}).get("timestamp")
 
 
-async def cleanup_old_calls() -> int:
-    """Delete call records older than RETENTION_DAYS. Returns count deleted."""
+async def cleanup_old_calls(*, strict: bool = False) -> int:
+    """Delete call records older than RETENTION_DAYS. Returns count deleted.
+
+    Embedded maintenance keeps its historical best-effort behavior. The
+    ledger-backed external worker requests ``strict`` so datastore uncertainty
+    reaches its durable ``needs_attention`` state instead of looking like an
+    empty retention batch.
+    """
     try:
         db = get_firestore_client()
         cutoff = time.time() - (RETENTION_DAYS * 86400)
@@ -366,4 +372,6 @@ async def cleanup_old_calls() -> int:
         return count
     except Exception as e:
         logger.error(f"Call cleanup failed: {e}", exc_info=True)
+        if strict:
+            raise
         return 0

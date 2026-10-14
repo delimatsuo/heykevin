@@ -611,8 +611,10 @@ def test_media_stream_awaits_durable_handoff_without_detached_post_call_tasks():
 
 
 def test_startup_launches_pending_handoff_worker():
-    source = inspect.getsource(app_main.startup)
+    startup_source = inspect.getsource(app_main.startup)
+    source = inspect.getsource(app_main._start_embedded_background_loops)
 
+    assert "_configure_background_workers" in startup_source
     assert "post_call_worker_loop" in source
 
 

@@ -256,7 +256,9 @@ async def _lookup_by_apple_id(
         contractor_id = contractor["contractor_id"]
         subscription_uuid = await ensure_subscription_uuid(contractor_id, contractor)
         raw_token, token_hash = generate_contractor_token(contractor_id)
-        await update_contractor(contractor_id, {"api_token_hash": token_hash})
+        _require_profile_update(
+            await update_contractor(contractor_id, {"api_token_hash": token_hash})
+        )
         return {"contractor_id": contractor_id, "api_token": raw_token, "subscription_uuid": subscription_uuid}
     return {"error": "Not found"}, 404
 
@@ -325,7 +327,9 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
             logger.info("Returning existing contractor %s matched on apple_user_id", contractor_id)
             subscription_uuid = await ensure_subscription_uuid(contractor_id, by_apple)
             raw_token, token_hash = generate_contractor_token(contractor_id)
-            await update_contractor(contractor_id, {"api_token_hash": token_hash})
+            _require_profile_update(
+                await update_contractor(contractor_id, {"api_token_hash": token_hash})
+            )
             return {
                 "status": "ok",
                 "contractor_id": contractor_id,
@@ -454,7 +458,9 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
 
             subscription_uuid = await ensure_subscription_uuid(contractor_id, existing)
             raw_token, token_hash = generate_contractor_token(contractor_id)
-            await update_contractor(contractor_id, {"api_token_hash": token_hash})
+            _require_profile_update(
+                await update_contractor(contractor_id, {"api_token_hash": token_hash})
+            )
             return {
                 "status": "ok",
                 "contractor_id": contractor_id,
@@ -485,7 +491,9 @@ async def api_create_contractor(body: ContractorCreate, request: Request):
     contractor_id = await create_contractor(data)
 
     raw_token, token_hash = generate_contractor_token(contractor_id)
-    await update_contractor(contractor_id, {"api_token_hash": token_hash})
+    if not await update_contractor(contractor_id, {"api_token_hash": token_hash}):
+        logger.error("New contractor token hash did not persist: %s", contractor_id)
+        raise HTTPException(status_code=500, detail="Failed to initialize account credentials")
 
     return {"status": "ok", "contractor_id": contractor_id, "api_token": raw_token}
 
@@ -586,7 +594,9 @@ async def api_provision_number(contractor_id: str, request: Request):
         )
 
     if contractor.get("country_code") != effective_country:
-        await update_contractor(contractor_id, {"country_code": effective_country})
+        _require_profile_update(
+            await update_contractor(contractor_id, {"country_code": effective_country})
+        )
 
     try:
         number = await provision_twilio_number(contractor_id, country_code=effective_country)
@@ -766,9 +776,8 @@ async def api_update_contractor(contractor_id: str, body: ContractorUpdate, requ
             )
 
     updated = await update_contractor(contractor_id, updates)
+    _require_profile_update(updated)
     if "owner_sms_enabled" in updates:
-        if not updated:
-            raise HTTPException(status_code=500, detail="Failed to persist preferences")
         fresh = await get_contractor(contractor_id)
         if not fresh or fresh.get("contractor_id") != contractor_id:
             raise HTTPException(status_code=500, detail="Failed to read back authoritative state")
@@ -813,8 +822,19 @@ async def api_update_services(contractor_id: str, body: ServicesList, request: R
             "price_min": s.price_min,
             "price_max": s.price_max,
         })
-    await update_contractor(contractor_id, {"services": sanitized})
+    _require_profile_update(
+        await update_contractor(contractor_id, {"services": sanitized})
+    )
     return {"status": "ok", "count": len(sanitized)}
+
+
+def _require_profile_update(updated: bool) -> None:
+    """Do not report a held release-state mutation as a saved profile edit."""
+    if not updated:
+        raise HTTPException(
+            status_code=409,
+            detail="Profile update requires number-release reconciliation",
+        )
 
 
 def _irreversible_gate(contractor: Optional[dict], action: ActionKey, contractor_id: str, request: Request) -> None:
@@ -858,7 +878,12 @@ async def api_delete_contractor(contractor_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Contractor not found")
     _irreversible_gate(contractor, ActionKey.ACCOUNT_DELETE, contractor_id, request)
     try:
-        await deactivate_contractor(contractor_id, user_requested=True)
+        deactivated = await deactivate_contractor(contractor_id, user_requested=True)
+        if deactivated is not True:
+            raise HTTPException(
+                status_code=409,
+                detail="Number release is in progress or requires reconciliation",
+            )
     except HTTPException:
         raise
     except Exception as e:
@@ -885,8 +910,25 @@ async def api_release_number(contractor_id: str, request: Request):
     except Exception as e:
         logger.error(f"Number release failed for {contractor_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to release phone number")
-    # No number on file means the desired end state already holds; report it
-    # as success so a retry after a partial failure heals instead of erroring.
+    # No number on file means the desired end state already holds. A false
+    # result with a live binding means another release owns the record or needs
+    # reconciliation; do not report that as a completed irreversible action.
+    if not released:
+        try:
+            current = await get_contractor(contractor_id)
+        except Exception as e:
+            logger.error(
+                "Could not confirm number-release state for %s: %s",
+                contractor_id,
+                type(e).__name__,
+                exc_info=True,
+            )
+            raise HTTPException(status_code=500, detail="Failed to confirm phone number state")
+        if current and current.get("twilio_number"):
+            raise HTTPException(
+                status_code=409,
+                detail="Number release is in progress or requires reconciliation",
+            )
     return {"status": "ok", "released": bool(released)}
 
 
@@ -968,7 +1010,9 @@ Existing knowledge is included only for context. If edit mode is "add", return o
 async def api_update_knowledge(contractor_id: str, body: KnowledgeUpdate, request: Request):
     """Update the contractor's knowledge base document."""
     require_contractor_access(request, contractor_id)
-    await update_contractor(contractor_id, {"knowledge": body.knowledge})
+    _require_profile_update(
+        await update_contractor(contractor_id, {"knowledge": body.knowledge})
+    )
     return {"status": "ok"}
 
 
@@ -1220,8 +1264,10 @@ Only include sections where you find relevant information. Use concise bullet po
                 data = llm_response.json()
                 knowledge = data["content"][0]["text"]
 
-                # Save to contractor profile
-                await update_contractor(contractor_id, {"knowledge": knowledge})
+                # Save to contractor profile before reporting an import.
+                _require_profile_update(
+                    await update_contractor(contractor_id, {"knowledge": knowledge})
+                )
                 logger.info(f"Website knowledge imported for {contractor_id} from {url}")
 
                 return {"status": "ok", "knowledge": knowledge}

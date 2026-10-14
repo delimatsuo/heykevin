@@ -498,6 +498,8 @@ async def verify_subscription(body: VerifyRequest, request: Request):
 
         if backfill_outcome is BindingBackfillOutcome.UUID_MISMATCH:
             raise HTTPException(status_code=409, detail="ownership_mismatch")
+        if backfill_outcome is BindingBackfillOutcome.RELEASE_CONFLICT:
+            raise HTTPException(status_code=409, detail="number_release_in_progress")
 
         return {
             "status": "ok",
@@ -630,6 +632,27 @@ async def verify_subscription(body: VerifyRequest, request: Request):
             "outcome": SubscriptionUpdateOutcome.INACTIVE.value,
             "entitlement_active": False,
         }
+
+    if update_result.outcome is SubscriptionUpdateOutcome.RETRYABLE:
+        retry_after = 60
+        logger.warning(
+            "subscription_verify outcome=retryable reason=%s contractor_hash=%s "
+            "transaction_hash=%s source=%s build=%s",
+            _telemetry_label(update_result.reason),
+            _telemetry_hash(body.contractor_id),
+            _telemetry_hash(body.transaction_id),
+            _telemetry_label(body.source),
+            _telemetry_label(body.app_build, fallback="legacy"),
+        )
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": str(retry_after)},
+            content={
+                "status": "retryable",
+                "reason": update_result.reason or "subscription_update_pending",
+                "retry_after_seconds": retry_after,
+            },
+        )
 
     if update_result.outcome is SubscriptionUpdateOutcome.OWNERSHIP_MISMATCH:
         logger.warning(

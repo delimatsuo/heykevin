@@ -572,6 +572,147 @@ async def test_reupload_after_failed_creates_fresh_media_id_and_object(setup_env
     assert doc["media_object_path"] == new_path
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", ["video/mp4", "image/jpeg"])
+async def test_reupload_after_sent_notification_starts_a_new_attempt(
+    setup_env, monkeypatch, content_type,
+):
+    """Settled notifications stay auditable while a new video or photo can retry."""
+    db = setup_env
+    token = f"test-token-reupload-sent-{content_type.replace('/', '-')}"
+    token_hash = _seed_estimate(db, token, status="failed")
+    old_media_id = "old-settled-media"
+    old_path = f"{token_hash}/{old_media_id}.mp4"
+    db.collection("estimates").document(token_hash).update({
+        "media_id": old_media_id,
+        "media_object_path": old_path,
+        "media_ids": [old_media_id],
+        "media_paths": {old_media_id: old_path},
+        "notified_at": 123.0,
+        "notification_state": "sent",
+        "notification_claimed_at": 122.0,
+    })
+
+    archived = []
+
+    def archive(token_hash, media_id, _body, media_type):
+        extension = "mp4" if media_type.startswith("video/") else "jpg"
+        path = f"{token_hash}/{media_id}.{extension}"
+        archived.append((media_id, path))
+        return path
+
+    async def analyzer(**_kwargs):
+        return {"diagnosis": "Retry complete", "confidence": "high"}
+
+    sms = AsyncMock(return_value=True)
+    monkeypatch.setattr(estimates, "archive_media", archive)
+    monkeypatch.setattr(estimates, "analyze_media", analyzer)
+    monkeypatch.setattr(estimate_notifications, "send_sms", sms)
+
+    response = await estimates.upload_and_analyze(
+        token,
+        request=_StreamingRequest(body=b"retry", content_type=content_type),
+    )
+    if content_type.startswith("video/"):
+        assert response.status_code == 202
+        await asyncio.sleep(0.1)
+    else:
+        assert response["status"] == "complete"
+
+    assert len(archived) == 1
+    new_media_id, new_path = archived[0]
+    doc = db.collection("estimates").document(token_hash).get().to_dict()
+    assert doc["status"] == "complete"
+    assert doc["media_id"] == new_media_id != old_media_id
+    assert doc["media_object_path"] == new_path
+    assert doc["notification_state"] is None
+    assert doc["notified_at"] is not None
+    assert doc["notification_history"] == [{
+        "media_id": old_media_id,
+        "state": "sent",
+        "notified_at": 123.0,
+        "uncertain_at": None,
+    }]
+    assert sms.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", ["video/mp4", "image/jpeg"])
+async def test_reupload_holds_an_uncertain_notification_for_reconciliation(
+    setup_env, monkeypatch, content_type,
+):
+    """Neither media path may replace an attempt with an ambiguous SMS result."""
+    db = setup_env
+    token = f"test-token-reupload-held-{content_type.replace('/', '-')}"
+    token_hash = _seed_estimate(db, token, status="failed")
+    old_media_id = "held-media"
+    old_path = f"{token_hash}/{old_media_id}.mp4"
+    db.collection("estimates").document(token_hash).update({
+        "media_id": old_media_id,
+        "media_object_path": old_path,
+        "notification_state": "needs_attention",
+        "notification_uncertain_at": 456.0,
+        "notified_at": None,
+    })
+
+    archived = False
+    analyzer_called = False
+
+    def must_not_archive(*_args, **_kwargs):
+        nonlocal archived
+        archived = True
+        raise AssertionError("held notification must be rejected before archival")
+
+    async def must_not_analyze(**_kwargs):
+        nonlocal analyzer_called
+        analyzer_called = True
+        raise AssertionError("held notification must be rejected before analysis")
+
+    monkeypatch.setattr(estimates, "archive_media", must_not_archive)
+    monkeypatch.setattr(estimates, "analyze_media", must_not_analyze)
+
+    response = await estimates.upload_and_analyze(
+        token,
+        request=_StreamingRequest(body=b"retry", content_type=content_type),
+    )
+
+    assert response.status_code == 409
+    assert json.loads(response.body) == {"status": "notification_reconciliation"}
+    assert archived is False
+    assert analyzer_called is False
+    doc = db.collection("estimates").document(token_hash).get().to_dict()
+    assert doc["media_id"] == old_media_id
+    assert doc["media_object_path"] == old_path
+    assert doc["notification_state"] == "needs_attention"
+    assert doc["notification_uncertain_at"] == 456.0
+
+
+@pytest.mark.parametrize("state", ["pending_external", "needs_attention"])
+def test_atomic_upload_claim_refuses_unsettled_notification_state(setup_env, state):
+    """The transaction closes the race after the request-start pre-check."""
+    db = setup_env
+    token = f"test-token-atomic-held-{state}"
+    token_hash = _seed_estimate(db, token, status="failed")
+    db.collection("estimates").document(token_hash).update({
+        "notification_state": state,
+        "media_id": "prior-media",
+        "notified_at": None,
+    })
+
+    claimed, data = estimates._claim_upload(
+        media_id="new-media",
+        object_path=f"{token_hash}/new-media.mp4",
+        content_type="video/mp4",
+        caller_description="",
+        token_hash=token_hash,
+    )
+
+    assert claimed is False
+    assert data["notification_state"] == state
+    current = db.collection("estimates").document(token_hash).get().to_dict()
+    assert current["media_id"] == "prior-media"
+
+
 # 21. ?description= reaches analyze_media(text_description=...), is stored on the doc, and never appears in log output.
 @pytest.mark.asyncio
 async def test_description_parameter_passed_to_analyzer_and_stored_never_logged(setup_env, monkeypatch):

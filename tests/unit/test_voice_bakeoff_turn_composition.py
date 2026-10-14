@@ -111,9 +111,13 @@ _BASELINE_HASHES = {
     # Re-pinned 2026-10-01 for reviewed public market-availability router.
     # Re-pinned 2026-10-11 for reviewed default-off Jobber webhook/recovery
     # wiring and bounded shutdown drain.
+    # Re-pinned 2026-10-13 for reviewed staging worker isolation; embedded
+    # remains the default and call routing is unchanged.
+    # Re-pinned 2026-10-13 for reviewed durable external-worker cutover
+    # fencing and bounded maintenance scans; voice bakeoff isolation remains.
     # Voice bakeoff imports and activation remain prohibited.
     "app/main.py":
-        "3558b3e4d0ec7818416ec8eccc4a56a867d123c874e89972e741ec3c627f45f2",
+        "97ac5ed051ce02fc0ad2e227cb214d75f8e56d20d1a3ded9da9064a432e96750",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

@@ -204,7 +204,7 @@ async def test_api_update_contractor_owner_sms_patch_readback(monkeypatch):
     assert res_empty == {"status": "no changes"}
     assert len(get_calls) == 0
 
-    # 4. Failed persistence raises 500
+    # 4. Held persistence reports reconciliation
     async def failing_update(cid, updates):
         return False
 
@@ -215,7 +215,7 @@ async def test_api_update_contractor_owner_sms_patch_readback(monkeypatch):
             ContractorUpdate(owner_sms_enabled=True),
             FakeRequest(),
         )
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 409
 
 
 @pytest.mark.asyncio

@@ -212,4 +212,24 @@ final class SignupPhoneTests: XCTestCase {
         XCTAssertEqual(SignupCountry.suggestedCountry(locale: Locale(identifier: "en_CA")), "CA")
         XCTAssertEqual(SignupCountry.suggestedCountry(locale: Locale(identifier: "ja_JP")), "US")
     }
+
+    func testDeviceRegionIsAHintAndNeverSilentlyBecomesUS() {
+        XCTAssertEqual(SignupCountry.deviceRegionCode(locale: Locale(identifier: "en_US")), "US")
+        XCTAssertEqual(SignupCountry.deviceRegionCode(locale: Locale(identifier: "pt_BR")), "BR")
+        XCTAssertEqual(SignupCountry.deviceRegionCode(locale: Locale(identifier: "de_DE")), "DE")
+        XCTAssertEqual(SignupCountry.deviceRegionCode(locale: Locale(identifier: "ja_JP")), "JP")
+        XCTAssertNotEqual(
+            SignupCountry.deviceRegionCode(locale: Locale(identifier: "de_DE")),
+            "US",
+            "An unsupported device region must remain visible to onboarding rather than being replaced with US."
+        )
+    }
+
+    func testDeviceRegionRejectsNonCountryCodes() {
+        XCTAssertNil(SignupCountry.normalizedCountryCode(nil))
+        XCTAssertNil(SignupCountry.normalizedCountryCode(""))
+        XCTAssertNil(SignupCountry.normalizedCountryCode("USA"))
+        XCTAssertNil(SignupCountry.normalizedCountryCode("1A"))
+        XCTAssertNil(SignupCountry.normalizedCountryCode("001"))
+    }
 }

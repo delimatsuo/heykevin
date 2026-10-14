@@ -26,6 +26,12 @@ from app.utils.phone import normalize_phone
 
 logger = get_logger(__name__)
 
+# The webhook must leave enough of Twilio's 15-second deadline for routing and
+# the voice pipeline. The database helper uses this shorter RPC deadline; the
+# outer wait is only a final guard around local executor scheduling.
+INBOUND_EVIDENCE_RPC_TIMEOUT_SECONDS = 0.75
+INBOUND_EVIDENCE_TIMEOUT_SECONDS = 1.0
+
 router = APIRouter()
 
 
@@ -257,31 +263,44 @@ async def _record_forwarding_evidence(contractor_id: str, seen_at: float):
         logger.warning(f"Could not record forwarding measurement: {type(e).__name__}")
 
 
-async def _record_inbound_call_evidence(contractor_id: str, seen_at: float):
-    """Stamp last_inbound_call_at on every inbound call, whatever the route.
-
-    The number-release sweep treats a number as quiet only if nothing has
-    reached it for 30 days. Calls on expired accounts take the ring-through
-    or voicemail branch below and never write a call record, so without this
-    stamp they would be invisible to that check. Same contract as
-    _record_forwarding_evidence: best-effort, fire-and-forget, hourly throttle.
-    """
-    try:
-        from app.db.contractors import get_contractor, update_contractor
-
-        contractor = await get_contractor(contractor_id)
-        if contractor:
-            previous = contractor.get("last_inbound_call_at") or 0
-            if not (isinstance(previous, (int, float)) and seen_at - previous < 3600):
-                await update_contractor(contractor_id, {"last_inbound_call_at": seen_at})
-    except Exception as e:
-        logger.warning(f"Failed to record inbound call evidence for {contractor_id}: {e}")
-
+async def _record_inbound_call_measurement(contractor_id: str, seen_at: float):
+    """Record optional acquisition telemetry after the safety stamp is settled."""
     try:
         from app.services.acquisition import record_inbound_call_measurement
         await record_inbound_call_measurement(contractor_id, seen_at)
     except Exception as e:
         logger.warning(f"Could not record inbound call measurement: {type(e).__name__}")
+
+
+async def _record_inbound_call_evidence(
+    contractor_id: str,
+    seen_at: float,
+    *,
+    record_measurement: bool = True,
+) -> bool:
+    """Write the release-aware inbound stamp within the webhook's RPC budget."""
+    try:
+        from app.db.contractors import record_inbound_call_evidence
+
+        recorded = await record_inbound_call_evidence(
+            contractor_id,
+            seen_at,
+            rpc_timeout=INBOUND_EVIDENCE_RPC_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to record inbound call evidence for %s: %s",
+            contractor_id,
+            type(e).__name__,
+        )
+        recorded = False
+
+    # Attribution is meaningful only after the release-aware safety write
+    # committed. The request handler passes ``False`` and schedules this work
+    # after its own acknowledgement; direct callers retain the same ordering.
+    if record_measurement and recorded:
+        await _record_inbound_call_measurement(contractor_id, seen_at)
+    return recorded
 
 
 async def _handle_deleted_app(
@@ -354,9 +373,40 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                 asyncio.create_task(
                     _record_forwarding_evidence(contractor_id, time.time())
                 )
-            # Every inbound call, forwarded or not, before the subscription
-            # branch so expired accounts are covered too.
-            asyncio.create_task(_record_inbound_call_evidence(contractor_id, time.time()))
+            # Every inbound call attempts the transactional safety stamp before
+            # the subscription branch. Cap that wait so a Firestore outage
+            # cannot consume Twilio's routing deadline and strand the call.
+            inbound_seen_at = time.time()
+            try:
+                inbound_recorded = await asyncio.wait_for(
+                    _record_inbound_call_evidence(
+                        contractor_id,
+                        inbound_seen_at,
+                        record_measurement=False,
+                    ),
+                    timeout=INBOUND_EVIDENCE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                inbound_recorded = False
+                logger.error(
+                    "Inbound call safety stamp exceeded its response budget: %s",
+                    contractor_id,
+                )
+
+            if not inbound_recorded:
+                # Storage could not establish a safe release-state ordering.
+                # Preserve the caller's path without consuming AI/provider
+                # resources or waiting out Twilio's webhook deadline.
+                logger.error(
+                    "Inbound call safety stamp unacknowledged; direct ring fallback: %s",
+                    contractor_id,
+                )
+                return twiml_response(
+                    _forward_twiml(owner_phone or settings.user_phone, caller_id=to_number)
+                )
+            asyncio.create_task(
+                _record_inbound_call_measurement(contractor_id, inbound_seen_at)
+            )
         else:
             contractor_id = ""
             owner_name = settings.user_name

@@ -4115,3 +4115,161 @@ async def test_gemini_3_live_intake_uses_client_content_turn_complete_false():
     assert len(pipeline._ws.sent_payloads) == 2
     assert "realtime_input" in pipeline._ws.sent_payloads[0]
     assert pipeline._ws.sent_payloads[1]["client_content"]["turn_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_disables_claude_thinking_to_prevent_response_truncation(monkeypatch):
+    """claude-sonnet-5 enables adaptive thinking by default and spends 80+ tokens
+    of max_tokens on internal reasoning before text, truncating spoken replies
+    to fragments like 'Thanks, Jon'. Thinking must be disabled on live voice turns.
+    """
+    import app.services.voice_pipeline as voice_pipeline_module
+
+    request_bodies: list[dict] = []
+
+    class FakeClaudeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Thanks, Jonathan. Is the sink completely backed up?"}],
+            }
+
+    class FakeClaudeClient:
+        async def post(self, *_args, **kwargs):
+            request_bodies.append(kwargs["json"])
+            return FakeClaudeResponse()
+
+    monkeypatch.setattr(voice_pipeline_module.settings, "anthropic_model", "claude-sonnet-5")
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    await pipeline._http_client.aclose()
+    pipeline._http_client = FakeClaudeClient()
+    pipeline._speak = _noop_audio
+
+    await pipeline._handle_caller_speech("Hi, my name is Jonathan. I have a clogged sink.")
+
+    assert request_bodies[0]["thinking"] == {"type": "disabled"}
+    assert request_bodies[0]["max_tokens"] >= 180
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_waits_longer_before_flushing_incomplete_unpunctuated_clause():
+    """When Deepgram emits an unpunctuated mid-sentence final segment
+    ('I said that I have a client' with speech_final=False), the fallback timer
+    must use UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS so the second half of the
+    caller's sentence ('sync. Can you send someone?') merges into one turn.
+    """
+    processed: list[str] = []
+    flushed = asyncio.Event()
+
+    class _MidSentencePauseWebSocket:
+        def __init__(self):
+            self._step = 0
+
+        async def recv(self) -> str:
+            self._step += 1
+            if self._step == 1:
+                return json.dumps({
+                    "channel": {"alternatives": [{"transcript": "I said that I have a client"}]},
+                    "is_final": True,
+                    "speech_final": False,
+                })
+            if self._step == 2:
+                # Longer than UTTERANCE_END_FALLBACK_SECONDS (0.03s), shorter than
+                # UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS (0.12s).
+                await asyncio.sleep(0.055)
+                return json.dumps({
+                    "channel": {"alternatives": [{"transcript": "sync. Can you send someone?"}]},
+                    "is_final": True,
+                    "speech_final": True,
+                })
+            await asyncio.sleep(1.0)
+            raise asyncio.CancelledError
+
+        async def send(self, _data: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    pipeline.UTTERANCE_END_FALLBACK_SECONDS = 0.03
+    pipeline.UTTERANCE_END_INCOMPLETE_FALLBACK_SECONDS = 0.12
+    pipeline._connected = True
+
+    async def fake_process_utterance(text: str) -> None:
+        processed.append(text)
+        flushed.set()
+
+    pipeline._process_utterance = fake_process_utterance
+    pipeline._deepgram_ws = _MidSentencePauseWebSocket()
+
+    receive_task = asyncio.create_task(pipeline._deepgram_receive_loop())
+    await asyncio.wait_for(flushed.wait(), timeout=0.5)
+    receive_task.cancel()
+    await pipeline.stop()
+
+    assert processed == ["I said that I have a client sync. Can you send someone?"]
+
+
+@pytest.mark.asyncio
+async def test_voice_pipeline_deepgram_url_includes_trade_and_service_keyterms(monkeypatch):
+    """Deepgram nova-3 on 8kHz mulaw PSTN audio needs trade and service keyterms
+    so 'clogged sink' is not decoded as 'client sync'.
+    """
+    import app.services.voice_pipeline as voice_pipeline_module
+
+    connected_urls: list[str] = []
+
+    class _DummyWS:
+        async def recv(self) -> str:
+            await asyncio.sleep(10)
+            return "{}"
+
+        async def send(self, _data: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def fake_connect(url: str, **_kwargs):
+        connected_urls.append(url)
+        return _DummyWS()
+
+    monkeypatch.setattr(voice_pipeline_module.websockets, "connect", fake_connect)
+
+    pipeline = VoicePipeline(
+        on_audio_out=_noop_audio,
+        on_transcript=_noop_transcript,
+        call_sid="CA_test",
+        contractor_config=_plumbing_config(),
+    )
+    ok = await pipeline._connect_deepgram()
+    await pipeline.stop()
+
+    assert ok is True
+    assert len(connected_urls) == 1
+    assert "endpointing=500" in connected_urls[0]
+    assert "keyterm=clogged%20sink" in connected_urls[0]
+    assert "keyterm=Faucet%20replacement" in connected_urls[0]
+
+
+def test_business_prompt_includes_stt_phonetic_homophone_tolerance():
+    prompt = build_system_prompt(_plumbing_config(), caller_phone="+16504228667")
+
+    assert "SPEECH-TO-TEXT TOLERANCE" in prompt
+    assert '"client sync"' in prompt
+    assert '"clogged sink"' in prompt
+

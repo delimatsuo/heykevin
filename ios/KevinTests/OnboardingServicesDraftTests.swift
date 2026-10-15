@@ -115,4 +115,16 @@ final class OnboardingServicesDraftTests: XCTestCase {
         XCTAssertTrue(draft.servicesPayload.isEmpty)
         XCTAssertTrue(draft.knowledgeMarkdown.isEmpty)
     }
+
+    func testTradeTemplateAndQuotingRules() {
+        var draft = OnboardingServicesDraft()
+        draft.applyTradeTemplate(.electrical)
+        XCTAssertEqual(draft.activeItems.count, 2)
+        XCTAssertTrue(draft.selectedRuleIDs.contains("ballpark"))
+
+        // Toggling "no_phone_price" clears "ballpark"
+        draft.toggleQuotingRule(id: "no_phone_price")
+        XCTAssertEqual(draft.selectedRuleIDs, ["no_phone_price"])
+        XCTAssertTrue(draft.knowledgeMarkdown.contains("Do not quote dollar figures over the phone"))
+    }
 }

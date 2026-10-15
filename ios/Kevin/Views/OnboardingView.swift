@@ -170,7 +170,7 @@ struct OnboardingView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color(.systemGroupedBackground)
+                Color.hkWarmCanvas
                     .ignoresSafeArea()
                 VStack {
                     switch step {
@@ -205,6 +205,7 @@ struct OnboardingView: View {
                 .padding()
             }
         }
+        .preferredColorScheme(.light)
         .onDisappear {
             marketCheckID = UUID()
             if appState.sessionState != .ready, let revision = signInAttemptRevision,

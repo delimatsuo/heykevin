@@ -3,68 +3,59 @@ import SwiftUI
 // MARK: - Color tokens
 
 extension Color {
-    /// Trade Signal Blue. Kevin's voice and identity. Maps to systemBlue so it
-    /// brightens automatically in dark mode for legibility.
-    static let hkBlue = Color(uiColor: .systemBlue)
+    /// Forest Sage accent used for live status and subtle highlights.
+    static let hkBlue = Color(red: 0.176, green: 0.353, blue: 0.263)
 
-    /// Restrained Cobalt adapted for dark legibility.
-    static let hkCobalt = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.45, green: 0.65, blue: 1.0, alpha: 1.0)
-            : UIColor(red: 0.11, green: 0.35, blue: 0.85, alpha: 1.0)
-    })
+    /// Deep Charcoal Ink for interactive controls and links.
+    static let hkCobalt = Color(red: 0.098, green: 0.090, blue: 0.086)
 
-    /// Clear Line Green. The go signal. Pick Up CTA, Live indicator.
-    static let hkGreen = Color(uiColor: .systemGreen)
+    /// Forest Sage for primary call pickup and live indicators.
+    static let hkGreen = Color(red: 0.176, green: 0.353, blue: 0.263)
 
-    /// Forest Green for primary call pickup.
-    static let hkForest = Color(red: 0.12, green: 0.48, blue: 0.30)
+    /// Forest Sage for primary call pickup.
+    static let hkForest = Color(red: 0.176, green: 0.353, blue: 0.263)
 
-    /// Warning Orange. Trial expiry, taking-a-message status.
-    static let hkOrange = Color(uiColor: .systemOrange)
+    /// Warm Terracotta for trial expiry and taking-a-message status.
+    static let hkOrange = Color(red: 0.722, green: 0.314, blue: 0.196)
 
-    /// Error Red. Errors, destructive labels (Ignore tint).
-    static let hkRed = Color(uiColor: .systemRed)
+    /// Warm Crimson for errors and destructive actions.
+    static let hkRed = Color(red: 0.722, green: 0.235, blue: 0.196)
 
-    /// Canvas Grey. systemGroupedBackground equivalent.
-    static let hkCanvas = Color(.systemGroupedBackground)
+    /// Warm Stone Canvas (#FAF7F2).
+    static let hkCanvas = Color(red: 0.980, green: 0.969, blue: 0.949)
 
-    /// Warm Ivory Canvas for journal.
-    static let hkWarmCanvas = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.08, green: 0.09, blue: 0.10, alpha: 1.0)
-            : UIColor(red: 0.98, green: 0.97, blue: 0.95, alpha: 1.0)
-    })
+    /// Warm Stone Canvas (#FAF7F2) for journal and all app screens.
+    static let hkWarmCanvas = Color(red: 0.980, green: 0.969, blue: 0.949)
 
-    /// Ink Text.
-    static let hkInk = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1.0)
-            : UIColor(red: 0.12, green: 0.13, blue: 0.14, alpha: 1.0)
-    })
+    /// Charcoal Ink Text (#191716).
+    static let hkInk = Color(red: 0.098, green: 0.090, blue: 0.086)
 
-    /// Muted Ink Text.
-    static let hkInkSecondary = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.65, green: 0.68, blue: 0.72, alpha: 1.0)
-            : UIColor(red: 0.42, green: 0.45, blue: 0.48, alpha: 1.0)
-    })
+    /// Warm Stone Secondary Text (#57534E).
+    static let hkInkSecondary = Color(red: 0.341, green: 0.325, blue: 0.306)
 
-    /// Fine Divider.
-    static let hkDivider = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(white: 0.22, alpha: 1.0)
-            : UIColor(red: 0.91, green: 0.89, blue: 0.86, alpha: 1.0)
-    })
+    /// Muted Stone Text (#8A847D).
+    static let hkInkMuted = Color(red: 0.541, green: 0.518, blue: 0.490)
 
-    /// Surface Grey. Secondary surfaces, caller chat bubbles.
-    static let hkSurface = Color(.systemGray5)
+    /// Fine Hairline Divider (rgba(25, 23, 22, 0.08)).
+    static let hkDivider = Color(red: 0.098, green: 0.090, blue: 0.086).opacity(0.08)
 
-    /// Mid Grey. Dividers, disabled borders.
-    static let hkBorder = Color(.systemGray4)
+    /// Soft Oat Surface (#F2ECE4) for pills, avatars, and secondary containers.
+    static let hkSurface = Color(red: 0.949, green: 0.925, blue: 0.894)
 
-    /// Call surface. Adapts to light/dark mode.
-    static let hkCallSurface = Color(.secondarySystemGroupedBackground)
+    /// Deeper Sand Surface (#E6DFD5) for selected tags and borders.
+    static let hkSandDeep = Color(red: 0.902, green: 0.875, blue: 0.835)
+
+    /// Sage Tint Surface (#E9F0EC).
+    static let hkSageTint = Color(red: 0.914, green: 0.941, blue: 0.925)
+
+    /// Terracotta Tint Surface (#F9ECE8).
+    static let hkAmberTint = Color(red: 0.976, green: 0.925, blue: 0.910)
+
+    /// Subtle Card Border.
+    static let hkBorder = Color(red: 0.098, green: 0.090, blue: 0.086).opacity(0.10)
+
+    /// Pure White Card Surface (#FFFFFF).
+    static let hkCallSurface = Color.white
 }
 
 /// Bridges the Color tokens above to `ShapeStyle` so they can be used directly
@@ -80,8 +71,12 @@ extension ShapeStyle where Self == Color {
     static var hkWarmCanvas:   Color { .hkWarmCanvas }
     static var hkInk:          Color { .hkInk }
     static var hkInkSecondary: Color { .hkInkSecondary }
+    static var hkInkMuted:     Color { .hkInkMuted }
     static var hkDivider:      Color { .hkDivider }
     static var hkSurface:      Color { .hkSurface }
+    static var hkSandDeep:     Color { .hkSandDeep }
+    static var hkSageTint:     Color { .hkSageTint }
+    static var hkAmberTint:    Color { .hkAmberTint }
     static var hkBorder:       Color { .hkBorder }
     static var hkCallSurface:  Color { .hkCallSurface }
 }
@@ -101,25 +96,24 @@ enum HKSpace {
 // MARK: - Corner radius scale
 
 enum HKRadius {
-    static let card: CGFloat = 12
-    static let button: CGFloat = 14
+    static let card: CGFloat = 18
+    static let button: CGFloat = 999
     static let bubble: CGFloat = 18
 }
 
 // MARK: - Button styles
 
-/// Primary CTA: full-width, deeply colored. Pick Up, Subscribe.
-/// Pass `tint` (defaults to hkGreen) so the destructive variant can use red, dark CTA can use black, etc.
+/// Primary CTA: full-width pill. Pick Up, Subscribe.
 struct HKPrimaryButtonStyle: ButtonStyle {
     var tint: Color = .hkGreen
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 16, weight: .semibold))
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, minHeight: 56)
+            .frame(maxWidth: .infinity, minHeight: 54)
             .background(tint.opacity(configuration.isPressed ? 0.85 : 1))
-            .clipShape(RoundedRectangle(cornerRadius: HKRadius.button, style: .continuous))
+            .clipShape(Capsule())
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -127,20 +121,20 @@ struct HKPrimaryButtonStyle: ButtonStyle {
 
 /// Bordered secondary action: Text Reply, Restore Purchases.
 struct HKSecondaryButtonStyle: ButtonStyle {
-    var tint: Color = .hkBlue
+    var tint: Color = .hkInk
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 15, weight: .regular))
+            .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(tint)
             .frame(maxWidth: .infinity, minHeight: 48)
             .background(
-                RoundedRectangle(cornerRadius: HKRadius.card, style: .continuous)
-                    .fill(tint.opacity(configuration.isPressed ? 0.10 : 0.0))
+                Capsule()
+                    .fill(Color.hkSurface.opacity(configuration.isPressed ? 0.75 : 1.0))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: HKRadius.card, style: .continuous)
-                    .stroke(tint.opacity(0.35), lineWidth: 1)
+                Capsule()
+                    .stroke(Color.hkDivider, lineWidth: 1)
             )
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
@@ -151,33 +145,31 @@ struct HKSecondaryButtonStyle: ButtonStyle {
 struct HKDestructiveButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 15, weight: .regular))
+            .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(.hkRed)
             .frame(maxWidth: .infinity, minHeight: 48)
             .background(
-                RoundedRectangle(cornerRadius: HKRadius.card, style: .continuous)
-                    .fill(Color.hkRed.opacity(configuration.isPressed ? 0.10 : 0.0))
+                Capsule()
+                    .fill(Color.hkRed.opacity(configuration.isPressed ? 0.12 : 0.06))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: HKRadius.card, style: .continuous)
-                    .stroke(Color.hkRed.opacity(0.35), lineWidth: 1)
+                Capsule()
+                    .stroke(Color.hkRed.opacity(0.25), lineWidth: 1)
             )
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
-/// Dark primary used for less-emphasized commit actions (Continue, Subscribe-via-paywall).
-/// Background adapts: black in light mode, white in dark mode. Label uses the
-/// inverse so contrast is preserved in both schemes.
+/// Charcoal pill primary CTA matching Hims editorial style.
 struct HKDarkPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(Color(uiColor: .systemBackground))
-            .frame(maxWidth: .infinity, minHeight: 52)
-            .background(Color.primary.opacity(configuration.isPressed ? 0.85 : 1))
-            .clipShape(RoundedRectangle(cornerRadius: HKRadius.button, style: .continuous))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, minHeight: 54)
+            .background(Color.hkInk.opacity(configuration.isPressed ? 0.85 : 1))
+            .clipShape(Capsule())
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -221,25 +213,14 @@ struct HKStatusDot: View {
     }
 }
 
-/// Hashable color generator for caller avatars. Stable per phone number.
+/// Warm editorial palette for caller avatars.
 enum HKAvatarPalette {
-    private static let palette: [Color] = [
-        .hkBlue,
-        Color(red: 0.40, green: 0.30, blue: 0.85), // purple
-        .hkGreen,
-        .hkOrange,
-        Color(red: 0.20, green: 0.55, blue: 0.95), // teal-ish blue
-        Color(red: 0.85, green: 0.30, blue: 0.55), // pink
-    ]
-
     static func color(for key: String) -> Color {
-        guard !key.isEmpty else { return .gray }
-        let hash = key.unicodeScalars.reduce(0) { $0 &+ Int($1.value) }
-        return palette[abs(hash) % palette.count]
+        return .hkSurface
     }
 }
 
-/// Caller avatar circle. Renders initials when name is present, otherwise a generic person icon.
+/// Caller avatar circle in warm oat (#F2ECE4) with charcoal ink initials (#191716).
 struct HKAvatar: View {
     var name: String
     var phone: String
@@ -253,34 +234,20 @@ struct HKAvatar: View {
 
     private var hasName: Bool { !initials.isEmpty }
 
-    private var gradient: LinearGradient {
-        if hasName {
-            let base = HKAvatarPalette.color(for: phone.isEmpty ? name : phone)
-            return LinearGradient(
-                colors: [base.opacity(0.85), base],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        } else {
-            return LinearGradient(
-                colors: [Color(.systemGray3), Color(.systemGray)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
-    }
-
     var body: some View {
         ZStack {
-            Circle().fill(gradient)
+            Circle()
+                .fill(Color.hkSurface)
+            Circle()
+                .strokeBorder(Color.hkDivider, lineWidth: 1)
             if hasName {
                 Text(initials)
-                    .font(.system(size: size * 0.36, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: size * 0.35, weight: .bold))
+                    .foregroundStyle(Color.hkInk)
             } else {
                 Image(systemName: "person.fill")
-                    .font(.system(size: size * 0.5))
-                    .foregroundStyle(.white)
+                    .font(.system(size: size * 0.44, weight: .semibold))
+                    .foregroundStyle(Color.hkInkSecondary)
             }
         }
         .frame(width: size, height: size)
@@ -396,27 +363,17 @@ struct KevinMark: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.30, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.30, green: 0.55, blue: 1.0),
-                            Color(red: 0.0, green: 0.30, blue: 0.85)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+                .fill(Color.hkInk)
                 .overlay(
                     RoundedRectangle(cornerRadius: size * 0.30, style: .continuous)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                        .blendMode(.plusLighter)
+                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
                 )
 
-            Image(systemName: "phone.fill")
-                .font(.system(size: size * 0.46, weight: .regular))
-                .foregroundStyle(.white)
+            Image(systemName: "phone.badge.waveform.fill")
+                .font(.system(size: size * 0.42, weight: .semibold))
+                .foregroundStyle(Color.hkWarmCanvas)
         }
         .frame(width: size, height: size)
-        .shadow(color: Color.hkBlue.opacity(0.30), radius: size * 0.18, x: 0, y: size * 0.10)
+        .shadow(color: Color.black.opacity(0.10), radius: size * 0.16, x: 0, y: size * 0.08)
     }
 }

@@ -378,13 +378,8 @@ struct SettingsHost<Root: View>: View {
                     .listRowBackground(Color.clear)
                 }
 
-                setupStatusSection
+                activeProfileSwitcherSection
                     .disabled(isFixtureMode)
-                    .accessibilityIdentifier("settings.section.setup")
-
-                howKevinAnswersSection
-                    .disabled(isFixtureMode)
-                    .accessibilityIdentifier("settings.section.howKevinAnswers")
 
                 if !appState.isPersonalMode {
                     yourBusinessSection
@@ -398,20 +393,39 @@ struct SettingsHost<Root: View>: View {
                         .accessibilityIdentifier("settings.section.integrations")
                 }
 
+                howKevinAnswersSection
+                    .disabled(isFixtureMode)
+                    .accessibilityIdentifier("settings.section.howKevinAnswers")
+
+                setupStatusSection
+                    .disabled(isFixtureMode)
+                    .accessibilityIdentifier("settings.section.setup")
+
                 callForwardingSection
                     .disabled(isFixtureMode)
                     .accessibilityIdentifier("settings.section.callForwarding")
             }
+            .scrollContentBackground(.hidden)
+            .background(Color.hkWarmCanvas.ignoresSafeArea())
+            .tint(Color.hkGreen)
+            .preferredColorScheme(.light)
             .navigationTitle(String(localized: "Kevin"))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         isAccountPresented = true
                     } label: {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 5) {
                             Image(systemName: "person.crop.circle")
+                                .font(.system(size: 14, weight: .semibold))
                             Text(String(localized: "Settings"))
+                                .font(.system(size: 13, weight: .semibold))
                         }
+                        .foregroundStyle(Color.hkInk)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.hkSurface))
+                        .overlay(Capsule().strokeBorder(Color.hkDivider, lineWidth: 1))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                     }
@@ -494,6 +508,10 @@ struct SettingsHost<Root: View>: View {
                 .disabled(isFixtureMode)
                 .accessibilityIdentifier("settings.section.about")
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.hkWarmCanvas.ignoresSafeArea())
+        .tint(Color.hkGreen)
+        .preferredColorScheme(.light)
         .navigationTitle(String(localized: "Account"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -502,6 +520,7 @@ struct SettingsHost<Root: View>: View {
                     isAccountPresented = false
                 }
                 .font(.headline)
+                .foregroundStyle(Color.hkInk)
                 .accessibilityIdentifier("settings.done")
             }
         }
@@ -513,6 +532,127 @@ struct SettingsHost<Root: View>: View {
 
     // MARK: - Sections: Kevin Tab
 
+    private var activeProfileSwitcherSection: some View {
+        let isBiz = !appState.isPersonalMode
+        return Section {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    profileChoiceCard(
+                        title: String(localized: "Business Receptionist"),
+                        subtitle: appState.businessName.isEmpty
+                            ? String(localized: "Intake & pricing")
+                            : appState.businessName,
+                        icon: "building.2",
+                        isSelected: isBiz
+                    ) {
+                        guard appState.isPersonalMode, !isSwitchingMode else { return }
+                        Task { await switchMode() }
+                    }
+                    .accessibilityIdentifier("kevin.profileCard.business")
+
+                    profileChoiceCard(
+                        title: String(localized: "Personal Assistant"),
+                        subtitle: appState.userName.isEmpty
+                            ? String(localized: "Personal screening")
+                            : String(localized: "\(appState.userName)'s screening"),
+                        icon: "shield",
+                        isSelected: !isBiz
+                    ) {
+                        guard !appState.isPersonalMode, !isSwitchingMode else { return }
+                        Task { await switchMode() }
+                    }
+                    .accessibilityIdentifier("kevin.profileCard.personal")
+                }
+                .accessibilityIdentifier("kevin.activeProfileStatus")
+
+                if isSwitchingMode {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text(String(localized: "Switching answering profile…"))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Color.hkInkSecondary)
+                    }
+                    .padding(.horizontal, 4)
+                }
+
+                if !modeChangeError.isEmpty {
+                    Text(modeChangeError)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.hkRed)
+                        .padding(.horizontal, 4)
+                }
+            }
+            .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        } header: {
+            Text(String(localized: "Active Answering Profile"))
+                .font(.system(size: 11, weight: .bold))
+                .tracking(0.6)
+                .foregroundStyle(Color.hkInkMuted)
+        }
+    }
+
+    private func profileChoiceCard(
+        title: String,
+        subtitle: String,
+        icon: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: icon)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.hkWarmCanvas : Color.hkInk)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(isSelected ? Color.hkInk : Color.hkSurface)
+                        )
+                    Spacer()
+                    ZStack {
+                        Circle()
+                            .strokeBorder(isSelected ? Color.hkInk : Color.hkDivider, lineWidth: 1.5)
+                            .background(Circle().fill(isSelected ? Color.hkInk : Color.clear))
+                            .frame(width: 22, height: 22)
+                        if isSelected {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(Color.white)
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Color.hkInk)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Text(subtitle)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(isSelected ? Color.hkGreen : Color.hkInkMuted)
+                        .lineLimit(1)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(isSelected ? Color.hkInk : Color.hkDivider, lineWidth: isSelected ? 2 : 1)
+            )
+            .shadow(color: Color.black.opacity(isSelected ? 0.06 : 0.02), radius: isSelected ? 10 : 4, x: 0, y: 3)
+        }
+        .buttonStyle(.plain)
+    }
+
     private var setupStatusSection: some View {
         let numberOK = !appState.kevinNumber.isEmpty
         let pushOK = pushPermission == .authorized || pushPermission == .provisional
@@ -522,20 +662,25 @@ struct SettingsHost<Root: View>: View {
         return Section {
             if allGood {
                 Label(String(localized: "Setup steps completed"), systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.hkGreen)
+                    .font(.subheadline.weight(.semibold))
             }
 
             if numberOK {
                 HStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.title3)
-                        .hidden()
+                    Image(systemName: "phone.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.hkInk)
+                        .frame(width: 30, height: 30)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.hkSurface))
 
                     Text(String(localized: "Kevin Number"))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.hkInk)
                     Spacer()
                     Text(PhoneFormatter.format(kevinNumber))
-                        .foregroundStyle(Color.secondary)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.hkInkSecondary)
                         .textSelection(.enabled)
                 }
             } else {
@@ -558,7 +703,14 @@ struct SettingsHost<Root: View>: View {
                     if isProvisioningNumber {
                         AnyView(ProgressView().scaleEffect(0.8))
                     } else {
-                        AnyView(Text(String(localized: "Get Number")).font(.caption.weight(.medium)).foregroundStyle(.blue))
+                        AnyView(
+                            Text(String(localized: "Get Number"))
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.hkInk)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Color.hkSurface))
+                        )
                     }
                 }
             }
@@ -566,15 +718,16 @@ struct SettingsHost<Root: View>: View {
             if !allGood {
                 HStack(spacing: 12) {
                     Image(systemName: (forwardingCountry != "CA" && appState.forwardingActivated) ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .foregroundStyle((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.green : Color.orange)
+                        .foregroundStyle((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.hkGreen : Color.hkOrange)
                         .font(.title3)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(localized: "Call Forwarding"))
-                            .font(.subheadline)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.hkInk)
                         Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : (appState.forwardingActivated ? String(localized: "Activation requested") : String(localized: "Missed calls must route to Kevin")))
                             .font(.caption)
-                            .foregroundStyle((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.secondary : Color.orange)
+                            .foregroundStyle((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.hkInkSecondary : Color.hkOrange)
                     }
                     Spacer()
                     Button {
@@ -590,12 +743,17 @@ struct SettingsHost<Root: View>: View {
                         }
                     } label: {
                         Text((forwardingCountry != "CA" && appState.forwardingActivated) ? String(localized: "Re-activate") : String(localized: "Set up forwarding"))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(forwardingCodes == nil ? Color.secondary : ((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.blue : Color.orange))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.blue : Color.orange).opacity(forwardingCodes == nil ? 0.05 : 0.15))
-                            .clipShape(Capsule())
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(forwardingCodes == nil ? Color.hkInkMuted : ((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.hkInk : Color.white))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule().fill(
+                                    forwardingCodes == nil
+                                        ? Color.hkSurface
+                                        : ((forwardingCountry != "CA" && appState.forwardingActivated) ? Color.hkSurface : Color.hkInk)
+                                )
+                            )
                     }
                     .buttonStyle(.borderless)
                     .disabled(forwardingCodes == nil || isFixtureMode)
@@ -624,8 +782,11 @@ struct SettingsHost<Root: View>: View {
                         Text(pushPermission == .denied
                              ? String(localized: "Open Settings")
                              : String(localized: "Enable"))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.blue)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.hkInk)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Color.hkSurface))
                     )
                 }
 
@@ -637,53 +798,34 @@ struct SettingsHost<Root: View>: View {
                 ) {
                     presentPaywall(from: .assistant)
                 } actionLabel: {
-                    AnyView(Text(String(localized: "Subscribe")).font(.caption.weight(.medium)).foregroundStyle(.blue))
+                    AnyView(
+                        Text(String(localized: "Subscribe"))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.hkInk)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Color.hkSurface))
+                    )
                 }
             }
         } header: {
-            Text(allGood ? String(localized: "Kevin") : String(localized: "Setup Status"))
+            Text(allGood ? String(localized: "Phone Line Status") : String(localized: "Setup Status"))
         }
     }
 
     private var howKevinAnswersSection: some View {
         Section {
-            HStack(spacing: 12) {
-                Image(systemName: appState.isPersonalMode ? "shield" : "building.2")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
-                    .frame(width: 38, height: 38)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(red: 0.949, green: 0.925, blue: 0.894))
-                    )
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(appState.isPersonalMode
-                         ? String(localized: "Personal Assistant Active")
-                         : String(localized: "Business Receptionist Active"))
-                        .font(.subheadline.weight(.bold))
-                    Text(appState.isPersonalMode
-                         ? String(localized: "Screening unknown callers for \(appState.userName.isEmpty ? "you" : appState.userName)")
-                         : (appState.businessName.isEmpty
-                            ? String(localized: "Answering with business intake & pricing")
-                            : String(localized: "Answering as \(appState.businessName)")))
-                        .font(.caption)
-                        .foregroundStyle(Color.secondary)
-                }
-                Spacer()
-            }
-            .accessibilityIdentifier("kevin.activeProfileStatus")
-
             // Screen all calls toggle (moved from Recents)
             Toggle(isOn: screenAllCallsBinding) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "Screen all calls"))
                         .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.hkInk)
                     Text(!appState.ringThroughContacts
                          ? String(localized: "Kevin screens everyone, including contacts")
                          : String(localized: "Contacts bypass Kevin and ring directly"))
                         .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(Color.hkInkSecondary)
                 }
             }
             .disabled(isSavingScreenAllCalls || isFixtureMode)
@@ -692,25 +834,29 @@ struct SettingsHost<Root: View>: View {
             if !screenAllCallsSaveError.isEmpty {
                 Text(screenAllCallsSaveError)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.hkRed)
             }
 
             Toggle(String(localized: "Block spam with disconnect tone"), isOn: sitToneBinding)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.hkInk)
                 .disabled(isSavingSitTone || isFixtureMode)
 
             if !sitToneSaveError.isEmpty {
                 Text(sitToneSaveError)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.hkRed)
             }
 
             Toggle(String(localized: "Alert me for urgent calls"), isOn: smartInterruptionBinding)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.hkInk)
                 .disabled(isSavingSmartInterruption || isFixtureMode)
 
             if !smartInterruptionSaveError.isEmpty {
                 Text(smartInterruptionSaveError)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.hkRed)
             }
 
             if ownerSMSPreference.isLoaded && !ownerSMSPreference.isUnsupportedBackend {
@@ -718,12 +864,15 @@ struct SettingsHost<Root: View>: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(String(localized: "Choose SMS notifications"))
                             .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.hkInk)
                         Text(String(localized: "Opt in to receive Hey Kevin call summaries, voicemail and account notices by text. Your existing app preference does not provide SMS consent."))
                             .font(.caption)
-                            .foregroundStyle(Color.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                         Button(String(localized: "Review and opt in")) {
                             prepareOwnerSMSConsent()
                         }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.hkGreen)
                         .disabled(ownerSMSPreference.isSaving || isPreparingSMSConsent || ownerSMSPreference.isCarrierBlocked || isFixtureMode)
                         .accessibilityIdentifier("settings.smsConsent.review")
                     }
@@ -732,9 +881,10 @@ struct SettingsHost<Root: View>: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(String(localized: "SMS notifications"))
                                 .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.hkInk)
                             Text(OwnerSMSPreferenceState.summaryDescription)
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         }
                     }
                     .disabled(ownerSMSPreference.isSaving || isFixtureMode)
@@ -744,6 +894,7 @@ struct SettingsHost<Root: View>: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "SMS notifications"))
                         .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.hkInk)
                     if ownerSMSPreference.loadError.isEmpty {
                         ProgressView(String(localized: "Loading SMS settings…"))
                             .font(.caption)
@@ -755,12 +906,13 @@ struct SettingsHost<Root: View>: View {
                 HStack {
                     Text(ownerSMSPreference.loadError)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.hkRed)
                     Spacer()
                     Button(String(localized: "Retry")) {
                         Task { await coalesceLoad(isForegroundOrTabSwitch: true) }
                     }
-                    .font(.caption.weight(.medium))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.hkInk)
                     .disabled(isFixtureMode || ownerSMSPreference.isSaving)
                     .accessibilityIdentifier("settings.smsNotifications.loadRetry")
                 }
@@ -770,17 +922,17 @@ struct SettingsHost<Root: View>: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(OwnerSMSPreferenceState.carrierBlockedNotice)
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.hkOrange)
                     if !kevinNumber.isEmpty {
                         Text(String(localized: "Kevin number: \(PhoneFormatter.format(kevinNumber))"))
                             .font(.caption2)
-                            .foregroundStyle(Color.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                     Text(ownerSMSPreference.consentRequired
                          ? String(localized: "After replying START, refresh settings and review the SMS opt-in above. START does not replace your app consent.")
                          : OwnerSMSPreferenceState.appSwitchRequiredNotice)
                         .font(.caption2)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(Color.hkInkSecondary)
                 }
                 .padding(.vertical, 2)
             }
@@ -789,14 +941,15 @@ struct SettingsHost<Root: View>: View {
                 HStack {
                     Text(ownerSMSPreference.saveError)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.hkRed)
                     Spacer()
                     Button(String(localized: "Retry")) {
                         if let requested = ownerSMSPreference.requestedEnabled {
                             saveOwnerSMSPreference(requested)
                         }
                     }
-                    .font(.caption.weight(.medium))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.hkInk)
                     .disabled(ownerSMSPreference.isSaving || ownerSMSPreference.requestedEnabled == nil)
                     .accessibilityIdentifier("settings.smsNotifications.retry")
                 }
@@ -830,64 +983,28 @@ struct SettingsHost<Root: View>: View {
                 } label: {
                     HStack {
                         Text(String(localized: "Sync Contacts"))
-                            .font(.subheadline)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.hkInk)
                         Spacer()
                         if !syncMessage.isEmpty {
                             Text(syncMessage)
                                 .font(.caption)
-                                .foregroundStyle(syncMessage.contains("Error") || syncMessage.contains("denied") ? .red : .green)
+                                .foregroundStyle(syncMessage.contains("Error") || syncMessage.contains("denied") ? Color.hkRed : Color.hkGreen)
                         }
                         Image(systemName: "arrow.triangle.2.circlepath")
-                            .foregroundStyle(.blue)
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                 }
                 .disabled(isFixtureMode)
             }
 
-            Button {
-                #if DEBUG
-                if isFixtureMode { return }
-                #endif
-                showModeChangeAlert = true
-            } label: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(appState.isPersonalMode
-                             ? String(localized: "Use Kevin for Your Business")
-                             : String(localized: "Switch to Personal Screening"))
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.blue)
-                        Text(appState.isPersonalMode
-                             ? String(localized: "Receptionist mode: intake questions, business hours, knowledge base. Requires a Business plan.")
-                             : String(localized: "Kevin only screens unknown callers and takes messages. Your business setup is kept."))
-                            .font(.caption)
-                            .foregroundStyle(Color.secondary)
-                    }
-                    Spacer()
-                    if isSwitchingMode {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                            .font(.caption)
-                    }
-                }
-            }
-            .disabled(isSwitchingMode || isFixtureMode)
-
-            if !modeChangeError.isEmpty {
-                Text(modeChangeError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
             if !saveError.isEmpty {
                 Text(saveError)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.hkRed)
             }
         } header: {
-            Text(String(localized: "How Kevin Answers"))
+            Text(String(localized: "Call Screening & Alerts"))
         } footer: {
             Text(appState.isPersonalMode
                  ? String(localized: "Choose how Kevin screens your calls. Enable urgent call alerts to be notified about urgent issues.")
@@ -899,9 +1016,10 @@ struct SettingsHost<Root: View>: View {
         Section {
             HStack {
                 Text(String(localized: "Business"))
+                    .foregroundStyle(Color.hkInk)
                 Spacer()
                 Text(appState.businessName.isEmpty ? String(localized: "Not set") : appState.businessName)
-                    .foregroundStyle(appState.businessName.isEmpty ? .tertiary : .secondary)
+                    .foregroundStyle(appState.businessName.isEmpty ? Color.hkInkMuted : Color.hkInkSecondary)
             }
 
             HStack {
@@ -912,6 +1030,7 @@ struct SettingsHost<Root: View>: View {
                         saveBusinessHoursExplicitly()
                     }
                 ), displayedComponents: .hourAndMinute)
+                .foregroundStyle(Color.hkInk)
                 .disabled(isSavingBusinessHours || isFixtureMode)
                 .accessibilityIdentifier("settings.businessHours.start")
 
@@ -929,6 +1048,7 @@ struct SettingsHost<Root: View>: View {
                         saveBusinessHoursExplicitly()
                     }
                 ), displayedComponents: .hourAndMinute)
+                .foregroundStyle(Color.hkInk)
                 .disabled(isSavingBusinessHours || isFixtureMode)
                 .accessibilityIdentifier("settings.businessHours.end")
 
@@ -942,12 +1062,13 @@ struct SettingsHost<Root: View>: View {
                 HStack {
                     Text(businessHoursSaveError)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.hkRed)
                     Spacer()
                     Button(String(localized: "Retry")) {
                         saveBusinessHoursExplicitly()
                     }
-                    .font(.caption.weight(.medium))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.hkInk)
                     .accessibilityIdentifier("settings.businessHours.retry")
                 }
             }
@@ -965,10 +1086,11 @@ struct SettingsHost<Root: View>: View {
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "Services & Pricing"))
-                        .font(.subheadline)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.hkInk)
                     Text(String(localized: "Add your services so Kevin can quote estimates"))
                         .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(Color.hkInkSecondary)
                 }
             }
 
@@ -981,16 +1103,16 @@ struct SettingsHost<Root: View>: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(localized: "Business Knowledge"))
-                            .font(.subheadline)
-                            .foregroundStyle(Color.primary)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.hkInk)
                         Text(String(localized: "Tell Kevin about your business so he can answer questions"))
                             .font(.caption)
-                            .foregroundStyle(Color.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.footnote.weight(.semibold))
-                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                        .foregroundStyle(Color.hkInkMuted)
                 }
             }
 
@@ -1000,6 +1122,7 @@ struct SettingsHost<Root: View>: View {
                     .keyboardType(.URL)
                     .autocapitalization(.none)
                     .font(.subheadline)
+                    .foregroundStyle(Color.hkInk)
                     .disabled(isFixtureMode)
 
                 if isImporting {
@@ -1009,6 +1132,12 @@ struct SettingsHost<Root: View>: View {
                     Button(String(localized: "Import")) {
                         Task { await importWebsite() }
                     }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(websiteURL.isEmpty ? Color.hkInkMuted : Color.hkInk)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.hkSurface))
+                    .buttonStyle(.borderless)
                     .disabled(websiteURL.isEmpty || isFixtureMode)
                 }
             }
@@ -1016,7 +1145,7 @@ struct SettingsHost<Root: View>: View {
             if !importMessage.isEmpty {
                 Text(importMessage)
                     .font(.caption)
-                    .foregroundStyle(importMessage.contains("Failed") ? .red : .green)
+                    .foregroundStyle(importMessage.contains("Failed") ? Color.hkRed : Color.hkGreen)
             }
         } header: {
             Text(String(localized: "Knowledge Base"))
@@ -1032,29 +1161,30 @@ struct SettingsHost<Root: View>: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(localized: "Jobber"))
                             .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.hkInk)
                         switch jobberModel.connectionState {
                         case .unknown:
                             Text(String(localized: "Status unknown"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         case .notReady:
                             Text(String(localized: "Not connected"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         case .disconnectPending:
                             Text(String(localized: "Connection paused • Reconnect to resume"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         case .reauthorizationRequired:
                             Text(String(localized: "Reconnection required"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         case .connected(let leadCaptureEnabled):
                             Text(leadCaptureEnabled
                                  ? String(localized: "Connected • Lead capture enabled")
                                  : String(localized: "Connected • Lead capture off"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkGreen)
                         }
                     }
                     Spacer()
@@ -1068,11 +1198,11 @@ struct SettingsHost<Root: View>: View {
                             Button(String(localized: "Refresh")) {
                                 performJobberRefresh()
                             }
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.blue)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.hkInk)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(Color.blue.opacity(0.12))
+                            .background(Color.hkSurface)
                             .clipShape(Capsule())
                             .buttonStyle(.borderless)
                             .disabled(isFixtureMode)
@@ -1082,6 +1212,7 @@ struct SettingsHost<Root: View>: View {
                                     performJobberRefresh()
                                 }
                                 .font(.caption)
+                                .foregroundStyle(Color.hkInkSecondary)
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
 
@@ -1089,11 +1220,11 @@ struct SettingsHost<Root: View>: View {
                                     performJobberConnect()
                                 } label: {
                                     Text(String(localized: "Connect"))
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(.blue)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.hkInk)
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 5)
-                                        .background(Color.blue.opacity(0.12))
+                                        .background(Color.hkSurface)
                                         .clipShape(Capsule())
                                 }
                                 .buttonStyle(.borderless)
@@ -1105,13 +1236,15 @@ struct SettingsHost<Root: View>: View {
                                     performJobberRefresh()
                                 }
                                 .font(.caption)
+                                .foregroundStyle(Color.hkInkSecondary)
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
 
                                 Button(String(localized: "Reconnect")) {
                                     performJobberConnect()
                                 }
-                                .font(.caption)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.hkInk)
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
 
@@ -1120,6 +1253,7 @@ struct SettingsHost<Root: View>: View {
                                 } label: {
                                     Text(String(localized: "Remove"))
                                         .font(.caption)
+                                        .foregroundStyle(Color.hkRed)
                                 }
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
@@ -1130,6 +1264,7 @@ struct SettingsHost<Root: View>: View {
                                     performJobberRefresh()
                                 }
                                 .font(.caption)
+                                .foregroundStyle(Color.hkInkSecondary)
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
 
@@ -1137,11 +1272,11 @@ struct SettingsHost<Root: View>: View {
                                     performJobberConnect()
                                 } label: {
                                     Text(String(localized: "Reconnect"))
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(.blue)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.hkInk)
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 5)
-                                        .background(Color.blue.opacity(0.12))
+                                        .background(Color.hkSurface)
                                         .clipShape(Capsule())
                                 }
                                 .buttonStyle(.borderless)
@@ -1152,6 +1287,7 @@ struct SettingsHost<Root: View>: View {
                                 } label: {
                                     Text(String(localized: "Remove"))
                                         .font(.caption)
+                                        .foregroundStyle(Color.hkRed)
                                 }
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
@@ -1162,6 +1298,7 @@ struct SettingsHost<Root: View>: View {
                                     performJobberRefresh()
                                 }
                                 .font(.caption)
+                                .foregroundStyle(Color.hkInkSecondary)
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
 
@@ -1170,6 +1307,7 @@ struct SettingsHost<Root: View>: View {
                                 } label: {
                                     Text(String(localized: "Disconnect"))
                                         .font(.caption)
+                                        .foregroundStyle(Color.hkRed)
                                 }
                                 .buttonStyle(.borderless)
                                 .disabled(isFixtureMode)
@@ -1181,19 +1319,19 @@ struct SettingsHost<Root: View>: View {
                 if let prompt = jobberModel.browserPromptMessage {
                     Text(prompt)
                         .font(.caption)
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Color.hkGreen)
                 }
 
                 if let notice = jobberModel.unconfirmedRevocationNotice {
                     Text(notice)
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.hkOrange)
                 }
 
                 if let errorMsg = jobberModel.statusErrorMessage {
                     Text(errorMsg)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.hkRed)
                 }
             }
             .id("jobber_integration_section")
@@ -1202,9 +1340,10 @@ struct SettingsHost<Root: View>: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "Google Calendar"))
                         .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.hkInk)
                     Text(String(localized: "Availability checking, appointment requests"))
                         .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(Color.hkInkSecondary)
                 }
                 Spacer()
                 if appState.googleCalendarConnected {
@@ -1213,6 +1352,7 @@ struct SettingsHost<Root: View>: View {
                     } label: {
                         Text(String(localized: "Disconnect"))
                             .font(.caption)
+                            .foregroundStyle(Color.hkRed)
                     }
                     .buttonStyle(.borderless)
                     .disabled(isFixtureMode)
@@ -1221,11 +1361,11 @@ struct SettingsHost<Root: View>: View {
                         Task { await connectGoogleCalendar() }
                     } label: {
                         Text(String(localized: "Connect"))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.blue)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.hkInk)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(Color.blue.opacity(0.12))
+                            .background(Color.hkSurface)
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.borderless)
@@ -1247,18 +1387,20 @@ struct SettingsHost<Root: View>: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Carrier setup in preparation"))
                             .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.hkInk)
                         Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.setup : String(localized: "Carrier-specific instructions are not available yet."))
                             .font(.caption)
-                            .foregroundStyle(Color.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                 } else {
                     Toggle(isOn: $appState.isVerizonCarrier) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(String(localized: "I'm a Verizon customer"))
                                 .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.hkInk)
                             Text(String(localized: "Uses *71 to activate and *73 to deactivate"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         }
                     }
                 }
@@ -1281,13 +1423,14 @@ struct SettingsHost<Root: View>: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(String(localized: "Activate Kevin"))
                                 .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.hkInk)
                             Text(String(localized: "Forward missed calls to Kevin"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         }
                         Spacer()
                         Image(systemName: "phone.arrow.right")
-                            .foregroundStyle(.green)
+                            .foregroundStyle(Color.hkGreen)
                     }
                 }
                 .disabled(isFixtureMode)
@@ -1301,11 +1444,11 @@ struct SettingsHost<Root: View>: View {
                                 .font(.subheadline.weight(.medium))
                             Text(String(localized: "Stop forwarding, calls ring normally"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         }
                         Spacer()
                         Image(systemName: "xmark.circle")
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Color.hkRed)
                     }
                 }
                 .disabled(isFixtureMode)
@@ -1319,11 +1462,11 @@ struct SettingsHost<Root: View>: View {
                                 .font(.subheadline.weight(.medium))
                             Text(String(localized: "Nuclear option — clears every forwarding type at once"))
                                 .font(.caption)
-                                .foregroundStyle(Color.secondary)
+                                .foregroundStyle(Color.hkInkSecondary)
                         }
                         Spacer()
                         Image(systemName: "exclamationmark.octagon")
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Color.hkRed)
                     }
                 }
                 .disabled(codes.clearAll == nil || isFixtureMode)
@@ -1331,10 +1474,10 @@ struct SettingsHost<Root: View>: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Label(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Color.hkInk)
                     Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.baseline : String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
                         .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(Color.hkInkSecondary)
                 }
                 .padding(.vertical, 4)
                 if forwardingCountry == "CA" {
@@ -1349,7 +1492,7 @@ struct SettingsHost<Root: View>: View {
         } footer: {
             if appState.kevinNumber.isEmpty {
                 Text(String(localized: "You need a Kevin number before setting up forwarding. Please contact support."))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.hkOrange)
             } else if forwardingCountry == "US" {
                 Text(String(localized: "Tapping opens your phone dialer. Tap Call to confirm. If you're on Verizon, turn on the toggle above so the correct codes are used."))
             } else {
@@ -1365,16 +1508,18 @@ struct SettingsHost<Root: View>: View {
         Section {
             HStack {
                 Text(String(localized: "Name"))
+                    .foregroundStyle(Color.hkInk)
                 Spacer()
                 Text(appState.userName)
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(Color.hkInkSecondary)
             }
 
             HStack {
                 Text(String(localized: "Plan"))
+                    .foregroundStyle(Color.hkInk)
                 Spacer()
                 Text(planLabel)
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(Color.hkInkSecondary)
             }
 
             Picker(selection: countryBinding) {
@@ -1384,14 +1529,15 @@ struct SettingsHost<Root: View>: View {
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "Country"))
+                        .foregroundStyle(Color.hkInk)
                     if !appState.kevinNumber.isEmpty {
                         Text(String(localized: "Your account country is locked to your assigned Kevin number."))
                             .font(.caption)
-                            .foregroundStyle(Color.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                     } else {
                         Text(String(localized: "Sets the call forwarding codes Kevin shows you."))
                             .font(.caption)
-                            .foregroundStyle(Color.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                 }
             }
@@ -1400,23 +1546,25 @@ struct SettingsHost<Root: View>: View {
             if !countrySaveError.isEmpty {
                 Text(countrySaveError)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.hkRed)
             }
 
             if RegulatoryAddress.requiresAddress(countryCode: appState.countryCode) {
                 TextField(String(localized: "Business Address"), text: $regulatoryAddressDraft)
                     .textContentType(.fullStreetAddress)
                     .font(.subheadline)
+                    .foregroundStyle(Color.hkInk)
                     .disabled(isFixtureMode)
                 TextField(String(localized: "City"), text: $regulatoryCityDraft)
                     .textContentType(.addressCity)
                     .font(.subheadline)
+                    .foregroundStyle(Color.hkInk)
                     .disabled(isFixtureMode)
 
                 if !regulatoryAddressError.isEmpty {
                     Text(regulatoryAddressError)
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.hkRed)
                 }
 
                 Button {
@@ -1426,6 +1574,8 @@ struct SettingsHost<Root: View>: View {
                         ProgressView()
                     } else {
                         Text(String(localized: "Save Address"))
+                            .fontWeight(.semibold)
+                            .foregroundStyle(Color.hkGreen)
                     }
                 }
                 .disabled(isSavingRegulatoryAddress || isFixtureMode)
@@ -1436,10 +1586,11 @@ struct SettingsHost<Root: View>: View {
             } label: {
                 HStack {
                     Text(viewPlansLabel)
-                        .foregroundStyle(.blue)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Color.hkGreen)
                     Spacer()
                     Image(systemName: "arrow.right.circle.fill")
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Color.hkGreen)
                 }
             }
             .disabled(isFixtureMode)
@@ -1456,12 +1607,12 @@ struct SettingsHost<Root: View>: View {
                 } label: {
                     HStack {
                         Text(String(localized: "Manage Subscription"))
+                            .foregroundStyle(Color.hkInk)
                         Spacer()
                         Image(systemName: "arrow.up.right.square")
-                            .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                            .foregroundStyle(Color.hkInkMuted)
                     }
                 }
-                .foregroundStyle(.primary)
                 .disabled(isFixtureMode)
             }
         } header: {
@@ -2583,30 +2734,39 @@ San Jose, Santa Clara, Campbell
                             startRecording()
                         }
                     } label: {
-                        HStack(spacing: 8) {
+                        HStack(spacing: 10) {
                             Image(systemName: isRecording ? "stop.circle.fill" : "mic.circle.fill")
                                 .font(.title2)
-                                .foregroundStyle(isRecording ? .red : .blue)
-                            VStack(alignment: .leading, spacing: 1) {
+                                .foregroundStyle(isRecording ? Color.hkRed : Color.hkInk)
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(isRecording ? String(localized: "Tap to stop") : String(localized: "Describe your business"))
-                                    .font(.subheadline.weight(.medium))
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Color.hkInk)
                                 Text(isRecording ? String(localized: "Recording...") : String(localized: "Talk and Kevin will learn"))
                                     .font(.caption)
-                                    .foregroundStyle(Color.secondary)
+                                    .foregroundStyle(Color.hkInkSecondary)
                             }
                         }
                     }
                     .buttonStyle(.plain)
                     .disabled(isFixtureMode)
 
+                    Spacer()
+
                     if isTranscribing {
                         ProgressView()
                             .scaleEffect(0.8)
                     }
                 }
-                .padding()
-                .background(Color(.systemGray6))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.hkDivider, lineWidth: 1)
+                )
                 .padding(.horizontal)
                 .padding(.top, 8)
 
@@ -2623,12 +2783,13 @@ San Jose, Santa Clara, Campbell
                 ZStack(alignment: .topLeading) {
                     TextEditor(text: $knowledgeText)
                         .font(.system(.subheadline, design: .monospaced))
+                        .foregroundStyle(Color.hkInk)
                         .scrollContentBackground(.hidden)
 
                     if knowledgeText.isEmpty {
                         Text(placeholder)
                             .font(.system(.subheadline, design: .monospaced))
-                            .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                            .foregroundStyle(Color.hkInkMuted)
                             .padding(.top, 8)
                             .padding(.leading, 5)
                             .allowsHitTesting(false)
@@ -2636,9 +2797,14 @@ San Jose, Santa Clara, Campbell
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.white)
+                        .padding(.horizontal, 8)
+                )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(.systemGray4), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.hkDivider, lineWidth: 1)
                         .padding(.horizontal, 8)
                 )
                 .padding(.top, 8)
@@ -2646,14 +2812,14 @@ San Jose, Santa Clara, Campbell
                 if !knowledgeLengthWarning.isEmpty {
                     Text(knowledgeLengthWarning)
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.hkOrange)
                         .padding(.horizontal)
                         .padding(.top, 4)
                 }
 
                 Text(String(localized: "Type your services, or tap the mic to describe them by voice. Kevin uses this to answer caller questions."))
                     .font(.caption)
-                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                    .foregroundStyle(Color.hkInkMuted)
                     .padding(.horizontal)
                     .padding(.top, 4)
                     .padding(.bottom, 8)
@@ -2669,6 +2835,8 @@ San Jose, Santa Clara, Campbell
                     .disabled(isFixtureMode)
                 }
             }
+            .background(Color.hkWarmCanvas.ignoresSafeArea())
+            .preferredColorScheme(.light)
             .onChange(of: knowledgeText) { _, newValue in
                 if newValue.count > 10_000 {
                     knowledgeText = String(newValue.prefix(10_000))
@@ -2682,12 +2850,14 @@ San Jose, Santa Clara, Campbell
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(String(localized: "Cancel")) { dismiss() }
+                        .foregroundStyle(Color.hkInk)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(String(localized: "Save")) {
                         Task { await saveKnowledge() }
                     }
                     .fontWeight(.semibold)
+                    .foregroundStyle(Color.hkGreen)
                     .disabled(isSaving || knowledgeText.isEmpty || isFixtureMode)
                 }
             }
@@ -2707,7 +2877,11 @@ San Jose, Santa Clara, Campbell
                 NavigationStack {
                     TextEditor(text: $pendingKnowledge)
                         .font(.system(.subheadline, design: .monospaced))
+                        .foregroundStyle(Color.hkInk)
+                        .scrollContentBackground(.hidden)
                         .padding()
+                        .background(Color.hkWarmCanvas.ignoresSafeArea())
+                        .preferredColorScheme(.light)
                         .navigationTitle(String(localized: "Review Changes"))
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
@@ -2852,15 +3026,16 @@ private struct SetupRow<ActionLabel: View>: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                .foregroundStyle(ok ? .green : .orange)
+                .foregroundStyle(ok ? Color.hkGreen : Color.hkOrange)
                 .font(.title3)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.hkInk)
                 Text(ok ? okLabel : failLabel)
                     .font(.caption)
-                    .foregroundStyle(ok ? Color.secondary : Color.orange)
+                    .foregroundStyle(ok ? Color.hkInkSecondary : Color.hkOrange)
             }
 
             Spacer()

@@ -9,6 +9,7 @@ struct CallHistoryView: View {
     @ObservedObject var historyModel: CallHistoryModel
     @ObservedObject var navigation: FrontendNavigation
     var onOpenSettings: (() -> Void)? = nil
+    @State private var isSwitchingBannerMode = false
 
     init(
         historyModel: CallHistoryModel,
@@ -101,12 +102,20 @@ struct CallHistoryView: View {
                 // Grouped call rows
                 if !historyModel.groupedVisibleCalls.isEmpty {
                     ForEach(historyModel.groupedVisibleCalls) { group in
-                        Section(header: Text(group.title).font(.subheadline.weight(.semibold)).foregroundStyle(Color.hkInkSecondary)) {
+                        Section(
+                            header: Text(group.title.uppercased())
+                                .font(.system(size: 11, weight: .bold))
+                                .tracking(0.6)
+                                .foregroundStyle(Color.hkInkMuted)
+                        ) {
                             ForEach(group.calls) { call in
                                 Button(action: navigation.makeHistoricalSelectionAction(call: call, expectedAuth: historyModel.activeAuthContext)) {
                                     CallRow(call: call, isUnread: historyModel.isCallUnread(call))
                                 }
                                 .buttonStyle(.plain)
+                                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                                .listRowBackground(Color.clear)
+                                .listRowSeparator(.hidden)
                                 .accessibilityIdentifier("calls.row.\(call.id)")
                             }
                         }
@@ -124,6 +133,7 @@ struct CallHistoryView: View {
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(Color.hkWarmCanvas.ignoresSafeArea())
+            .preferredColorScheme(.light)
             .navigationTitle(String(localized: "Calls"))
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -132,7 +142,8 @@ struct CallHistoryView: View {
                             String(localized: "Mark All Read"),
                             action: historyModel.makeMarkAllReadAction(expectedAuth: historyModel.activeAuthContext)
                         )
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.hkInk)
                         .accessibilityIdentifier("calls.markAllRead")
                         .accessibilityHint(String(localized: "Marks all calls in this history as read, including hidden pages."))
                     }
@@ -142,10 +153,15 @@ struct CallHistoryView: View {
                     Button {
                         onOpenSettings?()
                     } label: {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 5) {
                             Image(systemName: "person.crop.circle")
                             Text(String(localized: "Settings"))
                         }
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.hkInk)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.hkSurface))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                     }
@@ -180,65 +196,111 @@ struct CallHistoryView: View {
             ? String(localized: "Answering with business intake & pricing")
             : String(localized: "Screening unknown callers • Contacts ring through")
 
-        return Button {
-            navigation.selectedTab = .kevin
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: isBusiness ? "building.2" : "shield")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
-                    .frame(width: 40, height: 40)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color(red: 0.949, green: 0.925, blue: 0.894))
-                    )
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(Color(red: 0.176, green: 0.353, blue: 0.263))
-                            .frame(width: 7, height: 7)
-                        Text(isBusiness
-                             ? String(localized: "BUSINESS RECEPTIONIST ACTIVE")
-                             : String(localized: "PERSONAL ASSISTANT ACTIVE"))
-                            .font(.system(size: 10, weight: .bold))
-                            .tracking(0.5)
-                            .foregroundStyle(Color(red: 0.176, green: 0.353, blue: 0.263))
-                    }
-                    Text(titleText)
-                        .font(.system(size: 15, weight: .semibold))
+        return HStack(alignment: .center, spacing: 12) {
+            Button {
+                navigation.selectedTab = .kevin
+            } label: {
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: isBusiness ? "briefcase" : "shield")
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Color.hkInk)
-                        .lineLimit(1)
-                    Text(subtitleText)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.hkInkSecondary)
-                        .lineLimit(1)
+                        .frame(width: 42, height: 42)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.hkSurface)
+                        )
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(Color.hkGreen)
+                                .frame(width: 7, height: 7)
+                            Text(isBusiness
+                                 ? String(localized: "BUSINESS RECEPTIONIST ACTIVE")
+                                 : String(localized: "PERSONAL ASSISTANT ACTIVE"))
+                                .font(.system(size: 10, weight: .bold))
+                                .tracking(0.5)
+                                .foregroundStyle(Color.hkGreen)
+                        }
+                        Text(titleText)
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Color.hkInk)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(subtitleText)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Color.hkInkSecondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 4)
                 }
-
-                Spacer(minLength: 4)
-
-                Text(String(localized: "Switch"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.hkInk)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill(Color(red: 0.949, green: 0.925, blue: 0.894))
-                    )
+                .contentShape(Rectangle())
             }
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.white)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
-            )
+            .buttonStyle(.plain)
+
+            Button {
+                Task { await switchProfileFromBanner() }
+            } label: {
+                if isSwitchingBannerMode {
+                    ProgressView()
+                        .scaleEffect(0.75)
+                        .frame(width: 56, height: 30)
+                } else {
+                    Text(String(localized: "Switch"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.hkInk)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule()
+                                .fill(Color.hkSurface)
+                        )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(Color.hkDivider, lineWidth: 1)
+                        )
+                }
+            }
+            .buttonStyle(.borderless)
+            .disabled(isSwitchingBannerMode)
         }
-        .buttonStyle(.plain)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+                .shadow(color: Color.black.opacity(0.03), radius: 8, x: 0, y: 2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.hkDivider, lineWidth: 1)
+        )
         .accessibilityIdentifier("calls.activeProfileBanner")
+    }
+
+    private func switchProfileFromBanner() async {
+        let auth = appState.currentAuthContext()
+        guard auth.isValid, !isSwitchingBannerMode else {
+            navigation.selectedTab = .kevin
+            return
+        }
+        let targetMode = appState.isPersonalMode ? "business" : "personal"
+        isSwitchingBannerMode = true
+        defer { isSwitchingBannerMode = false }
+
+        #if DEBUG
+        if AppStoreScreenshotFixtures.isEnabled {
+            appState.mode = targetMode
+            return
+        }
+        #endif
+
+        switch await APIClient.shared.updateContractorMode(contractorId: auth.contractorId, mode: targetMode) {
+        case .success:
+            appState.mode = targetMode
+        case .entitlementRequired, .failed:
+            navigation.selectedTab = .kevin
+        }
     }
 
     private var searchBar: some View {
@@ -248,13 +310,14 @@ struct CallHistoryView: View {
                 .font(.subheadline)
 
             TextField(
-                String(localized: "Search calls"),
+                String(localized: "Search calls, names, or transcripts"),
                 text: Binding(
                     get: { historyModel.searchQuery },
                     set: { historyModel.setSearchQuery($0) }
                 )
             )
-            .font(.body)
+            .font(.system(size: 15))
+            .foregroundStyle(Color.hkInk)
             .textFieldStyle(.plain)
             .accessibilityIdentifier("calls.search")
 
@@ -271,9 +334,13 @@ struct CallHistoryView: View {
                 .accessibilityLabel(String(localized: "Clear search"))
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.white, in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(Color.hkDivider, lineWidth: 1)
+        )
     }
 
     private var filterPicker: some View {
@@ -288,21 +355,21 @@ struct CallHistoryView: View {
                     historyModel.setFilter(filter)
                 } label: {
                     Text(filter.localizedTitle)
-                        .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                        .font(.system(size: 13.5, weight: .semibold))
                         .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, minHeight: 38)
                         .background(
-                            isSelected ? Color.hkCobalt.opacity(0.15) : Color(.secondarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            isSelected ? Color.hkInk : Color.hkSurface,
+                            in: Capsule()
                         )
-                        .foregroundStyle(isSelected ? Color.hkCobalt : Color.hkInk)
+                        .foregroundStyle(isSelected ? Color.white : Color.hkInk)
                         .overlay {
-                            if isSelected {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.hkCobalt.opacity(0.3), lineWidth: 1)
+                            if !isSelected {
+                                Capsule()
+                                    .stroke(Color.hkDivider, lineWidth: 1)
                             }
                         }
                 }
@@ -328,28 +395,27 @@ struct CallHistoryView: View {
                 Task { await historyModel.loadCalls() }
             }
             .font(.footnote.weight(.semibold))
-            .foregroundStyle(Color.hkCobalt)
+            .foregroundStyle(Color.hkInk)
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
         }
-        .padding(10)
-        .background(Color.hkOrange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(12)
+        .background(Color.hkAmberTint, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func initialErrorView(message: String) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "wifi.exclamationmark")
                 .font(.system(size: 36))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.hkInkSecondary)
             Text(message)
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.hkInkSecondary)
                 .multilineTextAlignment(.center)
             Button(String(localized: "Retry")) {
                 Task { await historyModel.loadCalls() }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.hkCobalt)
+            .buttonStyle(HKDarkPrimaryButtonStyle())
             .frame(minHeight: 44)
         }
         .frame(maxWidth: .infinity)
@@ -359,7 +425,7 @@ struct CallHistoryView: View {
     private func emptyStateView(_ state: CallHistoryEmptyState) -> some View {
         VStack(spacing: 12) {
             Image(systemName: stateIcon(for: state))
-                .font(.system(size: 44))
+                .font(.system(size: 40))
                 .foregroundStyle(Color.hkInkSecondary.opacity(0.6))
 
             Text(state.title)
@@ -377,7 +443,7 @@ struct CallHistoryView: View {
                     historyModel.clearSearch()
                 }
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.hkCobalt)
+                .foregroundStyle(Color.hkInk)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
                 .padding(.top, 4)
@@ -386,14 +452,19 @@ struct CallHistoryView: View {
                     historyModel.setFilter(.all)
                 }
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.hkCobalt)
+                .foregroundStyle(Color.hkInk)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
                 .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
+        .padding(.vertical, 28)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.hkDivider, lineWidth: 1)
+        )
         .accessibilityElement(children: .combine)
     }
 
@@ -414,9 +485,10 @@ struct CallHistoryView: View {
                 } label: {
                     Text(String(localized: "Show 20 more"))
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.hkCobalt)
+                        .foregroundStyle(Color.hkInk)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(Color.hkCobalt.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(Color.hkSurface, in: Capsule())
+                        .overlay(Capsule().stroke(Color.hkDivider, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("calls.showMore")
@@ -424,7 +496,7 @@ struct CallHistoryView: View {
 
             Text(historyModel.historyFootnoteLabel)
                 .font(.caption2)
-                .foregroundStyle(Color.hkInkSecondary.opacity(0.8))
+                .foregroundStyle(Color.hkInkMuted)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -443,77 +515,81 @@ struct CallRow: View {
         dynamicTypeSize.isAccessibilitySize
     }
 
+    private var turnCount: Int {
+        call.transcript
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .count
+    }
+
     var body: some View {
-        let layout = isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
-            : AnyLayout(HStackLayout(alignment: .center, spacing: HKSpace.md))
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                HKAvatar(name: call.callerName, phone: call.callerPhone, size: 42)
 
-        layout {
-            HStack(spacing: HKSpace.md) {
-                HKAvatar(name: call.callerName, phone: call.callerPhone, size: 40)
-                if isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(call.displayName)
-                            .font(.body.weight(isUnread ? .bold : .medium))
-                            .foregroundStyle(call.isSpamOrBlocked ? Color.hkRed : Color.hkInk)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .monospacedDigit()
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                if !isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(call.displayName)
-                        .font(.body.weight(isUnread ? .bold : .medium))
+                        .font(.system(size: 16, weight: isUnread ? .bold : .semibold))
                         .foregroundStyle(call.isSpamOrBlocked ? Color.hkRed : Color.hkInk)
                         .fixedSize(horizontal: false, vertical: true)
                         .monospacedDigit()
+
+                    Text(call.callerExcerpt)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(isUnread ? Color.hkInk : Color.hkInkSecondary)
+                        .lineLimit(isAccessibilitySize ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: isAccessibilitySize)
+                        .truncationMode(.tail)
                 }
 
-                Text(call.callerExcerpt)
-                    .font(.subheadline)
-                    .foregroundStyle(isUnread ? Color.hkInk : Color.hkInkSecondary)
-                    .lineLimit(isAccessibilitySize ? nil : 2)
-                    .fixedSize(horizontal: false, vertical: isAccessibilitySize)
-                    .truncationMode(.tail)
-
-                let turnCount = call.transcript
-                    .components(separatedBy: "\n")
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                    .count
-                if turnCount > 0 {
-                    HStack(spacing: 4) {
-                        Image(systemName: "text.bubble")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text(String(localized: "Transcript • \(turnCount) turns"))
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .foregroundStyle(Color(red: 0.176, green: 0.353, blue: 0.263))
-                    .padding(.top, 2)
-                }
-            }
-
-            if !isAccessibilitySize {
                 Spacer(minLength: 6)
-            }
 
-            HStack(spacing: 6) {
-                Text(Self.timeLabel(for: call.timestamp))
-                    .font(.caption.weight(isUnread ? .semibold : .regular))
-                    .foregroundStyle(isUnread ? Color.hkCobalt : Color.hkInkSecondary)
-                    .monospacedDigit()
+                HStack(spacing: 6) {
+                    Text(Self.timeLabel(for: call.timestamp))
+                        .font(.system(size: 12, weight: isUnread ? .semibold : .medium))
+                        .foregroundStyle(isUnread ? Color.hkInk : Color.hkInkMuted)
+                        .monospacedDigit()
 
-                if isUnread {
-                    Circle()
-                        .fill(Color.hkCobalt)
-                        .frame(width: 8, height: 8)
+                    if isUnread {
+                        Circle()
+                            .fill(Color.hkGreen)
+                            .frame(width: 8, height: 8)
+                    }
                 }
             }
-            .frame(minWidth: isAccessibilitySize ? nil : 44, alignment: isAccessibilitySize ? .leading : .trailing)
+
+            if turnCount > 0 {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.bubble")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.hkGreen)
+                    Text(String(localized: "Transcript • \(turnCount) turns"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.hkGreen)
+                    Spacer()
+                    Text(String(localized: "Read →"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Color.hkInkSecondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.hkWarmCanvas)
+                )
+            }
         }
-        .padding(.vertical, 4)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+                .shadow(color: Color.black.opacity(0.025), radius: 6, x: 0, y: 2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.hkDivider, lineWidth: 1)
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(call.displayName), \(call.callerExcerpt), \(Self.timeLabel(for: call.timestamp)), \(isUnread ? String(localized: "Unread") : String(localized: "Read"))")
     }
@@ -658,31 +734,29 @@ struct CallDetailView: View {
     }
 
     private var callerHeader: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [outcomeColor.opacity(0.22), Color(.tertiarySystemFill)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 84, height: 84)
+                    .fill(Color.hkSurface)
+                    .frame(width: 72, height: 72)
+                Circle()
+                    .strokeBorder(Color.hkDivider, lineWidth: 1)
+                    .frame(width: 72, height: 72)
                 if !callerInitials.isEmpty {
                     Text(callerInitials)
-                        .font(.title.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(Color.hkInk)
                 } else {
                     Image(systemName: "phone.fill")
                         .font(.title2.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Color.hkInk)
                 }
             }
 
-            VStack(spacing: 5) {
+            VStack(spacing: 4) {
                 Text(call.displayName)
-                    .font(.title2.weight(.semibold))
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Color.hkInk)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .minimumScaleFactor(0.82)
@@ -699,8 +773,8 @@ struct CallDetailView: View {
                     }
                 } label: {
                     Text(call.formattedPhone)
-                        .font(.body)
-                        .foregroundStyle(Color.hkCobalt)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.hkInkSecondary)
                 }
                 .buttonStyle(.plain)
             }
@@ -708,8 +782,8 @@ struct CallDetailView: View {
             StatusPill(title: outcomeText, systemImage: outcomeIcon, color: outcomeColor)
 
             Text(call.timestamp.formatted(date: .abbreviated, time: .shortened))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.hkInkMuted)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 6)
@@ -724,7 +798,7 @@ struct CallDetailView: View {
                 if !confirmError.isEmpty {
                     Text(confirmError)
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.hkRed)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else if appointmentStatus == "confirmed" || appointmentStatus == "booked" {
@@ -732,7 +806,7 @@ struct CallDetailView: View {
             }
 
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     actionButton(title: String(localized: "Call Back"), systemImage: "phone.fill", destination: phoneURL(for: callbackPhone), isPrimary: appointmentStatus != "pending_owner_confirmation")
                     actionButton(title: String(localized: "Message"), systemImage: "message.fill", destination: messageURL(for: callbackPhone), isPrimary: false)
                 }
@@ -750,18 +824,24 @@ struct CallDetailView: View {
             if let title = call.appointmentTitle, !title.isEmpty {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.hkInk)
             }
             Text(formattedAppointmentStart)
                 .font(.headline)
+                .foregroundStyle(Color.hkInk)
             Text(String(localized: "Adds this time to Google Calendar. Nothing is booked until you confirm."))
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.hkInkSecondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
+        .padding(14)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.hkDivider, lineWidth: 1)
         }
         .accessibilityElement(children: .combine)
     }
@@ -770,24 +850,30 @@ struct CallDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
             Label(String(localized: "Added to Google Calendar"), systemImage: "checkmark.circle.fill")
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.green)
+                .foregroundStyle(Color.hkGreen)
             if let title = call.appointmentTitle, !title.isEmpty {
                 Text(title)
                     .font(.subheadline)
+                    .foregroundStyle(Color.hkInk)
             }
             Text(formattedAppointmentStart)
                 .font(.headline)
+                .foregroundStyle(Color.hkInk)
             if callerWasTexted {
                 Text(String(localized: "The caller was texted this time."))
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.hkInkSecondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
+        .padding(14)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.hkDivider, lineWidth: 1)
         }
         .accessibilityElement(children: .combine)
     }
@@ -814,15 +900,15 @@ struct CallDetailView: View {
                 isConfirming ? String(localized: "Confirming…") : String(localized: "Confirm"),
                 systemImage: "calendar.badge.checkmark"
             )
-            .font(.headline)
+            .font(.system(size: 15, weight: .semibold))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
+            .padding(.vertical, 13)
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.accentColor)
+            Capsule()
+                .fill(Color.hkGreen)
         }
         .disabled(isConfirming || AppStoreScreenshotFixtures.isEnabled)
         .accessibilityLabel(String(localized: "Confirm"))
@@ -886,7 +972,7 @@ struct CallDetailView: View {
                     title: String(localized: "Time"),
                     value: call.timestamp.formatted(date: .abbreviated, time: .shortened),
                     systemImage: "calendar",
-                    tint: .secondary
+                    tint: Color.hkInkSecondary
                 )
                 if let callbackNumber = call.callbackNumber, callbackNumber != call.callerPhone {
                     Divider()
@@ -894,7 +980,7 @@ struct CallDetailView: View {
                         title: String(localized: "Callback"),
                         value: PhoneFormatter.format(callbackNumber),
                         systemImage: "phone.arrow.up.right.fill",
-                        tint: .blue
+                        tint: Color.hkGreen
                     )
                 }
             }
@@ -907,7 +993,7 @@ struct CallDetailView: View {
             if transcriptLines.isEmpty {
                 Text(String(localized: "No transcript turns recorded for this call."))
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.hkInkSecondary)
                     .padding(.vertical, 8)
             } else {
                 VStack(spacing: 12) {
@@ -932,19 +1018,19 @@ struct CallDetailView: View {
             }
         } label: {
             Label(title, systemImage: systemImage)
-                .font(.headline)
-                .frame(maxWidth: .infinity, minHeight: 44)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity, minHeight: 46)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(isPrimary ? .white : .primary)
+        .foregroundStyle(isPrimary ? Color.white : Color.hkInk)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isPrimary ? Color.accentColor : Color(.secondarySystemGroupedBackground))
+            Capsule()
+                .fill(isPrimary ? Color.hkInk : Color.hkSurface)
         }
         .overlay {
             if !isPrimary {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color(.separator), lineWidth: 0.5)
+                Capsule()
+                    .stroke(Color.hkDivider, lineWidth: 1)
             }
         }
         .disabled(isFixtureMode)
@@ -994,11 +1080,11 @@ struct CallDetailView: View {
 
     private var outcomeColor: Color {
         switch call.outcome {
-        case "picked_up": return .green
-        case "voicemail": return .blue
-        case "ignored", "declined": return .orange
-        case "spam", "blocked": return .red
-        default: return .secondary
+        case "picked_up": return .hkGreen
+        case "voicemail": return .hkInk
+        case "ignored", "declined": return .hkOrange
+        case "spam", "blocked": return .hkRed
+        default: return .hkGreen
         }
     }
 
@@ -1025,19 +1111,20 @@ private struct CallDetailSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: systemImage)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title.uppercased(), systemImage: systemImage)
+                .font(.system(size: 11, weight: .bold))
+                .tracking(0.6)
+                .foregroundStyle(Color.hkInkMuted)
 
             VStack(alignment: .leading, spacing: 0) {
                 content
             }
-            .padding(14)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(16)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.hkDivider, lineWidth: 1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

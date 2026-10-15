@@ -15,7 +15,7 @@ struct ContactsView: View {
             List {
                 Section {
                     Text(String(localized: "Contacts added here will ring through directly without screening."))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.hkInkSecondary)
                         .font(.subheadline)
                         .listRowBackground(Color.clear)
                 }
@@ -25,12 +25,14 @@ struct ContactsView: View {
                         showContactPicker = true
                     } label: {
                         Label(String(localized: "Import from iPhone"), systemImage: "square.and.arrow.down")
+                            .foregroundStyle(Color.hkInk)
                     }
 
                     Button {
                         showAddManual = true
                     } label: {
                         Label(String(localized: "Add Number Manually"), systemImage: "plus")
+                            .foregroundStyle(Color.hkInk)
                     }
                 }
 
@@ -40,14 +42,15 @@ struct ContactsView: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(contact.name)
-                                        .font(.body)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(Color.hkInk)
                                     Text(contact.phone)
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(Color.hkInkSecondary)
                                 }
                                 Spacer()
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
+                                    .foregroundStyle(Color.hkGreen)
                             }
                         }
                         .onDelete(perform: deleteContacts)
@@ -55,6 +58,9 @@ struct ContactsView: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(Color.hkWarmCanvas.ignoresSafeArea())
+            .preferredColorScheme(.light)
             .navigationTitle(String(localized: "Contacts"))
             .sheet(isPresented: $showContactPicker) {
                 ContactPickerView { name, phone in

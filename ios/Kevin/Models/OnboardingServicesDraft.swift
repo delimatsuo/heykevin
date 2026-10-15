@@ -11,6 +11,7 @@ struct OnboardingPricePreset: Equatable, Sendable, Hashable {
 struct OnboardingQuotingRule: Identifiable, Equatable, Sendable {
     let id: String
     let emoji: String
+    let iconSystemName: String
     let title: String
     let subtitle: String
     let knowledgeLine: String
@@ -18,28 +19,32 @@ struct OnboardingQuotingRule: Identifiable, Equatable, Sendable {
     static let catalog: [OnboardingQuotingRule] = [
         OnboardingQuotingRule(
             id: "ballpark",
-            emoji: "🎯",
+            emoji: "",
+            iconSystemName: "slider.horizontal.3",
             title: String(localized: "Share prices as ballpark ranges"),
             subtitle: String(localized: "Kevin quotes your min–max range and reminds callers final pricing is confirmed on-site."),
             knowledgeLine: "- Quote listed service prices as ballpark estimates only; final price is confirmed on-site."
         ),
         OnboardingQuotingRule(
             id: "waive_fee",
-            emoji: "🎟️",
+            emoji: "",
+            iconSystemName: "arrow.uturn.backward.circle",
             title: String(localized: "$89 service call waived with repair"),
             subtitle: String(localized: "Let callers know there's a diagnostic visit fee that goes toward the job if they book."),
             knowledgeLine: "- Standard $89 service call / diagnostic fee is waived when the customer proceeds with the repair."
         ),
         OnboardingQuotingRule(
             id: "free_est",
-            emoji: "🤝",
+            emoji: "",
+            iconSystemName: "doc.text",
             title: String(localized: "Free estimates for big jobs"),
             subtitle: String(localized: "For replacements or remodels, Kevin offers a free no-obligation on-site estimate."),
             knowledgeLine: "- Major replacements, installations, and remodels include a free on-site estimate."
         ),
         OnboardingQuotingRule(
             id: "no_phone_price",
-            emoji: "🔒",
+            emoji: "",
+            iconSystemName: "lock",
             title: String(localized: "Never quote prices on the phone"),
             subtitle: String(localized: "Focus 100% on booking the lead—collect their name, address, and issue first."),
             knowledgeLine: "- Do not quote dollar figures over the phone; collect the caller's issue and address so we can quote on-site."
@@ -64,18 +69,20 @@ enum OnboardingTradeCategory: String, CaseIterable, Identifiable, Sendable {
         case .hvac: return String(localized: "HVAC & Climate")
         case .roofing: return String(localized: "Roofing & Exterior")
         case .general: return String(localized: "General Contracting")
-        case .other: return String(localized: "Other Pro Service")
+        case .other: return String(localized: "Other Business")
         }
     }
 
-    var emoji: String {
+    var emoji: String { "" }
+
+    var iconSystemName: String {
         switch self {
-        case .plumbing: return "🔧"
-        case .electrical: return "⚡"
-        case .hvac: return "❄️"
-        case .roofing: return "🏠"
-        case .general: return "🔨"
-        case .other: return "✨"
+        case .plumbing: return "wrench.and.screwdriver"
+        case .electrical: return "bolt"
+        case .hvac: return "wind"
+        case .roofing: return "house"
+        case .general: return "hammer"
+        case .other: return "square.grid.2x2"
         }
     }
 

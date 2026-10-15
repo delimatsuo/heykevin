@@ -53,8 +53,17 @@ struct OnboardingView: View {
     @State private var servicesUploadMessage = ""
     @State private var isExtractingPriceList = false
     @State private var didSkipServicesStep = false
+    private enum OnboardingInputField: Hashable {
+        case personalOwnerName
+        case businessOwnerName
+        case businessName
+        case customService
+        case additionalNotes
+    }
+    @FocusState private var focusedField: OnboardingInputField?
+    var onDebugPreviewComplete: (() -> Void)? = nil
 
-    #if DEBUG
+    #if DEBUG || STAGING
     init(
         isRecoveryMode: Bool = false,
         initialStep: OnboardingStep = .welcome,
@@ -62,9 +71,11 @@ struct OnboardingView: View {
         initialPhoneNumber: String = "",
         initialErrorMessage: String = "",
         initialMarketCountryCode: String? = nil,
-        initialMarketAdmission: SignupAdmissionStatus? = nil
+        initialMarketAdmission: SignupAdmissionStatus? = nil,
+        onDebugPreviewComplete: (() -> Void)? = nil
     ) {
         self.isRecoveryMode = isRecoveryMode
+        self.onDebugPreviewComplete = onDebugPreviewComplete
         let resolvedInitialStep: OnboardingStep = {
             guard !isRecoveryMode else { return .signIn }
             guard initialStep == .welcome,
@@ -84,6 +95,8 @@ struct OnboardingView: View {
         _errorMessage = State(initialValue: initialErrorMessage)
         _marketCountryCode = State(initialValue: initialMarketCountryCode)
         _marketAdmission = State(initialValue: initialMarketAdmission)
+        _ownerName = State(initialValue: AppState.shared.userName)
+        _businessName = State(initialValue: AppState.shared.businessName)
     }
     #else
     init(isRecoveryMode: Bool = false) {
@@ -769,130 +782,154 @@ struct OnboardingView: View {
     }
 
     private var modeSelectStep: some View {
-        VStack(spacing: 0) {
-            HKProgressBar(current: 2, total: 5)
-                .padding(.bottom, HKSpace.xl)
+        ZStack {
+            himsAmbientCanvas(for: 1)
+                .padding(-24)
 
-            VStack(spacing: HKSpace.lg) {
-                KevinMark(size: 64)
+            VStack(alignment: .leading, spacing: 18) {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(String(localized: "STEP 01 / PROFILE SETUP"))
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .tracking(0.7)
+                            .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
-                VStack(spacing: 6) {
-                    Text(String(localized: "How do you want\nKevin to work?"))
-                        .font(.system(size: 28, weight: .bold))
-                        .tracking(-0.6)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(2)
+                        Text(String(localized: "Do you intend to use Kevin as your personal assistant or as your business receptionist?"))
+                            .font(.system(size: 26, weight: .bold))
+                            .tracking(-0.6)
+                            .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
+                            .fixedSize(horizontal: false, vertical: true)
 
-                    Text(String(localized: "Pick the role you need. You can change this later, or run both on separate numbers."))
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(2)
-                        .padding(.horizontal, HKSpace.sm)
-                }
-            }
-            .padding(.bottom, HKSpace.lg)
+                        Text(String(localized: "Choose how Kevin should answer your line. Your setup and home dashboard will launch directly in the profile you pick."))
+                            .font(.system(size: 14.5))
+                            .foregroundStyle(Color(red: 0.34, green: 0.32, blue: 0.31))
+                            .fixedSize(horizontal: false, vertical: true)
 
-            VStack(spacing: HKSpace.md) {
-                if subscriptionManager.isLoading {
-                    ProgressView(String(localized: "Loading plans..."))
-                        .padding(.vertical, 16)
-                } else if subscriptionManager.products.isEmpty {
-                    VStack(spacing: 6) {
-                        Text(String(localized: "Could not load plans."))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button(String(localized: "Try Again")) {
-                            Task { await subscriptionManager.fetchProducts() }
+                        VStack(spacing: 12) {
+                            modeCard(
+                                mode: "business",
+                                iconSystemName: "briefcase",
+                                title: String(localized: "Business Receptionist"),
+                                desc: String(localized: "Answers with your company name, asks trade-specific intake questions, shares ballpark pricing, and texts you structured job leads."),
+                                tags: [
+                                    String(localized: "Company greeting"),
+                                    String(localized: "Services & ballpark quotes"),
+                                    String(localized: "Lead capture SMS"),
+                                ]
+                            )
+
+                            modeCard(
+                                mode: "personal",
+                                iconSystemName: "shield",
+                                title: String(localized: "Personal Assistant"),
+                                desc: String(localized: "Screens unknown callers in real time, blocks robocalls silently, and lets your saved contacts ring straight through to you."),
+                                tags: [
+                                    String(localized: "Contacts ring through"),
+                                    String(localized: "Spam filtering"),
+                                    String(localized: "Live call transcript"),
+                                ]
+                            )
                         }
-                        .font(.caption.weight(.medium))
+                        .padding(.top, 4)
                     }
-                    .padding(.vertical, 8)
+                    .padding(.bottom, 12)
                 }
 
-                modeCard(
-                    mode: "personal",
-                    title: String(localized: "Personal"),
-                    price: personalPriceDisplay,
-                    desc: String(localized: "Screen unknown callers. Saved contacts ring through to you."),
-                    tags: [
-                        String(localized: "Block robocalls"),
-                        String(localized: "Live transcripts"),
-                        String(localized: "Text replies"),
-                    ]
-                )
-
-                modeCard(
-                    mode: "business",
-                    title: String(localized: "Business"),
-                    price: businessPriceDisplay,
-                    desc: String(localized: "A full receptionist. Smart intake, business hours, and a knowledge base for FAQs."),
-                    tags: [
-                        String(localized: "Smart intake"),
-                        String(localized: "Business hours"),
-                        String(localized: "After-hours mode"),
-                        String(localized: "Knowledge base"),
-                    ]
-                )
-            }
-            .task {
-                if subscriptionManager.products.isEmpty {
-                    await subscriptionManager.fetchProducts()
-                }
-            }
-
-            Spacer()
-
-            VStack(spacing: HKSpace.xs) {
-                Button {
-                    if selectedMode == "personal" {
-                        step = .personalInfo
-                    } else {
-                        step = .businessInfo
+                VStack(spacing: 8) {
+                    Button {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            if selectedMode == "personal" {
+                                step = .personalInfo
+                            } else {
+                                selectedMode = "business"
+                                businessSubStep = 0
+                                step = .businessInfo
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(selectedMode == "personal"
+                                 ? String(localized: "Continue as Personal Assistant")
+                                 : String(localized: "Continue as Business Receptionist"))
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 13.5, weight: .semibold))
+                        }
+                        .font(.system(size: 15.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(
+                            Capsule()
+                                .fill(Color(red: 0.098, green: 0.090, blue: 0.086))
+                        )
                     }
-                } label: {
-                    Text(selectedMode == "personal"
-                         ? String(localized: "Continue with Personal")
-                         : String(localized: "Continue with Business"))
-                }
-                .buttonStyle(HKDarkPrimaryButtonStyle())
+                    .buttonStyle(.plain)
 
-                Text(String(localized: "14-day free trial. Cancel anytime."))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 4)
+                    Text(String(localized: "You can switch profiles anytime in the Kevin tab."))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
+        }
+        .task {
+            if subscriptionManager.products.isEmpty {
+                await subscriptionManager.fetchProducts()
             }
         }
     }
 
     @ViewBuilder
-    private func modeCard(mode: String, title: String, price: String, desc: String, tags: [String]) -> some View {
+    private func modeCard(
+        mode: String,
+        iconSystemName: String,
+        title: String,
+        desc: String,
+        tags: [String]
+    ) -> some View {
         let selected = selectedMode == mode
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        let sand = Color(red: 0.949, green: 0.925, blue: 0.894)
+        let sandDeep = Color(red: 0.902, green: 0.875, blue: 0.835)
         Button {
-            selectedMode = mode
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                selectedMode = mode
+            }
         } label: {
-            VStack(alignment: .leading, spacing: HKSpace.sm) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(title)
-                        .font(.system(size: 18, weight: .bold))
-                        .tracking(-0.3)
-                        .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center) {
+                    Image(systemName: iconSystemName)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(selected ? .white : ink)
+                        .frame(width: 40, height: 40)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(selected ? ink : sand)
+                        )
+
                     Spacer()
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(price)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.primary)
-                        if price != String(localized: "Unavailable") && price != "…" {
-                            Text(String(localized: "/mo"))
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.secondary)
+
+                    ZStack {
+                        Circle()
+                            .strokeBorder(selected ? ink : Color.black.opacity(0.18), lineWidth: 1.5)
+                            .background(Circle().fill(selected ? ink : Color.clear))
+                            .frame(width: 22, height: 22)
+                        if selected {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundStyle(.white)
                         }
                     }
                 }
 
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .tracking(-0.2)
+                    .foregroundStyle(ink)
+
                 Text(desc)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(Color(red: 0.34, green: 0.32, blue: 0.31))
                     .multilineTextAlignment(.leading)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -900,34 +937,33 @@ struct OnboardingView: View {
                 FlowLayout(spacing: 6, lineSpacing: 6) {
                     ForEach(tags, id: \.self) { tag in
                         Text(tag)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(selected ? Color.hkBlue : Color.secondary)
-                            .padding(.horizontal, HKSpace.sm)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(selected ? ink : Color(red: 0.34, green: 0.32, blue: 0.31))
+                            .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                             .background(
                                 Capsule()
-                                    .fill(selected ? Color.hkBlue.opacity(0.10) : Color(.systemGray6))
+                                    .fill(selected ? sandDeep : sand)
                             )
                     }
                 }
-                .padding(.top, 2)
             }
-            .padding(HKSpace.lg)
+            .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(selected ? Color.hkBlue.opacity(0.05) : Color(.secondarySystemGroupedBackground))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white)
+                    .shadow(
+                        color: Color.black.opacity(selected ? 0.06 : 0.02),
+                        radius: selected ? 12 : 5,
+                        x: 0,
+                        y: selected ? 4 : 2
+                    )
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(selected ? Color.hkBlue : Color(.systemGray5), lineWidth: selected ? 1.5 : 1)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(selected ? ink : Color.black.opacity(0.09), lineWidth: selected ? 1.5 : 1)
             )
-            .overlay(alignment: .topTrailing) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 20))
-                    .foregroundStyle(selected ? Color.hkBlue : Color(.systemGray3))
-                    .padding(HKSpace.md)
-            }
         }
         .buttonStyle(.plain)
     }
@@ -1032,32 +1068,115 @@ struct OnboardingView: View {
     // MARK: - Personal Info
 
     private var personalInfoStep: some View {
-        VStack(spacing: 24) {
-            Text(String(localized: "About You"))
-                .font(.title.bold())
+        ZStack {
+            himsAmbientCanvas(for: 2)
+                .padding(-24)
 
-            Text(String(localized: "Kevin will use your name to greet callers."))
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Button {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            step = .modeSelect
+                        }
+                    } label: {
+                        Image(systemName: "arrow.left")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
+                            .frame(width: 34, height: 34)
+                            .background(Circle().fill(Color.white))
+                            .overlay(Circle().stroke(Color.black.opacity(0.09), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
 
-            TextField(String(localized: "Your Name"), text: $ownerName)
-                .textFieldStyle(.roundedBorder)
-                .textContentType(.name)
-                .padding(.vertical)
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(String(localized: "STEP 02 / PERSONAL ASSISTANT"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
-            Spacer()
+                    Text(String(localized: "What name should Kevin use when greeting callers?"))
+                        .font(.system(size: 26, weight: .bold))
+                        .tracking(-0.6)
+                        .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
 
-            Button {
-                selectedMode = "personal"
-                step = .contactsPermission
-            } label: {
-                Text(String(localized: "Continue"))
-                    .font(.headline)
+                    Text(String(localized: "Kevin will introduce himself as your personal assistant and ask who's calling and why."))
+                        .font(.system(size: 14.5))
+                        .foregroundStyle(Color(red: 0.34, green: 0.32, blue: 0.31))
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(String(localized: "YOUR FIRST NAME"))
+                            .font(.system(size: 11, weight: .semibold))
+                            .tracking(0.5)
+                            .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
+                        TextField(String(localized: "e.g. Deli"), text: $ownerName)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
+                            .textContentType(.name)
+                            .focused($focusedField, equals: .personalOwnerName)
+                    }
+                    .padding(16)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        focusedField = .personalOwnerName
+                    }
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.white)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(
+                                        focusedField == .personalOwnerName
+                                            ? Color(red: 0.098, green: 0.090, blue: 0.086)
+                                            : Color.black.opacity(0.09),
+                                        lineWidth: 1.5
+                                    )
+                            )
+                    )
+                }
+
+                Spacer()
+
+                Button {
+                    focusedField = nil
+                    selectedMode = "personal"
+                    appState.mode = "personal"
+                    appState.userName = ownerName
+                    if let onDebugPreviewComplete, !appState.contractorId.isEmpty {
+                        Task {
+                            _ = try? await APIClient.shared.patchContractor(
+                                appState.contractorId,
+                                body: [
+                                    "owner_name": ownerName,
+                                    "mode": "personal",
+                                ]
+                            )
+                            appState.mode = "personal"
+                            onDebugPreviewComplete()
+                        }
+                    } else {
+                        step = .contactsPermission
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(String(localized: "Continue as Personal Assistant"))
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 13.5, weight: .semibold))
+                    }
+                    .font(.system(size: 15.5, weight: .semibold))
+                    .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
+                    .background(
+                        Capsule()
+                            .fill(Color(red: 0.098, green: 0.090, blue: 0.086))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .opacity(ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1.0)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(ownerName.isEmpty)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
         }
     }
 
@@ -1071,49 +1190,10 @@ struct OnboardingView: View {
         }
     }
 
-    private func tradeAccentColor(_ trade: OnboardingTradeCategory) -> Color {
-        switch trade {
-        case .plumbing: return Color(red: 0.918, green: 0.345, blue: 0.047)
-        case .electrical: return Color(red: 0.851, green: 0.467, blue: 0.024)
-        case .hvac: return Color(red: 0.008, green: 0.518, blue: 0.780)
-        case .roofing: return Color(red: 0.020, green: 0.588, blue: 0.412)
-        case .general: return Color(red: 0.310, green: 0.275, blue: 0.898)
-        case .other: return Color(red: 0.486, green: 0.227, blue: 0.929)
-        }
-    }
-
-    private func tradeTintColor(_ trade: OnboardingTradeCategory) -> Color {
-        switch trade {
-        case .plumbing: return Color(red: 1.0, green: 0.929, blue: 0.835)
-        case .electrical: return Color(red: 0.996, green: 0.953, blue: 0.780)
-        case .hvac: return Color(red: 0.878, green: 0.949, blue: 0.996)
-        case .roofing: return Color(red: 0.820, green: 0.980, blue: 0.898)
-        case .general: return Color(red: 0.878, green: 0.906, blue: 1.0)
-        case .other: return Color(red: 0.929, green: 0.914, blue: 0.996)
-        }
-    }
-
     @ViewBuilder
-    private func himsAmbientCanvas(for stepIdx: Int) -> some View {
-        let topGlow: Color = {
-            switch stepIdx {
-            case 1: return Color(red: 1.0, green: 0.898, blue: 0.816)
-            case 2: return Color(red: 0.878, green: 0.918, blue: 1.0)
-            case 3: return Color(red: 0.851, green: 0.961, blue: 0.898)
-            case 4: return Color(red: 0.992, green: 0.910, blue: 0.784)
-            default: return Color(red: 0.859, green: 0.918, blue: 0.996)
-            }
-        }()
-        ZStack {
-            Color(red: 0.980, green: 0.969, blue: 0.941)
-            RadialGradient(
-                colors: [topGlow, Color(red: 0.980, green: 0.969, blue: 0.941).opacity(0)],
-                center: .topTrailing,
-                startRadius: 20,
-                endRadius: 380
-            )
-        }
-        .ignoresSafeArea()
+    private func himsAmbientCanvas(for _: Int) -> some View {
+        Color(red: 0.980, green: 0.969, blue: 0.949)
+            .ignoresSafeArea()
     }
 
     @ViewBuilder
@@ -1123,46 +1203,48 @@ struct OnboardingView: View {
         onBack: @escaping () -> Void,
         onSkip: (() -> Void)? = nil
     ) -> some View {
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
         HStack(spacing: 12) {
             Button(action: onBack) {
                 Image(systemName: "arrow.left")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(Color(red: 0.11, green: 0.098, blue: 0.09))
-                    .frame(width: 36, height: 36)
-                    .background(Circle().fill(Color.black.opacity(0.06)))
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(ink)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color.white))
+                    .overlay(Circle().stroke(Color.black.opacity(0.09), lineWidth: 1))
             }
             .buttonStyle(.plain)
 
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 ForEach(1...5, id: \.self) { idx in
                     Capsule()
                         .fill(idx <= stepIndex
-                              ? Color(red: 0.11, green: 0.098, blue: 0.09)
-                              : Color.black.opacity(0.10))
-                        .frame(height: 5)
+                              ? ink
+                              : Color(red: 0.902, green: 0.875, blue: 0.835))
+                        .frame(height: 3)
                 }
             }
 
             if showSkip, let onSkip {
                 Button(action: onSkip) {
                     Text(String(localized: "Skip"))
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Color(red: 0.34, green: 0.32, blue: 0.31))
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.06)))
                 }
                 .buttonStyle(.plain)
                 .disabled(isLoading || isExtractingPriceList)
             } else {
-                Color.clear.frame(width: 44, height: 32)
+                Color.clear.frame(width: 34, height: 34)
             }
         }
         .padding(.bottom, 4)
     }
 
     private var businessInfoStep: some View {
-        ZStack {
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        return ZStack {
             himsAmbientCanvas(for: currentHimsStepIndex)
                 .padding(-24)
 
@@ -1171,6 +1253,7 @@ struct OnboardingView: View {
                     stepIndex: currentHimsStepIndex,
                     showSkip: false,
                     onBack: {
+                        focusedField = nil
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                             if businessSubStep > 0 {
                                 businessSubStep = 0
@@ -1184,29 +1267,24 @@ struct OnboardingView: View {
                 if businessSubStep == 0 {
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 14) {
-                            HStack(spacing: 6) {
-                                Text(selectedTrade.emoji)
-                                Text(String(localized: "PERSONALIZING KEVIN"))
-                            }
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(tradeAccentColor(selectedTrade))
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(tradeTintColor(selectedTrade)))
+                            Text(String(localized: "STEP 02 / INDUSTRY"))
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .tracking(0.7)
+                                .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
-                            Text(String(localized: "First, what kind of work do you do?"))
-                                .font(.system(size: 28, weight: .heavy))
+                            Text(String(localized: "What kind of work do you do?"))
+                                .font(.system(size: 26, weight: .bold))
                                 .tracking(-0.6)
-                                .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                .foregroundStyle(ink)
 
-                            Text(String(localized: "Kevin tailors his questions, emergency triage, and service menu to your trade."))
-                                .font(.system(size: 15, weight: .regular))
+                            Text(String(localized: "Kevin tailors his intake questions, urgency triage, and starter service list to your trade."))
+                                .font(.system(size: 14.5))
                                 .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
                                 .lineSpacing(2)
 
                             LazyVGrid(
-                                columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible(), spacing: 11)],
-                                spacing: 11
+                                columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
+                                spacing: 10
                             ) {
                                 ForEach(OnboardingTradeCategory.allCases) { trade in
                                     himsTradeCard(trade)
@@ -1229,104 +1307,125 @@ struct OnboardingView: View {
                         HStack(spacing: 8) {
                             Text(String(localized: "Continue"))
                             Image(systemName: "arrow.right")
+                                .font(.system(size: 13.5, weight: .semibold))
                         }
-                        .font(.system(size: 16, weight: .bold))
+                        .font(.system(size: 15.5, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 17)
-                        .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
-                        .shadow(color: Color.black.opacity(0.18), radius: 12, y: 6)
+                        .padding(.vertical, 16)
+                        .background(Capsule().fill(ink))
                     }
                     .buttonStyle(.plain)
                 } else {
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 14) {
-                            HStack(spacing: 6) {
-                                Text("🎙️")
-                                Text(String(localized: "LIVE GREETING PREVIEW"))
-                            }
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(Color(red: 0.114, green: 0.306, blue: 0.847))
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(Color(red: 0.859, green: 0.918, blue: 0.996)))
+                            Text(String(localized: "STEP 03 / VOICE SCRIPT"))
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .tracking(0.7)
+                                .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
-                            Text(String(localized: "How should Kevin answer your phone?"))
-                                .font(.system(size: 28, weight: .heavy))
+                            Text(String(localized: "How should Kevin answer your business line?"))
+                                .font(.system(size: 26, weight: .bold))
                                 .tracking(-0.6)
-                                .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                .foregroundStyle(ink)
 
-                            Text(String(localized: "Callers hear this the moment Kevin picks up."))
-                                .font(.system(size: 15))
+                            Text(String(localized: "Callers hear this greeting the moment Kevin picks up."))
+                                .font(.system(size: 14.5))
                                 .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
 
                             // Live Voice Greeting Card
-                            VStack(alignment: .leading, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 12) {
                                 HStack {
-                                    Text(String(localized: "KEVIN'S VOICE"))
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundStyle(Color(red: 0.22, green: 0.74, blue: 0.97))
+                                    Text(String(localized: "LIVE GREETING PREVIEW"))
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .tracking(0.6)
+                                        .foregroundStyle(Color(red: 0.655, green: 0.953, blue: 0.816))
                                     Spacer()
                                     HStack(spacing: 3) {
-                                        ForEach([10.0, 16.0, 12.0, 18.0, 11.0], id: \.self) { h in
+                                        ForEach([8.0, 14.0, 10.0, 16.0, 9.0], id: \.self) { h in
                                             Capsule()
-                                                .fill(Color(red: 0.22, green: 0.74, blue: 0.97))
-                                                .frame(width: 3, height: h)
+                                                .fill(Color(red: 0.655, green: 0.953, blue: 0.816))
+                                                .frame(width: 2.5, height: h)
                                         }
                                     }
                                 }
-                                let previewOwner = ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Mike" : ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
-                                let previewBiz = businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Apex Plumbing" : businessName.trimmingCharacters(in: .whitespacesAndNewlines)
-                                Text("“Hey there! I’m Kevin, \(previewOwner)’s assistant at \(previewBiz). How can we help you today?”")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundStyle(.white)
+                                let previewOwner = ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Deli" : ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                let previewBiz = businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Matsuo Electric" : businessName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                Text("“Hi, this is Kevin, \(previewOwner)’s assistant at \(previewBiz). How can I help you today?”")
+                                    .font(.system(size: 15.5, weight: .medium))
+                                    .foregroundStyle(Color(red: 0.980, green: 0.969, blue: 0.949))
                                     .lineSpacing(3)
                             }
                             .padding(18)
                             .background(
-                                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                    .fill(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                    .fill(ink)
                             )
-                            .shadow(color: Color.black.opacity(0.14), radius: 14, y: 8)
 
                             // Conversational First Name Card
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: 5) {
                                 Text(String(localized: "YOUR FIRST NAME"))
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
-                                TextField(String(localized: "e.g. Mike"), text: $ownerName)
-                                    .font(.system(size: 20, weight: .bold))
-                                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .tracking(0.5)
+                                    .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
+                                TextField(String(localized: "e.g. Deli"), text: $ownerName)
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundStyle(ink)
                                     .textContentType(.name)
+                                    .focused($focusedField, equals: .businessOwnerName)
+                                    .submitLabel(.next)
+                                    .onSubmit {
+                                        focusedField = .businessName
+                                    }
                             }
-                            .padding(16)
+                            .padding(15)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                focusedField = .businessOwnerName
+                            }
                             .background(
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .fill(Color.white.opacity(0.92))
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(Color.white)
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .stroke(Color.black.opacity(0.08), lineWidth: 1.5)
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(
+                                        focusedField == .businessOwnerName ? ink : Color.black.opacity(0.09),
+                                        lineWidth: 1.5
+                                    )
                             )
 
                             // Conversational Business Name Card
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: 5) {
                                 Text(String(localized: "YOUR BUSINESS NAME"))
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
-                                TextField(String(localized: "e.g. Apex Plumbing"), text: $businessName)
-                                    .font(.system(size: 20, weight: .bold))
-                                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .tracking(0.5)
+                                    .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
+                                TextField(String(localized: "e.g. Matsuo Electric"), text: $businessName)
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundStyle(ink)
                                     .textContentType(.organizationName)
+                                    .focused($focusedField, equals: .businessName)
+                                    .submitLabel(.done)
+                                    .onSubmit {
+                                        focusedField = nil
+                                    }
                             }
-                            .padding(16)
+                            .padding(15)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                focusedField = .businessName
+                            }
                             .background(
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .fill(Color.white.opacity(0.92))
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(Color.white)
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .stroke(Color.black.opacity(0.08), lineWidth: 1.5)
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(
+                                        focusedField == .businessName ? ink : Color.black.opacity(0.09),
+                                        lineWidth: 1.5
+                                    )
                             )
                         }
                     }
@@ -1334,6 +1433,7 @@ struct OnboardingView: View {
                     let canProceed = !ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         && !businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     Button {
+                        focusedField = nil
                         selectedMode = "business"
                         errorMessage = ""
                         if !hasSeededTradeServices {
@@ -1347,18 +1447,17 @@ struct OnboardingView: View {
                         }
                     } label: {
                         HStack(spacing: 8) {
-                            Text(String(localized: "Sounds great"))
+                            Text(String(localized: "Continue"))
                             Image(systemName: "arrow.right")
+                                .font(.system(size: 13.5, weight: .semibold))
                         }
-                        .font(.system(size: 16, weight: .bold))
+                        .font(.system(size: 15.5, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 17)
+                        .padding(.vertical, 16)
                         .background(
                             Capsule().fill(
-                                canProceed
-                                    ? Color(red: 0.094, green: 0.094, blue: 0.106)
-                                    : Color.black.opacity(0.25)
+                                canProceed ? ink : Color.black.opacity(0.22)
                             )
                         )
                     }
@@ -1372,8 +1471,8 @@ struct OnboardingView: View {
     @ViewBuilder
     private func himsTradeCard(_ trade: OnboardingTradeCategory) -> some View {
         let isSelected = selectedTrade == trade
-        let accent = tradeAccentColor(trade)
-        let tint = tradeTintColor(trade)
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        let sand = Color(red: 0.949, green: 0.925, blue: 0.894)
         Button {
             withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
                 selectedTrade = trade
@@ -1382,45 +1481,47 @@ struct OnboardingView: View {
                 hasSeededTradeServices = true
             }
         } label: {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text(trade.emoji)
-                        .font(.system(size: 20))
-                        .frame(width: 40, height: 40)
+                    Image(systemName: trade.iconSystemName)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(isSelected ? .white : ink)
+                        .frame(width: 36, height: 36)
                         .background(
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .fill(tint)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(isSelected ? ink : sand)
                         )
                     Spacer()
                     ZStack {
                         Circle()
-                            .fill(isSelected ? accent : Color.black.opacity(0.06))
+                            .strokeBorder(isSelected ? ink : Color.black.opacity(0.18), lineWidth: 1.5)
+                            .background(Circle().fill(isSelected ? ink : Color.clear))
                             .frame(width: 22, height: 22)
                         if isSelected {
                             Image(systemName: "checkmark")
-                                .font(.system(size: 11, weight: .bold))
+                                .font(.system(size: 10.5, weight: .bold))
                                 .foregroundStyle(.white)
                         }
                     }
                 }
-                Spacer(minLength: 4)
+                Spacer(minLength: 2)
                 Text(trade.label)
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                    .font(.system(size: 14.5, weight: .semibold))
+                    .foregroundStyle(ink)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
+            .padding(15)
+            .frame(maxWidth: .infinity, minHeight: 108, alignment: .topLeading)
             .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(isSelected ? Color.white : Color.white.opacity(0.84))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(isSelected ? accent : Color.black.opacity(0.07), lineWidth: isSelected ? 2 : 1.5)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(isSelected ? ink : Color.black.opacity(0.09), lineWidth: isSelected ? 1.5 : 1)
             )
-            .shadow(color: Color.black.opacity(isSelected ? 0.07 : 0.02), radius: isSelected ? 12 : 4, y: 4)
+            .shadow(color: Color.black.opacity(isSelected ? 0.05 : 0.02), radius: isSelected ? 10 : 4, y: 3)
         }
         .buttonStyle(.plain)
     }
@@ -1437,6 +1538,7 @@ struct OnboardingView: View {
                     stepIndex: currentHimsStepIndex,
                     showSkip: servicesSubStep < 2,
                     onBack: {
+                        focusedField = nil
                         errorMessage = ""
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                             if servicesSubStep > 0 {
@@ -1448,6 +1550,7 @@ struct OnboardingView: View {
                         }
                     },
                     onSkip: {
+                        focusedField = nil
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                             if servicesSubStep == 0 {
                                 skipHimsServicesSelectionSubStep()
@@ -1505,53 +1608,47 @@ struct OnboardingView: View {
     }
 
     private var himsScannerBanner: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                Text("📸")
-                    .font(.system(size: 20))
-                    .frame(width: 42, height: 42)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color(red: 0.22, green: 0.74, blue: 0.97).opacity(0.18))
-                    )
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(servicesDraft.uploadedFileName != nil
-                         ? String(localized: "✓ Scanned \(servicesDraft.uploadedFileName!)")
-                         : String(localized: "Have a price sheet or menu?"))
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                    Text(isExtractingPriceList
-                         ? String(localized: "Reading price sheet…")
-                         : (!servicesUploadMessage.isEmpty
-                            ? servicesUploadMessage
-                            : String(localized: "Upload a PDF/CSV or snap a photo — Kevin reads it instantly")))
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color(red: 0.58, green: 0.64, blue: 0.72))
-                }
-                Spacer()
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        let sand = Color(red: 0.949, green: 0.925, blue: 0.894)
+        return VStack(alignment: .leading, spacing: 11) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(servicesDraft.uploadedFileName != nil
+                     ? String(localized: "Imported \(servicesDraft.uploadedFileName!)")
+                     : String(localized: "Have an existing price sheet?"))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ink)
+                Text(isExtractingPriceList
+                     ? String(localized: "Reading price sheet…")
+                     : (!servicesUploadMessage.isEmpty
+                        ? servicesUploadMessage
+                        : String(localized: "Upload a PDF/CSV or photograph your menu to import automatically.")))
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
             }
 
             HStack(spacing: 8) {
                 Button {
                     showServicesFileImporter = true
                 } label: {
-                    Label(String(localized: "Upload File"), systemImage: "doc.badge.plus")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.white.opacity(0.14)))
+                    Label(String(localized: "Upload File"), systemImage: "doc.text")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(ink)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(Color.white))
+                        .overlay(Capsule().stroke(Color.black.opacity(0.14), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .disabled(isExtractingPriceList || isLoading)
 
                 PhotosPicker(selection: $selectedPriceListPhoto, matching: .images) {
-                    Label(String(localized: "Snap / Photo"), systemImage: "camera.fill")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.white.opacity(0.14)))
+                    Label(String(localized: "Scan Photo"), systemImage: "camera")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(ink)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(Color.white))
+                        .overlay(Capsule().stroke(Color.black.opacity(0.14), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .disabled(isExtractingPriceList || isLoading)
@@ -1559,21 +1656,20 @@ struct OnboardingView: View {
         }
         .padding(15)
         .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color(red: 0.118, green: 0.161, blue: 0.231), Color(red: 0.059, green: 0.090, blue: 0.165)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(sand)
         )
-        .shadow(color: Color.black.opacity(0.14), radius: 12, y: 6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+        )
     }
 
     @ViewBuilder
     private func himsServiceCard(_ entry: OnboardingServiceEntry) -> some View {
         let active = entry.isSelected
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        let sage = Color(red: 0.176, green: 0.353, blue: 0.263)
         VStack(alignment: .leading, spacing: 10) {
             Button {
                 withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
@@ -1581,31 +1677,26 @@ struct OnboardingView: View {
                 }
             } label: {
                 HStack(spacing: 10) {
-                    Text(entry.emoji)
-                        .font(.system(size: 19))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(entry.name)
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(ink)
                         Text(active
-                             ? (entry.formattedPrice.map { String(localized: "Included • Quotes \($0)") }
-                                ?? String(localized: "Included • No price quoted on calls"))
+                             ? (entry.formattedPrice.map { String(localized: "Included · Quotes \($0)") }
+                                ?? String(localized: "Included · No price quoted on calls"))
                              : String(localized: "Tap to include"))
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(active
-                                             ? Color(red: 0.02, green: 0.588, blue: 0.412)
-                                             : Color(red: 0.47, green: 0.44, blue: 0.42))
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(active ? sage : Color(red: 0.54, green: 0.52, blue: 0.49))
                     }
                     Spacer()
                     ZStack {
                         Circle()
-                            .fill(active
-                                  ? Color(red: 0.063, green: 0.725, blue: 0.506)
-                                  : Color.black.opacity(0.08))
-                            .frame(width: 24, height: 24)
+                            .strokeBorder(active ? ink : Color.black.opacity(0.18), lineWidth: 1.5)
+                            .background(Circle().fill(active ? ink : Color.clear))
+                            .frame(width: 22, height: 22)
                         Image(systemName: active ? "checkmark" : "plus")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(active ? .white : Color(red: 0.47, green: 0.44, blue: 0.42))
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(active ? .white : Color(red: 0.54, green: 0.52, blue: 0.49))
                     }
                 }
             }
@@ -1621,67 +1712,54 @@ struct OnboardingView: View {
                 }
             }
         }
-        .padding(14)
+        .padding(15)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(active ? Color.white : Color.white.opacity(0.86))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(active
-                        ? Color(red: 0.063, green: 0.725, blue: 0.506)
-                        : Color.black.opacity(0.07), lineWidth: active ? 2 : 1.5)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(active ? ink : Color.black.opacity(0.09), lineWidth: active ? 1.5 : 1)
         )
     }
 
     @ViewBuilder
     private func himsPricePresetChip(_ preset: OnboardingPricePreset, for entry: OnboardingServiceEntry) -> some View {
         let isPresetSelected = entry.priceMin == preset.priceMin && entry.priceMax == preset.priceMax
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        let sand = Color(red: 0.949, green: 0.925, blue: 0.894)
         Button {
             servicesDraft.applyPricePreset(preset, to: entry.id)
         } label: {
             Text(preset.label)
-                .font(.system(size: 12, weight: isPresetSelected ? .bold : .semibold))
-                .foregroundStyle(isPresetSelected
-                                 ? Color(red: 0.024, green: 0.373, blue: 0.275)
-                                 : Color(red: 0.267, green: 0.251, blue: 0.235))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .font(.system(size: 12, weight: isPresetSelected ? .semibold : .medium))
+                .foregroundStyle(isPresetSelected ? .white : Color(red: 0.341, green: 0.325, blue: 0.306))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 6)
                 .background(
-                    Capsule().fill(isPresetSelected
-                                   ? Color(red: 0.863, green: 0.988, blue: 0.906)
-                                   : Color.black.opacity(0.05))
-                )
-                .overlay(
-                    Capsule().stroke(isPresetSelected
-                                     ? Color(red: 0.063, green: 0.725, blue: 0.506)
-                                     : Color.clear, lineWidth: 1)
+                    Capsule().fill(isPresetSelected ? ink : sand)
                 )
         }
         .buttonStyle(.plain)
     }
 
     private var himsServicesSelectionSubStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        return VStack(alignment: .leading, spacing: 12) {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 6) {
-                        Text("✨")
-                        Text(String(localized: "OPTIONAL • PRE-LOADED FOR \(selectedTrade.label.uppercased())"))
-                    }
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Color(red: 0.016, green: 0.471, blue: 0.341))
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(Color(red: 0.820, green: 0.980, blue: 0.898)))
+                    Text(String(localized: "STEP 04 / OPTIONAL · \(selectedTrade.label.uppercased())"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
                     Text(String(localized: "What services do you want Kevin to know?"))
-                        .font(.system(size: 27, weight: .heavy))
+                        .font(.system(size: 26, weight: .bold))
                         .tracking(-0.6)
-                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                        .foregroundStyle(ink)
 
-                    Text(String(localized: "Tap any service you offer. Pick a ballpark price range, or leave it unpriced."))
-                        .font(.system(size: 15))
+                    Text(String(localized: "Select the services you offer. Choose a ballpark range if you want Kevin to quote estimates, or leave it unpriced."))
+                        .font(.system(size: 14.5))
                         .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
                         .lineSpacing(2)
 
@@ -1693,26 +1771,35 @@ struct OnboardingView: View {
 
                     // Quick Add Custom Service Pill Bar
                     HStack(spacing: 8) {
-                        TextField(String(localized: "+ Add another service..."), text: $draftServiceName)
-                            .font(.system(size: 14, weight: .semibold))
-                            .padding(.horizontal, 14)
+                        TextField(String(localized: "Add another service..."), text: $draftServiceName)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(ink)
+                            .focused($focusedField, equals: .customService)
+                            .submitLabel(.done)
+                            .onSubmit {
+                                commitTypedDraftService()
+                            }
+                            .padding(.horizontal, 16)
                             .padding(.vertical, 11)
                             .background(
-                                Capsule().fill(Color.white.opacity(0.9))
+                                Capsule().fill(Color.white)
                             )
                             .overlay(
-                                Capsule().stroke(Color.black.opacity(0.1), lineWidth: 1)
+                                Capsule().stroke(
+                                    focusedField == .customService ? ink : Color.black.opacity(0.09),
+                                    lineWidth: 1.5
+                                )
                             )
 
                         Button {
                             commitTypedDraftService()
                         } label: {
                             Text(String(localized: "Add"))
-                                .font(.system(size: 13, weight: .bold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.white)
-                                .padding(.horizontal, 16)
+                                .padding(.horizontal, 18)
                                 .padding(.vertical, 11)
-                                .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
+                                .background(Capsule().fill(ink))
                         }
                         .buttonStyle(.plain)
                         .disabled(draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1723,6 +1810,7 @@ struct OnboardingView: View {
             let activeCount = servicesDraft.activeItems.count
             VStack(spacing: 8) {
                 Button {
+                    focusedField = nil
                     if !draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         commitTypedDraftService()
                     }
@@ -1735,23 +1823,25 @@ struct OnboardingView: View {
                              ? String(localized: "Continue with \(activeCount) service\(activeCount == 1 ? "" : "s")")
                              : String(localized: "Continue"))
                         Image(systemName: "arrow.right")
+                            .font(.system(size: 13.5, weight: .semibold))
                     }
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 15.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 17)
-                    .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
+                    .padding(.vertical, 16)
+                    .background(Capsule().fill(ink))
                 }
                 .buttonStyle(.plain)
 
                 Button {
+                    focusedField = nil
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                         skipHimsServicesSelectionSubStep()
                     }
                 } label: {
                     Text(String(localized: "Skip for now — I'll add services later"))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
                 }
                 .buttonStyle(.plain)
             }
@@ -1761,25 +1851,17 @@ struct OnboardingView: View {
     @ViewBuilder
     private func himsQuotingRuleCard(_ rule: OnboardingQuotingRule) -> some View {
         let isSelected = servicesDraft.selectedRuleIDs.contains(rule.id)
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
         Button {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
                 servicesDraft.toggleQuotingRule(id: rule.id)
             }
         } label: {
-            HStack(alignment: .top, spacing: 13) {
-                Text(rule.emoji)
-                    .font(.system(size: 20))
-                    .frame(width: 40, height: 40)
-                    .background(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .fill(isSelected
-                                  ? Color(red: 0.996, green: 0.953, blue: 0.780)
-                                  : Color.black.opacity(0.05))
-                    )
+            HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(rule.title)
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(ink)
                         .multilineTextAlignment(.leading)
                     Text(rule.subtitle)
                         .font(.system(size: 13))
@@ -1790,101 +1872,107 @@ struct OnboardingView: View {
                 Spacer()
                 ZStack {
                     Circle()
-                        .fill(isSelected
-                              ? Color(red: 0.851, green: 0.467, blue: 0.024)
-                              : Color.black.opacity(0.08))
+                        .strokeBorder(isSelected ? ink : Color.black.opacity(0.18), lineWidth: 1.5)
+                        .background(Circle().fill(isSelected ? ink : Color.clear))
                         .frame(width: 22, height: 22)
                     if isSelected {
                         Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .bold))
+                            .font(.system(size: 10.5, weight: .bold))
                             .foregroundStyle(.white)
                     }
                 }
+                .padding(.top, 2)
             }
-            .padding(15)
+            .padding(16)
             .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(isSelected ? Color.white : Color.white.opacity(0.88))
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(isSelected
-                            ? Color(red: 0.851, green: 0.467, blue: 0.024)
-                            : Color.black.opacity(0.07), lineWidth: isSelected ? 2 : 1.5)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(isSelected ? ink : Color.black.opacity(0.09), lineWidth: isSelected ? 1.5 : 1)
             )
         }
         .buttonStyle(.plain)
     }
 
     private var himsQuotingRulesSubStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        return VStack(alignment: .leading, spacing: 12) {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 6) {
-                        Text("💡")
-                        Text(String(localized: "OPTIONAL • CALL RULES"))
-                    }
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Color(red: 0.706, green: 0.325, blue: 0.035))
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(Color(red: 0.996, green: 0.953, blue: 0.780)))
+                    Text(String(localized: "STEP 05 / OPTIONAL · QUOTING POLICY"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
                     Text(String(localized: "How should Kevin handle pricing questions?"))
-                        .font(.system(size: 27, weight: .heavy))
+                        .font(.system(size: 26, weight: .bold))
                         .tracking(-0.6)
-                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                        .foregroundStyle(ink)
 
-                    Text(String(localized: "Pick the ground rules that match how you run your business."))
-                        .font(.system(size: 15))
+                    Text(String(localized: "Select the guidelines Kevin should follow when callers ask about cost."))
+                        .font(.system(size: 14.5))
                         .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
 
                     ForEach(OnboardingQuotingRule.catalog) { rule in
                         himsQuotingRuleCard(rule)
                     }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(String(localized: "ANYTHING ELSE CALLERS ASK? (OPTIONAL)"))
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(String(localized: "ADDITIONAL NOTES FOR CALLERS (OPTIONAL)"))
+                            .font(.system(size: 11, weight: .semibold))
+                            .tracking(0.5)
+                            .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
                         TextField(
                             String(localized: "e.g. Licensed & insured, senior discount…"),
                             text: $servicesDraft.additionalNotes
                         )
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                        .font(.system(size: 14.5, weight: .medium))
+                        .foregroundStyle(ink)
+                        .focused($focusedField, equals: .additionalNotes)
                     }
                     .padding(15)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        focusedField = .additionalNotes
+                    }
                     .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(Color.white.opacity(0.9))
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.white)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(Color.black.opacity(0.08), lineWidth: 1.5)
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(
+                                focusedField == .additionalNotes ? ink : Color.black.opacity(0.09),
+                                lineWidth: 1.5
+                            )
                     )
                 }
             }
 
             VStack(spacing: 8) {
                 Button {
+                    focusedField = nil
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
                         servicesSubStep = 2
                     }
                 } label: {
                     HStack(spacing: 8) {
-                        Text(String(localized: "Build My Receptionist"))
-                        Text("✨")
+                        Text(String(localized: "Review Receptionist Setup"))
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 13.5, weight: .semibold))
                     }
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 15.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 17)
-                    .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
+                    .padding(.vertical, 16)
+                    .background(Capsule().fill(ink))
                 }
                 .buttonStyle(.plain)
 
                 Button {
+                    focusedField = nil
                     servicesDraft.selectedRuleIDs.removeAll()
                     servicesDraft.additionalNotes = ""
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
@@ -1892,8 +1980,8 @@ struct OnboardingView: View {
                     }
                 } label: {
                     Text(String(localized: "Skip for now"))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
                 }
                 .buttonStyle(.plain)
             }
@@ -1901,46 +1989,45 @@ struct OnboardingView: View {
     }
 
     private var himsReceptionistRevealSubStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let ink = Color(red: 0.098, green: 0.090, blue: 0.086)
+        let sage = Color(red: 0.176, green: 0.353, blue: 0.263)
+        let sageTint = Color(red: 0.914, green: 0.941, blue: 0.925)
+        let sand = Color(red: 0.949, green: 0.925, blue: 0.894)
+        return VStack(alignment: .leading, spacing: 14) {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 6) {
-                        Text("🎉")
-                        Text(String(localized: "READY FOR CALLS"))
-                    }
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Color(red: 0.114, green: 0.306, blue: 0.847))
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(Color(red: 0.859, green: 0.918, blue: 0.996)))
+                    Text(String(localized: "READY TO LAUNCH"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
-                    Text(String(localized: "Meet your custom AI receptionist."))
-                        .font(.system(size: 28, weight: .heavy))
+                    Text(String(localized: "Your business receptionist is ready."))
+                        .font(.system(size: 26, weight: .bold))
                         .tracking(-0.6)
-                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                        .foregroundStyle(ink)
 
-                    let displayBiz = businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Apex Plumbing" : businessName
-                    Text(String(localized: "Kevin is tuned for \(displayBiz). You can tweak any of this anytime in Settings."))
-                        .font(.system(size: 15))
+                    let displayBiz = businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "your business" : businessName
+                    Text(String(localized: "Kevin will launch directly in Business Receptionist mode for \(displayBiz)."))
+                        .font(.system(size: 14.5))
                         .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
 
                     VStack(alignment: .leading, spacing: 14) {
                         HStack(spacing: 12) {
-                            Text(selectedTrade.emoji)
-                                .font(.system(size: 24))
-                                .frame(width: 46, height: 46)
+                            Image(systemName: selectedTrade.iconSystemName)
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 40, height: 40)
                                 .background(
-                                    RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                        .fill(tradeTintColor(selectedTrade))
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(ink)
                                 )
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(displayBiz)
-                                    .font(.system(size: 17, weight: .heavy))
-                                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
-                                let displayOwner = ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Mike" : ownerName
-                                Text("\(selectedTrade.label) • Greeting for \(displayOwner)")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+                                    .font(.system(size: 16.5, weight: .bold))
+                                    .foregroundStyle(ink)
+                                Text(String(localized: "Business Receptionist Profile · \(selectedTrade.label)"))
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(sage)
                             }
                             Spacer()
                         }
@@ -1949,31 +2036,30 @@ struct OnboardingView: View {
 
                         let activeServices = servicesDraft.activeItems
                         Text(String(localized: "SERVICES & BALLPARK PRICING (\(activeServices.count))"))
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                            .font(.system(size: 11, weight: .semibold))
+                            .tracking(0.5)
+                            .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
 
                         if activeServices.isEmpty {
-                            Text(String(localized: "Skipped for now — Kevin will take caller details and text you right away."))
+                            Text(String(localized: "No services listed yet — Kevin will capture caller details and text you right away."))
                                 .font(.system(size: 13))
-                                .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                                .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
                         } else {
                             ForEach(activeServices) { svc in
                                 HStack {
-                                    Text("\(svc.emoji) \(svc.name)")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundStyle(Color(red: 0.11, green: 0.098, blue: 0.09))
+                                    Text(svc.name)
+                                        .font(.system(size: 13.5, weight: .medium))
+                                        .foregroundStyle(ink)
                                     Spacer()
                                     Text(svc.formattedPrice ?? String(localized: "No price"))
-                                        .font(.system(size: 12, weight: .bold))
+                                        .font(.system(size: 11.5, weight: .semibold))
                                         .foregroundStyle(svc.formattedPrice == nil
                                                          ? Color(red: 0.341, green: 0.325, blue: 0.306)
-                                                         : Color(red: 0.024, green: 0.373, blue: 0.275))
+                                                         : sage)
                                         .padding(.horizontal, 9)
                                         .padding(.vertical, 4)
                                         .background(
-                                            Capsule().fill(svc.formattedPrice == nil
-                                                           ? Color.black.opacity(0.05)
-                                                           : Color(red: 0.863, green: 0.988, blue: 0.906))
+                                            Capsule().fill(svc.formattedPrice == nil ? sand : sageTint)
                                         )
                                 }
                             }
@@ -1984,18 +2070,19 @@ struct OnboardingView: View {
                         }
                         if !activeRules.isEmpty {
                             Divider()
-                            Text(String(localized: "CALL HANDLING RULES"))
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                            Text(String(localized: "QUOTING POLICY"))
+                                .font(.system(size: 11, weight: .semibold))
+                                .tracking(0.5)
+                                .foregroundStyle(Color(red: 0.54, green: 0.52, blue: 0.49))
                             VStack(alignment: .leading, spacing: 6) {
                                 ForEach(activeRules) { rule in
-                                    Text("\(rule.emoji) \(rule.title)")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(Color(red: 0.573, green: 0.251, blue: 0.055))
+                                    Text(rule.title)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(ink)
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 5)
                                         .background(
-                                            Capsule().fill(Color(red: 0.996, green: 0.953, blue: 0.780))
+                                            Capsule().fill(sand)
                                         )
                                 }
                             }
@@ -2003,10 +2090,13 @@ struct OnboardingView: View {
                     }
                     .padding(18)
                     .background(
-                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .fill(Color.white)
                     )
-                    .shadow(color: Color.black.opacity(0.06), radius: 14, y: 6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(ink, lineWidth: 1.5)
+                    )
 
                     if !errorMessage.isEmpty {
                         Text(errorMessage)
@@ -2024,21 +2114,21 @@ struct OnboardingView: View {
                     ProgressView()
                         .tint(.white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 17)
-                        .background(Capsule().fill(Color(red: 0.145, green: 0.388, blue: 0.922)))
+                        .padding(.vertical, 16)
+                        .background(Capsule().fill(ink))
                 } else {
                     HStack(spacing: 8) {
                         Text(appState.hasBusinessEntitlement
-                             ? String(localized: "Continue")
+                             ? String(localized: "Launch Business Receptionist")
                              : String(localized: "Start 14-Day Free Trial"))
                         Image(systemName: "arrow.right")
+                            .font(.system(size: 13.5, weight: .semibold))
                     }
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 15.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 17)
-                    .background(Capsule().fill(Color(red: 0.145, green: 0.388, blue: 0.922)))
-                    .shadow(color: Color(red: 0.145, green: 0.388, blue: 0.922).opacity(0.3), radius: 12, y: 6)
+                    .padding(.vertical, 16)
+                    .background(Capsule().fill(ink))
                 }
             }
             .buttonStyle(.plain)
@@ -3065,16 +3155,34 @@ struct OnboardingView: View {
         if !skipServices, !draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             commitTypedDraftService()
         }
+        if let onDebugPreviewComplete, !appState.contractorId.isEmpty {
+            Task {
+                let ready = await prepareBusinessDraftProfile()
+                guard ready else { return }
+                _ = try? await APIClient.shared.patchContractor(
+                    appState.contractorId,
+                    body: ["mode": "business"]
+                )
+                appState.mode = "business"
+                appState.userName = ownerName
+                appState.businessName = businessName
+                appState.serviceType = serviceType
+                onDebugPreviewComplete()
+            }
+            return
+        }
         if appState.hasBusinessEntitlement {
-            if !appState.contractorId.isEmpty && (effectiveServicesPayload != nil || effectiveKnowledgeMarkdown != nil) {
-                Task {
-                    let ready = await prepareBusinessDraftProfile()
-                    if ready {
-                        step = .contactsPermission
-                    }
+            Task {
+                let ready = await prepareBusinessDraftProfile()
+                guard ready else { return }
+                let result = await activateBusinessAfterPurchase(
+                    authContext: appState.currentAuthContext()
+                ) {
+                    step = .contactsPermission
                 }
-            } else {
-                step = .contactsPermission
+                if case .failure(let message) = result {
+                    errorMessage = message
+                }
             }
         } else {
             Task {

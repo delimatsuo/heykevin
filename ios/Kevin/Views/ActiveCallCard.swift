@@ -424,7 +424,7 @@ struct LiveCallDetailView: View {
                 // Bottom Action Bar
                 liveActionBar(sid: sid)
             }
-            .background(Color(.systemGroupedBackground))
+            .background(Color.hkWarmCanvas.ignoresSafeArea())
             .navigationTitle(String(localized: "Live Call"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -527,7 +527,7 @@ struct LiveCallDetailView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(Color(.secondarySystemGroupedBackground))
+        .background(Color.white)
         .overlay(alignment: .bottom) {
             Divider()
         }
@@ -587,7 +587,7 @@ struct LiveCallDetailView: View {
         .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 16)
-        .background(Color(.secondarySystemGroupedBackground))
+        .background(Color.white)
         .overlay(alignment: .top) {
             Divider()
         }
@@ -723,9 +723,17 @@ private struct TranscriptBubble: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(
-                        isKevin ? Color.accentColor : Color(.secondarySystemGroupedBackground),
+                        isKevin
+                            ? Color(red: 0.098, green: 0.090, blue: 0.086)
+                            : Color.white,
                         in: RoundedRectangle(cornerRadius: 16, style: .continuous)
                     )
+                    .overlay {
+                        if !isKevin {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        }
+                    }
             }
             .frame(maxWidth: 290, alignment: isKevin ? .trailing : .leading)
 

@@ -38,6 +38,7 @@ struct CallHistoryView: View {
                 // Search, Filter, and Count Header Section
                 Section {
                     VStack(alignment: .leading, spacing: 12) {
+                        activeProfileBanner
                         searchBar
                         filterPicker
                         if !historyModel.showingCountLabel.isEmpty {
@@ -165,6 +166,80 @@ struct CallHistoryView: View {
     }
 
     // MARK: - Subviews
+
+    private var activeProfileBanner: some View {
+        let isBusiness = !appState.isPersonalMode
+        let titleText = isBusiness
+            ? (appState.businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? String(localized: "Business Receptionist")
+                : appState.businessName)
+            : (appState.userName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? String(localized: "Personal Assistant")
+                : String(localized: "\(appState.userName)'s Personal Assistant"))
+        let subtitleText = isBusiness
+            ? String(localized: "Answering with business intake & pricing")
+            : String(localized: "Screening unknown callers • Contacts ring through")
+
+        return Button {
+            navigation.selectedTab = .kevin
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: isBusiness ? "building.2" : "shield")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
+                    .frame(width: 40, height: 40)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color(red: 0.949, green: 0.925, blue: 0.894))
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(Color(red: 0.176, green: 0.353, blue: 0.263))
+                            .frame(width: 7, height: 7)
+                        Text(isBusiness
+                             ? String(localized: "BUSINESS RECEPTIONIST ACTIVE")
+                             : String(localized: "PERSONAL ASSISTANT ACTIVE"))
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.5)
+                            .foregroundStyle(Color(red: 0.176, green: 0.353, blue: 0.263))
+                    }
+                    Text(titleText)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.hkInk)
+                        .lineLimit(1)
+                    Text(subtitleText)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.hkInkSecondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                Text(String(localized: "Switch"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.hkInk)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Color(red: 0.949, green: 0.925, blue: 0.894))
+                    )
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("calls.activeProfileBanner")
+    }
 
     private var searchBar: some View {
         HStack(spacing: 8) {
@@ -402,6 +477,22 @@ struct CallRow: View {
                     .lineLimit(isAccessibilitySize ? nil : 2)
                     .fixedSize(horizontal: false, vertical: isAccessibilitySize)
                     .truncationMode(.tail)
+
+                let turnCount = call.transcript
+                    .components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .count
+                if turnCount > 0 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "text.bubble")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(String(localized: "Transcript • \(turnCount) turns"))
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(Color(red: 0.176, green: 0.353, blue: 0.263))
+                    .padding(.top, 2)
+                }
             }
 
             if !isAccessibilitySize {
@@ -548,7 +639,7 @@ struct CallDetailView: View {
                 }
                 return permitted ? .handled : .discarded
             })
-            .background(Color(.systemGroupedBackground))
+            .background(Color.hkWarmCanvas.ignoresSafeArea())
             .navigationTitle(String(localized: "Details"))
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
@@ -776,36 +867,49 @@ struct CallDetailView: View {
     }
 
     private var callSummary: some View {
-        CallDetailSection(title: String(localized: "Call"), systemImage: "phone.badge.waveform") {
-            DetailRow(
-                title: String(localized: "Outcome"),
-                value: outcomeText,
-                systemImage: outcomeIcon,
-                tint: outcomeColor
-            )
-            Divider()
-            DetailRow(
-                title: String(localized: "Time"),
-                value: call.timestamp.formatted(date: .abbreviated, time: .shortened),
-                systemImage: "calendar",
-                tint: .secondary
-            )
-            if let callbackNumber = call.callbackNumber, callbackNumber != call.callerPhone {
+        CallDetailSection(title: String(localized: "Call Summary"), systemImage: "phone.badge.waveform") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(call.callerExcerpt)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.hkInk)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 4)
                 Divider()
                 DetailRow(
-                    title: String(localized: "Callback"),
-                    value: PhoneFormatter.format(callbackNumber),
-                    systemImage: "phone.arrow.up.right.fill",
-                    tint: .blue
+                    title: String(localized: "Outcome"),
+                    value: outcomeText,
+                    systemImage: outcomeIcon,
+                    tint: outcomeColor
                 )
+                Divider()
+                DetailRow(
+                    title: String(localized: "Time"),
+                    value: call.timestamp.formatted(date: .abbreviated, time: .shortened),
+                    systemImage: "calendar",
+                    tint: .secondary
+                )
+                if let callbackNumber = call.callbackNumber, callbackNumber != call.callerPhone {
+                    Divider()
+                    DetailRow(
+                        title: String(localized: "Callback"),
+                        value: PhoneFormatter.format(callbackNumber),
+                        systemImage: "phone.arrow.up.right.fill",
+                        tint: .blue
+                    )
+                }
             }
         }
     }
 
     @ViewBuilder
     private var transcriptSection: some View {
-        if !transcriptLines.isEmpty {
-            CallDetailSection(title: String(localized: "Conversation"), systemImage: "text.bubble") {
+        CallDetailSection(title: String(localized: "Call Transcript"), systemImage: "text.bubble") {
+            if transcriptLines.isEmpty {
+                Text(String(localized: "No transcript turns recorded for this call."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
                 VStack(spacing: 12) {
                     ForEach(Array(transcriptLines.enumerated()), id: \.offset) { _, line in
                         TranscriptRow(line: line)
@@ -930,10 +1034,10 @@ private struct CallDetailSection<Content: View>: View {
                 content
             }
             .padding(14)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color(.separator), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1030,21 +1134,30 @@ struct TranscriptRow: View {
 
             VStack(alignment: isKevin ? .trailing : .leading, spacing: 4) {
                 if !speaker.isEmpty {
-                    Text(speaker)
-                        .font(.caption2.weight(.semibold))
+                    Text(isKevin ? "KEVIN (RECEPTIONIST)" : "CALLER")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(0.5)
                         .foregroundStyle(.secondary)
                 }
 
                 Text(linkedText)
-                    .font(.body)
+                    .font(.subheadline)
                     .foregroundStyle(isKevin ? .white : Color.hkInk)
                     .textSelection(.enabled)
-                    .padding(.horizontal, 13)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(
-                        isKevin ? Color.accentColor : Color(.tertiarySystemGroupedBackground),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        isKevin
+                            ? Color(red: 0.098, green: 0.090, blue: 0.086)
+                            : Color(red: 0.980, green: 0.969, blue: 0.949),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
                     )
+                    .overlay {
+                        if !isKevin {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        }
+                    }
             }
             .frame(maxWidth: 290, alignment: isKevin ? .trailing : .leading)
 
@@ -1071,13 +1184,17 @@ struct TranscriptRow: View {
     private var speakerAvatar: some View {
         ZStack {
             Circle()
-                .fill(isKevin ? Color.accentColor.opacity(0.16) : Color(.tertiarySystemFill))
+                .fill(
+                    isKevin
+                        ? Color(red: 0.176, green: 0.353, blue: 0.263).opacity(0.14)
+                        : Color(red: 0.949, green: 0.925, blue: 0.894)
+                )
                 .frame(width: 30, height: 30)
 
             if isKevin {
-                Image(systemName: "phone.bubble.left.fill")
+                Image(systemName: "waveform")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Color(red: 0.176, green: 0.353, blue: 0.263))
             } else {
                 Image(systemName: "person.fill")
                     .font(.caption.weight(.semibold))

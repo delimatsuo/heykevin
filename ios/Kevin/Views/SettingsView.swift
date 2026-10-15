@@ -647,6 +647,33 @@ struct SettingsHost<Root: View>: View {
 
     private var howKevinAnswersSection: some View {
         Section {
+            HStack(spacing: 12) {
+                Image(systemName: appState.isPersonalMode ? "shield" : "building.2")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.098, green: 0.090, blue: 0.086))
+                    .frame(width: 38, height: 38)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color(red: 0.949, green: 0.925, blue: 0.894))
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(appState.isPersonalMode
+                         ? String(localized: "Personal Assistant Active")
+                         : String(localized: "Business Receptionist Active"))
+                        .font(.subheadline.weight(.bold))
+                    Text(appState.isPersonalMode
+                         ? String(localized: "Screening unknown callers for \(appState.userName.isEmpty ? "you" : appState.userName)")
+                         : (appState.businessName.isEmpty
+                            ? String(localized: "Answering with business intake & pricing")
+                            : String(localized: "Answering as \(appState.businessName)")))
+                        .font(.caption)
+                        .foregroundStyle(Color.secondary)
+                }
+                Spacer()
+            }
+            .accessibilityIdentifier("kevin.activeProfileStatus")
+
             // Screen all calls toggle (moved from Recents)
             Toggle(isOn: screenAllCallsBinding) {
                 VStack(alignment: .leading, spacing: 2) {

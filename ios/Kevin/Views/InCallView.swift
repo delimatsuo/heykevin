@@ -318,9 +318,17 @@ private struct InCallFrozenTranscriptBubble: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(
-                        isKevin ? Color.accentColor : Color(.secondarySystemGroupedBackground),
+                        isKevin
+                            ? Color(red: 0.098, green: 0.090, blue: 0.086)
+                            : Color.white,
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                     )
+                    .overlay {
+                        if !isKevin {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        }
+                    }
             }
             .frame(maxWidth: 280, alignment: isKevin ? .trailing : .leading)
 

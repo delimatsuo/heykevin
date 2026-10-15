@@ -2,17 +2,384 @@ import Foundation
 import PDFKit
 import Vision
 
+struct OnboardingPricePreset: Equatable, Sendable, Hashable {
+    let label: String
+    let priceMin: Int
+    let priceMax: Int
+}
+
+struct OnboardingQuotingRule: Identifiable, Equatable, Sendable {
+    let id: String
+    let emoji: String
+    let title: String
+    let subtitle: String
+    let knowledgeLine: String
+
+    static let catalog: [OnboardingQuotingRule] = [
+        OnboardingQuotingRule(
+            id: "ballpark",
+            emoji: "🎯",
+            title: String(localized: "Share prices as ballpark ranges"),
+            subtitle: String(localized: "Kevin quotes your min–max range and reminds callers final pricing is confirmed on-site."),
+            knowledgeLine: "- Quote listed service prices as ballpark estimates only; final price is confirmed on-site."
+        ),
+        OnboardingQuotingRule(
+            id: "waive_fee",
+            emoji: "🎟️",
+            title: String(localized: "$89 service call waived with repair"),
+            subtitle: String(localized: "Let callers know there's a diagnostic visit fee that goes toward the job if they book."),
+            knowledgeLine: "- Standard $89 service call / diagnostic fee is waived when the customer proceeds with the repair."
+        ),
+        OnboardingQuotingRule(
+            id: "free_est",
+            emoji: "🤝",
+            title: String(localized: "Free estimates for big jobs"),
+            subtitle: String(localized: "For replacements or remodels, Kevin offers a free no-obligation on-site estimate."),
+            knowledgeLine: "- Major replacements, installations, and remodels include a free on-site estimate."
+        ),
+        OnboardingQuotingRule(
+            id: "no_phone_price",
+            emoji: "🔒",
+            title: String(localized: "Never quote prices on the phone"),
+            subtitle: String(localized: "Focus 100% on booking the lead—collect their name, address, and issue first."),
+            knowledgeLine: "- Do not quote dollar figures over the phone; collect the caller's issue and address so we can quote on-site."
+        ),
+    ]
+}
+
+enum OnboardingTradeCategory: String, CaseIterable, Identifiable, Sendable {
+    case plumbing
+    case electrical
+    case hvac
+    case roofing
+    case general
+    case other
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .plumbing: return String(localized: "Plumbing & Drain")
+        case .electrical: return String(localized: "Electrical")
+        case .hvac: return String(localized: "HVAC & Climate")
+        case .roofing: return String(localized: "Roofing & Exterior")
+        case .general: return String(localized: "General Contracting")
+        case .other: return String(localized: "Other Pro Service")
+        }
+    }
+
+    var emoji: String {
+        switch self {
+        case .plumbing: return "🔧"
+        case .electrical: return "⚡"
+        case .hvac: return "❄️"
+        case .roofing: return "🏠"
+        case .general: return "🔨"
+        case .other: return "✨"
+        }
+    }
+
+    var serviceTypeKey: String {
+        switch self {
+        case .plumbing: return "plumbing"
+        case .electrical: return "electrical"
+        case .hvac: return "hvac"
+        case .roofing, .general, .other: return "general"
+        }
+    }
+
+    var defaultServices: [OnboardingServiceEntry] {
+        switch self {
+        case .plumbing:
+            return [
+                OnboardingServiceEntry(
+                    name: "Drain Cleaning",
+                    priceMin: 95,
+                    priceMax: 185,
+                    emoji: "🌀",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$95–$185", priceMin: 95, priceMax: 185),
+                        OnboardingPricePreset(label: "$150–$250", priceMin: 150, priceMax: 250),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Water Heater Install / Repair",
+                    priceMin: 1200,
+                    priceMax: 1800,
+                    emoji: "🔥",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$150–$350", priceMin: 150, priceMax: 350),
+                        OnboardingPricePreset(label: "$1,200–$1,800", priceMin: 1200, priceMax: 1800),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Leak Detection & Pipe Repair",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "💧",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$120–$250", priceMin: 120, priceMax: 250),
+                        OnboardingPricePreset(label: "$200–$450", priceMin: 200, priceMax: 450),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "24/7 Emergency Service",
+                    priceMin: 250,
+                    priceMax: 250,
+                    emoji: "🚨",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$199", priceMin: 199, priceMax: 199),
+                        OnboardingPricePreset(label: "$250", priceMin: 250, priceMax: 250),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Sewer Camera Inspection",
+                    priceMin: 199,
+                    priceMax: 299,
+                    emoji: "📹",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$149", priceMin: 149, priceMax: 149),
+                        OnboardingPricePreset(label: "$199–$299", priceMin: 199, priceMax: 299),
+                    ]
+                ),
+            ]
+        case .electrical:
+            return [
+                OnboardingServiceEntry(
+                    name: "Panel Upgrade (200A)",
+                    priceMin: 1800,
+                    priceMax: 3200,
+                    emoji: "⚡",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$1,800–$3,200", priceMin: 1800, priceMax: 3200),
+                        OnboardingPricePreset(label: "$2,500–$4,000", priceMin: 2500, priceMax: 4000),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "EV Charger Installation",
+                    priceMin: 450,
+                    priceMax: 850,
+                    emoji: "🔌",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$450–$850", priceMin: 450, priceMax: 850),
+                        OnboardingPricePreset(label: "$600–$1,200", priceMin: 600, priceMax: 1200),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Circuit & Outlet Troubleshooting",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "💡",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$125–$225", priceMin: 125, priceMax: 225),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Recessed & Landscape Lighting",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "✨",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$150–$300", priceMin: 150, priceMax: 300),
+                    ]
+                ),
+            ]
+        case .hvac:
+            return [
+                OnboardingServiceEntry(
+                    name: "Seasonal AC / Furnace Tune-Up",
+                    priceMin: 89,
+                    priceMax: 89,
+                    emoji: "🌡️",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$89", priceMin: 89, priceMax: 89),
+                        OnboardingPricePreset(label: "$129", priceMin: 129, priceMax: 129),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "No-Cool / No-Heat Diagnostic",
+                    priceMin: 99,
+                    priceMax: 189,
+                    emoji: "❄️",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$99–$189", priceMin: 99, priceMax: 189),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Full System Replacement",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "🏠",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$5,500–$12,000", priceMin: 5500, priceMax: 12000),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Duct Cleaning & Airflow",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "💨",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$299–$499", priceMin: 299, priceMax: 499),
+                    ]
+                ),
+            ]
+        case .roofing:
+            return [
+                OnboardingServiceEntry(
+                    name: "Storm & Leak Roof Inspection",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "🔍",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$150", priceMin: 150, priceMax: 150),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Shingle & Flashing Repair",
+                    priceMin: 350,
+                    priceMax: 850,
+                    emoji: "🛠️",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$350–$850", priceMin: 350, priceMax: 850),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Gutter Cleaning & Guards",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "🌧️",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$175–$350", priceMin: 175, priceMax: 350),
+                    ]
+                ),
+            ]
+        case .general:
+            return [
+                OnboardingServiceEntry(
+                    name: "Kitchen & Bath Remodeling",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "🛁",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$2,500–$15,000", priceMin: 2500, priceMax: 15000),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Half-Day / Full-Day Repairs",
+                    priceMin: 250,
+                    priceMax: 600,
+                    emoji: "🧰",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$250–$600", priceMin: 250, priceMax: 600),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Drywall, Paint & Trim",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "🎨",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$180–$450", priceMin: 180, priceMax: 450),
+                    ]
+                ),
+            ]
+        case .other:
+            return [
+                OnboardingServiceEntry(
+                    name: "Initial Consultation / Quote",
+                    priceMin: 0,
+                    priceMax: 0,
+                    emoji: "📋",
+                    isSelected: true,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$95", priceMin: 95, priceMax: 95),
+                    ]
+                ),
+                OnboardingServiceEntry(
+                    name: "Standard Service Visit",
+                    priceMin: 120,
+                    priceMax: 250,
+                    emoji: "⚡",
+                    isSelected: false,
+                    presets: [
+                        OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+                        OnboardingPricePreset(label: "$120–$250", priceMin: 120, priceMax: 250),
+                    ]
+                ),
+            ]
+        }
+    }
+}
+
 struct OnboardingServiceEntry: Identifiable, Equatable, Sendable {
     let id: UUID
     var name: String
     var priceMin: Int
     var priceMax: Int
+    var emoji: String
+    var isSelected: Bool
+    var presets: [OnboardingPricePreset]
 
-    init(id: UUID = UUID(), name: String, priceMin: Int = 0, priceMax: Int = 0) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        priceMin: Int = 0,
+        priceMax: Int = 0,
+        emoji: String = "✨",
+        isSelected: Bool = true,
+        presets: [OnboardingPricePreset] = [
+            OnboardingPricePreset(label: "No price", priceMin: 0, priceMax: 0),
+            OnboardingPricePreset(label: "$95–$185", priceMin: 95, priceMax: 185),
+            OnboardingPricePreset(label: "$200–$400", priceMin: 200, priceMax: 400),
+        ]
+    ) {
         self.id = id
         self.name = name
         self.priceMin = priceMin
         self.priceMax = priceMax
+        self.emoji = emoji
+        self.isSelected = isSelected
+        self.presets = presets
     }
 
     var formattedPrice: String? {
@@ -36,11 +403,54 @@ struct OnboardingServicesDraft: Equatable, Sendable {
     static let maxKnowledgeLength = 10_000
 
     var items: [OnboardingServiceEntry] = []
+    var selectedRuleIDs: Set<String> = []
     var additionalNotes: String = ""
     var uploadedFileName: String?
 
+    var activeItems: [OnboardingServiceEntry] {
+        items.filter(\.isSelected)
+    }
+
     var hasContent: Bool {
-        !items.isEmpty || !additionalNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !activeItems.isEmpty
+            || !selectedRuleIDs.isEmpty
+            || !additionalNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    mutating func applyTradeTemplate(_ trade: OnboardingTradeCategory) {
+        items = trade.defaultServices
+        if selectedRuleIDs.isEmpty {
+            selectedRuleIDs = ["ballpark"]
+        }
+    }
+
+    mutating func toggleService(id: UUID) {
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        items[idx].isSelected.toggle()
+    }
+
+    mutating func applyPricePreset(_ preset: OnboardingPricePreset, to id: UUID) {
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        items[idx].priceMin = preset.priceMin
+        items[idx].priceMax = preset.priceMax
+        items[idx].isSelected = true
+    }
+
+    mutating func toggleQuotingRule(id: String) {
+        if id == "no_phone_price" {
+            if selectedRuleIDs.contains(id) {
+                selectedRuleIDs.remove(id)
+            } else {
+                selectedRuleIDs = ["no_phone_price"]
+            }
+        } else {
+            selectedRuleIDs.remove("no_phone_price")
+            if selectedRuleIDs.contains(id) {
+                selectedRuleIDs.remove(id)
+            } else {
+                selectedRuleIDs.insert(id)
+            }
+        }
     }
 
     static func sanitizeName(_ raw: String) -> String {
@@ -107,11 +517,18 @@ struct OnboardingServicesDraft: Equatable, Sendable {
         let parsed = Self.parseUploadedText(rawText)
         var addedCount = 0
         for entry in parsed {
-            guard items.count < Self.maxItems else { break }
-            let exists = items.contains {
+            if let existingIdx = items.firstIndex(where: {
                 $0.name.caseInsensitiveCompare(entry.name) == .orderedSame
-            }
-            if !exists {
+            }) {
+                if !items[existingIdx].isSelected {
+                    items[existingIdx].isSelected = true
+                    if entry.priceMin > 0 || entry.priceMax > 0 {
+                        items[existingIdx].priceMin = entry.priceMin
+                        items[existingIdx].priceMax = entry.priceMax
+                    }
+                    addedCount += 1
+                }
+            } else if items.count < Self.maxItems {
                 items.append(entry)
                 addedCount += 1
             }
@@ -323,7 +740,7 @@ struct OnboardingServicesDraft: Equatable, Sendable {
     }
 
     var servicesPayload: [[String: Any]] {
-        items.prefix(Self.maxItems).map { item in
+        activeItems.prefix(Self.maxItems).map { item in
             [
                 "name": item.name,
                 "price_min": item.priceMin,
@@ -332,14 +749,24 @@ struct OnboardingServicesDraft: Equatable, Sendable {
         }
     }
 
-    /// Freeform notes section for the contractor knowledge base.
+    /// Freeform notes & selected quoting rules section for the contractor knowledge base.
     /// Structured services are stored in `services` (via `servicesPayload`) rather than
     /// duplicated into `knowledge`, so subsequent edits or deletions in `ServicesView`
     /// never leave stale prices in `knowledge`.
     var knowledgeMarkdown: String {
+        let ruleLines = OnboardingQuotingRule.catalog
+            .filter { selectedRuleIDs.contains($0.id) }
+            .map(\.knowledgeLine)
         let cleanNotes = additionalNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanNotes.isEmpty else { return "" }
-        let section = "## Pricing & Service Notes\n\(cleanNotes)"
+        var bodyParts: [String] = []
+        if !ruleLines.isEmpty {
+            bodyParts.append(ruleLines.joined(separator: "\n"))
+        }
+        if !cleanNotes.isEmpty {
+            bodyParts.append(cleanNotes)
+        }
+        guard !bodyParts.isEmpty else { return "" }
+        let section = "## Pricing & Service Notes\n" + bodyParts.joined(separator: "\n")
         return String(section.prefix(Self.maxKnowledgeLength))
     }
 

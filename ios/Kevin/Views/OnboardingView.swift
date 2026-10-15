@@ -41,6 +41,10 @@ struct OnboardingView: View {
     @State private var countrySelectionReturnDestination: CountrySelectionReturnDestination = .welcome
     @State private var newSignupAdmissionCountryCode: String?
     @State private var servicesDraft = OnboardingServicesDraft()
+    @State private var selectedTrade: OnboardingTradeCategory = .plumbing
+    @State private var businessSubStep: Int = 0
+    @State private var servicesSubStep: Int = 0
+    @State private var hasSeededTradeServices = false
     @State private var draftServiceName = ""
     @State private var draftServiceMinPrice = ""
     @State private var draftServiceMaxPrice = ""
@@ -61,7 +65,20 @@ struct OnboardingView: View {
         initialMarketAdmission: SignupAdmissionStatus? = nil
     ) {
         self.isRecoveryMode = isRecoveryMode
-        _step = State(initialValue: isRecoveryMode ? .signIn : initialStep)
+        let resolvedInitialStep: OnboardingStep = {
+            guard !isRecoveryMode else { return .signIn }
+            guard initialStep == .welcome,
+                  let envStep = ProcessInfo.processInfo.environment["KEVIN_DEBUG_ONBOARDING_STEP"] else {
+                return initialStep
+            }
+            switch envStep {
+            case "modeSelect": return .modeSelect
+            case "businessInfo": return .businessInfo
+            case "businessServices": return .businessServices
+            default: return initialStep
+            }
+        }()
+        _step = State(initialValue: resolvedInitialStep)
         _selectedCountryCode = State(initialValue: initialCountryCode)
         _phoneNumber = State(initialValue: initialPhoneNumber)
         _errorMessage = State(initialValue: initialErrorMessage)
@@ -1044,280 +1061,423 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Business Info
+    // MARK: - Hims-Style Guided Business Intake (5 Dynamic Micro-Steps)
 
-    private var businessInfoStep: some View {
-        VStack(spacing: 24) {
-            Text(String(localized: "About Your Business"))
-                .font(.title.bold())
-
-            Text(String(localized: "Kevin will use this to greet callers."))
-                .foregroundStyle(.secondary)
-
-            VStack(spacing: 16) {
-                TextField(String(localized: "Your Name"), text: $ownerName)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.name)
-
-                TextField(String(localized: "Business Name"), text: $businessName)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.organizationName)
-            }
-            .padding(.vertical)
-
-            Spacer()
-
-            Button {
-                selectedMode = "business"
-                errorMessage = ""
-                step = .businessServices
-            } label: {
-                Text(String(localized: "Continue"))
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+    private var currentHimsStepIndex: Int {
+        if step == .businessInfo {
+            return businessSubStep == 0 ? 1 : 2
+        } else {
+            return min(5, 3 + servicesSubStep)
         }
     }
 
-    // MARK: - Business Services & Price List (Optional)
+    private func tradeAccentColor(_ trade: OnboardingTradeCategory) -> Color {
+        switch trade {
+        case .plumbing: return Color(red: 0.918, green: 0.345, blue: 0.047)
+        case .electrical: return Color(red: 0.851, green: 0.467, blue: 0.024)
+        case .hvac: return Color(red: 0.008, green: 0.518, blue: 0.780)
+        case .roofing: return Color(red: 0.020, green: 0.588, blue: 0.412)
+        case .general: return Color(red: 0.310, green: 0.275, blue: 0.898)
+        case .other: return Color(red: 0.486, green: 0.227, blue: 0.929)
+        }
+    }
+
+    private func tradeTintColor(_ trade: OnboardingTradeCategory) -> Color {
+        switch trade {
+        case .plumbing: return Color(red: 1.0, green: 0.929, blue: 0.835)
+        case .electrical: return Color(red: 0.996, green: 0.953, blue: 0.780)
+        case .hvac: return Color(red: 0.878, green: 0.949, blue: 0.996)
+        case .roofing: return Color(red: 0.820, green: 0.980, blue: 0.898)
+        case .general: return Color(red: 0.878, green: 0.906, blue: 1.0)
+        case .other: return Color(red: 0.929, green: 0.914, blue: 0.996)
+        }
+    }
+
+    @ViewBuilder
+    private func himsAmbientCanvas(for stepIdx: Int) -> some View {
+        let topGlow: Color = {
+            switch stepIdx {
+            case 1: return Color(red: 1.0, green: 0.898, blue: 0.816)
+            case 2: return Color(red: 0.878, green: 0.918, blue: 1.0)
+            case 3: return Color(red: 0.851, green: 0.961, blue: 0.898)
+            case 4: return Color(red: 0.992, green: 0.910, blue: 0.784)
+            default: return Color(red: 0.859, green: 0.918, blue: 0.996)
+            }
+        }()
+        ZStack {
+            Color(red: 0.980, green: 0.969, blue: 0.941)
+            RadialGradient(
+                colors: [topGlow, Color(red: 0.980, green: 0.969, blue: 0.941).opacity(0)],
+                center: .topTrailing,
+                startRadius: 20,
+                endRadius: 380
+            )
+        }
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private func himsProgressHeader(
+        stepIndex: Int,
+        showSkip: Bool,
+        onBack: @escaping () -> Void,
+        onSkip: (() -> Void)? = nil
+    ) -> some View {
+        HStack(spacing: 12) {
+            Button(action: onBack) {
+                Image(systemName: "arrow.left")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color(red: 0.11, green: 0.098, blue: 0.09))
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.black.opacity(0.06)))
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 6) {
+                ForEach(1...5, id: \.self) { idx in
+                    Capsule()
+                        .fill(idx <= stepIndex
+                              ? Color(red: 0.11, green: 0.098, blue: 0.09)
+                              : Color.black.opacity(0.10))
+                        .frame(height: 5)
+                }
+            }
+
+            if showSkip, let onSkip {
+                Button(action: onSkip) {
+                    Text(String(localized: "Skip"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.34, green: 0.32, blue: 0.31))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+                .disabled(isLoading || isExtractingPriceList)
+            } else {
+                Color.clear.frame(width: 44, height: 32)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+
+    private var businessInfoStep: some View {
+        ZStack {
+            himsAmbientCanvas(for: currentHimsStepIndex)
+                .padding(-24)
+
+            VStack(alignment: .leading, spacing: 18) {
+                himsProgressHeader(
+                    stepIndex: currentHimsStepIndex,
+                    showSkip: false,
+                    onBack: {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            if businessSubStep > 0 {
+                                businessSubStep = 0
+                            } else {
+                                step = .modeSelect
+                            }
+                        }
+                    }
+                )
+
+                if businessSubStep == 0 {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(spacing: 6) {
+                                Text(selectedTrade.emoji)
+                                Text(String(localized: "PERSONALIZING KEVIN"))
+                            }
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(tradeAccentColor(selectedTrade))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(tradeTintColor(selectedTrade)))
+
+                            Text(String(localized: "First, what kind of work do you do?"))
+                                .font(.system(size: 28, weight: .heavy))
+                                .tracking(-0.6)
+                                .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+
+                            Text(String(localized: "Kevin tailors his questions, emergency triage, and service menu to your trade."))
+                                .font(.system(size: 15, weight: .regular))
+                                .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+                                .lineSpacing(2)
+
+                            LazyVGrid(
+                                columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible(), spacing: 11)],
+                                spacing: 11
+                            ) {
+                                ForEach(OnboardingTradeCategory.allCases) { trade in
+                                    himsTradeCard(trade)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+
+                    Button {
+                        if !hasSeededTradeServices {
+                            serviceType = selectedTrade.serviceTypeKey
+                            servicesDraft.applyTradeTemplate(selectedTrade)
+                            hasSeededTradeServices = true
+                        }
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            businessSubStep = 1
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(String(localized: "Continue"))
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 17)
+                        .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
+                        .shadow(color: Color.black.opacity(0.18), radius: 12, y: 6)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(spacing: 6) {
+                                Text("🎙️")
+                                Text(String(localized: "LIVE GREETING PREVIEW"))
+                            }
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Color(red: 0.114, green: 0.306, blue: 0.847))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Color(red: 0.859, green: 0.918, blue: 0.996)))
+
+                            Text(String(localized: "How should Kevin answer your phone?"))
+                                .font(.system(size: 28, weight: .heavy))
+                                .tracking(-0.6)
+                                .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+
+                            Text(String(localized: "Callers hear this the moment Kevin picks up."))
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+
+                            // Live Voice Greeting Card
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text(String(localized: "KEVIN'S VOICE"))
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(Color(red: 0.22, green: 0.74, blue: 0.97))
+                                    Spacer()
+                                    HStack(spacing: 3) {
+                                        ForEach([10.0, 16.0, 12.0, 18.0, 11.0], id: \.self) { h in
+                                            Capsule()
+                                                .fill(Color(red: 0.22, green: 0.74, blue: 0.97))
+                                                .frame(width: 3, height: h)
+                                        }
+                                    }
+                                }
+                                let previewOwner = ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Mike" : ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                let previewBiz = businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Apex Plumbing" : businessName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                Text("“Hey there! I’m Kevin, \(previewOwner)’s assistant at \(previewBiz). How can we help you today?”")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .lineSpacing(3)
+                            }
+                            .padding(18)
+                            .background(
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .fill(Color(red: 0.094, green: 0.094, blue: 0.106))
+                            )
+                            .shadow(color: Color.black.opacity(0.14), radius: 14, y: 8)
+
+                            // Conversational First Name Card
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(String(localized: "YOUR FIRST NAME"))
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                                TextField(String(localized: "e.g. Mike"), text: $ownerName)
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                    .textContentType(.name)
+                            }
+                            .padding(16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .fill(Color.white.opacity(0.92))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .stroke(Color.black.opacity(0.08), lineWidth: 1.5)
+                            )
+
+                            // Conversational Business Name Card
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(String(localized: "YOUR BUSINESS NAME"))
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                                TextField(String(localized: "e.g. Apex Plumbing"), text: $businessName)
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                    .textContentType(.organizationName)
+                            }
+                            .padding(16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .fill(Color.white.opacity(0.92))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .stroke(Color.black.opacity(0.08), lineWidth: 1.5)
+                            )
+                        }
+                    }
+
+                    let canProceed = !ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        && !businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    Button {
+                        selectedMode = "business"
+                        errorMessage = ""
+                        if !hasSeededTradeServices {
+                            serviceType = selectedTrade.serviceTypeKey
+                            servicesDraft.applyTradeTemplate(selectedTrade)
+                            hasSeededTradeServices = true
+                        }
+                        servicesSubStep = 0
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            step = .businessServices
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(String(localized: "Sounds great"))
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 17)
+                        .background(
+                            Capsule().fill(
+                                canProceed
+                                    ? Color(red: 0.094, green: 0.094, blue: 0.106)
+                                    : Color.black.opacity(0.25)
+                            )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canProceed)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func himsTradeCard(_ trade: OnboardingTradeCategory) -> some View {
+        let isSelected = selectedTrade == trade
+        let accent = tradeAccentColor(trade)
+        let tint = tradeTintColor(trade)
+        Button {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                selectedTrade = trade
+                serviceType = trade.serviceTypeKey
+                servicesDraft.applyTradeTemplate(trade)
+                hasSeededTradeServices = true
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(trade.emoji)
+                        .font(.system(size: 20))
+                        .frame(width: 40, height: 40)
+                        .background(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .fill(tint)
+                        )
+                    Spacer()
+                    ZStack {
+                        Circle()
+                            .fill(isSelected ? accent : Color.black.opacity(0.06))
+                            .frame(width: 22, height: 22)
+                        if isSelected {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+                Spacer(minLength: 4)
+                Text(trade.label)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(isSelected ? Color.white : Color.white.opacity(0.84))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(isSelected ? accent : Color.black.opacity(0.07), lineWidth: isSelected ? 2 : 1.5)
+            )
+            .shadow(color: Color.black.opacity(isSelected ? 0.07 : 0.02), radius: isSelected ? 12 : 4, y: 4)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Business Services & Price List (Hims-Style Guided Steps 3, 4, 5)
 
     private var businessServicesStep: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                HStack {
-                    Button {
+        ZStack {
+            himsAmbientCanvas(for: currentHimsStepIndex)
+                .padding(-24)
+
+            VStack(alignment: .leading, spacing: 14) {
+                himsProgressHeader(
+                    stepIndex: currentHimsStepIndex,
+                    showSkip: servicesSubStep < 2,
+                    onBack: {
                         errorMessage = ""
-                        step = .businessInfo
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.left")
-                                .font(.caption.weight(.bold))
-                            Text(String(localized: "Back"))
-                                .font(.subheadline)
-                        }
-                        .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer()
-
-                    Text(String(localized: "Optional"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.hkBlue)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.hkBlue.opacity(0.12)))
-
-                    Spacer()
-
-                    Button {
-                        proceedFromBusinessServices(skipServices: true)
-                    } label: {
-                        Text(String(localized: "Skip"))
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isLoading || isExtractingPriceList)
-                }
-
-                VStack(spacing: 8) {
-                    Text(String(localized: "Services & Price List"))
-                        .font(.title.bold())
-                        .multilineTextAlignment(.center)
-
-                    Text(String(localized: "Type the services you offer, add optional prices, or upload a price list. You can skip this and edit anytime in Settings."))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(2)
-                }
-
-                // Type a service + optional price range
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(String(localized: "Add a Service (Optional)"))
-                        .font(.subheadline.weight(.semibold))
-
-                    TextField(String(localized: "Service name (e.g. Drain cleaning)"), text: $draftServiceName)
-                        .textFieldStyle(.roundedBorder)
-
-                    HStack(spacing: 8) {
-                        TextField(String(localized: "Min $ (optional)"), text: $draftServiceMinPrice)
-                            .textFieldStyle(.roundedBorder)
-                            .keyboardType(.numberPad)
-
-                        TextField(String(localized: "Max $ (optional)"), text: $draftServiceMaxPrice)
-                            .textFieldStyle(.roundedBorder)
-                            .keyboardType(.numberPad)
-
-                        Button {
-                            commitTypedDraftService()
-                        } label: {
-                            Text(String(localized: "Add"))
-                                .font(.subheadline.weight(.semibold))
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }
-                .padding()
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                // Upload a price list or services document / photo
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(String(localized: "Upload Services or Price List (Optional)"))
-                        .font(.subheadline.weight(.semibold))
-
-                    HStack(spacing: 10) {
-                        Button {
-                            showServicesFileImporter = true
-                        } label: {
-                            Label(String(localized: "Upload File"), systemImage: "doc.badge.plus")
-                                .font(.subheadline.weight(.medium))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 10)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(isExtractingPriceList || isLoading)
-
-                        PhotosPicker(
-                            selection: $selectedPriceListPhoto,
-                            matching: .images
-                        ) {
-                            Label(String(localized: "Upload Photo"), systemImage: "photo.badge.plus")
-                                .font(.subheadline.weight(.medium))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 10)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(isExtractingPriceList || isLoading)
-                    }
-
-                    Text(String(localized: "Supports PDF, CSV, TXT, or a photo of your price sheet."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if isExtractingPriceList {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .scaleEffect(0.85)
-                            Text(String(localized: "Reading price list…"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } else if !servicesUploadMessage.isEmpty {
-                        Text(servicesUploadMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding()
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                // Added / imported services list
-                if !servicesDraft.items.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(String(localized: "Your Services (\(servicesDraft.items.count))"))
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            if let uploadedName = servicesDraft.uploadedFileName {
-                                Text(uploadedName)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            if servicesSubStep > 0 {
+                                servicesSubStep -= 1
+                            } else {
+                                businessSubStep = 1
+                                step = .businessInfo
                             }
                         }
-
-                        ForEach(servicesDraft.items) { entry in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.name)
-                                        .font(.subheadline.weight(.medium))
-                                    Text(entry.formattedPrice ?? String(localized: "No price listed"))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button {
-                                    servicesDraft.removeEntry(id: entry.id)
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(String(localized: "Remove \(entry.name)"))
+                    },
+                    onSkip: {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            if servicesSubStep == 0 {
+                                skipHimsServicesSelectionSubStep()
+                            } else if servicesSubStep == 1 {
+                                servicesDraft.selectedRuleIDs.removeAll()
+                                servicesDraft.additionalNotes = ""
+                                servicesSubStep = 2
+                            } else {
+                                proceedFromBusinessServices(skipServices: true)
                             }
-                            .padding(.vertical, 6)
-                            Divider()
                         }
                     }
-                    .padding()
-                    .background(Color(.secondarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                )
+
+                if servicesSubStep == 0 {
+                    himsServicesSelectionSubStep
+                } else if servicesSubStep == 1 {
+                    himsQuotingRulesSubStep
+                } else {
+                    himsReceptionistRevealSubStep
                 }
-
-                // Optional freeform notes
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(String(localized: "Additional Notes or Pricing Details (Optional)"))
-                        .font(.subheadline.weight(.semibold))
-
-                    TextField(
-                        String(localized: "e.g. $89 service call fee waived with repair, free estimates…"),
-                        text: $servicesDraft.additionalNotes,
-                        axis: .vertical
-                    )
-                    .lineLimit(2...5)
-                    .textFieldStyle(.roundedBorder)
+            }
+        }
+        .onAppear {
+            if !hasSeededTradeServices && servicesDraft.items.isEmpty {
+                if serviceType.isEmpty {
+                    serviceType = selectedTrade.serviceTypeKey
                 }
-                .padding()
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                if !errorMessage.isEmpty {
-                    Text(errorMessage)
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                        .multilineTextAlignment(.center)
-                }
-
-                VStack(spacing: 12) {
-                    Button {
-                        proceedFromBusinessServices(skipServices: false)
-                    } label: {
-                        if isLoading {
-                            ProgressView()
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 16)
-                        } else {
-                            Text(appState.hasBusinessEntitlement
-                                 ? String(localized: "Continue")
-                                 : String(localized: "Start Business Trial"))
-                                .font(.headline)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 16)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isLoading || isExtractingPriceList)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-
-                    Button(String(localized: "Skip for now")) {
-                        proceedFromBusinessServices(skipServices: true)
-                    }
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .disabled(isLoading || isExtractingPriceList)
-                    .padding(.bottom, 8)
-                }
+                servicesDraft.applyTradeTemplate(selectedTrade)
+                hasSeededTradeServices = true
             }
         }
         .fileImporter(
@@ -1330,6 +1490,559 @@ struct OnboardingView: View {
         .onChange(of: selectedPriceListPhoto) { _, newItem in
             guard let newItem else { return }
             Task { await handlePriceListPhotoSelection(newItem) }
+        }
+    }
+
+    private func skipHimsServicesSelectionSubStep() {
+        for idx in servicesDraft.items.indices {
+            servicesDraft.items[idx].isSelected = false
+        }
+        servicesDraft.selectedRuleIDs.removeAll()
+        draftServiceName = ""
+        draftServiceMinPrice = ""
+        draftServiceMaxPrice = ""
+        servicesSubStep = 1
+    }
+
+    private var himsScannerBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Text("📸")
+                    .font(.system(size: 20))
+                    .frame(width: 42, height: 42)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color(red: 0.22, green: 0.74, blue: 0.97).opacity(0.18))
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(servicesDraft.uploadedFileName != nil
+                         ? String(localized: "✓ Scanned \(servicesDraft.uploadedFileName!)")
+                         : String(localized: "Have a price sheet or menu?"))
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text(isExtractingPriceList
+                         ? String(localized: "Reading price sheet…")
+                         : (!servicesUploadMessage.isEmpty
+                            ? servicesUploadMessage
+                            : String(localized: "Upload a PDF/CSV or snap a photo — Kevin reads it instantly")))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(red: 0.58, green: 0.64, blue: 0.72))
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    showServicesFileImporter = true
+                } label: {
+                    Label(String(localized: "Upload File"), systemImage: "doc.badge.plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Color.white.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+                .disabled(isExtractingPriceList || isLoading)
+
+                PhotosPicker(selection: $selectedPriceListPhoto, matching: .images) {
+                    Label(String(localized: "Snap / Photo"), systemImage: "camera.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Color.white.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+                .disabled(isExtractingPriceList || isLoading)
+            }
+        }
+        .padding(15)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color(red: 0.118, green: 0.161, blue: 0.231), Color(red: 0.059, green: 0.090, blue: 0.165)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .shadow(color: Color.black.opacity(0.14), radius: 12, y: 6)
+    }
+
+    @ViewBuilder
+    private func himsServiceCard(_ entry: OnboardingServiceEntry) -> some View {
+        let active = entry.isSelected
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                    servicesDraft.toggleService(id: entry.id)
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Text(entry.emoji)
+                        .font(.system(size: 19))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.name)
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                        Text(active
+                             ? (entry.formattedPrice.map { String(localized: "Included • Quotes \($0)") }
+                                ?? String(localized: "Included • No price quoted on calls"))
+                             : String(localized: "Tap to include"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(active
+                                             ? Color(red: 0.02, green: 0.588, blue: 0.412)
+                                             : Color(red: 0.47, green: 0.44, blue: 0.42))
+                    }
+                    Spacer()
+                    ZStack {
+                        Circle()
+                            .fill(active
+                                  ? Color(red: 0.063, green: 0.725, blue: 0.506)
+                                  : Color.black.opacity(0.08))
+                            .frame(width: 24, height: 24)
+                        Image(systemName: active ? "checkmark" : "plus")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(active ? .white : Color(red: 0.47, green: 0.44, blue: 0.42))
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+
+            if active {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(entry.presets, id: \.self) { preset in
+                            himsPricePresetChip(preset, for: entry)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(active ? Color.white : Color.white.opacity(0.86))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(active
+                        ? Color(red: 0.063, green: 0.725, blue: 0.506)
+                        : Color.black.opacity(0.07), lineWidth: active ? 2 : 1.5)
+        )
+    }
+
+    @ViewBuilder
+    private func himsPricePresetChip(_ preset: OnboardingPricePreset, for entry: OnboardingServiceEntry) -> some View {
+        let isPresetSelected = entry.priceMin == preset.priceMin && entry.priceMax == preset.priceMax
+        Button {
+            servicesDraft.applyPricePreset(preset, to: entry.id)
+        } label: {
+            Text(preset.label)
+                .font(.system(size: 12, weight: isPresetSelected ? .bold : .semibold))
+                .foregroundStyle(isPresetSelected
+                                 ? Color(red: 0.024, green: 0.373, blue: 0.275)
+                                 : Color(red: 0.267, green: 0.251, blue: 0.235))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule().fill(isPresetSelected
+                                   ? Color(red: 0.863, green: 0.988, blue: 0.906)
+                                   : Color.black.opacity(0.05))
+                )
+                .overlay(
+                    Capsule().stroke(isPresetSelected
+                                     ? Color(red: 0.063, green: 0.725, blue: 0.506)
+                                     : Color.clear, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var himsServicesSelectionSubStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 6) {
+                        Text("✨")
+                        Text(String(localized: "OPTIONAL • PRE-LOADED FOR \(selectedTrade.label.uppercased())"))
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color(red: 0.016, green: 0.471, blue: 0.341))
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color(red: 0.820, green: 0.980, blue: 0.898)))
+
+                    Text(String(localized: "What services do you want Kevin to know?"))
+                        .font(.system(size: 27, weight: .heavy))
+                        .tracking(-0.6)
+                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+
+                    Text(String(localized: "Tap any service you offer. Pick a ballpark price range, or leave it unpriced."))
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+                        .lineSpacing(2)
+
+                    himsScannerBanner
+
+                    ForEach(servicesDraft.items) { entry in
+                        himsServiceCard(entry)
+                    }
+
+                    // Quick Add Custom Service Pill Bar
+                    HStack(spacing: 8) {
+                        TextField(String(localized: "+ Add another service..."), text: $draftServiceName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 11)
+                            .background(
+                                Capsule().fill(Color.white.opacity(0.9))
+                            )
+                            .overlay(
+                                Capsule().stroke(Color.black.opacity(0.1), lineWidth: 1)
+                            )
+
+                        Button {
+                            commitTypedDraftService()
+                        } label: {
+                            Text(String(localized: "Add"))
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 11)
+                                .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+
+            let activeCount = servicesDraft.activeItems.count
+            VStack(spacing: 8) {
+                Button {
+                    if !draftServiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        commitTypedDraftService()
+                    }
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        servicesSubStep = 1
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(activeCount > 0
+                             ? String(localized: "Continue with \(activeCount) service\(activeCount == 1 ? "" : "s")")
+                             : String(localized: "Continue"))
+                        Image(systemName: "arrow.right")
+                    }
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 17)
+                    .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        skipHimsServicesSelectionSubStep()
+                    }
+                } label: {
+                    Text(String(localized: "Skip for now — I'll add services later"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func himsQuotingRuleCard(_ rule: OnboardingQuotingRule) -> some View {
+        let isSelected = servicesDraft.selectedRuleIDs.contains(rule.id)
+        Button {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                servicesDraft.toggleQuotingRule(id: rule.id)
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 13) {
+                Text(rule.emoji)
+                    .font(.system(size: 20))
+                    .frame(width: 40, height: 40)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(isSelected
+                                  ? Color(red: 0.996, green: 0.953, blue: 0.780)
+                                  : Color.black.opacity(0.05))
+                    )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(rule.title)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                        .multilineTextAlignment(.leading)
+                    Text(rule.subtitle)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+                        .multilineTextAlignment(.leading)
+                        .lineSpacing(2)
+                }
+                Spacer()
+                ZStack {
+                    Circle()
+                        .fill(isSelected
+                              ? Color(red: 0.851, green: 0.467, blue: 0.024)
+                              : Color.black.opacity(0.08))
+                        .frame(width: 22, height: 22)
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+            }
+            .padding(15)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(isSelected ? Color.white : Color.white.opacity(0.88))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(isSelected
+                            ? Color(red: 0.851, green: 0.467, blue: 0.024)
+                            : Color.black.opacity(0.07), lineWidth: isSelected ? 2 : 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var himsQuotingRulesSubStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 6) {
+                        Text("💡")
+                        Text(String(localized: "OPTIONAL • CALL RULES"))
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color(red: 0.706, green: 0.325, blue: 0.035))
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color(red: 0.996, green: 0.953, blue: 0.780)))
+
+                    Text(String(localized: "How should Kevin handle pricing questions?"))
+                        .font(.system(size: 27, weight: .heavy))
+                        .tracking(-0.6)
+                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+
+                    Text(String(localized: "Pick the ground rules that match how you run your business."))
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+
+                    ForEach(OnboardingQuotingRule.catalog) { rule in
+                        himsQuotingRuleCard(rule)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(String(localized: "ANYTHING ELSE CALLERS ASK? (OPTIONAL)"))
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                        TextField(
+                            String(localized: "e.g. Licensed & insured, senior discount…"),
+                            text: $servicesDraft.additionalNotes
+                        )
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                    }
+                    .padding(15)
+                    .background(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(Color.white.opacity(0.9))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Color.black.opacity(0.08), lineWidth: 1.5)
+                    )
+                }
+            }
+
+            VStack(spacing: 8) {
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        servicesSubStep = 2
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(String(localized: "Build My Receptionist"))
+                        Text("✨")
+                    }
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 17)
+                    .background(Capsule().fill(Color(red: 0.094, green: 0.094, blue: 0.106)))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    servicesDraft.selectedRuleIDs.removeAll()
+                    servicesDraft.additionalNotes = ""
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        servicesSubStep = 2
+                    }
+                } label: {
+                    Text(String(localized: "Skip for now"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var himsReceptionistRevealSubStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 6) {
+                        Text("🎉")
+                        Text(String(localized: "READY FOR CALLS"))
+                    }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color(red: 0.114, green: 0.306, blue: 0.847))
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color(red: 0.859, green: 0.918, blue: 0.996)))
+
+                    Text(String(localized: "Meet your custom AI receptionist."))
+                        .font(.system(size: 28, weight: .heavy))
+                        .tracking(-0.6)
+                        .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+
+                    let displayBiz = businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Apex Plumbing" : businessName
+                    Text(String(localized: "Kevin is tuned for \(displayBiz). You can tweak any of this anytime in Settings."))
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 12) {
+                            Text(selectedTrade.emoji)
+                                .font(.system(size: 24))
+                                .frame(width: 46, height: 46)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                        .fill(tradeTintColor(selectedTrade))
+                                )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(displayBiz)
+                                    .font(.system(size: 17, weight: .heavy))
+                                    .foregroundStyle(Color(red: 0.094, green: 0.094, blue: 0.106))
+                                let displayOwner = ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Mike" : ownerName
+                                Text("\(selectedTrade.label) • Greeting for \(displayOwner)")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color(red: 0.341, green: 0.325, blue: 0.306))
+                            }
+                            Spacer()
+                        }
+
+                        Divider()
+
+                        let activeServices = servicesDraft.activeItems
+                        Text(String(localized: "SERVICES & BALLPARK PRICING (\(activeServices.count))"))
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+
+                        if activeServices.isEmpty {
+                            Text(String(localized: "Skipped for now — Kevin will take caller details and text you right away."))
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                        } else {
+                            ForEach(activeServices) { svc in
+                                HStack {
+                                    Text("\(svc.emoji) \(svc.name)")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(Color(red: 0.11, green: 0.098, blue: 0.09))
+                                    Spacer()
+                                    Text(svc.formattedPrice ?? String(localized: "No price"))
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(svc.formattedPrice == nil
+                                                         ? Color(red: 0.341, green: 0.325, blue: 0.306)
+                                                         : Color(red: 0.024, green: 0.373, blue: 0.275))
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 4)
+                                        .background(
+                                            Capsule().fill(svc.formattedPrice == nil
+                                                           ? Color.black.opacity(0.05)
+                                                           : Color(red: 0.863, green: 0.988, blue: 0.906))
+                                        )
+                                }
+                            }
+                        }
+
+                        let activeRules = OnboardingQuotingRule.catalog.filter {
+                            servicesDraft.selectedRuleIDs.contains($0.id)
+                        }
+                        if !activeRules.isEmpty {
+                            Divider()
+                            Text(String(localized: "CALL HANDLING RULES"))
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(Color(red: 0.47, green: 0.44, blue: 0.42))
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(activeRules) { rule in
+                                    Text("\(rule.emoji) \(rule.title)")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(Color(red: 0.573, green: 0.251, blue: 0.055))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(
+                                            Capsule().fill(Color(red: 0.996, green: 0.953, blue: 0.780))
+                                        )
+                                }
+                            }
+                        }
+                    }
+                    .padding(18)
+                    .background(
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            .fill(Color.white)
+                    )
+                    .shadow(color: Color.black.opacity(0.06), radius: 14, y: 6)
+
+                    if !errorMessage.isEmpty {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+            }
+
+            Button {
+                proceedFromBusinessServices(skipServices: !servicesDraft.hasContent)
+            } label: {
+                if isLoading {
+                    ProgressView()
+                        .tint(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 17)
+                        .background(Capsule().fill(Color(red: 0.145, green: 0.388, blue: 0.922)))
+                } else {
+                    HStack(spacing: 8) {
+                        Text(appState.hasBusinessEntitlement
+                             ? String(localized: "Continue")
+                             : String(localized: "Start 14-Day Free Trial"))
+                        Image(systemName: "arrow.right")
+                    }
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 17)
+                    .background(Capsule().fill(Color(red: 0.145, green: 0.388, blue: 0.922)))
+                    .shadow(color: Color(red: 0.145, green: 0.388, blue: 0.922).opacity(0.3), radius: 12, y: 6)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isLoading || isExtractingPriceList)
         }
     }
 

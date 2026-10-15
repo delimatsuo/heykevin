@@ -137,16 +137,15 @@ struct CallHistoryView: View {
             .navigationTitle(String(localized: "Calls"))
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if historyModel.unreadCount > 0 {
-                        Button(
-                            String(localized: "Mark All Read"),
-                            action: historyModel.makeMarkAllReadAction(expectedAuth: historyModel.activeAuthContext)
-                        )
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.hkInk)
-                        .accessibilityIdentifier("calls.markAllRead")
-                        .accessibilityHint(String(localized: "Marks all calls in this history as read, including hidden pages."))
-                    }
+                    Button(
+                        String(localized: "Mark All Read"),
+                        action: historyModel.makeMarkAllReadAction(expectedAuth: historyModel.activeAuthContext)
+                    )
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(historyModel.unreadCount > 0 ? Color.hkInk : Color.hkInkMuted)
+                    .disabled(historyModel.unreadCount == 0)
+                    .accessibilityIdentifier("calls.markAllRead")
+                    .accessibilityHint(String(localized: "Marks all calls in this history as read, including hidden pages."))
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {

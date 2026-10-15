@@ -162,7 +162,8 @@ struct PaywallView: View {
                 }
                 .padding()
             }
-            .background(Color(.systemGroupedBackground))
+            .background(Color.hkWarmCanvas.ignoresSafeArea())
+            .preferredColorScheme(.light)
             .navigationTitle("Hey Kevin")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -174,6 +175,7 @@ struct PaywallView: View {
                             }
                             dismiss()
                         }
+                        .foregroundStyle(Color.hkInk)
                         .disabled(coordinator.isBusy)
                     }
                 }
@@ -219,6 +221,7 @@ struct PaywallView: View {
             Text(isOnboarding ? String(localized: "Pick the plan\nthat fits.") : String(localized: "Stop missing\nreal leads."))
                 .font(.system(size: 30, weight: .bold))
                 .tracking(-0.6)
+                .foregroundStyle(Color.hkInk)
                 .multilineTextAlignment(.center)
                 .lineSpacing(1)
 
@@ -226,7 +229,7 @@ struct PaywallView: View {
                  ? String(localized: "14-day free trial. You will not be charged until the trial ends. Cancel anytime.")
                  : String(localized: "Cancel anytime, no questions asked."))
                 .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.hkInkSecondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
                 .padding(.horizontal, HKSpace.sm)
@@ -236,32 +239,33 @@ struct PaywallView: View {
     private var expiredBanner: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.hkOrange)
             Text("Your trial has expired. Subscribe to restore AI screening.")
-                .font(.subheadline)
-                .foregroundStyle(.primary)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.hkInk)
         }
         .padding()
-        .background(Color.orange.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(Color.hkOrange.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var promoBadge: some View {
         HStack {
             Image(systemName: "tag.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(Color.hkGreen)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Founding Member Offer")
                     .font(.subheadline.bold())
+                    .foregroundStyle(Color.hkInk)
                 Text("75% off for 3 months — first 1,000 users only")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.hkInkSecondary)
             }
             Spacer()
         }
         .padding()
-        .background(Color.green.opacity(0.1))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(Color.hkSageTint)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var purchaseButton: some View {
@@ -331,23 +335,27 @@ struct PaywallView: View {
             } label: {
                 HStack {
                     Image(systemName: "phone.slash")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.hkRed)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(localized: "Cancel Forwarding"))
                             .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Color.hkRed)
                         Text(String(localized: "Stop routing calls through Kevin"))
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Color.hkInkMuted)
                         .font(.caption)
                 }
                 .padding()
-                .background(Color(.systemGray6))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.hkDivider, lineWidth: 1)
+                )
             }
             .buttonStyle(.plain)
         }
@@ -451,10 +459,10 @@ private struct TierCard: View {
                         Text(tierName)
                             .font(.system(size: 17, weight: .bold))
                             .tracking(-0.3)
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(Color.hkInk)
                         Text(tierTagline)
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.hkInkSecondary)
                     }
                     Spacer(minLength: HKSpace.md)
                     priceColumn
@@ -465,12 +473,12 @@ private struct TierCard: View {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(isSelected ? Color.hkBlue : Color(.systemGray3))
+                                .foregroundStyle(isSelected ? Color.hkGreen : Color.hkInkMuted)
                                 .frame(width: 14, alignment: .leading)
                                 .padding(.top, 3)
                             Text(feature)
                                 .font(.system(size: 13))
-                                .foregroundStyle(.primary)
+                                .foregroundStyle(Color.hkInk)
                                 .lineSpacing(2)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -480,22 +488,23 @@ private struct TierCard: View {
             .padding(HKSpace.lg)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isSelected ? Color.hkBlue.opacity(0.05) : Color(.secondarySystemGroupedBackground))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(isSelected ? Color.hkBlue : Color(.systemGray5), lineWidth: isSelected ? 1.5 : 1)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(isSelected ? Color.hkInk : Color.hkDivider, lineWidth: isSelected ? 2 : 1)
             )
+            .shadow(color: Color.black.opacity(isSelected ? 0.06 : 0.02), radius: isSelected ? 10 : 4, x: 0, y: 3)
             .overlay(alignment: .topTrailing) {
                 if isRecommended {
                     Text(String(localized: "Most popular").uppercased())
                         .font(.system(size: 10, weight: .bold))
                         .tracking(0.6)
-                        .foregroundStyle(Color(uiColor: .systemBackground))
+                        .foregroundStyle(Color.white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.primary))
+                        .background(Capsule().fill(Color.hkGreen))
                         .offset(x: -16, y: -10)
                 }
             }

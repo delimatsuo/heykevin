@@ -14,6 +14,49 @@ struct KevinApp: App {
         let state = AppState.shared
         AppStoreScreenshotFixtures.configure(state)
         _appState = StateObject(wrappedValue: state)
+        Self.configureHimsAppearance()
+    }
+
+    private static func configureHimsAppearance() {
+        let warmStone = UIColor(red: 0.980, green: 0.969, blue: 0.949, alpha: 1.0)
+        let charcoalInk = UIColor(red: 0.098, green: 0.090, blue: 0.086, alpha: 1.0)
+        let mutedStone = UIColor(red: 0.541, green: 0.518, blue: 0.490, alpha: 1.0)
+        let forestSage = UIColor(red: 0.176, green: 0.353, blue: 0.263, alpha: 1.0)
+
+        let navAppearance = UINavigationBarAppearance()
+        navAppearance.configureWithOpaqueBackground()
+        navAppearance.backgroundColor = warmStone
+        navAppearance.shadowColor = .clear
+        navAppearance.titleTextAttributes = [.foregroundColor: charcoalInk]
+        navAppearance.largeTitleTextAttributes = [.foregroundColor: charcoalInk]
+        UINavigationBar.appearance().standardAppearance = navAppearance
+        UINavigationBar.appearance().scrollEdgeAppearance = navAppearance
+        UINavigationBar.appearance().compactAppearance = navAppearance
+        UINavigationBar.appearance().tintColor = charcoalInk
+
+        let tabAppearance = UITabBarAppearance()
+        tabAppearance.configureWithOpaqueBackground()
+        tabAppearance.backgroundColor = warmStone
+        tabAppearance.shadowColor = UIColor(red: 0.098, green: 0.090, blue: 0.086, alpha: 0.08)
+        tabAppearance.stackedLayoutAppearance.selected.iconColor = charcoalInk
+        tabAppearance.stackedLayoutAppearance.selected.titleTextAttributes = [.foregroundColor: charcoalInk]
+        tabAppearance.stackedLayoutAppearance.normal.iconColor = mutedStone
+        tabAppearance.stackedLayoutAppearance.normal.titleTextAttributes = [.foregroundColor: mutedStone]
+        UITabBar.appearance().standardAppearance = tabAppearance
+        UITabBar.appearance().scrollEdgeAppearance = tabAppearance
+        UITabBar.appearance().tintColor = charcoalInk
+
+        UISwitch.appearance().onTintColor = forestSage
+    }
+
+    @MainActor
+    private static func enforceLightWindows() {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows {
+                window.overrideUserInterfaceStyle = .light
+            }
+        }
     }
 
     var body: some Scene {
@@ -23,6 +66,9 @@ struct KevinApp: App {
             } else if AppStoreScreenshotFixtures.isEnabled {
                 AppStoreScreenshotRoot()
                     .environmentObject(appState)
+                    .preferredColorScheme(.light)
+                    .tint(Color.hkInk)
+                    .onAppear { Self.enforceLightWindows() }
             } else {
                 Group {
                     switch appState.sessionState {
@@ -49,6 +95,11 @@ struct KevinApp: App {
                         }
                     }
                 }
+                .preferredColorScheme(.light)
+                .tint(Color.hkInk)
+                .onAppear {
+                    Self.enforceLightWindows()
+                }
                 .onChange(of: appState.isOnboarded) {
                     appState.refreshSecureStorageForActiveUse()
                 }
@@ -67,6 +118,7 @@ struct KevinApp: App {
                 .appVersionGate()
                 .task {
                     await MainActor.run {
+                        Self.enforceLightWindows()
                         appState.refreshSecureStorageForActiveUse()
                     }
                     // Kick off a version check on cold launch so the gate can decide
@@ -78,6 +130,7 @@ struct KevinApp: App {
         .onChange(of: scenePhase) {
             if ProcessInfo.processInfo.environment["KEVIN_UNIT_TESTS"] == "1" { return }
             if scenePhase == .active {
+                Self.enforceLightWindows()
                 guard !AppStoreScreenshotFixtures.isEnabled else { return }
                 appState.refreshSecureStorageForActiveUse()
 

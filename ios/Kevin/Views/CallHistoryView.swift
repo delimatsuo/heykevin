@@ -348,7 +348,7 @@ struct CallHistoryView: View {
             : AnyLayout(HStackLayout(spacing: 8))
 
         return layout {
-            ForEach(CallHistoryFilter.allCases) { filter in
+            ForEach(CallHistoryFilter.allCases.filter { $0 != .spam }) { filter in
                 let isSelected = historyModel.selectedFilter == filter
                 Button {
                     historyModel.setFilter(filter)

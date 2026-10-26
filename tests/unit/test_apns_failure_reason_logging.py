@@ -134,6 +134,18 @@ async def test_apns_non_json_body_is_not_echoed(monkeypatch, caplog, kind):
     assert all("+15551234567" not in message for message in messages)
 
 
+@pytest.mark.asyncio
+async def test_apns_non_string_reason_keeps_status(monkeypatch, caplog):
+    _install_fake_apns(monkeypatch, JsonResponse(400, {"reason": ["BadDeviceToken"]}))
+    caplog.set_level(logging.ERROR, logger="app.services.push_notification")
+
+    assert await _send("regular") is False
+
+    messages = _failure_messages(caplog)
+    assert messages
+    assert all("status=400 reason=unknown" in message for message in messages)
+
+
 def test_reason_allowlist_covers_every_documented_400():
     documented_400s = {
         "BadCollapseId", "BadDeviceToken", "BadExpirationDate", "BadMessageId",

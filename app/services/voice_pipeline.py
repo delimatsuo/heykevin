@@ -1958,6 +1958,7 @@ class VoicePipeline:
                 # A4: Retry Claude API call once on failure
                 response = None
                 for attempt in range(2):
+                    request_started = time.monotonic()
                     try:
                         response = await client.post(
                             "https://api.anthropic.com/v1/messages",
@@ -1983,6 +1984,7 @@ class VoicePipeline:
                                 "claude_request_abandoned",
                                 self._call_sid,
                                 attempt=attempt + 1,
+                                elapsed_ms=int((time.monotonic() - request_started) * 1000),
                                 exception_type=type(api_err).__name__,
                             )
                             return
@@ -2381,6 +2383,7 @@ class VoicePipeline:
         delivered_ok = False
         self._is_speaking = True
         self._interrupt_speaking = False
+        request_started = time.monotonic()
 
         try:
             client = self._http_client
@@ -2560,6 +2563,7 @@ class VoicePipeline:
                 _log_voice_event(
                     "tts_request_abandoned",
                     self._call_sid,
+                    elapsed_ms=int((time.monotonic() - request_started) * 1000),
                     exception_type=type(error).__name__,
                 )
             delivered_ok = False

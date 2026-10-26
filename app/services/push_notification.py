@@ -45,7 +45,9 @@ def _apns_error_reason(response) -> str:
         reason = response.json().get("reason")
     except Exception:
         return "unparsed"
-    return reason if reason in APNS_ERROR_REASONS else "unknown"
+    if isinstance(reason, str) and reason in APNS_ERROR_REASONS:
+        return reason
+    return "unknown"
 
 
 def _get_apns_url() -> str:

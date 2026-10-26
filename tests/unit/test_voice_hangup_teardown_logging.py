@@ -101,6 +101,7 @@ async def test_claude_request_cut_off_by_hangup_is_not_a_provider_error(caplog, 
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "event=claude_request_abandoned" in messages
+    assert "elapsed_ms=" in messages
     assert "exception_type=ReadError" in messages
     assert not any(event in messages for event in ALERTED_EVENTS)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -150,6 +151,7 @@ async def test_tts_request_after_hangup_is_not_a_provider_error(caplog):
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "event=tts_request_abandoned" in messages
+    assert "elapsed_ms=" in messages
     assert "exception_type=RuntimeError" in messages
     assert "event=tts_request_error" not in messages
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

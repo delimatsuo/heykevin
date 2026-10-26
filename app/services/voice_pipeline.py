@@ -1973,6 +1973,19 @@ class VoicePipeline:
                             break
                         logger.error(f"Claude error (attempt {attempt + 1}): {response.status_code}")
                     except Exception as api_err:
+                        if not self._connected:
+                            # stop() closed the shared HTTP client under this
+                            # request because the caller hung up mid-reply.
+                            # That is not a provider failure: do not page the
+                            # voice-provider alert, retry against the closed
+                            # client, or add a fallback line to a finished call.
+                            _log_voice_event(
+                                "claude_request_abandoned",
+                                self._call_sid,
+                                attempt=attempt + 1,
+                                exception_type=type(api_err).__name__,
+                            )
+                            return
                         _log_voice_event(
                             "claude_request_error",
                             self._call_sid,
@@ -2539,7 +2552,16 @@ class VoicePipeline:
                 delivered_ok = False
 
         except Exception as error:
-            _log_voice_exception("tts_request_error", error, self._call_sid)
+            if self._connected:
+                _log_voice_exception("tts_request_error", error, self._call_sid)
+            else:
+                # Hangup closed the HTTP client mid-request; see the
+                # claude_request_abandoned note in _handle_caller_speech.
+                _log_voice_event(
+                    "tts_request_abandoned",
+                    self._call_sid,
+                    exception_type=type(error).__name__,
+                )
             delivered_ok = False
 
         self._is_speaking = False

@@ -21,6 +21,32 @@ APNS_PRODUCTION = "https://api.push.apple.com"
 APNS_SANDBOX = "https://api.sandbox.push.apple.com"
 URGENT_VOIP_REASONS = {"urgent", "urgent_call", "emergency", "emergency_call"}
 
+# Error strings APNs returns in the `reason` key of a failed response, from
+# Apple's "Handling notification responses from APNs". Only these fixed codes
+# are logged; the response body itself never is. Without the reason a 400 is
+# undiagnosable: BadDeviceToken (a sandbox token from a dev-signed build sent to
+# production) and BadCollapseId (a payload bug) look identical.
+APNS_ERROR_REASONS = frozenset({
+    "BadCollapseId", "BadDeviceToken", "BadExpirationDate", "BadMessageId",
+    "BadPriority", "BadTopic", "DeviceTokenNotForTopic", "DuplicateHeaders",
+    "IdleTimeout", "InvalidPushType", "MissingDeviceToken", "MissingTopic",
+    "PayloadEmpty", "TopicDisallowed", "BadCertificate",
+    "BadCertificateEnvironment", "ExpiredProviderToken", "Forbidden",
+    "InvalidProviderToken", "MissingProviderToken", "UnrelatedKeyIdInToken",
+    "BadEnvironmentKeyIdInToken", "BadPath", "MethodNotAllowed", "ExpiredToken",
+    "Unregistered", "PayloadTooLarge", "TooManyProviderTokenUpdates",
+    "TooManyRequests", "InternalServerError", "ServiceUnavailable", "Shutdown",
+})
+
+
+def _apns_error_reason(response) -> str:
+    """Return APNs's reason code for a failed push, or a fixed placeholder."""
+    try:
+        reason = response.json().get("reason")
+    except Exception:
+        return "unparsed"
+    return reason if reason in APNS_ERROR_REASONS else "unknown"
+
 
 def _get_apns_url() -> str:
     """Get the correct APNs URL based on apns_sandbox config.
@@ -231,7 +257,11 @@ async def send_voip_push(
                     await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
-                    logger.error("APNs push failed: status=%s", response.status_code)
+                    logger.error(
+                        "APNs push failed: status=%s reason=%s",
+                        response.status_code,
+                        _apns_error_reason(response),
+                    )
                     if attempt == 0:
                         await asyncio.sleep(2)
                         continue
@@ -314,7 +344,11 @@ async def send_regular_push(
                     await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
-                    logger.error("APNs push failed: status=%s", response.status_code)
+                    logger.error(
+                        "APNs push failed: status=%s reason=%s",
+                        response.status_code,
+                        _apns_error_reason(response),
+                    )
                     if attempt == 0:
                         await asyncio.sleep(2)
                         continue
@@ -447,7 +481,11 @@ async def send_urgent_push(
                     await _delete_expired_device_token(device_token, contractor_id)
                     return False
                 else:
-                    logger.error("Urgent APNs push failed: status=%s", response.status_code)
+                    logger.error(
+                        "Urgent APNs push failed: status=%s reason=%s",
+                        response.status_code,
+                        _apns_error_reason(response),
+                    )
                     if attempt == 0:
                         await asyncio.sleep(2)
                         continue

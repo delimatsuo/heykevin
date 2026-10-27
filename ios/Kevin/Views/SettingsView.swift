@@ -955,48 +955,46 @@ struct SettingsHost<Root: View>: View {
                 }
             }
 
-            if appState.isPersonalMode {
-                Button {
-                    #if DEBUG
-                    if isFixtureMode {
-                        syncMessage = String(localized: "Synced 42 contacts")
-                        return
-                    }
-                    #endif
-                    Task {
-                        appState.contactsUploadConsent = true
-                        let result = await ContactSyncManager.shared.syncContacts(
-                            contractorId: appState.contractorId,
-                            force: true
-                        )
-                        switch result {
-                        case .success(let synced, _):
-                            syncMessage = String(localized: "Synced \(synced) contacts")
-                        case .permissionDenied:
-                            syncMessage = String(localized: "Contacts permission denied")
-                        case .rateLimited:
-                            syncMessage = String(localized: "Please wait before syncing again")
-                        case .error(let msg):
-                            syncMessage = String(localized: "Error: \(msg)")
-                        }
-                    }
-                } label: {
-                    HStack {
-                        Text(String(localized: "Sync Contacts"))
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(Color.hkInk)
-                        Spacer()
-                        if !syncMessage.isEmpty {
-                            Text(syncMessage)
-                                .font(.caption)
-                                .foregroundStyle(syncMessage.contains("Error") || syncMessage.contains("denied") ? Color.hkRed : Color.hkGreen)
-                        }
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .foregroundStyle(Color.hkInkSecondary)
+            Button {
+                #if DEBUG
+                if isFixtureMode {
+                    syncMessage = String(localized: "Synced 42 contacts")
+                    return
+                }
+                #endif
+                Task {
+                    appState.contactsUploadConsent = true
+                    let result = await ContactSyncManager.shared.syncContacts(
+                        contractorId: appState.contractorId,
+                        force: true
+                    )
+                    switch result {
+                    case .success(let synced, _):
+                        syncMessage = String(localized: "Synced \(synced) contacts")
+                    case .permissionDenied:
+                        syncMessage = String(localized: "Contacts permission denied")
+                    case .rateLimited:
+                        syncMessage = String(localized: "Please wait before syncing again")
+                    case .error(let msg):
+                        syncMessage = String(localized: "Error: \(msg)")
                     }
                 }
-                .disabled(isFixtureMode)
+            } label: {
+                HStack {
+                    Text(String(localized: "Sync Contacts"))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.hkInk)
+                    Spacer()
+                    if !syncMessage.isEmpty {
+                        Text(syncMessage)
+                            .font(.caption)
+                            .foregroundStyle(syncMessage.contains("Error") || syncMessage.contains("denied") ? Color.hkRed : Color.hkGreen)
+                    }
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(Color.hkInkSecondary)
+                }
             }
+            .disabled(isFixtureMode)
 
             if !saveError.isEmpty {
                 Text(saveError)

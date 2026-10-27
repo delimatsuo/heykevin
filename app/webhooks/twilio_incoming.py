@@ -146,6 +146,16 @@ def _spam_disconnect_twiml() -> str:
     return str(response)
 
 
+RINGBACK_TONE_PATH = "/static/audio/ringback-us.wav"
+
+
+def _ringback_twiml() -> str:
+    """Loop one ring cycle (scripts/gen_ringback_tone.py) until the conference starts."""
+    response = VoiceResponse()
+    response.play(f"{settings.cloud_run_url.rstrip('/')}{RINGBACK_TONE_PATH}", loop=0)
+    return str(response)
+
+
 def _conference_twiml(call_sid: str, conference_name: str) -> str:
     """TwiML to put caller into a conference while we ring the contractor."""
     response = VoiceResponse()
@@ -155,7 +165,9 @@ def _conference_twiml(call_sid: str, conference_name: str) -> str:
         start_conference_on_enter=True,
         end_conference_on_exit=False,
         beep=False,
-        wait_url="http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
+        # The caller hears ringing. POST keeps the call's phone numbers out of request URLs and logs.
+        wait_url=f"{settings.cloud_run_url.rstrip('/')}/webhooks/twilio/ringback",
+        wait_method="POST",
         max_participants=2,
     )
     response.append(dial)
@@ -831,7 +843,7 @@ async def _async_redirect_to_kevin(call_sid: str, contractor_id: str, *, expecte
 
         ws_url = settings.cloud_run_url.replace("https://", "wss://")
         response = VoiceResponse()
-        response.say("Thanks for holding. Let me connect you with our assistant.", voice="Polly.Matthew")
+        response.say("Let me connect you with our assistant.", voice="Polly.Matthew")
         connect = Connect()
         stream = connect.stream(url=f"{ws_url}/media-stream/{call_sid}")
         stream.parameter(name="ws_token", value=ws_token)
@@ -1407,6 +1419,12 @@ async def handle_inbound_message(request: Request, _=Depends(verify_twilio_signa
         return twiml_response("<Response></Response>", status_code=500)
 
     return twiml_response("<Response></Response>")
+
+
+@router.post("/webhooks/twilio/ringback")
+async def handle_ringback(request: Request, _=Depends(verify_twilio_signature)):
+    """Conference waitUrl: the ringing a ring-through caller hears until the contractor joins."""
+    return twiml_response(_ringback_twiml())
 
 
 @router.post("/webhooks/twilio/fallback")

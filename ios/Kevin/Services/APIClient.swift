@@ -395,6 +395,15 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         return URLSession(configuration: config)
     }()
 
+    private lazy var contactSyncSession: URLSession = {
+        // One upload carries up to 5000 numbers and the server writes them in
+        // batches; the default 15-second resource budget is too short for that.
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 120
+        return URLSession(configuration: config)
+    }()
+
     private var session: URLSession {
         customSession ?? defaultSession
     }
@@ -1233,7 +1242,6 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 60
 
             let contactDicts = contacts.map { ["name": $0.name, "phone": $0.phone] }
             let body: [String: Any] = [
@@ -1244,7 +1252,7 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             authorize(&request)
 
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await (customSession ?? contactSyncSession).data(for: request)
             return ContactSyncResponseParser.parse(data: data, response: response)
         } catch {
             debugLog("Bulk sync failed: \(error.localizedDescription)")

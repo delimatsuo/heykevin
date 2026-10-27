@@ -21,9 +21,12 @@ actor ContactSyncManager {
     private let store = CNContactStore()
     // v2: builds before this one cached the hash after uploading in 200-number
     // requests that the server mostly dropped, so that hash does not prove the
-    // server has the full list. A new key makes every device upload once more.
-    private let lastSyncHashKey = "lastContactSyncHash.v2"
-    private let lastSyncAttemptKey = "lastContactSyncAttemptAt"
+    // server has the full list. New keys make every device upload once more,
+    // without waiting out the 24-hour window an earlier build started.
+    static let lastSyncHashKey = "lastContactSyncHash.v2"
+    static let lastSyncAttemptKey = "lastContactSyncAttemptAt.v2"
+    /// The most numbers one upload carries; the server accepts no more per request.
+    static let maxContacts = 5000
     private let permissionDeniedKey = "contactsPermissionDenied"
     private let minSyncInterval: TimeInterval = 300 // 5 minutes
     private let automaticSyncInterval: TimeInterval = 24 * 3600
@@ -59,7 +62,7 @@ actor ContactSyncManager {
 
             // Persist the automatic sync window so cold launches do not
             // repeatedly enumerate the entire address book.
-            let persistedLast = UserDefaults.standard.double(forKey: lastSyncAttemptKey)
+            let persistedLast = UserDefaults.standard.double(forKey: Self.lastSyncAttemptKey)
             if persistedLast > 0,
                now.timeIntervalSince(Date(timeIntervalSince1970: persistedLast)) < automaticSyncInterval {
                 debugLog("Contact sync: automatic sync recently completed")
@@ -92,7 +95,7 @@ actor ContactSyncManager {
         // Fetch contacts with phone numbers — cap at 5000 to prevent memory issues
         let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey] as [CNKeyDescriptor]
         var contacts: [(name: String, phone: String)] = []
-        let maxContacts = 5000
+        let maxContacts = Self.maxContacts
 
         do {
             let request = CNContactFetchRequest(keysToFetch: keys)
@@ -113,47 +116,65 @@ actor ContactSyncManager {
             debugLog("Contact fetch failed: \(error)")
             return .error("Contact fetch failed: \(error.localizedDescription)")
         }
-        // A contact's numbers are added together, so the last one can overshoot.
-        if contacts.count > maxContacts {
-            contacts.removeLast(contacts.count - maxContacts)
+
+        let (result, completed) = await Self.upload(contacts, force: force, defaults: .standard) { list, hash in
+            await APIClient.shared.bulkSyncContacts(contractorId: contractorId, contacts: list, contactsHash: hash)
         }
+        if completed {
+            lastSyncTime = Date()
+        }
+        return result
+    }
+
+    typealias Uploader = (_ contacts: [(name: String, phone: String)], _ hash: String) async -> ContactSyncUploadResult
+
+    /// Everything after reading the address book: cap the list, skip it if this
+    /// exact list already reached the server, otherwise upload it, and remember
+    /// it only when the server confirms it holds it. `completed` says whether
+    /// the attempt was recorded, which starts the automatic-sync window.
+    static func upload(
+        _ contacts: [(name: String, phone: String)],
+        force: Bool,
+        defaults: UserDefaults,
+        uploader: Uploader
+    ) async -> (result: SyncResult, completed: Bool) {
+        // A contact's numbers are added together, so the last one can overshoot.
+        let contacts = Array(contacts.prefix(maxContacts))
+        let recordAttempt = { defaults.set(Date().timeIntervalSince1970, forKey: lastSyncAttemptKey) }
 
         guard !contacts.isEmpty else {
-            recordSyncAttempt()
-            return .success(synced: 0, removed: 0)
+            recordAttempt()
+            return (.success(synced: 0, removed: 0), true)
         }
-
-        // Compute hash for server-side comparison (normalize to digits-only)
-        let sortedPhones = contacts.map { $0.phone.filter { $0.isNumber } }.sorted()
-        let phoneString = sortedPhones.joined(separator: ",")
-        let hash = SHA256.hash(data: Data(phoneString.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
 
         // Skip the upload if this exact list already reached the server. A
         // manual sync always uploads; the server skips an unchanged list.
-        let lastHash = UserDefaults.standard.string(forKey: lastSyncHashKey) ?? ""
-        if !force, hash == lastHash {
+        let hash = listHash(contacts)
+        if !force, hash == defaults.string(forKey: lastSyncHashKey) {
             debugLog("Contact sync: hash unchanged locally, skipping")
-            recordSyncAttempt()
-            return .success(synced: 0, removed: 0)
+            recordAttempt()
+            return (.success(synced: 0, removed: 0), true)
         }
 
-        // Send the whole list in one request (at most 5000 numbers, the
-        // server's limit). The server un-whitelists contacts missing from the
-        // list it receives, so splitting it would drop contacts.
-        let outcome = await APIClient.shared.bulkSyncContacts(
-            contractorId: contractorId,
-            contacts: contacts,
-            contactsHash: hash
-        )
+        // Send the whole list in one request. The server un-whitelists contacts
+        // missing from a complete list, so splitting it would drop contacts.
+        let outcome = await uploader(contacts, hash)
+        debugLog("Contact sync finished: \(outcome)")
         let (result, serverHasList) = Self.result(for: outcome, uploadedCount: contacts.count)
         if serverHasList {
-            UserDefaults.standard.set(hash, forKey: lastSyncHashKey)
-            recordSyncAttempt()
+            defaults.set(hash, forKey: lastSyncHashKey)
+            recordAttempt()
         }
-        debugLog("Contact sync finished: \(outcome)")
-        return result
+        return (result, serverHasList)
+    }
+
+    /// The list's contacts_hash, which the server recomputes to verify it holds
+    /// the whole list: SHA-256 of the digits-only numbers, sorted and comma-joined.
+    static func listHash(_ contacts: [(name: String, phone: String)]) -> String {
+        let sortedPhones = contacts.map { $0.phone.filter { $0.isNumber } }.sorted()
+        return SHA256.hash(data: Data(sortedPhones.joined(separator: ",").utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     /// Maps the server's reply to the caller's result, and says whether the
@@ -197,11 +218,5 @@ actor ContactSyncManager {
     /// Reset permission denied cache (e.g., if user changes in Settings).
     func resetPermissionCache() {
         UserDefaults.standard.removeObject(forKey: permissionDeniedKey)
-    }
-
-    private func recordSyncAttempt() {
-        let now = Date()
-        lastSyncTime = now
-        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: lastSyncAttemptKey)
     }
 }

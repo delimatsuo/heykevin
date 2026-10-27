@@ -18,7 +18,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 SUBCOLLECTIONS = (
-    "contacts", "caller_contacts", "service_requests", "inbound_messages",
+    "contacts", "contact_sync", "caller_contacts", "service_requests", "inbound_messages",
     "devices", "settings", "knowledge_base", "customer_memory",
 )
 BY_CONTRACTOR = ("calls", "jobs", "post_call_handoffs", "estimates", "conference_bindings")

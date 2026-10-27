@@ -101,49 +101,105 @@ async def list_contacts(contractor_id: str = "", limit: int = 100) -> list[dict]
         return []
 
 
+CONTACT_SYNC_SUBCOLLECTION = "contact_sync"
+_OPEN_CONTACT_SYNC_DOC = "open"
+
+
+def _open_contact_sync_ref(db, contractor_id: str):
+    if not contractor_id:
+        raise ValueError("contractor_id is required for contact sync access")
+    return (
+        db.collection("contractors")
+        .document(contractor_id)
+        .collection(CONTACT_SYNC_SUBCOLLECTION)
+        .document(_OPEN_CONTACT_SYNC_DOC)
+    )
+
+
+async def get_open_contact_sync(contractor_id: str) -> dict:
+    """The contact sync this contractor's app is part-way through, or {}.
+
+    Holds the sync's id, the digits of every number its requests delivered so
+    far and the time of its last request. Raises on Firestore errors.
+    """
+    def _read() -> dict:
+        doc = _open_contact_sync_ref(get_firestore_client(), contractor_id).get()
+        return doc.to_dict() if doc.exists else {}
+
+    return await asyncio.to_thread(_read)
+
+
+async def save_open_contact_sync(contractor_id: str, state: dict) -> None:
+    await asyncio.to_thread(
+        lambda: _open_contact_sync_ref(get_firestore_client(), contractor_id).set(state)
+    )
+
+
+async def clear_open_contact_sync(contractor_id: str) -> None:
+    await asyncio.to_thread(
+        lambda: _open_contact_sync_ref(get_firestore_client(), contractor_id).delete()
+    )
+
+
 async def bulk_sync_contacts(
     contractor_id: str,
     contacts: list[dict],
+    *,
+    sync_id: str,
+    sweep: bool,
+    default_region: str = "US",
 ) -> dict:
     """Bulk sync iPhone contacts for a contractor.
 
-    Marks all provided contacts as whitelisted (source: iphone_sync).
-    Un-whitelists previously synced contacts that are no longer in the list.
-    Uses Firestore batch writes (max 500 per batch).
+    Marks all provided contacts as whitelisted (source: iphone_sync) and stamps
+    them with ``sync_id``. One sync can arrive as several requests that share a
+    ``sync_id``. Only the request that completes the sync passes ``sweep=True``,
+    which un-whitelists previously synced contacts that this sync did not carry.
+    Numbers without a country code are read as ``default_region`` numbers, the
+    owner's country. Uses Firestore batch writes (max 500 per batch), off the
+    event loop: a 5000-number upload would otherwise stall live calls.
 
     Returns {"synced": N, "removed": N}.
     """
+    return await asyncio.to_thread(
+        _bulk_sync_contacts_blocking, contractor_id, contacts, sync_id, sweep, default_region,
+    )
+
+
+def _bulk_sync_contacts_blocking(
+    contractor_id: str,
+    contacts: list[dict],
+    sync_id: str,
+    sweep: bool,
+    default_region: str,
+) -> dict:
     try:
         db = get_firestore_client()
         col_ref = _contacts_ref(db, contractor_id)
 
-        # Get existing iphone_sync contacts
-        existing_docs = list(col_ref.where("source", "==", "iphone_sync").stream())
-        existing_phones = {doc.to_dict().get("phone", "") for doc in existing_docs}
-
-        # Build set of new phones
         from app.utils.phone import normalize_phone
-        new_phones = set()
         valid_contacts = []
         for c in contacts:
-            normalized = normalize_phone(c.get("phone", ""))
+            normalized = normalize_phone(c.get("phone", ""), default_region)
             if normalized:
-                new_phones.add(normalized)
                 valid_contacts.append({"name": c.get("name", ""), "phone": normalized})
 
         # Batch write new/updated contacts
         synced = 0
+        synced_doc_ids = set()
         batch = db.batch()
         batch_count = 0
 
         for contact in valid_contacts:
-            doc_ref = col_ref.document(phone_hash(contact["phone"]))
-            batch.set(doc_ref, {
+            doc_id = phone_hash(contact["phone"])
+            synced_doc_ids.add(doc_id)
+            batch.set(col_ref.document(doc_id), {
                 "phone": contact["phone"],
                 "name": contact["name"],
                 "is_whitelisted": True,
                 "is_blacklisted": False,
                 "source": "iphone_sync",
+                "sync_id": sync_id,
             }, merge=True)
             batch_count += 1
             synced += 1
@@ -153,12 +209,19 @@ async def bulk_sync_contacts(
                 batch = db.batch()
                 batch_count = 0
 
-        # Un-whitelist stale contacts (were synced before but no longer in phone)
+        # Un-whitelist stale contacts: synced before, but not carried by this sync.
+        # This request's upserts may still be uncommitted, so the stream shows
+        # their old sync_id; skip them by id rather than by sync_id.
         removed = 0
-        stale_phones = existing_phones - new_phones
-        for doc in existing_docs:
-            doc_data = doc.to_dict()
-            if doc_data.get("phone", "") in stale_phones:
+        if sweep:
+            for doc in col_ref.where("source", "==", "iphone_sync").stream():
+                doc_data = doc.to_dict()
+                if (
+                    doc.id in synced_doc_ids
+                    or doc_data.get("sync_id") == sync_id
+                    or not doc_data.get("is_whitelisted")
+                ):
+                    continue
                 batch.update(doc.reference, {"is_whitelisted": False})
                 batch_count += 1
                 removed += 1

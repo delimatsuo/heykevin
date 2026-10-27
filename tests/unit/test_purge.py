@@ -320,7 +320,7 @@ async def test_purge_deletes_all_subcollections_and_by_contractor_collections(db
     from app.db.purge import purge_contractor
 
     _seed_contractor(db)
-    for sub in ("contacts", "caller_contacts", "service_requests",
+    for sub in ("contacts", "contact_sync", "caller_contacts", "service_requests",
                 "inbound_messages", "devices", "settings", "knowledge_base"):
         db.docs[f"contractors/c1/{sub}/d1"] = {"x": 1}
     for coll in ("calls", "jobs", "post_call_handoffs", "conference_bindings"):
@@ -329,7 +329,7 @@ async def test_purge_deletes_all_subcollections_and_by_contractor_collections(db
 
     result = await purge_contractor("c1")
 
-    for sub in ("contacts", "caller_contacts", "service_requests",
+    for sub in ("contacts", "contact_sync", "caller_contacts", "service_requests",
                 "inbound_messages", "devices", "settings", "knowledge_base"):
         assert f"contractors/c1/{sub}/d1" not in db.docs
     for coll in ("calls", "jobs", "post_call_handoffs", "conference_bindings"):

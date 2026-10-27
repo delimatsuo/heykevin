@@ -33,6 +33,7 @@ _BATCH = 500
 # that Firestore will NOT cascade-delete.
 _SUBCOLLECTIONS = (
     "contacts",
+    "contact_sync",
     "caller_contacts",
     "service_requests",
     "inbound_messages",

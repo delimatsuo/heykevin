@@ -14,6 +14,11 @@ from pydantic import ValidationError
 
 from app.api import admin as admin_api
 
+# Import before the autouse fixture swaps out firestore.transactional: this
+# module binds `transactional` at import time, so a first import inside a test
+# here would keep the stand-in and break later tests in the same process.
+from app.services import integration_token_mutations  # noqa: F401
+
 
 class _FakeDoc:
     def __init__(self, doc_id: str, data: dict):

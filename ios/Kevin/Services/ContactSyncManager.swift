@@ -8,7 +8,7 @@ private func debugLog(_ message: String) {
     #endif
 }
 
-enum SyncResult {
+enum SyncResult: Equatable {
     case success(synced: Int, removed: Int)
     case permissionDenied
     case rateLimited
@@ -19,7 +19,10 @@ actor ContactSyncManager {
     static let shared = ContactSyncManager()
 
     private let store = CNContactStore()
-    private let lastSyncHashKey = "lastContactSyncHash"
+    // v2: builds before this one cached the hash after uploading in 200-number
+    // requests that the server mostly dropped, so that hash does not prove the
+    // server has the full list. A new key makes every device upload once more.
+    private let lastSyncHashKey = "lastContactSyncHash.v2"
     private let lastSyncAttemptKey = "lastContactSyncAttemptAt"
     private let permissionDeniedKey = "contactsPermissionDenied"
     private let minSyncInterval: TimeInterval = 300 // 5 minutes
@@ -110,6 +113,10 @@ actor ContactSyncManager {
             debugLog("Contact fetch failed: \(error)")
             return .error("Contact fetch failed: \(error.localizedDescription)")
         }
+        // A contact's numbers are added together, so the last one can overshoot.
+        if contacts.count > maxContacts {
+            contacts.removeLast(contacts.count - maxContacts)
+        }
 
         guard !contacts.isEmpty else {
             recordSyncAttempt()
@@ -123,39 +130,49 @@ actor ContactSyncManager {
             .map { String(format: "%02x", $0) }
             .joined()
 
-        // Check if hash matches server first (avoids sending full list)
+        // Skip the upload if this exact list already reached the server. A
+        // manual sync always uploads; the server skips an unchanged list.
         let lastHash = UserDefaults.standard.string(forKey: lastSyncHashKey) ?? ""
-        if hash == lastHash {
+        if !force, hash == lastHash {
             debugLog("Contact sync: hash unchanged locally, skipping")
             recordSyncAttempt()
             return .success(synced: 0, removed: 0)
         }
 
-        // Hash changed — send full list to backend in batches to reduce memory
-        let batchSize = 200
-        var totalSynced = 0
-        var totalRemoved = 0
-
-        for batchStart in stride(from: 0, to: contacts.count, by: batchSize) {
-            let batchEnd = min(batchStart + batchSize, contacts.count)
-            let batch = Array(contacts[batchStart..<batchEnd])
-            let isLastBatch = batchEnd >= contacts.count
-
-            let result = await APIClient.shared.bulkSyncContacts(
-                contractorId: contractorId,
-                contacts: batch,
-                contactsHash: isLastBatch ? hash : ""
-            )
-            totalSynced += result.synced
-            totalRemoved += result.removed
+        // Send the whole list in one request (at most 5000 numbers, the
+        // server's limit). The server un-whitelists contacts missing from the
+        // list it receives, so splitting it would drop contacts.
+        let outcome = await APIClient.shared.bulkSyncContacts(
+            contractorId: contractorId,
+            contacts: contacts,
+            contactsHash: hash
+        )
+        let (result, serverHasList) = Self.result(for: outcome, uploadedCount: contacts.count)
+        if serverHasList {
+            UserDefaults.standard.set(hash, forKey: lastSyncHashKey)
+            recordSyncAttempt()
         }
+        debugLog("Contact sync finished: \(outcome)")
+        return result
+    }
 
-        // Cache the hash locally
-        UserDefaults.standard.set(hash, forKey: lastSyncHashKey)
-
-        recordSyncAttempt()
-        debugLog("Contact sync complete: synced=\(totalSynced), removed=\(totalRemoved)")
-        return .success(synced: totalSynced, removed: totalRemoved)
+    /// Maps the server's reply to the caller's result, and says whether the
+    /// server now holds this exact list, so its hash may be cached. A list the
+    /// server did not take is uploaded again on the next sync.
+    static func result(
+        for outcome: ContactSyncUploadResult,
+        uploadedCount: Int
+    ) -> (result: SyncResult, serverHasList: Bool) {
+        switch outcome {
+        case .synced(let synced, let removed):
+            return (.success(synced: synced, removed: removed), true)
+        case .unchanged:
+            return (.success(synced: uploadedCount, removed: 0), true)
+        case .rateLimited:
+            return (.rateLimited, false)
+        case .failed:
+            return (.error("Sync failed"), false)
+        }
     }
 
     /// Request contacts permission (used during onboarding).

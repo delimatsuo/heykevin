@@ -393,6 +393,30 @@ final class FrontendUITests: XCTestCase {
         XCTAssertFalse(screenAllToggle.isEnabled, "Screen all calls toggle must be disabled in screenshot fixtures")
     }
 
+    // MARK: - 9b. Sync Contacts in Both Profiles
+
+    // Contacts ring through in either profile, so the manual sync must be reachable in both.
+    func testSyncContactsShownInBusinessProfile() throws {
+        assertSyncContactsShown(scenario: "business-kevin")
+    }
+
+    func testSyncContactsShownInPersonalProfile() throws {
+        assertSyncContactsShown(scenario: "personal-kevin")
+    }
+
+    private func assertSyncContactsShown(scenario: String, file: StaticString = #filePath, line: UInt = #line) {
+        let app = launchApp(scenario: scenario)
+        let kevinTab = app.tabBars.buttons["Kevin"]
+        XCTAssertTrue(kevinTab.waitForExistence(timeout: 5), file: file, line: line)
+        XCTAssertTrue(kevinTab.isSelected, "\(scenario) must open on the Kevin tab", file: file, line: line)
+
+        // Rows in this section carry the section's accessibility identifier, so match the label.
+        let syncButton = app.buttons["Sync Contacts"]
+        let found = scrollToElement(syncButton, in: app, direction: .down, requireHittable: false)
+        XCTAssertTrue(found && syncButton.exists, "Sync Contacts must show in the \(scenario) profile", file: file, line: line)
+        XCTAssertFalse(syncButton.isEnabled, "Sync Contacts must be disabled in screenshot fixtures", file: file, line: line)
+    }
+
     // MARK: - 10. Connected Call Screening Transcript and Persistent Controls
 
     func testConnectedViewWithCapturedTranscriptAndControls() throws {

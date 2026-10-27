@@ -42,6 +42,52 @@ def _get_ref(call_sid: str):
     return rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}")
 
 
+class _NothingToWrite(Exception):
+    def __init__(self, current):
+        self.current = current
+
+
+def run_rtdb_transaction(ref, update):
+    """ref.transaction(update), where returning None for a missing record writes nothing.
+
+    firebase-admin writes the callback's result with set_if_unchanged, which refuses
+    None (ValueError). Callbacks here return the current value to mean "no change",
+    which is None once the record has been deleted, e.g. after the call ended. Returns
+    the committed value, or None when the record is gone. Deleting a record that
+    exists takes delete_if_unchanged.
+    """
+    def guarded(current):
+        new = update(current)
+        if new is None:
+            raise _NothingToWrite(current)
+        return new
+
+    try:
+        return ref.transaction(guarded)
+    except _NothingToWrite as result:
+        if result.current is not None:
+            raise ValueError("RTDB transaction callback returned None for an existing record; "
+                             "use delete_if_unchanged to delete it") from None
+        return None
+
+
+def delete_if_unchanged(ref, etag) -> bool:
+    """Delete ref's location only if its ETag still matches; False on a 412 or without an ETag.
+
+    firebase-admin (pinned) has no public conditional delete, so this sends RTDB's
+    documented REST call: DELETE with if-match.
+    """
+    from firebase_admin import exceptions
+
+    if not isinstance(etag, str) or not etag:
+        return False  # requests drops a None header, which would make the DELETE unconditional
+    try:
+        ref._client.request("delete", ref._add_suffix(), headers={"if-match": etag})
+    except exceptions.FailedPreconditionError:
+        return False
+    return True
+
+
 async def save_active_call(call: ActiveCall):
     """Save active call state to RTDB."""
     try:
@@ -77,6 +123,7 @@ async def transition_state(call_sid: str, to_state: CallState) -> Optional[Activ
         result = [None]
 
         def _transaction(current_data):
+            result[0] = None  # a retry must not report an earlier attempt's transition
             if current_data is None:
                 logger.warning(f"Call {call_sid} not found in RTDB")
                 return current_data
@@ -95,7 +142,7 @@ async def transition_state(call_sid: str, to_state: CallState) -> Optional[Activ
             return current_data
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: ref.transaction(_transaction))
+        await loop.run_in_executor(None, run_rtdb_transaction, ref, _transaction)
 
         if result[0] and result[0].get("state") == to_state.value:
             logger.info(f"State transition: → {to_state.value}")

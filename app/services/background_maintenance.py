@@ -29,23 +29,15 @@ def _is_stale(record, now: float) -> bool:
 def _delete_if_still_stale(ref, now: float) -> bool:
     """Delete one active call only if it is still stale and unchanged since this read.
 
-    firebase-admin's transaction() can't delete: it refuses to write None. RTDB's REST
-    API deletes conditionally instead (DELETE with if-match), answering 412 when a live
-    call refreshed the record in between; the next pass then sees it fresh.
+    A live call that refreshes the record in between makes the conditional delete
+    fail (412), and the next pass then sees it fresh.
     """
-    from firebase_admin import exceptions
+    from app.db.cache import delete_if_unchanged
 
     current, etag = ref.get(etag=True)
     if not _is_stale(current, now):
         return False
-    if not isinstance(etag, str) or not etag:
-        return False  # requests drops a None header, which would make the DELETE unconditional
-    try:
-        # firebase-admin (pinned) has no public conditional delete; send the documented REST call.
-        ref._client.request("delete", ref._add_suffix(), headers={"if-match": etag})
-    except exceptions.FailedPreconditionError:
-        return False
-    return True
+    return delete_if_unchanged(ref, etag)
 
 
 async def orphan_calls_once(*, continuation: dict | None = None, page_size: int | None = None) -> dict:

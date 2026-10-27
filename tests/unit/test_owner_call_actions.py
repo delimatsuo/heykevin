@@ -29,7 +29,10 @@ class Store:
             if self.retry_with is not None:
                 self.record, self.retry_with = self.retry_with, None
                 first = callback(deepcopy(self.record))
-            # Firebase null really deletes the location. No special abort interpretation.
+            # Mirrors app.db.cache.run_rtdb_transaction: None for a missing record writes
+            # nothing; a transaction never deletes an existing one.
+            if first is None and self.record is not None:
+                raise ValueError('RTDB transaction callback returned None for an existing record')
             self.record = deepcopy(first)
             return deepcopy(first)
     async def read(self, sid):

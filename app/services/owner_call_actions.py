@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 from app.config import settings
-from app.db.cache import ACTIVE_CALLS_PATH, STALE_THRESHOLD, _init_firebase
+from app.db.cache import ACTIVE_CALLS_PATH, STALE_THRESHOLD, _init_firebase, run_rtdb_transaction
 from app.services.conference_registry import get_conference_binding, new_conference_name, register_conference
 
 ACTION_ACCEPT = 'accept'
@@ -114,7 +114,7 @@ async def _run_rtdb_transaction(call_sid, transaction_fn):
     validate_call_sid(call_sid)
     _init_firebase()
     from firebase_admin import db
-    return await asyncio.to_thread(db.reference(f'{ACTIVE_CALLS_PATH}/{call_sid}').transaction, transaction_fn)
+    return await asyncio.to_thread(run_rtdb_transaction, db.reference(f'{ACTIVE_CALLS_PATH}/{call_sid}'), transaction_fn)
 
 
 async def read_record(call_sid):

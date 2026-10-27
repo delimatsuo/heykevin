@@ -15,13 +15,37 @@ def _bounded_cursor(continuation: dict | None) -> str | None:
     return cursor
 
 
-def _delete_if_stale(current, now: float):
-    """RTDB transactions retry against concurrent call-state refreshes."""
-    if isinstance(current, dict):
-        updated = current.get("state_updated_at", 0)
-        if updated and now - updated > 7200:
-            return None
-    return current
+STALE_CALL_SECONDS = 7200
+
+
+def _is_stale(record, now: float) -> bool:
+    if not isinstance(record, dict):
+        return False
+    updated = record.get("state_updated_at", 0)
+    return (isinstance(updated, (int, float)) and not isinstance(updated, bool)
+            and updated > 0 and now - updated > STALE_CALL_SECONDS)
+
+
+def _delete_if_still_stale(ref, now: float) -> bool:
+    """Delete one active call only if it is still stale and unchanged since this read.
+
+    firebase-admin's transaction() can't delete: it refuses to write None. RTDB's REST
+    API deletes conditionally instead (DELETE with if-match), answering 412 when a live
+    call refreshed the record in between; the next pass then sees it fresh.
+    """
+    from firebase_admin import exceptions
+
+    current, etag = ref.get(etag=True)
+    if not _is_stale(current, now):
+        return False
+    if not isinstance(etag, str) or not etag:
+        return False  # requests drops a None header, which would make the DELETE unconditional
+    try:
+        # firebase-admin (pinned) has no public conditional delete; send the documented REST call.
+        ref._client.request("delete", ref._add_suffix(), headers={"if-match": etag})
+    except exceptions.FailedPreconditionError:
+        return False
+    return True
 
 
 async def orphan_calls_once(*, continuation: dict | None = None, page_size: int | None = None) -> dict:
@@ -50,14 +74,14 @@ async def orphan_calls_once(*, continuation: dict | None = None, page_size: int 
     if bounded and cursor:
         items = [(call_sid, data) for call_sid, data in items if call_sid != cursor]
     selected = items[:page_size] if bounded else items
+    removed = 0
     for call_sid, data in selected:
-        if not isinstance(data, dict):
+        if not _is_stale(data, now):
             continue
-        updated = data.get("state_updated_at", 0)
-        if updated and now - updated > 7200:
-            ref = rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}")
-            await loop.run_in_executor(None, lambda r=ref: r.transaction(
-                lambda current: _delete_if_stale(current, now)))
+        call_ref = rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}")
+        removed += await loop.run_in_executor(None, _delete_if_still_stale, call_ref, now)
+    if removed:
+        logger.info("Removed %d stale active call(s)", removed)
     if not bounded:
         return {}
     if not selected:

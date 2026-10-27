@@ -428,7 +428,8 @@ def test_production_deploy_verifies_tagged_candidate_then_routes_to_latest():
     assert 'entry.get("tag") == "candidate"' in production_job
     assert '"$CANDIDATE_TAG_URL/health"' in production_job
     assert "--to-latest" in production_job
-    # Naming a revision would re-pin traffic, which is how deploys got stuck.
+    # Promoting to LATEST rather than the candidate by name leaves production
+    # unpinned, so out-of-band `gcloud run services update` changes serve too.
     assert "--to-revisions" not in production_job
     promote = production_job.index('gcloud run services update-traffic "$PRODUCTION_SERVICE"')
     assert production_job.index('test "$CANDIDATE_SHA" = "$DEPLOY_SHA"') < promote
@@ -437,10 +438,37 @@ def test_production_deploy_verifies_tagged_candidate_then_routes_to_latest():
 
 
 def _run_production_health_check(
-    tmp_path: Path, monkeypatch, *, traffic: str, latest_ready: str, served_sha: str
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    traffic: str,
+    latest_ready: str,
+    candidate_sha: str,
+    production_sha: str = "expected",
 ):
     workflow = Path(".github/workflows/deploy.yml").read_text()
     script = _production_health_check_script(workflow)
+    return _run_with_fake_gcloud(
+        tmp_path,
+        monkeypatch,
+        script,
+        traffic=traffic,
+        latest_ready=latest_ready,
+        candidate_sha=candidate_sha,
+        production_sha=production_sha,
+    )
+
+
+def _run_with_fake_gcloud(
+    tmp_path: Path,
+    monkeypatch,
+    script: str,
+    *,
+    traffic: str,
+    latest_ready: str = "",
+    candidate_sha: str = "",
+    production_sha: str = "",
+):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     traffic_updated = tmp_path / "traffic-updated"
@@ -465,8 +493,15 @@ fi
 
     curl = fake_bin / "curl"
     curl.write_text(
-        "#!/bin/sh\n"
-        "printf '{\"deploy_sha\":\"%s\"}\\n' \"$FAKE_SERVED_SHA\"\n"
+        """#!/bin/sh
+for arg; do url=$arg; done
+case "$url" in
+  https://candidate.example/*) sha=$FAKE_CANDIDATE_SHA ;;
+  https://production.example/*) sha=$FAKE_PRODUCTION_SHA ;;
+  *) exit 22 ;;
+esac
+printf '{"deploy_sha":"%s"}\\n' "$sha"
+"""
     )
     curl.chmod(0o755)
 
@@ -482,7 +517,8 @@ fi
     monkeypatch.setenv("DEPLOY_SHA", "expected")
     monkeypatch.setenv("FAKE_TRAFFIC", traffic)
     monkeypatch.setenv("FAKE_LATEST_READY", latest_ready)
-    monkeypatch.setenv("FAKE_SERVED_SHA", served_sha)
+    monkeypatch.setenv("FAKE_CANDIDATE_SHA", candidate_sha)
+    monkeypatch.setenv("FAKE_PRODUCTION_SHA", production_sha)
     monkeypatch.setenv("UPDATE_TRAFFIC_MARKER", str(traffic_updated))
 
     result = subprocess.run(
@@ -510,7 +546,7 @@ def test_production_deploy_unpins_traffic_after_verifying_candidate(tmp_path: Pa
         monkeypatch,
         traffic=PINNED_TRAFFIC_WITH_CANDIDATE,
         latest_ready="candidate-revision",
-        served_sha="expected",
+        candidate_sha="expected",
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -524,7 +560,7 @@ def test_production_candidate_sha_mismatch_never_updates_traffic(tmp_path: Path,
         monkeypatch,
         traffic=PINNED_TRAFFIC_WITH_CANDIDATE,
         latest_ready="candidate-revision",
-        served_sha="mismatch",
+        candidate_sha="mismatch",
     )
 
     assert result.returncode != 0
@@ -538,7 +574,7 @@ def test_production_never_routes_latest_when_it_is_not_the_candidate(tmp_path: P
         monkeypatch,
         traffic=PINNED_TRAFFIC_WITH_CANDIDATE,
         latest_ready="someone-elses-newer-revision",
-        served_sha="expected",
+        candidate_sha="expected",
     )
 
     assert result.returncode != 0
@@ -552,12 +588,73 @@ def test_production_missing_candidate_tag_never_updates_traffic(tmp_path: Path, 
         monkeypatch,
         traffic='{"status":{"traffic":[{"percent":100,"revisionName":"old-pinned-revision"}]}}',
         latest_ready="candidate-revision",
-        served_sha="expected",
+        candidate_sha="expected",
     )
 
     assert result.returncode != 0
     assert "Missing tagged production candidate URL" in result.stdout
     assert not traffic_updated.exists()
+
+
+def test_production_fails_when_promotion_leaves_the_old_build_serving(
+    tmp_path: Path, monkeypatch
+):
+    # The 2026-10-26 failure: the candidate is right, production still serves the old SHA.
+    result, traffic_updated = _run_production_health_check(
+        tmp_path,
+        monkeypatch,
+        traffic=PINNED_TRAFFIC_WITH_CANDIDATE,
+        latest_ready="candidate-revision",
+        candidate_sha="expected",
+        production_sha="old-production-sha",
+    )
+
+    assert result.returncode != 0
+    assert traffic_updated.exists()
+    assert "Production health deploy SHA mismatch" in result.stdout
+    assert "Production health verified" not in result.stdout
+
+
+def _production_tag_cleanup_script(workflow: str) -> str:
+    return next(
+        block
+        for block in _workflow_run_blocks(workflow)
+        if "--remove-tags candidate" in block
+    )
+
+
+def test_production_candidate_tag_cleanup_always_runs_after_a_deploy_attempt():
+    data = yaml.safe_load(Path(".github/workflows/deploy.yml").read_text())
+    steps = data["jobs"]["deploy-production"]["steps"]
+    names = [step.get("name") for step in steps]
+    deploy_step = steps[names.index("Deploy to Cloud Run (Production)")]
+    cleanup_step = steps[names.index("Remove candidate tag")]
+
+    assert deploy_step.get("id") == "deploy"
+    assert "always()" in cleanup_step["if"]
+    assert "steps.deploy.outcome != 'skipped'" in cleanup_step["if"]
+    assert names.index("Remove candidate tag") > names.index("Health check")
+
+
+@pytest.mark.parametrize(
+    ("traffic", "expect_removal"),
+    [
+        (PINNED_TRAFFIC_WITH_CANDIDATE, True),
+        ('{"status":{"traffic":[{"percent":100,"latestRevision":true,"revisionName":"r"}]}}', False),
+    ],
+)
+def test_production_candidate_tag_cleanup_removes_only_an_existing_tag(
+    tmp_path: Path, monkeypatch, traffic: str, expect_removal: bool
+):
+    script = _production_tag_cleanup_script(Path(".github/workflows/deploy.yml").read_text())
+
+    result, traffic_updated = _run_with_fake_gcloud(tmp_path, monkeypatch, script, traffic=traffic)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    if expect_removal:
+        assert "--remove-tags candidate" in traffic_updated.read_text()
+    else:
+        assert not traffic_updated.exists()
 
 
 def test_rollback_redeploy_routes_to_latest_after_deploying():

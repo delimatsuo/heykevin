@@ -369,6 +369,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Deploy to Cloud Run (Production)
+        id: deploy
         run: |
           DEPLOY_SHA="$(git rev-parse HEAD)"
           echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
@@ -395,6 +396,7 @@ jobs:
           CANDIDATE_TAG_REVISION=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); tagged_revisions=[entry.get("revisionName", "") for entry in traffic if entry.get("tag") == "candidate"]; print(tagged_revisions[0] if len(tagged_revisions) == 1 else "")' <<< "$PRODUCTION_TRAFFIC")
           test -n "$CANDIDATE_TAG_URL" || (echo "Missing tagged production candidate URL" && exit 1)
           test -n "$CANDIDATE_TAG_REVISION" || (echo "Missing tagged production candidate revision" && exit 1)
+          echo "Traffic before promotion (traffic-split rollback target): $PRODUCTION_TRAFFIC"
           CANDIDATE_HEALTH_JSON=$(curl -sf \
             --retry 5 \
             --retry-all-errors \
@@ -433,3 +435,20 @@ jobs:
           # shellcheck disable=SC2153
           test "$DEPLOYED_SHA" = "$DEPLOY_SHA" || (echo "Production health deploy SHA mismatch" && exit 1)
           echo "Production health verified for deploy SHA $DEPLOY_SHA"
+
+      - name: Remove candidate tag
+        if: ${{ always() && steps.deploy.outcome != 'skipped' }}
+        run: |
+          # The tag URL is public and wakes its revision with production config, so
+          # never leave it behind: not after promotion, and not after a failed deploy.
+          PRODUCTION_TRAFFIC=$(gcloud run services describe "$PRODUCTION_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format='json(status.traffic)')
+          HAS_CANDIDATE_TAG=$(python -c 'import json,sys; traffic=json.load(sys.stdin).get("status", {}).get("traffic", []); print("yes" if any(entry.get("tag") == "candidate" for entry in traffic) else "no")' <<< "$PRODUCTION_TRAFFIC")
+          if [ "$HAS_CANDIDATE_TAG" = "yes" ]; then
+            gcloud run services update-traffic "$PRODUCTION_SERVICE" \
+              --project "$GCP_PROJECT_ID" \
+              --region "$GCP_REGION" \
+              --remove-tags candidate
+          fi

@@ -101,6 +101,39 @@ async def list_contacts(contractor_id: str = "", limit: int = 100) -> list[dict]
         return []
 
 
+CONTACT_SYNC_SUBCOLLECTION = "contact_sync"
+_OPEN_CONTACT_SYNC_DOC = "open"
+
+
+def _open_contact_sync_ref(db, contractor_id: str):
+    if not contractor_id:
+        raise ValueError("contractor_id is required for contact sync access")
+    return (
+        db.collection("contractors")
+        .document(contractor_id)
+        .collection(CONTACT_SYNC_SUBCOLLECTION)
+        .document(_OPEN_CONTACT_SYNC_DOC)
+    )
+
+
+async def get_open_contact_sync(contractor_id: str) -> dict:
+    """The contact sync this contractor's app is part-way through, or {}.
+
+    Holds the sync's id, the digits of every number its requests delivered so
+    far and the time of its last request. Raises on Firestore errors.
+    """
+    doc = _open_contact_sync_ref(get_firestore_client(), contractor_id).get()
+    return doc.to_dict() if doc.exists else {}
+
+
+async def save_open_contact_sync(contractor_id: str, state: dict) -> None:
+    _open_contact_sync_ref(get_firestore_client(), contractor_id).set(state)
+
+
+async def clear_open_contact_sync(contractor_id: str) -> None:
+    _open_contact_sync_ref(get_firestore_client(), contractor_id).delete()
+
+
 async def bulk_sync_contacts(
     contractor_id: str,
     contacts: list[dict],

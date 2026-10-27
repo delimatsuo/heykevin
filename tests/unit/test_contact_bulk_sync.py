@@ -5,10 +5,14 @@ back-to-back 200-number requests and put contacts_hash only on the last one.
 Before this fix the 5-minute cooldown dropped every request after the first,
 so only the first 200 numbers (sorted by first name) were ever whitelisted, and
 contacts later in the alphabet were screened by Kevin.
+
+Contacts are un-whitelisted only when the server can prove it received the
+whole list: the numbers its requests delivered must hash to contacts_hash.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 from types import SimpleNamespace
 
@@ -25,7 +29,9 @@ from app.db import contacts as contacts_db
 from app.utils.phone import phone_hash
 
 CID = "ctr-sync"
-AREA_CODES = (202, 212, 312, 415, 617, 713)
+AREA_CODES = (202, 206, 212, 305, 312, 404, 415, 503, 617, 713)
+START = 1_000_000.0
+HOUR = 3600
 
 
 def _numbers(count: int) -> list[str]:
@@ -36,8 +42,13 @@ def _numbers(count: int) -> list[str]:
 
 
 def _e164(number: str) -> str:
-    digits = "".join(ch for ch in number if ch.isdigit())
-    return f"+1{digits}"
+    return "+1" + "".join(ch for ch in number if ch.isdigit())
+
+
+def _app_hash(numbers: list[str]) -> str:
+    """ContactSyncManager's contacts_hash: sorted digits-only numbers, comma-joined."""
+    digits = sorted("".join(filter(str.isdigit, n)) for n in numbers)
+    return hashlib.sha256(",".join(digits).encode()).hexdigest()
 
 
 class _Snapshot:
@@ -59,6 +70,12 @@ class _DocRef:
 
     def get(self):
         return _Snapshot(self, self._fs.docs.get(self.path))
+
+    def set(self, data: dict):
+        self._fs.docs[self.path] = dict(data)
+
+    def delete(self):
+        self._fs.docs.pop(self.path, None)
 
     def collection(self, name: str) -> _Collection:
         return _Collection(self._fs, f"{self.path}/{name}")
@@ -90,7 +107,7 @@ class _Collection(_Query):
 
 
 class _Batch:
-    """Buffers writes until commit, like a Firestore WriteBatch."""
+    """Buffers writes until commit and applies them in order, like a WriteBatch."""
 
     def __init__(self, fs: _Firestore):
         self._fs = fs
@@ -105,11 +122,16 @@ class _Batch:
     def commit(self):
         if self._fs.fail_commits:
             raise RuntimeError("firestore unavailable")
-        for _kind, path, data, merge in self._ops:
-            if merge and path in self._fs.docs:
-                self._fs.docs[path].update(data)
+        staged = {path: dict(data) for path, data in self._fs.docs.items()}
+        for kind, path, data, merge in self._ops:
+            if kind == "update" and path not in staged:
+                raise RuntimeError(f"NOT_FOUND: {path}")  # the whole batch fails
+            if merge and path in staged:
+                staged[path].update(data)
             else:
-                self._fs.docs[path] = data
+                staged[path] = data
+        self._fs.docs.clear()
+        self._fs.docs.update(staged)
         self._fs.commits += 1
 
 
@@ -130,7 +152,7 @@ class _Firestore:
 def env(monkeypatch):
     fs = _Firestore()
     contractors = {CID: {"contractor_id": CID, "country_code": "US"}}
-    clock = {"now": 1_000_000.0}
+    clock = {"now": START}
 
     async def get_contractor(contractor_id):
         doc = contractors.get(contractor_id)
@@ -158,14 +180,18 @@ async def _post(env, numbers: list[str], *, contacts_hash: str = "", at: float) 
     return await contacts_api.api_bulk_sync(object(), body)
 
 
-async def _installed_app_upload(env, numbers: list[str], *, contacts_hash: str, start: float) -> list[dict]:
+def _chunks(numbers: list[str]) -> list[list[str]]:
+    return [numbers[i:i + 200] for i in range(0, len(numbers), 200)]
+
+
+async def _installed_app_upload(env, numbers: list[str], *, start: float) -> list[dict]:
     """Mirror ContactSyncManager in shipped builds: 200 per request, hash on the last."""
+    chunks = _chunks(numbers)
     responses = []
-    chunks = [numbers[i:i + 200] for i in range(0, len(numbers), 200)]
     for index, chunk in enumerate(chunks):
         is_last = index == len(chunks) - 1
         responses.append(await _post(
-            env, chunk, contacts_hash=contacts_hash if is_last else "", at=start + index,
+            env, chunk, contacts_hash=_app_hash(numbers) if is_last else "", at=start + index,
         ))
     return responses
 
@@ -182,108 +208,175 @@ def _whitelisted(env) -> set[str]:
     }
 
 
+def _all(numbers: list[str]) -> set[str]:
+    return {_e164(n) for n in numbers}
+
+
 @pytest.mark.asyncio
 async def test_installed_app_batched_upload_whitelists_every_contact(env):
     numbers = _numbers(450)
 
-    responses = await _installed_app_upload(env, numbers, contacts_hash="h1", start=1_000_000)
+    responses = await _installed_app_upload(env, numbers, start=START)
 
     assert [r["status"] for r in responses] == ["ok", "ok", "ok"]
-    assert _whitelisted(env) == {_e164(n) for n in numbers}
+    assert _whitelisted(env) == _all(numbers)
     # The caller who reached Kevin was past the first 200 numbers.
     last = numbers[-1]
     assert (await contacts_db.get_contact(_e164(last), contractor_id=CID))["is_whitelisted"] is True
-    assert env.contractor["contacts_hash"] == "h1"
-    assert env.contractor["contact_sync_id"] == ""
+    assert env.contractor["contacts_list_hash"] == _app_hash(numbers)
+    assert f"contractors/{CID}/contact_sync/open" not in env.fs.docs
 
 
 @pytest.mark.asyncio
-async def test_batched_upload_removes_only_contacts_no_longer_on_the_phone(env):
+async def test_complete_sync_removes_only_contacts_no_longer_on_the_phone(env):
     first = _numbers(450)
-    await _installed_app_upload(env, first, contacts_hash="h1", start=1_000_000)
+    await _installed_app_upload(env, first, start=START)
     manual = "+12025550999"
     env.fs.docs[f"contractors/{CID}/contacts/{phone_hash(manual)}"] = {
         "phone": manual, "is_whitelisted": True, "trust_level": 100,
     }
 
-    # One contact deleted from the phone; the rest re-sent an hour later.
     deleted = first[10]
     second = [n for n in first if n != deleted]
-    responses = await _installed_app_upload(env, second, contacts_hash="h2", start=1_003_600)
+    responses = await _installed_app_upload(env, second, start=START + HOUR)
 
     assert [r["status"] for r in responses] == ["ok", "ok", "ok"]
     assert responses[-1]["removed"] == 1
     assert _contact(env, deleted)["is_whitelisted"] is False
-    assert _whitelisted(env) == {_e164(n) for n in second} | {manual}
+    assert _whitelisted(env) == _all(second) | {manual}
 
     # A contact removed earlier is not counted or rewritten by later syncs.
-    responses = await _installed_app_upload(env, second, contacts_hash="h3", start=1_007_200)
+    responses = await _installed_app_upload(env, second, start=START + 2 * HOUR)
     assert responses[-1]["removed"] == 0
 
 
 @pytest.mark.asyncio
-async def test_resent_contacts_stay_whitelisted_when_the_sync_completes_in_one_request(env):
-    numbers = _numbers(150)
-    await _post(env, numbers, contacts_hash="h1", at=1_000_000)
+async def test_single_request_over_500_contacts_sweeps_after_its_own_writes(env):
+    numbers = _numbers(700)
+    await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
 
-    # Same contacts from a reinstalled app with a different hash input order.
-    response = await _post(env, numbers, contacts_hash="h1-reordered", at=1_003_600)
+    remaining = numbers[:-1]
+    response = await _post(env, remaining, contacts_hash=_app_hash(remaining), at=START + HOUR)
+
+    assert response == {"status": "ok", "synced": 699, "removed": 1}
+    assert _whitelisted(env) == _all(remaining)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_middle_request_leaves_every_contact_whitelisted(env):
+    numbers = _numbers(450)
+    await _installed_app_upload(env, numbers, start=START)
+    first, middle, last = _chunks(numbers)
+
+    statuses = [(await _post(env, first, at=START + HOUR))["status"]]
+    env.fs.fail_commits = True
+    statuses.append((await _post(env, middle, at=START + HOUR + 1))["status"])
+    env.fs.fail_commits = False
+    final = await _post(env, last, contacts_hash=_app_hash(numbers), at=START + HOUR + 2)
+
+    assert statuses + [final["status"]] == ["ok", "error", "ok"]
+    assert final["removed"] == 0
+    assert _whitelisted(env) == _all(numbers)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_middle_request_leaves_every_contact_whitelisted(env):
+    numbers = _numbers(450)
+    await _installed_app_upload(env, numbers, start=START)
+    env.contractor["contacts_list_hash"] = "previous"
+    first, _lost, last = _chunks(numbers)
+
+    await _post(env, first, at=START + HOUR)
+    final = await _post(env, last, contacts_hash=_app_hash(numbers), at=START + HOUR + 2)
+
+    assert final["removed"] == 0
+    assert _whitelisted(env) == _all(numbers)
+    assert env.contractor["contacts_list_hash"] == "previous"
+
+
+@pytest.mark.asyncio
+async def test_a_pause_longer_than_the_window_never_removes_the_earlier_requests(env):
+    numbers = _numbers(450)
+    first, middle, last = _chunks(numbers)
+    await _post(env, first, at=START)
+    await _post(env, middle, at=START + 1)
+
+    # The app was suspended; the last request arrives long after.
+    final = await _post(env, last, contacts_hash=_app_hash(numbers), at=START + 2 * HOUR)
+
+    assert final["status"] == "ok"
+    assert final["removed"] == 0
+    assert _whitelisted(env) == _all(numbers)
+    assert "contacts_list_hash" not in env.contractor
+
+
+@pytest.mark.asyncio
+async def test_resent_contacts_stay_whitelisted_when_resynced_in_one_request(env):
+    numbers = _numbers(150)
+    await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+    env.contractor["contacts_list_hash"] = "stale"  # e.g. a reinstalled app
+
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START + HOUR)
 
     assert response == {"status": "ok", "synced": 150, "removed": 0}
-    assert _whitelisted(env) == {_e164(n) for n in numbers}
+    assert _whitelisted(env) == _all(numbers)
 
 
 @pytest.mark.asyncio
 async def test_a_new_sync_inside_the_cooldown_is_rate_limited(env):
-    await _installed_app_upload(env, _numbers(450), contacts_hash="h1", start=1_000_000)
+    numbers = _numbers(450)
+    await _installed_app_upload(env, numbers, start=START)
 
-    response = await _post(env, _numbers(5), contacts_hash="h2", at=1_000_060)
+    response = await _post(env, _numbers(5), contacts_hash=_app_hash(_numbers(5)), at=START + 60)
 
     assert response["status"] == "rate_limited"
-    assert env.contractor["contacts_hash"] == "h1"
+    assert env.contractor["contacts_list_hash"] == _app_hash(numbers)
+    assert _whitelisted(env) == _all(numbers)
 
 
 @pytest.mark.asyncio
-async def test_a_request_after_the_batch_window_cannot_continue_a_stale_sync(env):
+async def test_a_hash_stored_before_this_fix_never_skips_a_sync(env):
+    # The old endpoint stored the hash even when most of the list was dropped.
     numbers = _numbers(450)
-    await _post(env, numbers[:200], at=1_000_000)
+    env.contractor["contacts_hash"] = _app_hash(numbers)
 
-    late = await _post(env, numbers[200:], contacts_hash="h1", at=1_000_000 + 121)
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
 
-    assert late["status"] == "rate_limited"
-    assert _whitelisted(env) == {_e164(n) for n in numbers[:200]}
+    assert response["status"] == "ok"
+    assert _whitelisted(env) == _all(numbers)
 
 
 @pytest.mark.asyncio
 async def test_unchanged_single_request_sync_is_skipped_without_writes(env):
     numbers = _numbers(50)
-    await _post(env, numbers, contacts_hash="h1", at=1_000_000)
+    await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
     commits = env.fs.commits
 
-    response = await _post(env, numbers, contacts_hash="h1", at=1_003_600)
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START + HOUR)
 
     assert response == {"status": "skipped", "reason": "no_changes"}
     assert env.fs.commits == commits
 
 
 @pytest.mark.asyncio
-async def test_a_sync_over_the_cap_never_sweeps(env, monkeypatch):
-    monkeypatch.setattr(contacts_api, "MAX_CONTACTS_PER_SYNC", 300)
+async def test_a_sync_over_the_cap_never_removes_contacts(env, monkeypatch):
     numbers = _numbers(450)
-    await _installed_app_upload(env, numbers[:200], contacts_hash="h0", start=990_000)
+    await _installed_app_upload(env, numbers, start=START)
+    monkeypatch.setattr(contacts_api, "MAX_CONTACTS_PER_SYNC", 300)
 
-    responses = await _installed_app_upload(env, numbers, contacts_hash="h1", start=1_000_000)
+    responses = await _installed_app_upload(env, numbers, start=START + HOUR)
 
-    assert [r["status"] for r in responses] == ["ok", "rejected", "rejected"]
-    assert _whitelisted(env) == {_e164(n) for n in numbers[:200]}
-    assert env.contractor["contacts_hash"] == "h0"
+    assert [r["status"] for r in responses] == ["ok", "rejected", "ok"]
+    assert responses[-1]["removed"] == 0
+    assert _whitelisted(env) == _all(numbers)
 
 
 @pytest.mark.asyncio
 async def test_local_numbers_use_the_owners_country(env):
     env.contractor["country_code"] = "BR"
+    numbers = ["(11) 98765-4321"]
 
-    response = await _post(env, ["(11) 98765-4321"], contacts_hash="h1", at=1_000_000)
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
 
     assert response["synced"] == 1
     contact = await contacts_db.get_contact("+5511987654321", contractor_id=CID)
@@ -293,8 +386,17 @@ async def test_local_numbers_use_the_owners_country(env):
 @pytest.mark.asyncio
 async def test_a_failed_write_does_not_record_the_hash(env):
     env.fs.fail_commits = True
+    numbers = _numbers(20)
 
-    response = await _post(env, _numbers(20), contacts_hash="h1", at=1_000_000)
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
 
     assert response == {"status": "error", "synced": 0, "removed": 0}
-    assert "contacts_hash" not in env.contractor
+    assert "contacts_list_hash" not in env.contractor
+
+
+def test_server_hash_matches_the_app_hash():
+    numbers = ["(202) 555-0143", "+1 212-555-0100", "415.555.0199", "ext only", "(202) 555-0143"]
+    digits = [contacts_api._digits(n) for n in numbers]
+
+    assert contacts_api._client_list_hash(digits) == _app_hash(numbers)
+    assert contacts_api._client_list_hash(list(reversed(digits))) == _app_hash(numbers)

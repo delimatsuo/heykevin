@@ -9,7 +9,15 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from app.middleware.auth import verify_api_token, require_contractor_access
-from app.db.contacts import get_contact, upsert_contact, list_contacts, bulk_sync_contacts
+from app.db.contacts import (
+    bulk_sync_contacts,
+    clear_open_contact_sync,
+    get_contact,
+    get_open_contact_sync,
+    list_contacts,
+    save_open_contact_sync,
+    upsert_contact,
+)
 from app.utils.phone import normalize_phone
 from app.utils.logging import get_logger, redact_phone
 
@@ -22,12 +30,29 @@ _last_sync: dict[str, float] = {}
 SYNC_COOLDOWN = 300  # 5 minutes
 # Installed iOS builds upload an address book of more than 200 numbers as
 # back-to-back 200-number requests and send contacts_hash only on the last one.
-# A request that arrives within this many seconds of the previous request
-# continues that sync instead of starting a new one, so the cooldown does not
-# drop the later requests.
-SYNC_BATCH_WINDOW = 120
-# Matches the iOS app's 5000-number cap, across every request of one sync.
-MAX_CONTACTS_PER_SYNC = 5000
+# A request that arrives within this many seconds of the previous request of an
+# unfinished sync continues it instead of starting a new one, so the cooldown
+# does not drop the later requests. Equal to the cooldown, so a request that is
+# too late to continue a sync is never also too early to start one.
+SYNC_BATCH_WINDOW = SYNC_COOLDOWN
+# Across every request of one sync. Installed builds stop reading contacts once
+# past 5000 numbers but finish the contact that crossed it, so allow some slack.
+MAX_CONTACTS_PER_SYNC = 6000
+
+
+def _digits(phone: str) -> str:
+    """A number as the iOS app hashes it: its raw string reduced to digits.
+
+    From the raw string, not the normalized number: the app also hashes numbers
+    the server rejects as invalid.
+    """
+    return "".join(ch for ch in phone if ch.isnumeric())
+
+
+def _client_list_hash(digit_strings: list[str]) -> str:
+    """contacts_hash as ``ContactSyncManager`` computes it: SHA-256 of the
+    digits-only numbers, sorted and comma-joined."""
+    return hashlib.sha256(",".join(sorted(digit_strings)).encode()).hexdigest()
 
 
 class ContactCreate(BaseModel):
@@ -138,7 +163,9 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
 
     A request that carries contacts_hash completes a sync; a request without it
     is one part of a larger sync that a later request completes. Contacts the
-    completed sync did not carry are un-whitelisted only when it completes.
+    sync did not carry are un-whitelisted only when it completes and the numbers
+    the server received hash to contacts_hash, proving none of its requests was
+    lost, rejected or failed.
 
     Optimized with server-side hash: if a sync arrives as one request with the
     same contacts_hash as what's stored, it is skipped (0 Firestore writes).
@@ -153,10 +180,15 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
     now = time.time()
     completes_sync = bool(body.contacts_hash)
 
-    sync_id = contractor.get("contact_sync_id") or ""
-    sync_contacts = contractor.get("contact_sync_contacts") or 0
-    last_request_at = contractor.get("contact_sync_last_request_at") or 0
-    if not sync_id or now - last_request_at > SYNC_BATCH_WINDOW:
+    try:
+        open_sync = await get_open_contact_sync(body.contractor_id)
+    except Exception as e:  # noqa: BLE001 - fail the request; the app uploads again later
+        logger.error(f"Open contact sync read failed for {body.contractor_id}: {type(e).__name__}")
+        return {"status": "error", "synced": 0, "removed": 0}
+
+    sync_id = open_sync.get("sync_id") or ""
+    received = list(open_sync.get("phones") or [])
+    if not sync_id or now - (open_sync.get("last_request_at") or 0) > SYNC_BATCH_WINDOW:
         # This request starts a new sync.
         last_sync = contractor.get("last_sync_at", 0)
         if now - last_sync < SYNC_COOLDOWN:
@@ -164,57 +196,57 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
             logger.info(f"Bulk sync rate limited for {body.contractor_id}: retry in {remaining}s")
             return {"status": "rate_limited", "retry_after_seconds": remaining}
 
-        # Hash check: skip sync if contacts haven't changed
-        if completes_sync and body.contacts_hash == contractor.get("contacts_hash", ""):
+        # Hash check: skip sync if contacts haven't changed. Only a hash this code
+        # verified counts; the contacts_hash field written before it was also
+        # stored for lists the server never fully received.
+        if completes_sync and body.contacts_hash == contractor.get("contacts_list_hash", ""):
             logger.info(f"Bulk sync skipped for {body.contractor_id}: hash match")
             return {"status": "skipped", "reason": "no_changes"}
 
         sync_id = secrets.token_hex(8)
-        sync_contacts = 0
+        received = []
 
-    sync_contacts += len(body.contacts)
-    if sync_contacts > MAX_CONTACTS_PER_SYNC:
-        # Keep the over-cap count on the open sync so every later request of it,
-        # including the one that would sweep, is rejected too: a sweep after a
-        # dropped request would un-whitelist the dropped contacts.
-        await update_contractor(body.contractor_id, {
-            "last_sync_at": now,
-            "contact_sync_id": sync_id,
-            "contact_sync_contacts": sync_contacts,
-            "contact_sync_last_request_at": now,
-        })
+    if len(received) + len(body.contacts) > MAX_CONTACTS_PER_SYNC:
         logger.warning(f"Bulk sync rejected for {body.contractor_id}: over {MAX_CONTACTS_PER_SYNC} contacts")
         return {"status": "rejected", "reason": "too_many_contacts"}
+    received += [_digits(c.phone) for c in body.contacts]
+    complete = completes_sync and _client_list_hash(received) == body.contacts_hash
 
     contacts_data = [{"name": c.name, "phone": c.phone} for c in body.contacts]
     result = await bulk_sync_contacts(
         body.contractor_id,
         contacts_data,
         sync_id=sync_id,
-        sweep=completes_sync,
+        sweep=complete,
         default_region=(contractor.get("country_code") or "US").upper(),
     )
     failed = "error" in result
 
-    # Persist the sync's progress, and its hash once it completes
     updates = {"last_sync_at": now}
-    if completes_sync:
-        updates.update({
-            "contact_sync_id": "",
-            "contact_sync_contacts": 0,
-            "contact_sync_last_request_at": 0,
-        })
-        if not failed:
-            updates["contacts_hash"] = body.contacts_hash
-    else:
-        updates.update({
-            "contact_sync_id": sync_id,
-            "contact_sync_contacts": sync_contacts,
-            "contact_sync_last_request_at": now,
-        })
+    if complete and not failed:
+        updates["contacts_list_hash"] = body.contacts_hash
     await update_contractor(body.contractor_id, updates)
+
+    # Record only numbers that were written: a request that failed leaves the
+    # received list short, so this sync can no longer prove it is complete.
+    try:
+        if completes_sync:
+            await clear_open_contact_sync(body.contractor_id)
+        elif not failed:
+            await save_open_contact_sync(body.contractor_id, {
+                "sync_id": sync_id,
+                "phones": received,
+                "last_request_at": now,
+            })
+    except Exception as e:  # noqa: BLE001 - an unrecorded request only stops this sync's sweep
+        logger.error(f"Open contact sync write failed for {body.contractor_id}: {type(e).__name__}")
 
     if failed:
         return {"status": "error", "synced": 0, "removed": 0}
+    if completes_sync and not complete:
+        logger.warning(
+            f"Contact sync for {body.contractor_id} ended without its full list "
+            f"({len(received)} numbers received); kept existing whitelist"
+        )
     logger.info(f"Bulk sync request for {body.contractor_id} (completes sync: {completes_sync}): {result}")
     return {"status": "ok", **result}

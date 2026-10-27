@@ -400,3 +400,9 @@ def test_server_hash_matches_the_app_hash():
 
     assert contacts_api._client_list_hash(digits) == _app_hash(numbers)
     assert contacts_api._client_list_hash(list(reversed(digits))) == _app_hash(numbers)
+
+    # Same vector as ContactSyncUploadTests.testListHashMatchesTheServer (iOS).
+    ios_vector = ["(202) 555-0143", "+1 212-555-0100", "415.555.0199", "(202) 555-0143"]
+    assert contacts_api._client_list_hash([contacts_api._digits(n) for n in ios_vector]) == (
+        "0336923ab55bbd2c9c60a38d2e5130f8c95dbc13a8f482bbacc3950d769c3b61"
+    )

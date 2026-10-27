@@ -47,7 +47,7 @@ def _e164(number: str) -> str:
 
 def _app_hash(numbers: list[str]) -> str:
     """ContactSyncManager's contacts_hash: sorted digits-only numbers, comma-joined."""
-    digits = sorted("".join(filter(str.isdigit, n)) for n in numbers)
+    digits = sorted("".join(filter(str.isnumeric, n)) for n in numbers)  # Swift isNumber
     return hashlib.sha256(",".join(digits).encode()).hexdigest()
 
 
@@ -158,7 +158,11 @@ def env(monkeypatch):
         doc = contractors.get(contractor_id)
         return dict(doc) if doc is not None else None
 
+    refuse = SimpleNamespace(update=lambda updates: False)
+
     async def update_contractor(contractor_id, updates):
+        if refuse.update(updates):
+            return False  # e.g. held by a number release
         contractors[contractor_id].update(updates)
         return True
 
@@ -167,7 +171,7 @@ def env(monkeypatch):
     monkeypatch.setattr("app.db.contractors.update_contractor", update_contractor)
     monkeypatch.setattr(contacts_api, "require_contractor_access", lambda *_a, **_k: None)
     monkeypatch.setattr(contacts_api, "time", SimpleNamespace(time=lambda: clock["now"]))
-    return SimpleNamespace(fs=fs, contractor=contractors[CID], clock=clock)
+    return SimpleNamespace(fs=fs, contractor=contractors[CID], clock=clock, refuse=refuse)
 
 
 async def _post(env, numbers: list[str], *, contacts_hash: str = "", at: float) -> dict:
@@ -347,6 +351,61 @@ async def test_a_hash_stored_before_this_fix_never_skips_a_sync(env):
 
 
 @pytest.mark.asyncio
+async def test_a_list_at_the_apps_cap_never_removes_contacts(env, monkeypatch):
+    # The app stops reading at its cap; the numbers past it are still on the phone.
+    numbers = _numbers(450)
+    await _installed_app_upload(env, numbers, start=START)
+    monkeypatch.setattr(contacts_api, "APP_CONTACT_CAP", 400)
+
+    capped = numbers[:400]
+    responses = await _installed_app_upload(env, capped, start=START + HOUR)
+
+    assert responses[-1] == {"status": "ok", "synced": 200, "removed": 0}
+    assert _whitelisted(env) == _all(numbers)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_first_request_does_not_drop_the_rest_of_the_sync(env):
+    numbers = _numbers(450)
+    first, middle, last = _chunks(numbers)
+
+    env.fs.fail_commits = True
+    statuses = [(await _post(env, first, at=START))["status"]]
+    env.fs.fail_commits = False
+    statuses.append((await _post(env, middle, at=START + 1))["status"])
+    statuses.append((await _post(env, last, contacts_hash=_app_hash(numbers), at=START + 2))["status"])
+
+    assert statuses == ["error", "ok", "ok"]
+    assert _whitelisted(env) == _all(middle + last)
+    assert not env.contractor.get("contacts_list_hash")
+
+
+@pytest.mark.asyncio
+async def test_a_sync_stops_when_the_stored_hash_cannot_be_voided(env):
+    numbers = _numbers(50)
+    await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+    commits = env.fs.commits
+    env.refuse.update = lambda updates: updates == {"contacts_list_hash": ""}
+
+    response = await _post(env, _numbers(60), contacts_hash=_app_hash(_numbers(60)), at=START + HOUR)
+
+    assert response == {"status": "error", "synced": 0, "removed": 0}
+    assert env.fs.commits == commits
+
+
+@pytest.mark.asyncio
+async def test_a_lost_hash_save_cannot_leave_a_stale_hash(env):
+    original = _numbers(50)
+    await _post(env, original, contacts_hash=_app_hash(original), at=START)
+    env.refuse.update = lambda updates: "last_sync_at" in updates
+
+    changed = original[:-1]
+    await _post(env, changed, contacts_hash=_app_hash(changed), at=START + HOUR)
+
+    assert not env.contractor.get("contacts_list_hash")
+
+
+@pytest.mark.asyncio
 async def test_an_unfinished_sync_voids_the_stored_hash(env):
     # Codex review: a verified hash must not survive writes that change the whitelist.
     original = _numbers(250)
@@ -397,6 +456,16 @@ async def test_local_numbers_use_the_owners_country(env):
     assert response["synced"] == 1
     contact = await contacts_db.get_contact("+5511987654321", contractor_id=CID)
     assert contact["is_whitelisted"] is True
+
+
+@pytest.mark.asyncio
+async def test_local_numbers_follow_the_owners_phone_first(env):
+    env.contractor["owner_phone"] = "+5511912345678"  # stored country_code stays US
+    numbers = ["(11) 98765-4321"]
+
+    await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert (await contacts_db.get_contact("+5511987654321", contractor_id=CID))["is_whitelisted"] is True
 
 
 @pytest.mark.asyncio

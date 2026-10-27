@@ -122,16 +122,23 @@ async def get_open_contact_sync(contractor_id: str) -> dict:
     Holds the sync's id, the digits of every number its requests delivered so
     far and the time of its last request. Raises on Firestore errors.
     """
-    doc = _open_contact_sync_ref(get_firestore_client(), contractor_id).get()
-    return doc.to_dict() if doc.exists else {}
+    def _read() -> dict:
+        doc = _open_contact_sync_ref(get_firestore_client(), contractor_id).get()
+        return doc.to_dict() if doc.exists else {}
+
+    return await asyncio.to_thread(_read)
 
 
 async def save_open_contact_sync(contractor_id: str, state: dict) -> None:
-    _open_contact_sync_ref(get_firestore_client(), contractor_id).set(state)
+    await asyncio.to_thread(
+        lambda: _open_contact_sync_ref(get_firestore_client(), contractor_id).set(state)
+    )
 
 
 async def clear_open_contact_sync(contractor_id: str) -> None:
-    _open_contact_sync_ref(get_firestore_client(), contractor_id).delete()
+    await asyncio.to_thread(
+        lambda: _open_contact_sync_ref(get_firestore_client(), contractor_id).delete()
+    )
 
 
 async def bulk_sync_contacts(
@@ -149,10 +156,23 @@ async def bulk_sync_contacts(
     ``sync_id``. Only the request that completes the sync passes ``sweep=True``,
     which un-whitelists previously synced contacts that this sync did not carry.
     Numbers without a country code are read as ``default_region`` numbers, the
-    owner's country. Uses Firestore batch writes (max 500 per batch).
+    owner's country. Uses Firestore batch writes (max 500 per batch), off the
+    event loop: a 5000-number upload would otherwise stall live calls.
 
     Returns {"synced": N, "removed": N}.
     """
+    return await asyncio.to_thread(
+        _bulk_sync_contacts_blocking, contractor_id, contacts, sync_id, sweep, default_region,
+    )
+
+
+def _bulk_sync_contacts_blocking(
+    contractor_id: str,
+    contacts: list[dict],
+    sync_id: str,
+    sweep: bool,
+    default_region: str,
+) -> dict:
     try:
         db = get_firestore_client()
         col_ref = _contacts_ref(db, contractor_id)

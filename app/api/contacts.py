@@ -4,11 +4,13 @@ import hashlib
 import secrets
 import time
 
+import phonenumbers
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from typing import Optional
 
 from app.middleware.auth import verify_api_token, require_contractor_access
+from app.services.country_policy import is_recognized_country, resolve_service_binding
 from app.db.contacts import (
     bulk_sync_contacts,
     clear_open_contact_sync,
@@ -38,6 +40,10 @@ SYNC_BATCH_WINDOW = SYNC_COOLDOWN
 # Across every request of one sync. Installed builds stop reading contacts once
 # past 5000 numbers but finish the contact that crossed it, so allow some slack.
 MAX_CONTACTS_PER_SYNC = 6000
+# The app stops reading the address book at this many numbers. A list that
+# reached it may be cut short, so it never un-whitelists anything: the numbers
+# past the cut are still on the phone.
+APP_CONTACT_CAP = 5000
 
 
 def _digits(phone: str) -> str:
@@ -53,6 +59,27 @@ def _client_list_hash(digit_strings: list[str]) -> str:
     """contacts_hash as ``ContactSyncManager`` computes it: SHA-256 of the
     digits-only numbers, sorted and comma-joined."""
     return hashlib.sha256(",".join(sorted(digit_strings)).encode()).hexdigest()
+
+
+def _owner_region(contractor: dict) -> str:
+    """The owner's country, for numbers saved without a country code.
+
+    The country of the owner's own phone, whose address book this is; then the
+    service country as Settings resolves it (service binding, then
+    country_code); then US.
+    """
+    owner_region = None
+    try:
+        owner = phonenumbers.parse(contractor.get("owner_phone") or "", None)
+        if phonenumbers.is_valid_number(owner):
+            owner_region = phonenumbers.region_code_for_number(owner)
+    except phonenumbers.NumberParseException:
+        pass
+    binding = resolve_service_binding(contractor) or {}
+    for code in (owner_region, binding.get("country_code"), contractor.get("country_code")):
+        if isinstance(code, str) and is_recognized_country(code.strip().upper()):
+            return code.strip().upper()
+    return "US"
 
 
 class ContactCreate(BaseModel):
@@ -209,8 +236,20 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
     if len(received) + len(body.contacts) > MAX_CONTACTS_PER_SYNC:
         logger.warning(f"Bulk sync rejected for {body.contractor_id}: over {MAX_CONTACTS_PER_SYNC} contacts")
         return {"status": "rejected", "reason": "too_many_contacts"}
-    received += [_digits(c.phone) for c in body.contacts]
-    complete = completes_sync and _client_list_hash(received) == body.contacts_hash
+    sent = received + [_digits(c.phone) for c in body.contacts]
+    complete = (
+        completes_sync
+        and len(sent) < APP_CONTACT_CAP
+        and _client_list_hash(sent) == body.contacts_hash
+    )
+
+    # The stored hash must describe the whitelist exactly, and this request is
+    # about to change it. Void it first: if a later write fails, a stale hash
+    # would let an unchanged list skip the sync that repairs it.
+    if contractor.get("contacts_list_hash"):
+        if not await update_contractor(body.contractor_id, {"contacts_list_hash": ""}):
+            logger.error(f"Bulk sync aborted for {body.contractor_id}: could not void contacts_list_hash")
+            return {"status": "error", "synced": 0, "removed": 0}
 
     contacts_data = [{"name": c.name, "phone": c.phone} for c in body.contacts]
     result = await bulk_sync_contacts(
@@ -218,27 +257,25 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
         contacts_data,
         sync_id=sync_id,
         sweep=complete,
-        default_region=(contractor.get("country_code") or "US").upper(),
+        default_region=_owner_region(contractor),
     )
     failed = "error" in result
 
-    # The stored hash must describe the whitelist exactly. Any other request
-    # may have added numbers (even a failed write can commit part of a batch),
-    # so it voids the hash until a verified sync replaces it.
-    await update_contractor(body.contractor_id, {
-        "last_sync_at": now,
-        "contacts_list_hash": body.contacts_hash if complete and not failed else "",
-    })
+    updates = {"last_sync_at": now}
+    if complete and not failed:
+        updates["contacts_list_hash"] = body.contacts_hash
+    await update_contractor(body.contractor_id, updates)
 
-    # Record only numbers that were written: a request that failed leaves the
-    # received list short, so this sync can no longer prove it is complete.
+    # Keep the sync open after a failed request, so its later requests still
+    # continue it, but record only numbers that were written: a failed request
+    # leaves the received list short, so the sync can't verify and removes nothing.
     try:
         if completes_sync:
             await clear_open_contact_sync(body.contractor_id)
-        elif not failed:
+        else:
             await save_open_contact_sync(body.contractor_id, {
                 "sync_id": sync_id,
-                "phones": received,
+                "phones": received if failed else sent,
                 "last_request_at": now,
             })
     except Exception as e:  # noqa: BLE001 - an unrecorded request only stops this sync's sweep
@@ -248,8 +285,8 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
         return {"status": "error", "synced": 0, "removed": 0}
     if completes_sync and not complete:
         logger.warning(
-            f"Contact sync for {body.contractor_id} ended without its full list "
-            f"({len(received)} numbers received); kept existing whitelist"
+            f"Contact sync for {body.contractor_id} ended without a verified full list "
+            f"({len(sent)} numbers received); kept existing whitelist"
         )
     logger.info(f"Bulk sync request for {body.contractor_id} (completes sync: {completes_sync}): {result}")
     return {"status": "ok", **result}

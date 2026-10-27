@@ -247,6 +247,14 @@ def _staging_health_check_script(workflow: str) -> str:
     )
 
 
+def _production_health_check_script(workflow: str) -> str:
+    return next(
+        block
+        for block in _workflow_run_blocks(workflow)
+        if "PRODUCTION_TRAFFIC=$(gcloud run services describe" in block
+    )
+
+
 def _rollback_promo_containment_script(workflow: str) -> str:
     return next(
         block
@@ -406,6 +414,161 @@ def test_production_deploy_rejects_candidate_override():
 
     assert "Production does not accept candidate_sha" in production_job
     assert 'test -z "$CANDIDATE_SHA"' in production_job
+
+
+def test_production_deploy_verifies_tagged_candidate_then_routes_to_latest():
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+    production_job = workflow.split("deploy-production:", 1)[1]
+    production_deploy = production_job.split("Deploy to Cloud Run (Production)", 1)[1].split(
+        "Health check", 1
+    )[0]
+
+    assert "--tag candidate" in production_deploy
+    assert "--no-traffic" in production_deploy
+    assert 'entry.get("tag") == "candidate"' in production_job
+    assert '"$CANDIDATE_TAG_URL/health"' in production_job
+    assert "--to-latest" in production_job
+    # Naming a revision would re-pin traffic, which is how deploys got stuck.
+    assert "--to-revisions" not in production_job
+    promote = production_job.index('gcloud run services update-traffic "$PRODUCTION_SERVICE"')
+    assert production_job.index('test "$CANDIDATE_SHA" = "$DEPLOY_SHA"') < promote
+    assert production_job.index('test "$LATEST_READY_REVISION" = "$CANDIDATE_TAG_REVISION"') < promote
+    assert promote < production_job.index('"$PROD_URL/health"')
+
+
+def _run_production_health_check(
+    tmp_path: Path, monkeypatch, *, traffic: str, latest_ready: str, served_sha: str
+):
+    workflow = Path(".github/workflows/deploy.yml").read_text()
+    script = _production_health_check_script(workflow)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    traffic_updated = tmp_path / "traffic-updated"
+
+    gcloud = fake_bin / "gcloud"
+    gcloud.write_text(
+        """#!/bin/sh
+if [ "$3" = "describe" ]; then
+  case "$*" in
+    *"json(status.traffic)"*) printf '%s\\n' "$FAKE_TRAFFIC" ;;
+    *"latestReadyRevisionName"*) printf '%s\\n' "$FAKE_LATEST_READY" ;;
+    *"status.url"*) printf '%s\\n' "https://production.example" ;;
+  esac
+  exit 0
+fi
+if [ "$3" = "update-traffic" ]; then
+  printf '%s\\n' "$*" > "$UPDATE_TRAFFIC_MARKER"
+fi
+"""
+    )
+    gcloud.chmod(0o755)
+
+    curl = fake_bin / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "printf '{\"deploy_sha\":\"%s\"}\\n' \"$FAKE_SERVED_SHA\"\n"
+    )
+    curl.chmod(0o755)
+
+    sleep = fake_bin / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    (fake_bin / "python").symlink_to(sys.executable)
+
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("GCP_PROJECT_ID", "project")
+    monkeypatch.setenv("GCP_REGION", "region")
+    monkeypatch.setenv("PRODUCTION_SERVICE", "service")
+    monkeypatch.setenv("DEPLOY_SHA", "expected")
+    monkeypatch.setenv("FAKE_TRAFFIC", traffic)
+    monkeypatch.setenv("FAKE_LATEST_READY", latest_ready)
+    monkeypatch.setenv("FAKE_SERVED_SHA", served_sha)
+    monkeypatch.setenv("UPDATE_TRAFFIC_MARKER", str(traffic_updated))
+
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, traffic_updated
+
+
+# Traffic as it stood on 2026-10-26: 100% pinned to an old revision by name,
+# with the new deploy present only as the tagged 0% candidate.
+PINNED_TRAFFIC_WITH_CANDIDATE = (
+    '{"status":{"traffic":['
+    '{"percent":100,"revisionName":"old-pinned-revision"},'
+    '{"tag":"candidate","url":"https://candidate.example","revisionName":"candidate-revision"}'
+    "]}}"
+)
+
+
+def test_production_deploy_unpins_traffic_after_verifying_candidate(tmp_path: Path, monkeypatch):
+    result, traffic_updated = _run_production_health_check(
+        tmp_path,
+        monkeypatch,
+        traffic=PINNED_TRAFFIC_WITH_CANDIDATE,
+        latest_ready="candidate-revision",
+        served_sha="expected",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--to-latest" in traffic_updated.read_text()
+    assert "Production health verified for deploy SHA expected" in result.stdout
+
+
+def test_production_candidate_sha_mismatch_never_updates_traffic(tmp_path: Path, monkeypatch):
+    result, traffic_updated = _run_production_health_check(
+        tmp_path,
+        monkeypatch,
+        traffic=PINNED_TRAFFIC_WITH_CANDIDATE,
+        latest_ready="candidate-revision",
+        served_sha="mismatch",
+    )
+
+    assert result.returncode != 0
+    assert "Tagged production candidate deploy SHA mismatch" in result.stdout
+    assert not traffic_updated.exists()
+
+
+def test_production_never_routes_latest_when_it_is_not_the_candidate(tmp_path: Path, monkeypatch):
+    result, traffic_updated = _run_production_health_check(
+        tmp_path,
+        monkeypatch,
+        traffic=PINNED_TRAFFIC_WITH_CANDIDATE,
+        latest_ready="someone-elses-newer-revision",
+        served_sha="expected",
+    )
+
+    assert result.returncode != 0
+    assert "Latest ready production revision is not the verified candidate" in result.stdout
+    assert not traffic_updated.exists()
+
+
+def test_production_missing_candidate_tag_never_updates_traffic(tmp_path: Path, monkeypatch):
+    result, traffic_updated = _run_production_health_check(
+        tmp_path,
+        monkeypatch,
+        traffic='{"status":{"traffic":[{"percent":100,"revisionName":"old-pinned-revision"}]}}',
+        latest_ready="candidate-revision",
+        served_sha="expected",
+    )
+
+    assert result.returncode != 0
+    assert "Missing tagged production candidate URL" in result.stdout
+    assert not traffic_updated.exists()
+
+
+def test_rollback_redeploy_routes_to_latest_after_deploying():
+    workflow = Path(".github/workflows/rollback.yml").read_text()
+    redeploy = workflow.split("Rollback via git tag redeploy", 1)[1].split(
+        "Health check after rollback", 1
+    )[0]
+
+    assert redeploy.index('gcloud run deploy "$SERVICE"') < redeploy.index(
+        'gcloud run services update-traffic "$SERVICE"'
+    ) < redeploy.index("--to-latest")
 
 
 def test_deploy_workflow_defaults_observation_shadow_off_and_removes_key():
@@ -601,10 +764,10 @@ def test_release_health_checks_retry_transient_failures_with_timeouts():
         for path in (".github/workflows/deploy.yml", ".github/workflows/rollback.yml")
     )
 
-    assert workflows.count("--retry 5") == 4
-    assert workflows.count("--retry-all-errors") == 4
-    assert workflows.count("--connect-timeout 5") == 4
-    assert workflows.count("--max-time 30") == 4
+    assert workflows.count("--retry 5") == 5
+    assert workflows.count("--retry-all-errors") == 5
+    assert workflows.count("--connect-timeout 5") == 5
+    assert workflows.count("--max-time 30") == 5
 
 
 def test_temporary_gcp_credentials_are_excluded_from_build_contexts():

@@ -207,6 +207,12 @@ jobs:
             --service-account "$RUNTIME_SERVICE_ACCOUNT" \
             --build-service-account "$BUILD_SERVICE_ACCOUNT" \
             --update-env-vars "$ENV_VARS"
+          # A traffic-split rollback pins a revision by name, and a pinned revision
+          # keeps the redeployed one from serving. Route to LATEST explicitly.
+          gcloud run services update-traffic "$SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --to-latest
 
       - name: Health check after rollback
         run: |

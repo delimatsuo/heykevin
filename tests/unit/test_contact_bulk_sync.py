@@ -291,7 +291,7 @@ async def test_a_lost_middle_request_leaves_every_contact_whitelisted(env):
 
     assert final["removed"] == 0
     assert _whitelisted(env) == _all(numbers)
-    assert env.contractor["contacts_list_hash"] == "previous"
+    assert not env.contractor.get("contacts_list_hash")
 
 
 @pytest.mark.asyncio
@@ -307,7 +307,7 @@ async def test_a_pause_longer_than_the_window_never_removes_the_earlier_requests
     assert final["status"] == "ok"
     assert final["removed"] == 0
     assert _whitelisted(env) == _all(numbers)
-    assert "contacts_list_hash" not in env.contractor
+    assert not env.contractor.get("contacts_list_hash")
 
 
 @pytest.mark.asyncio
@@ -344,6 +344,22 @@ async def test_a_hash_stored_before_this_fix_never_skips_a_sync(env):
 
     assert response["status"] == "ok"
     assert _whitelisted(env) == _all(numbers)
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_sync_voids_the_stored_hash(env):
+    # Codex review: a verified hash must not survive writes that change the whitelist.
+    original = _numbers(250)
+    await _installed_app_upload(env, original, start=START)
+    extra = _numbers(251)[-1]
+    await _post(env, [extra], at=START + HOUR)  # a sync that never completes
+
+    response = await _post(env, original, contacts_hash=_app_hash(original), at=START + 2 * HOUR)
+
+    assert response["status"] == "ok"
+    assert response["removed"] == 1
+    assert _whitelisted(env) == _all(original)
+    assert env.contractor["contacts_list_hash"] == _app_hash(original)
 
 
 @pytest.mark.asyncio
@@ -391,7 +407,7 @@ async def test_a_failed_write_does_not_record_the_hash(env):
     response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
 
     assert response == {"status": "error", "synced": 0, "removed": 0}
-    assert "contacts_list_hash" not in env.contractor
+    assert not env.contractor.get("contacts_list_hash")
 
 
 def test_server_hash_matches_the_app_hash():

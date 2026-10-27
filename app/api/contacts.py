@@ -222,10 +222,13 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
     )
     failed = "error" in result
 
-    updates = {"last_sync_at": now}
-    if complete and not failed:
-        updates["contacts_list_hash"] = body.contacts_hash
-    await update_contractor(body.contractor_id, updates)
+    # The stored hash must describe the whitelist exactly. Any other request
+    # may have added numbers (even a failed write can commit part of a batch),
+    # so it voids the hash until a verified sync replaces it.
+    await update_contractor(body.contractor_id, {
+        "last_sync_at": now,
+        "contacts_list_hash": body.contacts_hash if complete and not failed else "",
+    })
 
     # Record only numbers that were written: a request that failed leaves the
     # received list short, so this sync can no longer prove it is complete.

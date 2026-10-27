@@ -174,6 +174,28 @@ enum AppleLookupResponseParser {
     }
 }
 
+enum ContactSyncUploadResult: Equatable, Sendable {
+    case synced(synced: Int, removed: Int)
+    case unchanged
+    case rateLimited
+    case failed
+}
+
+enum ContactSyncResponseParser {
+    static func parse(data: Data, response: URLResponse) -> ContactSyncUploadResult {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["error"] == nil else { return .failed }
+        switch json["status"] as? String {
+        case "ok":
+            return .synced(synced: json["synced"] as? Int ?? 0, removed: json["removed"] as? Int ?? 0)
+        case "skipped": return .unchanged
+        case "rate_limited": return .rateLimited
+        default: return .failed
+        }
+    }
+}
+
 enum DeviceRegistrationResponseParser {
     static func succeeded(data: Data, response: URLResponse) -> Bool {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -370,6 +392,15 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 90
+        return URLSession(configuration: config)
+    }()
+
+    private lazy var contactSyncSession: URLSession = {
+        // One upload carries up to 5000 numbers and the server writes them in
+        // batches; the default 15-second resource budget is too short for that.
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 120
         return URLSession(configuration: config)
     }()
 
@@ -1205,36 +1236,28 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
 
     // MARK: - Bulk Contact Sync
 
-    func bulkSyncContacts(contractorId: String, contacts: [(name: String, phone: String)], contactsHash: String = "") async -> (synced: Int, removed: Int) {
+    func bulkSyncContacts(contractorId: String, contacts: [(name: String, phone: String)], contactsHash: String) async -> ContactSyncUploadResult {
         do {
             let url = URL(string: "\(baseURL)/api/contacts/bulk-sync")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 30
 
             let contactDicts = contacts.map { ["name": $0.name, "phone": $0.phone] }
-            var body: [String: Any] = [
+            let body: [String: Any] = [
                 "contacts": contactDicts,
                 "contractor_id": contractorId,
+                "contacts_hash": contactsHash,
             ]
-            if !contactsHash.isEmpty {
-                body["contacts_hash"] = contactsHash
-            }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             authorize(&request)
 
-            let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200,
-               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                let synced = json["synced"] as? Int ?? 0
-                let removed = json["removed"] as? Int ?? 0
-                return (synced, removed)
-            }
+            let (data, response) = try await (customSession ?? contactSyncSession).data(for: request)
+            return ContactSyncResponseParser.parse(data: data, response: response)
         } catch {
             debugLog("Bulk sync failed: \(error.localizedDescription)")
+            return .failed
         }
-        return (0, 0)
     }
 
     // MARK: - Services

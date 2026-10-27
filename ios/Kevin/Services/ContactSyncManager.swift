@@ -8,7 +8,7 @@ private func debugLog(_ message: String) {
     #endif
 }
 
-enum SyncResult {
+enum SyncResult: Equatable {
     case success(synced: Int, removed: Int)
     case permissionDenied
     case rateLimited
@@ -19,8 +19,14 @@ actor ContactSyncManager {
     static let shared = ContactSyncManager()
 
     private let store = CNContactStore()
-    private let lastSyncHashKey = "lastContactSyncHash"
-    private let lastSyncAttemptKey = "lastContactSyncAttemptAt"
+    // v2: builds before this one cached the hash after uploading in 200-number
+    // requests that the server mostly dropped, so that hash does not prove the
+    // server has the full list. New keys make every device upload once more,
+    // without waiting out the 24-hour window an earlier build started.
+    static let lastSyncHashKey = "lastContactSyncHash.v2"
+    static let lastSyncAttemptKey = "lastContactSyncAttemptAt.v2"
+    /// The most numbers one upload carries; the server accepts no more per request.
+    static let maxContacts = 5000
     private let permissionDeniedKey = "contactsPermissionDenied"
     private let minSyncInterval: TimeInterval = 300 // 5 minutes
     private let automaticSyncInterval: TimeInterval = 24 * 3600
@@ -56,7 +62,7 @@ actor ContactSyncManager {
 
             // Persist the automatic sync window so cold launches do not
             // repeatedly enumerate the entire address book.
-            let persistedLast = UserDefaults.standard.double(forKey: lastSyncAttemptKey)
+            let persistedLast = UserDefaults.standard.double(forKey: Self.lastSyncAttemptKey)
             if persistedLast > 0,
                now.timeIntervalSince(Date(timeIntervalSince1970: persistedLast)) < automaticSyncInterval {
                 debugLog("Contact sync: automatic sync recently completed")
@@ -89,7 +95,7 @@ actor ContactSyncManager {
         // Fetch contacts with phone numbers — cap at 5000 to prevent memory issues
         let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey] as [CNKeyDescriptor]
         var contacts: [(name: String, phone: String)] = []
-        let maxContacts = 5000
+        let maxContacts = Self.maxContacts
 
         do {
             let request = CNContactFetchRequest(keysToFetch: keys)
@@ -111,51 +117,83 @@ actor ContactSyncManager {
             return .error("Contact fetch failed: \(error.localizedDescription)")
         }
 
+        let (result, completed) = await Self.upload(contacts, force: force, defaults: .standard) { list, hash in
+            await APIClient.shared.bulkSyncContacts(contractorId: contractorId, contacts: list, contactsHash: hash)
+        }
+        if completed {
+            lastSyncTime = Date()
+        }
+        return result
+    }
+
+    typealias Uploader = (_ contacts: [(name: String, phone: String)], _ hash: String) async -> ContactSyncUploadResult
+
+    /// Everything after reading the address book: cap the list, skip it if this
+    /// exact list already reached the server, otherwise upload it, and remember
+    /// it only when the server confirms it holds it. `completed` says whether
+    /// the attempt was recorded, which starts the automatic-sync window.
+    static func upload(
+        _ contacts: [(name: String, phone: String)],
+        force: Bool,
+        defaults: UserDefaults,
+        uploader: Uploader
+    ) async -> (result: SyncResult, completed: Bool) {
+        // A contact's numbers are added together, so the last one can overshoot.
+        let contacts = Array(contacts.prefix(maxContacts))
+        let recordAttempt = { defaults.set(Date().timeIntervalSince1970, forKey: lastSyncAttemptKey) }
+
         guard !contacts.isEmpty else {
-            recordSyncAttempt()
-            return .success(synced: 0, removed: 0)
+            recordAttempt()
+            return (.success(synced: 0, removed: 0), true)
         }
 
-        // Compute hash for server-side comparison (normalize to digits-only)
+        // Skip the upload if this exact list already reached the server. A
+        // manual sync always uploads; the server skips an unchanged list.
+        let hash = listHash(contacts)
+        if !force, hash == defaults.string(forKey: lastSyncHashKey) {
+            debugLog("Contact sync: hash unchanged locally, skipping")
+            recordAttempt()
+            return (.success(synced: 0, removed: 0), true)
+        }
+
+        // Send the whole list in one request. The server un-whitelists contacts
+        // missing from a complete list, so splitting it would drop contacts.
+        let outcome = await uploader(contacts, hash)
+        debugLog("Contact sync finished: \(outcome)")
+        let (result, serverHasList) = Self.result(for: outcome, uploadedCount: contacts.count)
+        if serverHasList {
+            defaults.set(hash, forKey: lastSyncHashKey)
+            recordAttempt()
+        }
+        return (result, serverHasList)
+    }
+
+    /// The list's contacts_hash, which the server recomputes to verify it holds
+    /// the whole list: SHA-256 of the digits-only numbers, sorted and comma-joined.
+    static func listHash(_ contacts: [(name: String, phone: String)]) -> String {
         let sortedPhones = contacts.map { $0.phone.filter { $0.isNumber } }.sorted()
-        let phoneString = sortedPhones.joined(separator: ",")
-        let hash = SHA256.hash(data: Data(phoneString.utf8))
+        return SHA256.hash(data: Data(sortedPhones.joined(separator: ",").utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
 
-        // Check if hash matches server first (avoids sending full list)
-        let lastHash = UserDefaults.standard.string(forKey: lastSyncHashKey) ?? ""
-        if hash == lastHash {
-            debugLog("Contact sync: hash unchanged locally, skipping")
-            recordSyncAttempt()
-            return .success(synced: 0, removed: 0)
+    /// Maps the server's reply to the caller's result, and says whether the
+    /// server now holds this exact list, so its hash may be cached. A list the
+    /// server did not take is uploaded again on the next sync.
+    static func result(
+        for outcome: ContactSyncUploadResult,
+        uploadedCount: Int
+    ) -> (result: SyncResult, serverHasList: Bool) {
+        switch outcome {
+        case .synced(let synced, let removed):
+            return (.success(synced: synced, removed: removed), true)
+        case .unchanged:
+            return (.success(synced: uploadedCount, removed: 0), true)
+        case .rateLimited:
+            return (.rateLimited, false)
+        case .failed:
+            return (.error("Sync failed"), false)
         }
-
-        // Hash changed — send full list to backend in batches to reduce memory
-        let batchSize = 200
-        var totalSynced = 0
-        var totalRemoved = 0
-
-        for batchStart in stride(from: 0, to: contacts.count, by: batchSize) {
-            let batchEnd = min(batchStart + batchSize, contacts.count)
-            let batch = Array(contacts[batchStart..<batchEnd])
-            let isLastBatch = batchEnd >= contacts.count
-
-            let result = await APIClient.shared.bulkSyncContacts(
-                contractorId: contractorId,
-                contacts: batch,
-                contactsHash: isLastBatch ? hash : ""
-            )
-            totalSynced += result.synced
-            totalRemoved += result.removed
-        }
-
-        // Cache the hash locally
-        UserDefaults.standard.set(hash, forKey: lastSyncHashKey)
-
-        recordSyncAttempt()
-        debugLog("Contact sync complete: synced=\(totalSynced), removed=\(totalRemoved)")
-        return .success(synced: totalSynced, removed: totalRemoved)
     }
 
     /// Request contacts permission (used during onboarding).
@@ -180,11 +218,5 @@ actor ContactSyncManager {
     /// Reset permission denied cache (e.g., if user changes in Settings).
     func resetPermissionCache() {
         UserDefaults.standard.removeObject(forKey: permissionDeniedKey)
-    }
-
-    private func recordSyncAttempt() {
-        let now = Date()
-        lastSyncTime = now
-        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: lastSyncAttemptKey)
     }
 }

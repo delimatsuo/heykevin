@@ -1,7 +1,5 @@
 """Housekeeping races and batch bounds without datastore/provider access."""
 
-import copy
-import hashlib
 import json
 import os
 import time
@@ -17,6 +15,7 @@ os.environ.setdefault("USER_PHONE", "+15555550101")
 import pytest
 
 from app.services import background_maintenance as maintenance
+from tests.fixtures.fake_rtdb import FakeRtdbClient, use_fake_rtdb
 
 
 def test_orphan_staleness_needs_a_timestamp_over_two_hours_old():
@@ -29,79 +28,8 @@ def test_orphan_staleness_needs_a_timestamp_over_two_hours_old():
     assert not maintenance._is_stale({"state_updated_at": True}, 10000)
 
 
-class _FakeRtdb:
-    """RTDB's REST surface under firebase-admin's real Reference.
-
-    ETags change on every write and a PUT or DELETE carrying a stale if-match
-    fails with 412. As on the real server, one without if-match is applied
-    unconditionally (requests drops a None header), so the race tests catch an
-    unconditional delete.
-    """
-
-    def __init__(self, records):
-        self.records = copy.deepcopy(records)
-        self.record_reads = []
-        self.send_etag = True
-        # e.g. a live call refreshing its record mid-cleanup
-        self.before_read = None
-        self.before_write = None
-
-    @staticmethod
-    def _key(url):
-        return url.removeprefix("/active_calls").removesuffix(".json").strip("/")
-
-    def _etag(self, key):
-        value = self.records if not key else self.records.get(key)
-        return '"' + hashlib.sha1(json.dumps(value, sort_keys=True).encode()).hexdigest() + '"'
-
-    def _precondition(self, key, headers):
-        from firebase_admin.exceptions import FailedPreconditionError
-        if self.before_write:
-            hook, self.before_write = self.before_write, None
-            hook(self.records)
-        expected = (headers or {}).get("if-match")
-        if expected is not None and expected != self._etag(key):
-            response = SimpleNamespace(headers={"ETag": self._etag(key)}, json=lambda: self.records.get(key))
-            raise FailedPreconditionError("412 Precondition Failed", http_response=response)
-
-    def body(self, method, url, **kwargs):  # list reads (plain and ordered-by-key pages)
-        assert method == "get"
-        key = self._key(url)
-        return copy.deepcopy(self.records if not key else self.records.get(key))
-
-    def headers_and_body(self, method, url, headers=None, **kwargs):  # get(etag=True)
-        assert method == "get" and headers == {"X-Firebase-ETag": "true"}
-        if self.before_read:
-            hook, self.before_read = self.before_read, None
-            hook(self.records)
-        key = self._key(url)
-        self.record_reads.append(key)
-        response_headers = {"ETag": self._etag(key)} if self.send_etag else {}
-        return response_headers, copy.deepcopy(self.records.get(key))
-
-    def headers(self, method, url, json=None, headers=None, **kwargs):  # set_if_unchanged (transactions)
-        assert method == "put"
-        key = self._key(url)
-        self._precondition(key, headers)
-        self.records[key] = json
-        return {"ETag": self._etag(key)}
-
-    def request(self, method, url, headers=None, **kwargs):
-        assert method == "delete", method
-        key = self._key(url)
-        self._precondition(key, headers)
-        self.records.pop(key, None)
-
-
 def _use_fake_rtdb(monkeypatch, records):
-    from firebase_admin import db as rtdb
-
-    from app.db import cache
-
-    fake = _FakeRtdb(records)
-    monkeypatch.setattr(cache, "_init_firebase", lambda: None)
-    monkeypatch.setattr(rtdb, "reference", lambda path: rtdb.Reference(path=path, client=fake))
-    return fake
+    return use_fake_rtdb(monkeypatch, active_calls=records)["active_calls"]
 
 
 def _calls(now):
@@ -211,7 +139,7 @@ async def test_orphan_cleanup_tolerates_a_call_that_ended_mid_pass(monkeypatch):
 def test_fake_rtdb_refuses_the_old_delete_by_transaction(monkeypatch):
     """firebase-admin's transaction() cannot delete; the fake must reproduce that."""
     from firebase_admin import db as rtdb
-    fake = _FakeRtdb(_calls(time.time()))
+    fake = FakeRtdbClient(_calls(time.time()))
     ref = rtdb.Reference(path="/active_calls/CA_stale", client=fake)
     with pytest.raises(ValueError, match="none"):
         ref.transaction(lambda current: None)

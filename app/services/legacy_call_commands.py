@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import secrets
 import time
 
-from app.db.cache import _init_firebase
+from app.db.cache import _init_firebase, delete_if_unchanged, run_rtdb_transaction
 
 CALL_COMMANDS_PATH = '/call_commands'
 ENRICHED_KEYS = frozenset({'call_sid', 'contractor_id', 'operation_id', 'action', 'claim_nonce'})
@@ -23,7 +23,7 @@ async def _run_legacy_command_transaction(call_sid, transaction_fn):
     validate_call_sid(call_sid)
     _init_firebase()
     from firebase_admin import db
-    return await asyncio.to_thread(db.reference(f'{CALL_COMMANDS_PATH}/{call_sid}').transaction, transaction_fn)
+    return await asyncio.to_thread(run_rtdb_transaction, db.reference(f'{CALL_COMMANDS_PATH}/{call_sid}'), transaction_fn)
 
 
 async def read_legacy_command(call_sid):
@@ -35,9 +35,22 @@ async def read_legacy_command(call_sid):
 
 
 async def delete_legacy_command_conditional(call_sid, expected_snapshot):
-    def txn(current):
-        return None if isinstance(current, dict) and current == expected_snapshot else current
-    return await _run_legacy_command_transaction(call_sid, txn)
+    """Delete the command only while it still equals expected_snapshot; a replacement survives."""
+    from app.services.owner_call_actions import validate_call_sid
+    validate_call_sid(call_sid)
+    _init_firebase()
+    from firebase_admin import db
+    ref = db.reference(f'{CALL_COMMANDS_PATH}/{call_sid}')
+
+    def delete():
+        for _ in range(25):  # firebase-admin's transaction retry budget
+            current, etag = ref.get(etag=True)
+            if not (isinstance(current, dict) and current == expected_snapshot) or not etag:
+                return current  # changed, gone, or no ETag to delete it safely
+            if delete_if_unchanged(ref, etag):
+                return None
+        raise db.TransactionAbortedError('Legacy command delete aborted after failed retries.')
+    return await asyncio.to_thread(delete)
 
 
 def _projection_matches(record, nonce):

@@ -1,6 +1,8 @@
 """Cross-version compatibility tests for legacy 407 and current call arbitration."""
 import asyncio
 from copy import deepcopy
+import hashlib
+import json
 import os
 import threading
 import time
@@ -52,6 +54,10 @@ def fresh_record(**changes):
     return base
 
 
+def _etag_of(value):
+    return '"' + hashlib.sha1(json.dumps(value, sort_keys=True).encode()).hexdigest() + '"'
+
+
 class ThreadSafeRTDBStore:
     def __init__(self, initial_active=None, initial_commands=None):
         self._lock = threading.Lock()
@@ -84,12 +90,27 @@ class ThreadSafeReference:
     def _get_key(self):
         return self.path_parts[1] if len(self.path_parts) > 1 else 'root'
 
-    def get(self):
+    def get(self, etag=False):
         with self.db._lock:
             d = self._get_target_dict()
             key = self._get_key()
             val = d.get(key)
-            return deepcopy(val) if val is not None else None
+            val = deepcopy(val) if val is not None else None
+            return (val, _etag_of(val)) if etag else val
+
+    def delete_if_etag(self, etag):
+        """RTDB's conditional DELETE (if-match), which app.db.cache.delete_if_unchanged sends."""
+        with self.db._lock:
+            d = self._get_target_dict()
+            key = self._get_key()
+            root = self.path_parts[0] if self.path_parts else ''
+            if root == 'call_commands' and self.db.command_retry_with is not None:
+                d[key] = deepcopy(self.db.command_retry_with)  # a concurrent writer wins the race
+                self.db.command_retry_with = None
+            if _etag_of(d.get(key)) != etag:
+                return False
+            d.pop(key, None)
+            return True
 
     def set(self, val):
         with self.db._lock:
@@ -129,9 +150,9 @@ class ThreadSafeReference:
                 res = callback(deepcopy(d.get(key)))
 
             if res is None:
-                d.pop(key, None)
-            else:
-                d[key] = deepcopy(res)
+                # firebase-admin's set_if_unchanged refuses None; a transaction never deletes.
+                raise ValueError('Value must not be none.')
+            d[key] = deepcopy(res)
             return deepcopy(res)
 
 
@@ -142,6 +163,7 @@ def rtdb_env(monkeypatch):
     monkeypatch.setattr('firebase_admin.db.reference', store.reference)
     monkeypatch.setattr(owner_actions, '_init_firebase', lambda: None)
     monkeypatch.setattr(legacy_cmds, '_init_firebase', lambda: None)
+    monkeypatch.setattr(legacy_cmds, 'delete_if_unchanged', lambda ref, etag: ref.delete_if_etag(etag))
     monkeypatch.setattr(owner_actions, 'register_conference', AsyncMock())
     monkeypatch.setattr(owner_actions, '_generate_access_token', lambda contractor_id='': 'token')
     monkeypatch.setattr('app.api.voip._generate_access_token', lambda contractor_id='': 'token')

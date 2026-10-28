@@ -265,6 +265,9 @@ async def _wait_for_embedded_cutover(store, *, fallback: bool) -> None:
             raise
         except Exception as error:
             logger.warning("Background-worker cutover read failed: %s", type(error).__name__)
+            # Name the hold again as soon as reads recover, so the end of
+            # these failures is never mistaken for the end of the drain.
+            polls_since_log = _DRAIN_HOLD_LOG_POLLS
             await asyncio.sleep(5)
             continue
         if ready:

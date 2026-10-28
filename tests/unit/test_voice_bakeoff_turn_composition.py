@@ -122,7 +122,7 @@ _BASELINE_HASHES = {
     # hold a staging cutover drain; routes and workers are unchanged.
     # Voice bakeoff imports and activation remain prohibited.
     "app/main.py":
-        "e367e9421aff5970f017c87f0928d451bcabc3597075b1d979f7818f5a14be6e",
+        "8e8b9aa92383c929271e92a79b9c74c0980179bb96b4624f98f562fa4fef0b9d",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

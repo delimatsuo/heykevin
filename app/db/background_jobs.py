@@ -158,7 +158,7 @@ def _job_hold_reason(job: str, snapshot) -> str | None:
         return None
     data = snapshot.to_dict()
     status = data.get("status") if isinstance(data, dict) else None
-    return status if status in ("running", "needs_attention") else "malformed"
+    return next((label for label in ("running", "needs_attention") if status == label), "malformed")
 
 
 def _authoritative_batch_snapshots(db, refs, *, transaction=None, error_message: str) -> list:
@@ -195,7 +195,8 @@ class BackgroundWorkerCutoverStore:
         self.db = db
         self.trusted_clock = trusted_clock
         self.transaction_factory = transaction_factory or (lambda: BoundedTransaction(db, max_attempts=1))
-        # (job, reason) for each ledger row that held the last begin_embedded().
+        # (job, reason) for each ledger row that held the last committed
+        # begin_embedded(); a failed call leaves the previous value.
         self.held_jobs: tuple[tuple[str, str], ...] = ()
 
     def _ref(self):
@@ -309,17 +310,19 @@ class BackgroundWorkerCutoverStore:
         """Fence new external claims, then permit legacy loops only when idle."""
         ref = self._ref()
         refs = [ref, *self._job_refs()]
+        held = ()
 
         @firestore.transactional
         def body(transaction):
+            nonlocal held
             control, *jobs = self._snapshots(refs, transaction)
             data = control.to_dict() or {}
-            self.held_jobs = tuple(
+            held = tuple(
                 (job, reason)
                 for job, snapshot in zip(JOB_INTERVALS, jobs)
                 if (reason := _job_hold_reason(job, snapshot)) is not None
             )
-            if self.held_jobs:
+            if held:
                 if not control.exists or data.get("state") != "external_draining":
                     transaction.set(ref, {**data, "state": "external_draining"})
                 return False
@@ -342,7 +345,9 @@ class BackgroundWorkerCutoverStore:
             })
             return True
 
-        return body(self.transaction_factory())
+        ready = body(self.transaction_factory())
+        self.held_jobs = held
+        return ready
 
     def external_active(self, generation: str) -> bool:
         """Read whether the current external lease remains admitted."""

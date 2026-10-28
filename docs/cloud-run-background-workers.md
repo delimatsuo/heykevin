@@ -51,9 +51,12 @@ and the [container contract](https://docs.cloud.google.com/run/docs/container-co
   and restores embedded processing only after every ledger record is
   `completed`. A `running`, malformed, or `needs_attention` record holds the
   API in draining state until an operator reconciles it. While held, the API
-  logs `Background-worker drain held by ledger jobs: <job>=<reason>` when the
-  set of held jobs changes and every 15 minutes after, and logs
-  `Background-worker drain released` when embedded loops start. If the control
+  logs a WARNING `Background-worker drain held by ledger jobs: <job>=<reason>`
+  (comma-separated; `<reason>` is `running`, `needs_attention`, or
+  `malformed`) when the set of held jobs changes, after cutover reads recover
+  from a failure, and every 180 successful 5-second checks (15 minutes)
+  after. Once a logged hold clears, it logs an INFO `Background-worker drain
+  released; starting embedded loops`. If the control
   datastore is unavailable, the API reports
   `cutover_unavailable` and starts no loops rather than risk duplicate work.
 - `app.worker_main:app` recognizes the ledger's fixed job names but executes

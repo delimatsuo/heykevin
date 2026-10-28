@@ -337,6 +337,22 @@ def test_begin_embedded_names_each_job_holding_the_drain():
     assert cutover.held_jobs == ()
 
 
+def test_failed_cutover_commit_never_reports_held_jobs():
+    class FailingCommit(Transaction):
+        def _commit(self):
+            self._rollback()
+            raise RuntimeError("fictional commit failure")
+
+    db = Database()
+    db.data["estimates"] = {"status": "needs_attention"}
+    cutover = BackgroundWorkerCutoverStore(db, transaction_factory=lambda: FailingCommit(db))
+
+    with pytest.raises(RuntimeError, match="fictional commit failure"):
+        cutover.begin_embedded()
+    assert cutover.held_jobs == ()
+    assert _CUTOVER_KEY not in db.data
+
+
 @pytest.mark.parametrize("job,record", [
     ("estimates", {"status": "completed"}),
     ("estimates", {"status": "completed", "next_due_at": -1, "continuation": {}}),

@@ -512,6 +512,134 @@ async def test_a_failing_summary_never_fails_the_sync(env, monkeypatch):
     assert _whitelisted(env) == _all(_numbers(3))
 
 
+# Made-up Brazilian numbers. Three coded mobiles make Brazil the address book's
+# second country, and outnumber the numbers read as US numbers.
+BRAZIL_CODED = ["+55 11 98765-1111", "+55 21 98765-2222", "+55 31 98765-3333"]
+BRAZIL_CODED_E164 = {"+5511987651111", "+5521987652222", "+5531987653333"}
+
+
+@pytest.mark.asyncio
+async def test_an_old_brazilian_mobile_is_whitelisted_with_its_nine(env):
+    numbers = _numbers(3) + ["+55 11 8765-4321"]
+
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert response["synced"] == 4
+    contact = await contacts_db.get_contact("+5511987654321", contractor_id=CID)
+    assert contact["is_whitelisted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_mostly_brazilian_address_book_whitelists_brazilian_readings(env, caplog):
+    numbers = BRAZIL_CODED + ["(21) 2345-6789", "0 11 8765-4321"]
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert _whitelisted(env) == BRAZIL_CODED_E164 | {
+        "+12123456789", "+552123456789",  # read both ways
+        "+5511987654321",  # unreadable as a US number: an old São Paulo mobile
+    }
+    assert response["synced"] == 5  # contacts, not whitelist entries
+    assert "reader_counts" not in response
+    assert _recovery_lines(caplog) == [
+        f"Bulk sync for {CID}: 1 numbers read with a Brazilian mobile's 9; 1 numbers "
+        "unreadable as US numbers read as BR numbers; 1 numbers read both as US and as BR numbers"
+    ]
+
+
+def _recovery_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "with a Brazilian mobile's 9" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_second_country_reading_alone_is_logged(env, caplog):
+    numbers = BRAZIL_CODED + ["0 11 2345-6789"]
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert _recovery_lines(caplog) == [
+        f"Bulk sync for {CID}: 0 numbers read with a Brazilian mobile's 9; 1 numbers "
+        "unreadable as US numbers read as BR numbers; 0 numbers read both as US and as BR numbers"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_without_a_second_country_names_none(env, caplog):
+    numbers = _numbers(3) + ["+55 11 8765-4321"]
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert _recovery_lines(caplog) == [f"Bulk sync for {CID}: 1 numbers read with a Brazilian mobile's 9"]
+
+
+@pytest.mark.asyncio
+async def test_a_sync_that_needs_no_second_reading_logs_no_recovery_line(env, caplog):
+    numbers = _numbers(3)
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert _recovery_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_later_requests_of_a_sync_decide_from_the_whole_sync_so_far(env):
+    # Installed builds send 200 numbers per request; a short last request alone
+    # would not show the address book is Brazilian.
+    numbers = BRAZIL_CODED + ["(21) 2345-6789"]
+
+    first = await _post(env, BRAZIL_CODED, at=START)
+    stored = env.fs.docs[f"contractors/{CID}/contact_sync/open"]["reader_counts"]
+    await _post(env, ["(21) 2345-6789"], contacts_hash=_app_hash(numbers), at=START + 1)
+
+    assert "reader_counts" not in first
+    assert stored == {"coded": {"BR": 3}, "home": 0}
+    assert {"+12123456789", "+552123456789"} <= _whitelisted(env)
+
+
+@pytest.mark.asyncio
+async def test_a_new_sync_starts_its_counts_afresh(env):
+    await _post(env, BRAZIL_CODED, at=START)  # left open
+    later = START + contacts_api.SYNC_BATCH_WINDOW + 1
+
+    await _post(env, ["(21) 2345-6789"], contacts_hash=_app_hash(["(21) 2345-6789"]), at=later)
+
+    assert "+552123456789" not in _whitelisted(env)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_request_keeps_the_earlier_counts(env):
+    numbers = BRAZIL_CODED + ["+1 415 555 0101", "(21) 2345-6789"]
+
+    await _post(env, BRAZIL_CODED, at=START)
+    env.fs.fail_commits = True
+    assert (await _post(env, ["+1 415 555 0101"], at=START + 1))["status"] == "error"
+    env.fs.fail_commits = False
+    await _post(env, ["(21) 2345-6789"], contacts_hash=_app_hash(numbers), at=START + 2)
+
+    assert "+552123456789" in _whitelisted(env)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_address_book_reader_falls_back_to_the_plain_reading(env, monkeypatch, caplog):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("reader bug")
+
+    monkeypatch.setattr("app.utils.phone.read_address_book", broken)
+    numbers = _numbers(3) + ["+55 11 8765-4321"]
+
+    with caplog.at_level("WARNING", logger=contacts_db.logger.name):
+        response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert response["status"] == "ok"
+    assert response["synced"] == 3
+    assert _whitelisted(env) == _all(_numbers(3))
+    assert any("Address book reading failed" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_a_failed_write_does_not_record_the_hash(env):
     env.fs.fail_commits = True

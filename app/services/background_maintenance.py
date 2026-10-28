@@ -72,7 +72,8 @@ async def _sweep_legacy_commands():
     from firebase_admin import db as rtdb
 
     loop = asyncio.get_running_loop()
-    commands = await loop.run_in_executor(None, rtdb.reference(CALL_COMMANDS_PATH).get)
+    commands_ref = rtdb.reference(CALL_COMMANDS_PATH)
+    commands = await loop.run_in_executor(None, lambda: commands_ref.get(shallow=True))  # keys only
     if not isinstance(commands, dict):
         return
     now = time.time()

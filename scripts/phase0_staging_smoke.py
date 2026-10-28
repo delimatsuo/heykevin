@@ -851,6 +851,8 @@ def rtdb_cleanup_delete(ref: Any, *, contractor_id: str, call_sid: str, run_nonc
             call_sid=call_sid,
             run_nonce=run_nonce,
         )
+        if not etag:
+            break  # no ETag to delete it safely
         if _delete_if_unchanged(ref, etag):
             return
     raise RTDBCleanupMismatchError("rtdb_cleanup_mismatch")

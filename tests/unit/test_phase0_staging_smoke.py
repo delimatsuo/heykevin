@@ -632,6 +632,18 @@ def test_rtdb_cleanup_keeps_a_node_replaced_after_verification():
     assert fake.records == {call_sid: replacement}
 
 
+def test_rtdb_cleanup_reverifies_and_deletes_a_node_touched_but_still_owned():
+    smoke = _load_smoke_module()
+    cid, nonce, call_sid = smoke.generate_contractor_id(), smoke.generate_run_nonce(), smoke.generate_call_sid()
+    owned = smoke.build_rtdb_call_payload(call_sid, cid, run_nonce=nonce, now=1000.0)
+    fake, ref = _real_rtdb_ref(call_sid, {call_sid: owned})
+    fake.before_write = lambda records: records[call_sid].update(state_updated_at=2000.0)
+
+    smoke.rtdb_cleanup_delete(ref, contractor_id=cid, call_sid=call_sid, run_nonce=nonce)
+
+    assert fake.records == {}
+
+
 def test_rtdb_cleanup_reports_absence_and_never_deletes_without_an_etag():
     smoke = _load_smoke_module()
     cid, nonce, call_sid = smoke.generate_contractor_id(), smoke.generate_run_nonce(), smoke.generate_call_sid()
@@ -646,6 +658,7 @@ def test_rtdb_cleanup_reports_absence_and_never_deletes_without_an_etag():
     with pytest.raises(smoke.RTDBCleanupMismatchError):
         smoke.rtdb_cleanup_delete(ref, contractor_id=cid, call_sid=call_sid, run_nonce=nonce)
     assert fake.records == {call_sid: owned}
+    assert fake.record_reads == [call_sid], "no ETag fails at once instead of re-reading"
 
 
 # ---------------------------------------------------------------------------

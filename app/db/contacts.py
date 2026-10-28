@@ -16,6 +16,7 @@ webhook code does not have to assemble the path.
 """
 
 import asyncio
+from collections import Counter
 from typing import Optional
 
 from app.db.firestore_client import get_firestore_client
@@ -120,7 +121,9 @@ async def get_open_contact_sync(contractor_id: str) -> dict:
     """The contact sync this contractor's app is part-way through, or {}.
 
     Holds the sync's id, the digits of every number its requests delivered so
-    far and the time of its last request. Raises on Firestore errors.
+    far, what they counted toward the address book's second country
+    (``reader_counts``) and the time of its last request. Raises on Firestore
+    errors.
     """
     def _read() -> dict:
         doc = _open_contact_sync_ref(get_firestore_client(), contractor_id).get()
@@ -148,6 +151,7 @@ async def bulk_sync_contacts(
     sync_id: str,
     sweep: bool,
     default_region: str = "US",
+    reader_counts: Optional[dict] = None,
 ) -> dict:
     """Bulk sync iPhone contacts for a contractor.
 
@@ -155,14 +159,19 @@ async def bulk_sync_contacts(
     them with ``sync_id``. One sync can arrive as several requests that share a
     ``sync_id``. Only the request that completes the sync passes ``sweep=True``,
     which un-whitelists previously synced contacts that this sync did not carry.
-    Numbers without a country code are read as ``default_region`` numbers, the
-    owner's country. Uses Firestore batch writes (max 500 per batch), off the
-    event loop: a 5000-number upload would otherwise stall live calls.
+    Numbers are read by ``read_address_book``: without a country code, as
+    ``default_region`` numbers, the owner's country, or as numbers of the
+    country most of the address book is in; ``reader_counts`` carries what the
+    sync's earlier requests counted toward that country. Uses Firestore batch
+    writes (max 500 per batch), off the event loop: a 5000-number upload would
+    otherwise stall live calls.
 
-    Returns {"synced": N, "removed": N}.
+    Returns {"synced": N, "removed": N, "reader_counts": {...}}, synced counting
+    contacts with at least one whitelisted number.
     """
     return await asyncio.to_thread(
-        _bulk_sync_contacts_blocking, contractor_id, contacts, sync_id, sweep, default_region,
+        _bulk_sync_contacts_blocking,
+        contractor_id, contacts, sync_id, sweep, default_region, reader_counts,
     )
 
 
@@ -172,20 +181,62 @@ def _bulk_sync_contacts_blocking(
     sync_id: str,
     sweep: bool,
     default_region: str,
+    reader_counts: Optional[dict] = None,
 ) -> dict:
     try:
         db = get_firestore_client()
         col_ref = _contacts_ref(db, contractor_id)
 
-        from app.utils.phone import normalize_phone
+        from app.utils.phone import (
+            AddressBook, country_of, describe_unreadable_numbers, normalize_phone, read_address_book,
+        )
+        phones = [c.get("phone", "") for c in contacts]
+        try:
+            book = read_address_book(phones, default_region, reader_counts)
+        except Exception as e:  # noqa: BLE001 - whitelist what the plain reading can read
+            logger.warning(f"Address book reading failed for {contractor_id}: {type(e).__name__}")
+            book = AddressBook(readings=[
+                [normalized] if (normalized := normalize_phone(phone, default_region)) else []
+                for phone in phones
+            ], counts=reader_counts if isinstance(reader_counts, dict) else {})
         valid_contacts = []
-        for c in contacts:
-            normalized = normalize_phone(c.get("phone", ""), default_region)
-            if normalized:
-                valid_contacts.append({"name": c.get("name", ""), "phone": normalized})
+        unreadable = []
+        readable_countries = Counter()
+        for c, phone, readings in zip(contacts, phones, book.readings):
+            if not readings:
+                unreadable.append(phone)
+            for reading in readings:
+                valid_contacts.append({"name": c.get("name", ""), "phone": reading})
+                readable_countries[country_of(reading)] += 1
+        # A number read two ways is one contact and two whitelist entries; the
+        # sync reports contacts.
+        read = sum(1 for readings in book.readings if readings)
+        if book.ninth_digit or book.as_second_country or book.both_ways:
+            # Counts only, like the summary below.
+            recovered = [f"{book.ninth_digit} numbers read with a Brazilian mobile's 9"]
+            if book.second_country:
+                recovered += [
+                    f"{book.as_second_country} numbers unreadable as {default_region} numbers "
+                    f"read as {book.second_country} numbers",
+                    f"{book.both_ways} numbers read both as {default_region} and as "
+                    f"{book.second_country} numbers",
+                ]
+            logger.info(f"Bulk sync for {contractor_id}: {'; '.join(recovered)}")
+        if unreadable:
+            # Counts only: why these numbers were dropped, and which countries the
+            # readable ones belong to, to tell how the unreadable ones were written.
+            # A log line must never fail the sync.
+            try:
+                logger.info(
+                    f"Bulk sync for {contractor_id}: {len(unreadable)} of {len(contacts)} numbers "
+                    f"unreadable as {default_region} numbers: "
+                    f"{describe_unreadable_numbers(unreadable, default_region)}; "
+                    f"readable numbers by country: {dict(readable_countries.most_common(5))}"
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Unreadable number summary failed for {contractor_id}: {type(e).__name__}")
 
         # Batch write new/updated contacts
-        synced = 0
         synced_doc_ids = set()
         batch = db.batch()
         batch_count = 0
@@ -202,7 +253,6 @@ def _bulk_sync_contacts_blocking(
                 "sync_id": sync_id,
             }, merge=True)
             batch_count += 1
-            synced += 1
 
             if batch_count >= 500:
                 batch.commit()
@@ -235,8 +285,8 @@ def _bulk_sync_contacts_blocking(
         if batch_count > 0:
             batch.commit()
 
-        logger.info(f"Bulk sync for {contractor_id}: synced={synced}, removed={removed}")
-        return {"synced": synced, "removed": removed}
+        logger.info(f"Bulk sync for {contractor_id}: synced={read}, removed={removed}")
+        return {"synced": read, "removed": removed, "reader_counts": book.counts}
 
     except Exception as e:
         logger.error(f"Bulk contact sync failed: {e}", exc_info=True)

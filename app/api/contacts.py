@@ -215,6 +215,9 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
 
     sync_id = open_sync.get("sync_id") or ""
     received = list(open_sync.get("phones") or [])
+    # What the sync's earlier requests counted toward its address book's
+    # second country (see read_address_book).
+    reader_counts = open_sync.get("reader_counts")
     if not sync_id or now - (open_sync.get("last_request_at") or 0) > SYNC_BATCH_WINDOW:
         # This request starts a new sync.
         last_sync = contractor.get("last_sync_at", 0)
@@ -232,6 +235,7 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
 
         sync_id = secrets.token_hex(8)
         received = []
+        reader_counts = None
 
     if len(received) + len(body.contacts) > MAX_CONTACTS_PER_SYNC:
         logger.warning(f"Bulk sync rejected for {body.contractor_id}: over {MAX_CONTACTS_PER_SYNC} contacts")
@@ -258,8 +262,10 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
         sync_id=sync_id,
         sweep=complete,
         default_region=_owner_region(contractor),
+        reader_counts=reader_counts,
     )
     failed = "error" in result
+    counted = result.pop("reader_counts", None)
 
     updates = {"last_sync_at": now}
     if complete and not failed:
@@ -276,6 +282,7 @@ async def api_bulk_sync(request: Request, body: BulkSyncRequest):
             await save_open_contact_sync(body.contractor_id, {
                 "sync_id": sync_id,
                 "phones": received if failed else sent,
+                "reader_counts": reader_counts if failed else counted,
                 "last_request_at": now,
             })
     except Exception as e:  # noqa: BLE001 - an unrecorded request only stops this sync's sweep

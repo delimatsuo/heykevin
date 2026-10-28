@@ -6,7 +6,7 @@ import hashlib
 import time
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import phonenumbers
@@ -128,17 +128,21 @@ def country_of(e164_number: str) -> Optional[str]:
 
 
 # Brazil put a 9 in front of every mobile number between 2012 and 2016. A mobile
-# saved before then has 8 digits after its 2-digit area code, starting with 6-9,
-# and libphonenumber now rejects it.
+# saved before then has 8 digits after its 2-digit area code. One starting with 6,
+# 8 or 9 is no longer valid. One starting with 7 still is, as one of the 8-digit
+# radio numbers Nextel sold; but most were mobiles that took the 9, and the radio
+# service is gone, so such a number is also read with its 9.
 _BRAZIL = 55
 _OLD_BRAZIL_MOBILE_STARTS = "6789"
+_OLD_BRAZIL_RADIO_START = "7"
 # Another country becomes an address book's second country once at least this
 # many of its numbers are written with a country code.
 SECOND_COUNTRY_MIN = 3
 
 
 def _brazil_ninth_digit(parsed: phonenumbers.PhoneNumber) -> Optional[phonenumbers.PhoneNumber]:
-    """An old 8-digit Brazilian mobile with the 9 it was given; None for any other number."""
+    """A Brazilian area code and 8-digit mobile with the 9 every mobile was given;
+    None for any other number, or when that is not valid."""
     national = str(parsed.national_number)
     if (
         parsed.country_code != _BRAZIL
@@ -152,44 +156,70 @@ def _brazil_ninth_digit(parsed: phonenumbers.PhoneNumber) -> Optional[phonenumbe
     return upgraded if phonenumbers.is_valid_number(upgraded) else None
 
 
-def _read(number: str, region: str) -> tuple[Optional[str], bool]:
+def _e164(parsed: phonenumbers.PhoneNumber) -> str:
+    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+
+
+def _read(number: str, region: str) -> tuple[list[str], bool]:
     """The number in E.164, read as a ``region`` number unless it carries a country
-    code, and whether it is an old Brazilian mobile that took its 9."""
+    code, and whether a 9 was added: an old Brazilian mobile is read with its 9,
+    and an old radio number both as it is and with its 9."""
     try:
         parsed = phonenumbers.parse(number, region)
     except phonenumbers.NumberParseException:
-        return None, False
-    if phonenumbers.is_valid_number(parsed):
-        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164), False
+        return [], False
     upgraded = _brazil_ninth_digit(parsed)
+    if phonenumbers.is_valid_number(parsed):
+        if upgraded is not None and str(parsed.national_number)[2] == _OLD_BRAZIL_RADIO_START:
+            return [_e164(parsed), _e164(upgraded)], True
+        return [_e164(parsed)], False
     if upgraded is None:
-        return None, False
-    return phonenumbers.format_number(upgraded, phonenumbers.PhoneNumberFormat.E164), True
+        return [], False
+    return [_e164(upgraded)], True
+
+
+def _prior_counts(prior) -> tuple[Counter, int]:
+    """Counts an earlier request of the same sync left, as stored; empty if malformed."""
+    if not isinstance(prior, dict):
+        return Counter(), 0
+    coded = prior.get("coded")
+    coded = Counter({
+        country: count for country, count in (coded.items() if isinstance(coded, dict) else ())
+        if isinstance(country, str) and isinstance(count, int) and not isinstance(count, bool) and count > 0
+    })
+    home = prior.get("home")
+    if not isinstance(home, int) or isinstance(home, bool) or home < 0:
+        home = 0
+    return coded, home
 
 
 @dataclass
 class AddressBook:
     """What ``read_address_book`` read, entry by entry, and counts for the log."""
 
-    readings: list[list[str]]  # per entry: no number, one, or two in E.164
+    readings: list[list[str]]  # per entry: no number, or one or more in E.164
     second_country: Optional[str] = None
-    ninth_digit: int = 0  # entries read as old Brazilian mobiles, given their 9
+    ninth_digit: int = 0  # entries with a reading that took a Brazilian mobile's 9
     as_second_country: int = 0  # entries unreadable at home, read as second-country numbers
     both_ways: int = 0  # entries read both as home and as second-country numbers
+    # Running counts the next request of the same sync passes back as ``prior``.
+    counts: dict = field(default_factory=dict)
 
 
-def read_address_book(numbers: list[str], home_region: str = "US") -> AddressBook:
+def read_address_book(numbers: list[str], home_region: str = "US", prior=None) -> AddressBook:
     """Read an owner's address-book numbers for the whitelist.
 
     A number written with "+" is read as its country's number; any other as a
     ``home_region`` number. Old 8-digit Brazilian mobiles are read with the 9
-    every Brazilian mobile was given.
+    every Brazilian mobile was given. A home number is one with the home calling
+    code: for an owner in the US, Canadian numbers too.
 
     An address book can be mostly another country's. Its second country is the
-    one, other than ``home_region``, whose code the most numbers are written
+    one, without the home calling code, whose code the most numbers are written
     with: at least ``SECOND_COUNTRY_MIN``, ties to the alphabetically first. A
     number without "+" that is not valid at home is read as a second-country
-    number, as it was most likely saved there, as "0 21 11 8765-4321" is.
+    number, as it was most likely saved there, as "0 21 11 8765-4321" is. So is
+    one that is valid at home only with a 9 added, which makes it a guess.
 
     When more numbers are written with the second country's code than are read
     as home numbers at all, as for an owner in the US whose contacts are mostly
@@ -198,41 +228,50 @@ def read_address_book(numbers: list[str], home_region: str = "US") -> AddressBoo
     the contact. Whitelisting both lets the contact ring through; the stranger
     with the other number rings through too, which costs far less than
     screening a contact.
+
+    The app can send one sync as several requests. ``prior`` is the ``counts``
+    the earlier requests returned, so later requests decide from everything the
+    sync has sent so far, not from a short last request alone.
     """
     cleaned = [_clean(number) for number in numbers]
     explicit = [_lead(number) == "plus" for number in cleaned]
     home = [_read(number, home_region) for number in cleaned]
+    home_prefix = f"+{phonenumbers.country_code_for_region(home_region)}"
 
-    home_count = 0
-    coded: Counter = Counter()
-    for (reading, _), is_explicit in zip(home, explicit):
-        if reading is None:
+    coded, home_count = _prior_counts(prior)
+    for (readings, _), is_explicit in zip(home, explicit):
+        if not readings:
             continue
-        country = country_of(reading)
-        if country == home_region:
+        if readings[0].startswith(home_prefix):  # calling codes are prefix-free
             home_count += 1
-        elif is_explicit and country in phonenumbers.SUPPORTED_REGIONS:
-            coded[country] += 1
+        elif is_explicit:
+            country = country_of(readings[0])
+            if country in phonenumbers.SUPPORTED_REGIONS:
+                coded[country] += 1
     ranked = sorted(coded.items(), key=lambda item: (-item[1], item[0]))
     second = ranked[0][0] if ranked and ranked[0][1] >= SECOND_COUNTRY_MIN else None
     second_dominates = second is not None and ranked[0][1] > home_count
 
-    book = AddressBook(readings=[], second_country=second)
-    for number, is_explicit, (reading, took_nine) in zip(cleaned, explicit, home):
-        entry = [reading] if reading else []
+    book = AddressBook(
+        readings=[], second_country=second, counts={"coded": dict(coded), "home": home_count},
+    )
+    for number, is_explicit, (readings, took_nine) in zip(cleaned, explicit, home):
+        entry = list(readings)
         wants_second = second is not None and not is_explicit and (
-            reading is None or (second_dominates and country_of(reading) == home_region)
+            not readings
+            or took_nine
+            or (second_dominates and readings[0].startswith(home_prefix))
         )
         if wants_second:
-            # Never the first reading again: that one is a home number or none.
-            alternative, alternative_took_nine = _read(number, second)
-            if alternative:
-                entry.append(alternative)
-                took_nine = took_nine or alternative_took_nine
-                if reading is None:
-                    book.as_second_country += 1
-                else:
+            alternatives, alternatives_took_nine = _read(number, second)
+            added = [reading for reading in alternatives if reading not in entry]
+            if added:
+                entry += added
+                took_nine = took_nine or alternatives_took_nine
+                if readings:
                     book.both_ways += 1
+                else:
+                    book.as_second_country += 1
         book.ninth_digit += took_nine
         book.readings.append(entry)
     return book

@@ -295,3 +295,80 @@ def test_the_owners_own_country_is_never_the_second_country():
     book = read_address_book(["+1 415 555 0101", "+1 415 555 0102", "+1 415 555 0103"], "US")
 
     assert book.second_country is None
+
+
+def test_a_country_sharing_the_home_calling_code_counts_as_home():
+    # Four Canadian numbers outnumber three Brazilian ones, but +1 is home in the US.
+    canada = ["+1 416 555 0101", "+1 416 555 0102", "+1 416 555 0103", "+1 416 555 0104"]
+
+    book = read_address_book(canada + BRAZIL_CODED + ["0 11 2345-6789", "(21) 2345-6789"], "US")
+
+    assert book.second_country == "BR"
+    assert book.readings[-2:] == [["+551123456789"], ["+12123456789"]]  # 5 home beat 3 coded
+    assert book.counts == {"coded": {"BR": 3}, "home": 5}
+
+
+def test_a_home_reading_that_needed_a_nine_also_gets_the_second_reading():
+    # A Brazilian owner with US contacts: "(218) 765-4321" is a US number, though
+    # with a 9 added it reads as a Rio mobile too. Brazil is not outnumbered here,
+    # so only the guessed number gets a second reading.
+    us_coded = ["+1 415 555 0101", "+1 415 555 0102", "+1 415 555 0103"]
+    local = ["(11) 2345-6781", "(11) 2345-6782", "(11) 2345-6783"]
+
+    book = read_address_book(us_coded + local + ["(218) 765-4321"], "BR")
+
+    assert book.second_country == "US"
+    assert book.readings[3:] == [
+        ["+551123456781"], ["+551123456782"], ["+551123456783"],
+        ["+5521987654321", "+12187654321"],
+    ]
+    assert book.both_ways == 1
+    assert book.ninth_digit == 1
+
+
+def test_an_old_radio_number_is_also_read_with_its_nine():
+    book = read_address_book(["+55 11 7123-4567"], "US")
+
+    assert book.readings == [["+551171234567", "+5511971234567"]]
+    assert book.ninth_digit == 1
+
+
+def test_a_nine_never_makes_a_number_in_an_unused_area_code():
+    assert read_address_book(["+55 20 8765-4321"], "US").readings == [[]]
+
+
+def test_coded_numbers_behind_format_marks_still_count():
+    marked = [f"\N{LEFT-TO-RIGHT EMBEDDING}{number}\N{POP DIRECTIONAL FORMATTING}" for number in BRAZIL_CODED]
+
+    assert read_address_book(marked, "US").second_country == "BR"
+
+
+def test_numbers_dialed_abroad_never_count_as_home():
+    british = ["011 44 20 7946 0958", "011 44 20 7946 0959", "011 44 20 7946 0960"]
+
+    book = read_address_book(BRAZIL_CODED + british + ["(21) 2345-6789"], "US")
+
+    assert book.counts["home"] == 1
+    assert book.readings[-1] == ["+12123456789", "+552123456789"]
+
+
+def test_a_later_request_decides_from_the_counts_of_the_earlier_ones():
+    first = read_address_book(BRAZIL_CODED, "US")
+    later = ["(21) 2345-6789", "+1 415 555 0101"]
+
+    alone = read_address_book(later, "US")
+    continued = read_address_book(later, "US", prior=first.counts)
+
+    assert alone.second_country is None
+    assert alone.readings[0] == ["+12123456789"]
+    assert continued.second_country == "BR"
+    assert continued.readings[0] == ["+12123456789", "+552123456789"]
+    assert continued.counts == {"coded": {"BR": 3}, "home": 2}
+
+
+def test_malformed_prior_counts_are_ignored():
+    for prior in ("junk", {"coded": {"BR": "3", 5: 2, "GB": True, "AR": -1}, "home": -1}, {"coded": []}):
+        book = read_address_book(["0 11 2345-6789"], "US", prior=prior)
+
+        assert book.second_country is None
+        assert book.counts == {"coded": {}, "home": 0}

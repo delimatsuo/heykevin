@@ -541,11 +541,38 @@ async def test_a_mostly_brazilian_address_book_whitelists_brazilian_readings(env
         "+5511987654321",  # unreadable as a US number: an old São Paulo mobile
     }
     assert response["synced"] == 5  # contacts, not whitelist entries
-    [line] = [r.getMessage() for r in caplog.records if "read with their 9" in r.getMessage()]
-    assert line == (
-        f"Bulk sync for {CID}: 1 old Brazilian mobiles read with their 9; 1 numbers "
+    assert "reader_counts" not in response
+    assert _recovery_lines(caplog) == [
+        f"Bulk sync for {CID}: 1 numbers read with a Brazilian mobile's 9; 1 numbers "
         "unreadable as US numbers read as BR numbers; 1 numbers read both as US and as BR numbers"
-    )
+    ]
+
+
+def _recovery_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "with a Brazilian mobile's 9" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_second_country_reading_alone_is_logged(env, caplog):
+    numbers = BRAZIL_CODED + ["0 11 2345-6789"]
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert _recovery_lines(caplog) == [
+        f"Bulk sync for {CID}: 0 numbers read with a Brazilian mobile's 9; 1 numbers "
+        "unreadable as US numbers read as BR numbers; 0 numbers read both as US and as BR numbers"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_without_a_second_country_names_none(env, caplog):
+    numbers = _numbers(3) + ["+55 11 8765-4321"]
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert _recovery_lines(caplog) == [f"Bulk sync for {CID}: 1 numbers read with a Brazilian mobile's 9"]
 
 
 @pytest.mark.asyncio
@@ -555,7 +582,45 @@ async def test_a_sync_that_needs_no_second_reading_logs_no_recovery_line(env, ca
     with caplog.at_level("INFO", logger=contacts_db.logger.name):
         await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
 
-    assert not [r for r in caplog.records if "read with their 9" in r.getMessage()]
+    assert _recovery_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_later_requests_of_a_sync_decide_from_the_whole_sync_so_far(env):
+    # Installed builds send 200 numbers per request; a short last request alone
+    # would not show the address book is Brazilian.
+    numbers = BRAZIL_CODED + ["(21) 2345-6789"]
+
+    first = await _post(env, BRAZIL_CODED, at=START)
+    stored = env.fs.docs[f"contractors/{CID}/contact_sync/open"]["reader_counts"]
+    await _post(env, ["(21) 2345-6789"], contacts_hash=_app_hash(numbers), at=START + 1)
+
+    assert "reader_counts" not in first
+    assert stored == {"coded": {"BR": 3}, "home": 0}
+    assert {"+12123456789", "+552123456789"} <= _whitelisted(env)
+
+
+@pytest.mark.asyncio
+async def test_a_new_sync_starts_its_counts_afresh(env):
+    await _post(env, BRAZIL_CODED, at=START)  # left open
+    later = START + contacts_api.SYNC_BATCH_WINDOW + 1
+
+    await _post(env, ["(21) 2345-6789"], contacts_hash=_app_hash(["(21) 2345-6789"]), at=later)
+
+    assert "+552123456789" not in _whitelisted(env)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_request_keeps_the_earlier_counts(env):
+    numbers = BRAZIL_CODED + ["+1 415 555 0101", "(21) 2345-6789"]
+
+    await _post(env, BRAZIL_CODED, at=START)
+    env.fs.fail_commits = True
+    assert (await _post(env, ["+1 415 555 0101"], at=START + 1))["status"] == "error"
+    env.fs.fail_commits = False
+    await _post(env, ["(21) 2345-6789"], contacts_hash=_app_hash(numbers), at=START + 2)
+
+    assert "+552123456789" in _whitelisted(env)
 
 
 @pytest.mark.asyncio

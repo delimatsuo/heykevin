@@ -44,7 +44,9 @@ class FakeRtdbClient:
     def body(self, method, url, **kwargs):  # get() and ordered-by-key pages
         assert method == "get"
         key = self._key(url)
-        return copy.deepcopy(self.records if not key else self.records.get(key))
+        if not key:
+            return copy.deepcopy(self.records) or None  # RTDB reads an empty path as null
+        return copy.deepcopy(self.records.get(key))
 
     def headers_and_body(self, method, url, headers=None, **kwargs):  # get(etag=True)
         assert method == "get" and headers == {"X-Firebase-ETag": "true"}

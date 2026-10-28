@@ -40,8 +40,58 @@ def _delete_if_still_stale(ref, now: float) -> bool:
     return delete_if_unchanged(ref, etag)
 
 
+def _call_is_over(record, now: float) -> bool:
+    """Legacy /call_commands entries carry no timestamp, so their call's active record dates them.
+
+    publish_message_intent writes a command only while that record is live, and the
+    record goes only with the call's terminal status callback or as stale. Nothing
+    consumes a command once its call is over: adoption requires a live record.
+    """
+    return record is None or _is_stale(record, now)
+
+
+def _delete_command_if_call_over(command_ref, call_ref, now: float) -> bool:
+    """Delete one legacy command only if its call is over and it is unchanged since this read.
+
+    The command is read before its call, so a call that starts and writes a command
+    mid-pass is found live. A replaced command fails the conditional delete (412).
+    """
+    from app.db.cache import delete_if_unchanged
+
+    current, etag = command_ref.get(etag=True)
+    if current is None or not _call_is_over(call_ref.get(), now):
+        return False
+    return delete_if_unchanged(command_ref, etag)
+
+
+async def _sweep_legacy_commands():
+    """Remove legacy commands left by ended calls, e.g. those written before #311, whose
+    conditional delete always failed."""
+    from app.db.cache import ACTIVE_CALLS_PATH
+    from app.services.legacy_call_commands import CALL_COMMANDS_PATH
+    from firebase_admin import db as rtdb
+
+    loop = asyncio.get_running_loop()
+    commands = await loop.run_in_executor(None, rtdb.reference(CALL_COMMANDS_PATH).get)
+    if not isinstance(commands, dict):
+        return
+    now = time.time()
+    removed = 0
+    for call_sid in sorted(commands):
+        removed += await loop.run_in_executor(
+            None, _delete_command_if_call_over,
+            rtdb.reference(f"{CALL_COMMANDS_PATH}/{call_sid}"),
+            rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}"), now,
+        )
+    if removed:
+        logger.info("Removed %d legacy call command(s) of ended calls", removed)
+
+
 async def orphan_calls_once(*, continuation: dict | None = None, page_size: int | None = None) -> dict:
-    """Clean stale calls, using a bounded RTDB key page for external mode."""
+    """Clean stale calls, using a bounded RTDB key page for external mode.
+
+    The unbounded (embedded) pass then sweeps legacy commands of ended calls.
+    """
     from app.db.cache import _init_firebase, ACTIVE_CALLS_PATH
     from firebase_admin import db as rtdb
 
@@ -60,7 +110,7 @@ async def orphan_calls_once(*, continuation: dict | None = None, page_size: int 
     else:
         calls = await loop.run_in_executor(None, ref.get)
     if not isinstance(calls, dict):
-        return {"cursor": None} if bounded else {}
+        calls = {}  # no active calls still leaves commands to sweep
     now = time.time()
     items = sorted(calls.items())
     if bounded and cursor:
@@ -75,6 +125,7 @@ async def orphan_calls_once(*, continuation: dict | None = None, page_size: int 
     if removed:
         logger.info("Removed %d stale active call(s)", removed)
     if not bounded:
+        await _sweep_legacy_commands()
         return {}
     if not selected:
         return {"cursor": None}

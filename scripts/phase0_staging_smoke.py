@@ -785,7 +785,7 @@ def rtdb_cleanup_transaction_update(
     call_sid: str,
     run_nonce: str,
 ) -> None:
-    """RTDB transaction update callback for cleanup."""
+    """Verify the node before cleanup: None for the exact owned node, raises otherwise."""
     if current is None:
         raise RTDBCleanupAbsenceSentinel("rtdb_cleanup_absence")
 
@@ -816,6 +816,43 @@ def rtdb_cleanup_transaction_update(
     ):
         return
 
+    raise RTDBCleanupMismatchError("rtdb_cleanup_mismatch")
+
+
+def _delete_if_unchanged(ref: Any, etag: Any) -> bool:
+    """app.db.cache.delete_if_unchanged, kept local because this script imports nothing from app.
+
+    DELETE with if-match through the reference's own client; False on a 412 or
+    without an ETag (requests drops a None header, making the DELETE unconditional).
+    """
+    from firebase_admin import exceptions
+
+    if not isinstance(etag, str) or not etag:
+        return False
+    try:
+        ref._client.request("delete", ref._add_suffix(), headers={"if-match": etag})
+    except exceptions.FailedPreconditionError:
+        return False
+    return True
+
+
+def rtdb_cleanup_delete(ref: Any, *, contractor_id: str, call_sid: str, run_nonce: str) -> None:
+    """Delete the smoke node only while it is still this run's exact payload.
+
+    firebase-admin's transaction() refuses a None result, so it cannot delete. This
+    reads with an ETag, verifies ownership, and deletes conditionally, re-verifying
+    when the node changed in between.
+    """
+    for _ in range(25):  # firebase-admin's transaction retry budget
+        current, etag = ref.get(etag=True)
+        rtdb_cleanup_transaction_update(
+            current,
+            contractor_id=contractor_id,
+            call_sid=call_sid,
+            run_nonce=run_nonce,
+        )
+        if _delete_if_unchanged(ref, etag):
+            return
     raise RTDBCleanupMismatchError("rtdb_cleanup_mismatch")
 
 
@@ -902,15 +939,12 @@ def mutable_text_reply_smoke(
     finally:
         if ref is not None and created:
             try:
-                def _delete_txn(current: Any) -> None:
-                    return rtdb_cleanup_transaction_update(
-                        current,
-                        contractor_id=contractor_id,
-                        call_sid=call_sid,
-                        run_nonce=run_nonce,
-                    )
-
-                ref.transaction(_delete_txn)
+                rtdb_cleanup_delete(
+                    ref,
+                    contractor_id=contractor_id,
+                    call_sid=call_sid,
+                    run_nonce=run_nonce,
+                )
             except RTDBCleanupAbsenceSentinel:
                 # Verified node absence swallowed as cleanup no-op
                 pass

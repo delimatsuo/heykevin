@@ -29,7 +29,7 @@ def test_orphan_staleness_needs_a_timestamp_over_two_hours_old():
 
 
 def _use_fake_rtdb(monkeypatch, records):
-    return use_fake_rtdb(monkeypatch, active_calls=records)["active_calls"]
+    return use_fake_rtdb(monkeypatch, active_calls=records, call_commands={})["active_calls"]
 
 
 def _calls(now):
@@ -134,6 +134,92 @@ async def test_orphan_cleanup_tolerates_a_call_that_ended_mid_pass(monkeypatch):
     await maintenance.orphan_calls_once()
 
     assert "CA_stale" not in fake.records
+
+
+def _commands():
+    # Legacy commands carry no timestamp; their call's active record dates them.
+    return {sid: {"type": "take_message"} for sid in ("CA_ended", "CA_stale", "CA_live", "CA_untimed")}
+
+
+def _use_command_fakes(monkeypatch, now, commands=None):
+    calls = {sid: data for sid, data in _calls(now).items() if sid != "CA_stale_too"}
+    fakes = use_fake_rtdb(monkeypatch, active_calls=calls,
+                          call_commands=_commands() if commands is None else commands)
+    return fakes["active_calls"], fakes["call_commands"]
+
+
+@pytest.mark.asyncio
+async def test_command_sweep_removes_only_commands_whose_call_is_over(monkeypatch):
+    calls, commands = _use_command_fakes(monkeypatch, time.time())
+
+    await maintenance._sweep_legacy_commands()
+
+    # CA_ended's record went with its terminal status callback; CA_stale's is past the
+    # stale threshold. A live or untimed call keeps its command.
+    assert sorted(commands.records) == ["CA_live", "CA_untimed"]
+    assert sorted(calls.records) == ["CA_live", "CA_stale", "CA_untimed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_size,swept", [(None, True), (25, False)])
+async def test_orphan_cleanup_sweeps_commands_in_embedded_mode_even_with_no_calls(monkeypatch, page_size, swept):
+    fakes = use_fake_rtdb(monkeypatch, active_calls={}, call_commands={"CA_ended": {"type": "take_message"}})
+
+    if page_size is None:
+        await maintenance.orphan_calls_once()
+    else:
+        await maintenance.orphan_calls_once(continuation={}, page_size=page_size)
+
+    assert ("CA_ended" not in fakes["call_commands"].records) is swept
+
+
+@pytest.mark.asyncio
+async def test_orphan_cleanup_sweeps_the_command_of_a_call_it_just_removed(monkeypatch):
+    calls, commands = _use_command_fakes(monkeypatch, time.time(), commands={"CA_stale": {"type": "take_message"}})
+
+    await maintenance.orphan_calls_once()
+
+    assert "CA_stale" not in calls.records and not commands.records
+
+
+@pytest.mark.asyncio
+async def test_command_sweep_keeps_a_command_replaced_between_read_and_delete(monkeypatch):
+    _, commands = _use_command_fakes(monkeypatch, time.time())
+    replacement = {"type": "take_message", "operation_id": "new"}
+    commands.before_write = lambda records: records.update(CA_ended=dict(replacement))
+
+    await maintenance._sweep_legacy_commands()
+
+    assert commands.records["CA_ended"] == replacement
+    assert "CA_stale" not in commands.records, "a 412 on one command must not stop the pass"
+
+
+@pytest.mark.asyncio
+async def test_command_sweep_never_deletes_without_an_etag(monkeypatch):
+    _, commands = _use_command_fakes(monkeypatch, time.time())
+    commands.send_etag = False
+
+    await maintenance._sweep_legacy_commands()
+
+    assert commands.records == _commands()
+
+
+@pytest.mark.asyncio
+async def test_command_sweep_reads_the_command_before_its_call(monkeypatch):
+    """A call that starts and writes its command mid-pass is found live, not deleted."""
+    now = time.time()
+    calls, commands = _use_command_fakes(monkeypatch, now, commands={"CA_ended": {"type": "take_message"}})
+    fresh = {"type": "take_message", "operation_id": "new"}
+
+    def call_starts(records):
+        calls.records["CA_ended"] = {"state_updated_at": now, "status": "screening"}
+        records["CA_ended"] = dict(fresh)
+
+    commands.before_read = call_starts
+
+    await maintenance._sweep_legacy_commands()
+
+    assert commands.records == {"CA_ended": fresh}
 
 
 def test_fake_rtdb_refuses_the_old_delete_by_transaction(monkeypatch):

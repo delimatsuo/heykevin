@@ -116,7 +116,8 @@ class _FakeFirestoreClient:
 
 
 class _FakeRTDBReference:
-    """Faithful fake of firebase_admin Reference.transaction that writes callback return value."""
+    """Writes the transaction callback's return value, None included, which firebase-admin
+    refuses; deletion tests use the real Reference over tests/fixtures/fake_rtdb.py instead."""
     def __init__(self, data: Any = None, should_fail_cleanup: bool = False):
         self.data = data
         self.write_count = 0
@@ -531,18 +532,13 @@ def test_rtdb_cleanup_transaction_exact_exception_classes():
 
     owned_payload = smoke.build_rtdb_call_payload(call_sid, cid, run_nonce=nonce, now=1000.0)
 
-    # 1. Exact match -> returns None (deletes node)
-    ref_owned = _FakeRTDBReference(data=dict(owned_payload))
-    res = ref_owned.transaction(
-        lambda curr: smoke.rtdb_cleanup_transaction_update(
-            curr,
-            contractor_id=cid,
-            call_sid=call_sid,
-            run_nonce=nonce,
-        )
-    )
-    assert res is None
-    assert ref_owned.data is None
+    # 1. Exact match -> verified (returns None); rtdb_cleanup_delete then deletes it
+    assert smoke.rtdb_cleanup_transaction_update(
+        dict(owned_payload),
+        contractor_id=cid,
+        call_sid=call_sid,
+        run_nonce=nonce,
+    ) is None
 
     # 2. Absent node -> raises exact RTDBCleanupAbsenceSentinel
     ref_absent = _FakeRTDBReference(data=None)
@@ -584,6 +580,72 @@ def test_rtdb_cleanup_transaction_exact_exception_classes():
             )
         )
     assert ref_hostile.data == hostile_payload
+
+
+def _real_rtdb_ref(call_sid, records):
+    """firebase-admin's own Reference over the shared fake RTDB, which refuses a None write."""
+    from firebase_admin import db as rtdb
+
+    from tests.fixtures.fake_rtdb import FakeRtdbClient
+
+    fake = FakeRtdbClient(records)
+    return fake, rtdb.Reference(path=f"/active_calls/{call_sid}", client=fake)
+
+
+def test_text_reply_smoke_removes_its_rtdb_node(monkeypatch):
+    """Seed and cleanup run through firebase-admin, whose transaction() cannot delete."""
+    smoke = _load_smoke_module()
+    database_url = "https://hey-kevin-staging-default-rtdb.firebaseio.com"
+    monkeypatch.setattr(smoke, "ALLOWED_STAGING_DATABASE_URLS", frozenset({database_url}))
+    cid, nonce, call_sid = smoke.generate_contractor_id(), smoke.generate_run_nonce(), smoke.generate_call_sid()
+    fake, ref = _real_rtdb_ref(call_sid, {"CA_other": {"state": "screening"}})
+    monkeypatch.setattr("firebase_admin.initialize_app", lambda *a, **kw: object())
+    monkeypatch.setattr("firebase_admin.db.reference", lambda path, app=None: ref)
+    monkeypatch.setattr("firebase_admin.delete_app", lambda app: None)
+    seeded = []
+
+    def denied(*args, **kwargs):
+        seeded.append(fake.records[call_sid])
+        return 200, {"status": "error", "message": "Text reply is not enabled"}
+
+    monkeypatch.setattr(smoke, "request_json", denied)
+
+    step = smoke.mutable_text_reply_smoke(smoke.REQUIRED_STAGING_BASE_URL, database_url, cid, "test-token",
+                                          run_nonce=nonce, call_sid=call_sid)
+
+    assert step.status == "PASS"
+    assert seeded[0]["codex_run_nonce"] == nonce
+    assert fake.records == {"CA_other": {"state": "screening"}}
+
+
+def test_rtdb_cleanup_keeps_a_node_replaced_after_verification():
+    smoke = _load_smoke_module()
+    cid, nonce, call_sid = smoke.generate_contractor_id(), smoke.generate_run_nonce(), smoke.generate_call_sid()
+    owned = smoke.build_rtdb_call_payload(call_sid, cid, run_nonce=nonce, now=1000.0)
+    replacement = dict(owned, codex_run_nonce="0" * 32)
+    fake, ref = _real_rtdb_ref(call_sid, {call_sid: owned})
+    fake.before_write = lambda records: records.update({call_sid: dict(replacement)})
+
+    with pytest.raises(smoke.RTDBCleanupMismatchError):
+        smoke.rtdb_cleanup_delete(ref, contractor_id=cid, call_sid=call_sid, run_nonce=nonce)
+
+    assert fake.records == {call_sid: replacement}
+
+
+def test_rtdb_cleanup_reports_absence_and_never_deletes_without_an_etag():
+    smoke = _load_smoke_module()
+    cid, nonce, call_sid = smoke.generate_contractor_id(), smoke.generate_run_nonce(), smoke.generate_call_sid()
+    owned = smoke.build_rtdb_call_payload(call_sid, cid, run_nonce=nonce, now=1000.0)
+
+    _, ref = _real_rtdb_ref(call_sid, {})
+    with pytest.raises(smoke.RTDBCleanupAbsenceSentinel):
+        smoke.rtdb_cleanup_delete(ref, contractor_id=cid, call_sid=call_sid, run_nonce=nonce)
+
+    fake, ref = _real_rtdb_ref(call_sid, {call_sid: owned})
+    fake.send_etag = False
+    with pytest.raises(smoke.RTDBCleanupMismatchError):
+        smoke.rtdb_cleanup_delete(ref, contractor_id=cid, call_sid=call_sid, run_nonce=nonce)
+    assert fake.records == {call_sid: owned}
 
 
 # ---------------------------------------------------------------------------
@@ -737,14 +799,17 @@ def test_18qf_mutable_text_reply_smoke_real_propagation_via_main(capsys, monkeyp
 
     class FakeRef:
         def transaction(self, txn_func):
-            if "rtdb_create_transaction_update" in txn_func.__name__ or "_create_txn" in txn_func.__name__:
-                return smoke.build_rtdb_call_payload(
-                    call_sid,
-                    cid,
-                    run_nonce=nonce,
-                    now=1000.0,
-                )
-            raise smoke.RTDBCleanupMismatchError("cleanup_mismatch")
+            assert "_create_txn" in txn_func.__name__, "cleanup must not delete through transaction()"
+            return smoke.build_rtdb_call_payload(
+                call_sid,
+                cid,
+                run_nonce=nonce,
+                now=1000.0,
+            )
+
+        def get(self, etag=False):
+            # Cleanup finds the node no longer owned by this run.
+            return {"call_sid": call_sid, "codex_run_nonce": "0" * 32}, '"v1"'
 
     fake_app = object()
     monkeypatch.setattr("firebase_admin.initialize_app", lambda *a, **kw: fake_app)

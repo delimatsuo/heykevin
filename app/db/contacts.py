@@ -178,17 +178,36 @@ def _bulk_sync_contacts_blocking(
         db = get_firestore_client()
         col_ref = _contacts_ref(db, contractor_id)
 
-        from app.utils.phone import country_of, describe_unreadable_numbers, normalize_phone
+        from app.utils.phone import (
+            AddressBook, country_of, describe_unreadable_numbers, normalize_phone, read_address_book,
+        )
+        phones = [c.get("phone", "") for c in contacts]
+        try:
+            book = read_address_book(phones, default_region)
+        except Exception as e:  # noqa: BLE001 - whitelist what the plain reading can read
+            logger.warning(f"Address book reading failed for {contractor_id}: {type(e).__name__}")
+            book = AddressBook(readings=[
+                [normalized] if (normalized := normalize_phone(phone, default_region)) else []
+                for phone in phones
+            ])
         valid_contacts = []
         unreadable = []
         readable_countries = Counter()
-        for c in contacts:
-            normalized = normalize_phone(c.get("phone", ""), default_region)
-            if normalized:
-                valid_contacts.append({"name": c.get("name", ""), "phone": normalized})
-                readable_countries[country_of(normalized)] += 1
-            else:
-                unreadable.append(c.get("phone", ""))
+        for c, phone, readings in zip(contacts, phones, book.readings):
+            if not readings:
+                unreadable.append(phone)
+            for reading in readings:
+                valid_contacts.append({"name": c.get("name", ""), "phone": reading})
+                readable_countries[country_of(reading)] += 1
+        read = sum(1 for readings in book.readings if readings)
+        if book.ninth_digit or book.as_second_country or book.both_ways:
+            # Counts only, like the summary below.
+            logger.info(
+                f"Bulk sync for {contractor_id}: {book.ninth_digit} old Brazilian mobiles read "
+                f"with their 9; {book.as_second_country} numbers unreadable as {default_region} "
+                f"numbers read as {book.second_country} numbers; {book.both_ways} numbers read "
+                f"both as {default_region} and as {book.second_country} numbers"
+            )
         if unreadable:
             # Counts only: why these numbers were dropped, and which countries the
             # readable ones belong to, to tell how the unreadable ones were written.
@@ -203,8 +222,8 @@ def _bulk_sync_contacts_blocking(
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Unreadable number summary failed for {contractor_id}: {type(e).__name__}")
 
-        # Batch write new/updated contacts
-        synced = 0
+        # Batch write new/updated contacts. A number read two ways is one contact
+        # and two whitelist entries; synced counts contacts.
         synced_doc_ids = set()
         batch = db.batch()
         batch_count = 0
@@ -221,7 +240,6 @@ def _bulk_sync_contacts_blocking(
                 "sync_id": sync_id,
             }, merge=True)
             batch_count += 1
-            synced += 1
 
             if batch_count >= 500:
                 batch.commit()

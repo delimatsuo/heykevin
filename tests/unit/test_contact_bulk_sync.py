@@ -512,6 +512,69 @@ async def test_a_failing_summary_never_fails_the_sync(env, monkeypatch):
     assert _whitelisted(env) == _all(_numbers(3))
 
 
+# Made-up Brazilian numbers. Three coded mobiles make Brazil the address book's
+# second country, and outnumber the numbers read as US numbers.
+BRAZIL_CODED = ["+55 11 98765-1111", "+55 21 98765-2222", "+55 31 98765-3333"]
+BRAZIL_CODED_E164 = {"+5511987651111", "+5521987652222", "+5531987653333"}
+
+
+@pytest.mark.asyncio
+async def test_an_old_brazilian_mobile_is_whitelisted_with_its_nine(env):
+    numbers = _numbers(3) + ["+55 11 8765-4321"]
+
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert response["synced"] == 4
+    contact = await contacts_db.get_contact("+5511987654321", contractor_id=CID)
+    assert contact["is_whitelisted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_mostly_brazilian_address_book_whitelists_brazilian_readings(env, caplog):
+    numbers = BRAZIL_CODED + ["(21) 2345-6789", "0 11 8765-4321"]
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert _whitelisted(env) == BRAZIL_CODED_E164 | {
+        "+12123456789", "+552123456789",  # read both ways
+        "+5511987654321",  # unreadable as a US number: an old São Paulo mobile
+    }
+    assert response["synced"] == 5  # contacts, not whitelist entries
+    [line] = [r.getMessage() for r in caplog.records if "read with their 9" in r.getMessage()]
+    assert line == (
+        f"Bulk sync for {CID}: 1 old Brazilian mobiles read with their 9; 1 numbers "
+        "unreadable as US numbers read as BR numbers; 1 numbers read both as US and as BR numbers"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sync_that_needs_no_second_reading_logs_no_recovery_line(env, caplog):
+    numbers = _numbers(3)
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert not [r for r in caplog.records if "read with their 9" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_address_book_reader_falls_back_to_the_plain_reading(env, monkeypatch, caplog):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("reader bug")
+
+    monkeypatch.setattr("app.utils.phone.read_address_book", broken)
+    numbers = _numbers(3) + ["+55 11 8765-4321"]
+
+    with caplog.at_level("WARNING", logger=contacts_db.logger.name):
+        response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert response["status"] == "ok"
+    assert response["synced"] == 3
+    assert _whitelisted(env) == _all(_numbers(3))
+    assert any("Address book reading failed" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_a_failed_write_does_not_record_the_hash(env):
     env.fs.fail_commits = True

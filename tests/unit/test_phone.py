@@ -1,7 +1,12 @@
 """Unit tests for phone number utilities."""
 
 from app.utils import phone as phone_utils
-from app.utils.phone import describe_unreadable_numbers, normalize_phone, phone_hash
+from app.utils.phone import (
+    describe_unreadable_numbers,
+    normalize_phone,
+    phone_hash,
+    read_address_book,
+)
 
 
 def test_normalize_us_number():
@@ -161,3 +166,107 @@ def test_a_huge_upload_scans_its_first_numbers_but_shapes_them_all(monkeypatch):
     assert summary["scanned"] == 3
     assert summary["valid_in"]["BR"] == 3
     assert summary["shapes"] == {"national/11": 5}
+
+
+# --- read_address_book: an owner's address book, read for the whitelist ---
+# Every number below is made up. Three valid Brazilian mobiles written with +55
+# make Brazil an address book's second country.
+
+BRAZIL_CODED = ["+55 11 98765-1111", "+55 21 98765-2222", "+55 31 98765-3333"]
+BRAZIL_CODED_E164 = [["+5511987651111"], ["+5521987652222"], ["+5531987653333"]]
+
+
+def test_an_old_brazilian_mobile_is_read_with_its_nine():
+    book = read_address_book(["+55 11 8765-4321"], "US")
+
+    assert book.readings == [["+5511987654321"]]
+    assert book.ninth_digit == 1
+
+
+def test_a_brazilian_landline_is_read_as_it_is():
+    book = read_address_book(["+55 21 2345-6789"], "US")
+
+    assert book.readings == [["+552123456789"]]
+    assert book.ninth_digit == 0
+
+
+def test_numbers_unreadable_at_home_are_read_as_the_second_countrys():
+    numbers = BRAZIL_CODED + [
+        "0 21 11 8765-4321",  # trunk 0, carrier code, old 8-digit mobile
+        "0 11 2345-6789",  # trunk 0, landline
+        "55 11 8765 4321",  # country code without "+", old mobile
+        "11 98765-4321",  # area code and mobile, no country code
+    ]
+
+    book = read_address_book(numbers, "US")
+
+    assert book.second_country == "BR"
+    assert book.readings == BRAZIL_CODED_E164 + [
+        ["+5511987654321"], ["+551123456789"], ["+5511987654321"], ["+5511987654321"],
+    ]
+    assert book.as_second_country == 4
+    assert book.ninth_digit == 2
+    assert book.both_ways == 0
+
+
+def test_too_few_coded_numbers_make_no_second_country():
+    book = read_address_book(BRAZIL_CODED[:2] + ["0 11 2345-6789"], "US")
+
+    assert book.second_country is None
+    assert book.readings[-1] == []
+    assert book.as_second_country == 0
+
+
+def test_a_number_valid_in_both_countries_is_read_both_ways_when_the_second_dominates():
+    # Three coded Brazilian numbers against two numbers read as US numbers.
+    book = read_address_book(BRAZIL_CODED + ["(21) 2345-6789", "(21) 8765-4321"], "US")
+
+    assert book.readings[3:] == [
+        ["+12123456789", "+552123456789"],  # a New York number and a Rio landline
+        ["+12187654321", "+5521987654321"],  # a Minnesota number and a Rio old mobile
+    ]
+    assert book.both_ways == 2
+    assert book.ninth_digit == 1
+
+
+def test_home_numbers_keep_one_reading_when_the_second_country_does_not_dominate():
+    numbers = BRAZIL_CODED + ["+1 415 555 0101", "+1 415 555 0102", "(21) 2345-6789", "0 11 2345-6789"]
+
+    book = read_address_book(numbers, "US")
+
+    assert book.readings[5:] == [["+12123456789"], ["+551123456789"]]
+    assert book.both_ways == 0
+    assert book.as_second_country == 1  # unreadable at home is still read as Brazilian
+
+
+def test_a_number_written_with_a_country_code_gets_one_reading():
+    book = read_address_book(BRAZIL_CODED + ["+1 212 345 6789"], "US")
+
+    assert book.readings[-1] == ["+12123456789"]
+    assert book.both_ways == 0
+
+
+def test_local_numbers_without_an_area_code_stay_unread():
+    book = read_address_book(BRAZIL_CODED + ["8765-4321", "98765-4321"], "US")
+
+    assert book.readings[-2:] == [[], []]
+
+
+def test_a_tie_for_second_country_goes_to_the_alphabetically_first():
+    british = ["+44 20 7946 0958", "+44 20 7946 0959", "+44 20 7946 0960"]
+
+    assert read_address_book(british + BRAZIL_CODED, "US").second_country == "BR"
+    assert read_address_book(BRAZIL_CODED + british, "US").second_country == "BR"
+
+
+def test_a_non_geographic_code_is_never_the_second_country():
+    book = read_address_book(["+800 1234 5678"] * 3 + ["0 11 2345-6789"], "US")
+
+    assert book.second_country is None
+    assert book.readings[-1] == []
+
+
+def test_the_owners_own_country_is_never_the_second_country():
+    book = read_address_book(["+1 415 555 0101", "+1 415 555 0102", "+1 415 555 0103"], "US")
+
+    assert book.second_country is None

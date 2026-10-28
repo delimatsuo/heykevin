@@ -16,6 +16,7 @@ webhook code does not have to assemble the path.
 """
 
 import asyncio
+from collections import Counter
 from typing import Optional
 
 from app.db.firestore_client import get_firestore_client
@@ -177,12 +178,30 @@ def _bulk_sync_contacts_blocking(
         db = get_firestore_client()
         col_ref = _contacts_ref(db, contractor_id)
 
-        from app.utils.phone import normalize_phone
+        from app.utils.phone import country_of, describe_unreadable_numbers, normalize_phone
         valid_contacts = []
+        unreadable = []
+        readable_countries = Counter()
         for c in contacts:
             normalized = normalize_phone(c.get("phone", ""), default_region)
             if normalized:
                 valid_contacts.append({"name": c.get("name", ""), "phone": normalized})
+                readable_countries[country_of(normalized)] += 1
+            else:
+                unreadable.append(c.get("phone", ""))
+        if unreadable:
+            # Counts only: why these numbers were dropped, and which countries the
+            # readable ones belong to, to tell how the unreadable ones were written.
+            # A log line must never fail the sync.
+            try:
+                logger.info(
+                    f"Bulk sync for {contractor_id}: {len(unreadable)} of {len(contacts)} numbers "
+                    f"unreadable as {default_region} numbers: "
+                    f"{describe_unreadable_numbers(unreadable, default_region)}; "
+                    f"readable numbers by country: {dict(readable_countries.most_common(5))}"
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Unreadable number summary failed for {contractor_id}: {type(e).__name__}")
 
         # Batch write new/updated contacts
         synced = 0

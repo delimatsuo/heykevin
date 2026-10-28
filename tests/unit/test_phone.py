@@ -67,6 +67,61 @@ def test_a_plus_number_is_counted_under_the_country_its_code_names():
     assert summary["shapes"] == {"plus/12": 1}
     assert summary["plus_countries"] == {"BR": 1}
     assert summary["valid_in"] == {}
+    assert summary["valid_nowhere"] == 0
+    assert summary["scanned"] == 0  # a "+" number is never tried as other countries
+
+
+def test_a_plus_hidden_behind_spaces_or_format_marks_is_still_a_plus():
+    numbers = [
+        "  +55 11 8765-4321",
+        "\N{LEFT-TO-RIGHT EMBEDDING}+55 11 8765-4321\N{POP DIRECTIONAL FORMATTING}",
+        "\N{FULLWIDTH PLUS SIGN}55 11 8765-4321",
+    ]
+
+    summary = describe_unreadable_numbers(numbers, "US")
+
+    assert summary["shapes"] == {"plus/12": 3}
+    assert summary["plus_countries"] == {"BR": 3}
+
+
+def test_a_number_dialed_with_00_counts_under_the_country_it_dials():
+    assert describe_unreadable_numbers(["0055 11 98765 4321"], "US")["valid_in"] == {"BR": 1}
+    # Dialed this way it can land in the owner's own country.
+    assert describe_unreadable_numbers(["0055 11 98765 4321"], "BR")["valid_in"] == {"BR": 1}
+
+
+def test_country_counts_keep_only_the_largest_in_a_stable_order():
+    # An 8-digit national number is valid in many countries.
+    first = describe_unreadable_numbers(["98765-4321"], "US")["valid_in"]
+
+    assert len(first) == phone_utils.SHAPE_TOP_COUNTRIES
+    assert list(first) == sorted(first)  # all tied at 1, so alphabetical
+
+
+def test_a_number_too_long_to_be_valid_is_not_tried_as_other_countries(monkeypatch):
+    calls = []
+    real_parse = phone_utils.phonenumbers.parse
+    monkeypatch.setattr(
+        phone_utils.phonenumbers, "parse",
+        lambda *args, **kwargs: calls.append(args) or real_parse(*args, **kwargs),
+    )
+
+    summary = describe_unreadable_numbers(["1" * 40], "US")
+
+    assert calls == []
+    assert summary["shapes"] == {"national/40": 1}
+    assert summary["valid_nowhere"] == 1
+
+
+def test_the_country_scan_stops_when_its_time_is_up(monkeypatch):
+    monkeypatch.setattr(phone_utils, "SHAPE_SCAN_SECONDS", 0)
+
+    summary = describe_unreadable_numbers(["11 98765-4321", "+55 11 8765-4321"], "US")
+
+    assert summary["scanned"] == 0
+    assert summary["valid_in"] == {}
+    assert summary["shapes"] == {"national/11": 1, "plus/12": 1}
+    assert summary["plus_countries"] == {"BR": 1}
 
 
 def test_shapes_say_how_each_number_starts():
@@ -81,7 +136,7 @@ def test_shapes_say_how_each_number_starts():
     assert summary["valid_nowhere"] >= 2  # "12" and "not-a-number" are numbers nowhere
 
 
-def test_the_owners_own_country_is_never_counted():
+def test_a_number_is_not_parsed_again_as_the_owners_country():
     summary = describe_unreadable_numbers(["11 98765-4321"], "BR")
 
     assert "BR" not in summary["valid_in"]
@@ -98,10 +153,11 @@ def test_the_summary_carries_no_digits_of_any_number():
             assert digits[start:start + 4] not in text
 
 
-def test_a_huge_upload_is_described_from_its_first_numbers(monkeypatch):
+def test_a_huge_upload_scans_its_first_numbers_but_shapes_them_all(monkeypatch):
     monkeypatch.setattr(phone_utils, "SHAPE_SCAN_LIMIT", 3)
 
     summary = describe_unreadable_numbers(["11 98765-4321"] * 5, "US")
 
     assert summary["scanned"] == 3
-    assert summary["shapes"] == {"national/11": 3}
+    assert summary["valid_in"]["BR"] == 3
+    assert summary["shapes"] == {"national/11": 5}

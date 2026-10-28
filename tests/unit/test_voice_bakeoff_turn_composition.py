@@ -115,9 +115,12 @@ _BASELINE_HASHES = {
     # remains the default and call routing is unchanged.
     # Re-pinned 2026-10-13 for reviewed durable external-worker cutover
     # fencing and bounded maintenance scans; voice bakeoff isolation remains.
+    # Re-pinned 2026-10-28 for the reviewed removal of the startup CRITICAL
+    # Vapi-secret warning, which fired the production error alert on every
+    # instance start; routes and workers are unchanged.
     # Voice bakeoff imports and activation remain prohibited.
     "app/main.py":
-        "97ac5ed051ce02fc0ad2e227cb214d75f8e56d20d1a3ded9da9064a432e96750",
+        "e3ff3c67bea5eeafe2fb43217acf729f8288afc5396b1826ae3cdd39a4165c84",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

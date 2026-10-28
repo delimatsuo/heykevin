@@ -100,19 +100,25 @@ RULES:
 
 @router.post("/webhooks/vapi/events")
 async def handle_vapi_event(request: Request):
-    """Handle events from Vapi's serverUrl webhook."""
-    # Verify webhook signature if secret is configured
-    if settings.vapi_webhook_secret:
-        body = await request.body()
-        signature = request.headers.get("X-Vapi-Signature", "")
-        expected = hmac.new(
-            settings.vapi_webhook_secret.encode(),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            logger.warning("Vapi webhook signature mismatch — rejecting request")
-            return JSONResponse(status_code=401, content={"error": "invalid signature"})
+    """Handle events from Vapi's serverUrl webhook.
+
+    Legacy: app.main does not mount this router. Should it ever be mounted
+    again, it accepts only signed events, and none while vapi_webhook_secret is
+    unset, so it can never serve unauthenticated call-state writes.
+    """
+    if not settings.vapi_webhook_secret:
+        logger.warning("Vapi webhook rejected: vapi_webhook_secret is not set")
+        return JSONResponse(status_code=401, content={"error": "webhook not configured"})
+    body = await request.body()
+    signature = request.headers.get("X-Vapi-Signature", "")
+    expected = hmac.new(
+        settings.vapi_webhook_secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        logger.warning("Vapi webhook signature mismatch — rejecting request")
+        return JSONResponse(status_code=401, content={"error": "invalid signature"})
 
     try:
         data = await request.json()

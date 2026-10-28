@@ -347,10 +347,6 @@ async def startup():
 
     validate_runtime_safety()
 
-    # Warn loudly if vapi_webhook_secret is not set in production
-    if not settings.vapi_webhook_secret and settings.environment != "development":
-        logger.critical("SECURITY WARNING: vapi_webhook_secret is not set — Vapi webhook is unauthenticated")
-
     await _configure_background_workers()
 
     # F-21: drop the redacted Twilio number from startup logs entirely. Even

@@ -146,6 +146,96 @@ async def test_incomplete_external_cutover_retains_embedded_recovery(inert_lifec
     assert len(inert_lifecycle) == 9
 
 
+@pytest.mark.asyncio
+async def test_draining_names_holding_jobs_when_they_change_and_every_fifteen_minutes(monkeypatch):
+    estimates = (("estimates", "needs_attention"),)
+    both = (("post_calls", "running"), ("estimates", "needs_attention"))
+
+    class HeldCutover:
+        held_jobs = ()
+        def __init__(self, polls):
+            self.polls, self.count = iter(polls), 0
+        def begin_embedded(self):
+            self.count += 1
+            held = next(self.polls)
+            self.held_jobs = held or ()
+            return held is None
+
+    # 181 polls of the same hold, a change, the fence turn, then release.
+    store = HeldCutover([estimates] * 181 + [both, (), None])
+    lines, started = [], []
+
+    class Recorder:
+        def warning(self, message, *args):
+            lines.append((store.count, "warning", message % args))
+        def info(self, message, *args):
+            lines.append((store.count, "info", message % args))
+
+    async def no_sleep(seconds):
+        assert seconds == 5
+    monkeypatch.setattr(main, "logger", Recorder())
+    monkeypatch.setattr(main.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(main, "_start_embedded_background_loops", lambda: started.append(True))
+    monkeypatch.setattr(main, "_effective_background_worker_mode", "draining")
+
+    await main._wait_for_embedded_cutover(store, fallback=False)
+
+    held = "Background-worker drain held by ledger jobs: "
+    assert lines == [
+        (1, "warning", held + "estimates=needs_attention"),
+        (181, "warning", held + "estimates=needs_attention"),
+        (182, "warning", held + "post_calls=running, estimates=needs_attention"),
+        (184, "info", "Background-worker drain released; starting embedded loops"),
+    ]
+    assert started == [True]
+    assert main._effective_background_worker_mode == "embedded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("polls,expected", [
+    # A fence turn with no held job is neither a hold nor a release.
+    ([(), None], []),
+    # Once reads recover, the unchanged hold is named again at once.
+    ([(("estimates", "needs_attention"),), RuntimeError, (("estimates", "needs_attention"),), None], [
+        (1, "warning", "Background-worker drain held by ledger jobs: estimates=needs_attention"),
+        (2, "warning", "Background-worker cutover read failed: RuntimeError"),
+        (3, "warning", "Background-worker drain held by ledger jobs: estimates=needs_attention"),
+        (4, "info", "Background-worker drain released; starting embedded loops"),
+    ]),
+])
+async def test_draining_logs_only_real_holds_and_renames_them_after_read_failures(monkeypatch, polls, expected):
+    class Cutover:
+        held_jobs = ()
+        def __init__(self):
+            self.polls, self.count = iter(polls), 0
+        def begin_embedded(self):
+            self.count += 1
+            held = next(self.polls)
+            if held is RuntimeError:
+                raise RuntimeError("fictional read failure")
+            self.held_jobs = held or ()
+            return held is None
+
+    store, lines = Cutover(), []
+
+    class Recorder:
+        def warning(self, message, *args):
+            lines.append((store.count, "warning", message % args))
+        def info(self, message, *args):
+            lines.append((store.count, "info", message % args))
+
+    async def no_sleep(seconds):
+        pass
+    monkeypatch.setattr(main, "logger", Recorder())
+    monkeypatch.setattr(main.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(main, "_start_embedded_background_loops", lambda: None)
+    monkeypatch.setattr(main, "_effective_background_worker_mode", "draining")
+
+    await main._wait_for_embedded_cutover(store, fallback=False)
+
+    assert lines == expected
+
+
 @pytest.mark.parametrize("environment", ["development", "production", "test"])
 def test_external_mode_forbidden_outside_staging(monkeypatch, environment):
     monkeypatch.setattr(main.settings, "background_worker_mode", "external")

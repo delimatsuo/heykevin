@@ -218,8 +218,7 @@ def read_address_book(numbers: list[str], home_region: str = "US", prior=None) -
     one, without the home calling code, whose code the most numbers are written
     with: at least ``SECOND_COUNTRY_MIN``, ties to the alphabetically first. A
     number without "+" that is not valid at home is read as a second-country
-    number, as it was most likely saved there, as "0 21 11 8765-4321" is. So is
-    one that is valid at home only with a 9 added, which makes it a guess.
+    number, as it was most likely saved there, as "0 21 11 8765-4321" is.
 
     When more numbers are written with the second country's code than are read
     as home numbers at all, as for an owner in the US whose contacts are mostly
@@ -227,7 +226,8 @@ def read_address_book(numbers: list[str], home_region: str = "US", prior=None) -
     ways: "(21) 2345-6789" is a New York number and a Rio number, and only one is
     the contact. Whitelisting both lets the contact ring through; the stranger
     with the other number rings through too, which costs far less than
-    screening a contact.
+    screening a contact. Only then: for an owner in Brazil, "(21) 8765-4321" is
+    far more likely an old Rio mobile than a US contact saved without +1.
 
     The app can send one sync as several requests. ``prior`` is the ``counts``
     the earlier requests returned, so later requests decide from everything the
@@ -258,15 +258,13 @@ def read_address_book(numbers: list[str], home_region: str = "US", prior=None) -
     for number, is_explicit, (readings, took_nine) in zip(cleaned, explicit, home):
         entry = list(readings)
         wants_second = second is not None and not is_explicit and (
-            not readings
-            or took_nine
-            or (second_dominates and readings[0].startswith(home_prefix))
+            not readings or (second_dominates and readings[0].startswith(home_prefix))
         )
         if wants_second:
+            # Never a home reading again: the second country has its own calling code.
             alternatives, alternatives_took_nine = _read(number, second)
-            added = [reading for reading in alternatives if reading not in entry]
-            if added:
-                entry += added
+            if alternatives:
+                entry += alternatives
                 took_nine = took_nine or alternatives_took_nine
                 if readings:
                     book.both_ways += 1

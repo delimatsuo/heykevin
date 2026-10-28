@@ -308,22 +308,45 @@ def test_a_country_sharing_the_home_calling_code_counts_as_home():
     assert book.counts == {"coded": {"BR": 3}, "home": 5}
 
 
-def test_a_home_reading_that_needed_a_nine_also_gets_the_second_reading():
-    # A Brazilian owner with US contacts: "(218) 765-4321" is a US number, though
-    # with a 9 added it reads as a Rio mobile too. Brazil is not outnumbered here,
-    # so only the guessed number gets a second reading.
+def test_a_brazilian_owner_reads_an_old_mobile_as_a_us_number_only_when_us_dominates():
+    # For an owner in Brazil, "(21) 8765-4321" is an old Rio mobile (with its 9)
+    # or a Minnesota number saved without +1; only a mostly-US book makes the
+    # second likely enough to whitelist.
     us_coded = ["+1 415 555 0101", "+1 415 555 0102", "+1 415 555 0103"]
     local = ["(11) 2345-6781", "(11) 2345-6782", "(11) 2345-6783"]
 
-    book = read_address_book(us_coded + local + ["(218) 765-4321"], "BR")
+    mostly_brazilian = read_address_book(us_coded + local + ["(21) 8765-4321"], "BR")
+    mostly_us = read_address_book(us_coded + ["(21) 8765-4321"], "BR")
 
-    assert book.second_country == "US"
-    assert book.readings[3:] == [
-        ["+551123456781"], ["+551123456782"], ["+551123456783"],
-        ["+5521987654321", "+12187654321"],
-    ]
-    assert book.both_ways == 1
-    assert book.ninth_digit == 1
+    assert mostly_brazilian.second_country == "US"
+    assert mostly_brazilian.readings[-1] == ["+5521987654321"]
+    assert mostly_brazilian.both_ways == 0
+    assert mostly_us.readings[-1] == ["+5521987654321", "+12187654321"]
+    assert mostly_us.both_ways == 1
+    assert mostly_us.ninth_digit == 1
+
+
+def test_only_old_mobile_starts_take_a_nine():
+    book = read_address_book(["+55 11 6123-4567", "+55 11 9765-4321", "+55 11 0123-4567"], "US")
+
+    assert book.readings == [["+5511961234567"], ["+5511997654321"], []]
+
+
+def test_a_canadian_number_is_a_home_number_read_both_ways():
+    # +1 is home in the US, so a mostly Brazilian book reads "(416) 555-0101" both
+    # ways: Toronto, or a Curitiba old mobile with its 9.
+    book = read_address_book(BRAZIL_CODED + ["(416) 555-0101"], "US")
+
+    assert book.readings[-1] == ["+14165550101", "+5541965550101"]
+
+
+def test_home_numbers_from_earlier_requests_count_against_dominance():
+    # The earlier requests sent three Brazilian numbers and ten US ones.
+    book = read_address_book(["(21) 2345-6789"], "US", prior={"coded": {"BR": 3}, "home": 10})
+
+    assert book.second_country == "BR"
+    assert book.readings == [["+12123456789"]]
+    assert book.counts == {"coded": {"BR": 3}, "home": 11}
 
 
 def test_an_old_radio_number_is_also_read_with_its_nine():

@@ -347,10 +347,6 @@ async def startup():
 
     validate_runtime_safety()
 
-    # No Vapi warning here: the legacy Vapi webhook is not mounted, and its
-    # handler rejects every event while vapi_webhook_secret is unset. Logging
-    # CRITICAL on each instance start only fired the production error alert.
-
     await _configure_background_workers()
 
     # F-21: drop the redacted Twilio number from startup logs entirely. Even

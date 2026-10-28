@@ -118,9 +118,11 @@ _BASELINE_HASHES = {
     # Re-pinned 2026-10-28 for the reviewed removal of the startup CRITICAL
     # Vapi-secret warning, which fired the production error alert on every
     # instance start; routes and workers are unchanged.
+    # Re-pinned 2026-10-28 for reviewed logging of the ledger jobs that
+    # hold a staging cutover drain; routes and workers are unchanged.
     # Voice bakeoff imports and activation remain prohibited.
     "app/main.py":
-        "e3ff3c67bea5eeafe2fb43217acf729f8288afc5396b1826ae3cdd39a4165c84",
+        "e367e9421aff5970f017c87f0928d451bcabc3597075b1d979f7818f5a14be6e",
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.

@@ -273,8 +273,8 @@ async def _wait_for_embedded_cutover(store, *, fallback: bool) -> None:
             _start_embedded_background_loops()
             _effective_background_worker_mode = "embedded_fallback" if fallback else "embedded"
             return
-        # A held ledger row never clears on its own (see
-        # docs/cloud-run-background-workers.md), so name it for the operator.
+        # Only an operator clears a needs_attention or malformed row (see
+        # docs/cloud-run-background-workers.md), so name each held job.
         held, polls_since_log = store.held_jobs, polls_since_log + 1
         if held and (held != logged_hold or polls_since_log >= _DRAIN_HOLD_LOG_POLLS):
             logger.warning(

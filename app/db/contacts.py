@@ -199,6 +199,8 @@ def _bulk_sync_contacts_blocking(
             for reading in readings:
                 valid_contacts.append({"name": c.get("name", ""), "phone": reading})
                 readable_countries[country_of(reading)] += 1
+        # A number read two ways is one contact and two whitelist entries; the
+        # sync reports contacts.
         read = sum(1 for readings in book.readings if readings)
         if book.ninth_digit or book.as_second_country or book.both_ways:
             # Counts only, like the summary below.
@@ -222,8 +224,7 @@ def _bulk_sync_contacts_blocking(
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Unreadable number summary failed for {contractor_id}: {type(e).__name__}")
 
-        # Batch write new/updated contacts. A number read two ways is one contact
-        # and two whitelist entries; synced counts contacts.
+        # Batch write new/updated contacts
         synced_doc_ids = set()
         batch = db.batch()
         batch_count = 0
@@ -272,8 +273,8 @@ def _bulk_sync_contacts_blocking(
         if batch_count > 0:
             batch.commit()
 
-        logger.info(f"Bulk sync for {contractor_id}: synced={synced}, removed={removed}")
-        return {"synced": synced, "removed": removed}
+        logger.info(f"Bulk sync for {contractor_id}: synced={read}, removed={removed}")
+        return {"synced": read, "removed": removed}
 
     except Exception as e:
         logger.error(f"Bulk contact sync failed: {e}", exc_info=True)

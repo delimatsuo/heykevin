@@ -149,12 +149,7 @@ def _brazil_ninth_digit(parsed: phonenumbers.PhoneNumber) -> Optional[phonenumbe
     upgraded = phonenumbers.PhoneNumber(
         country_code=_BRAZIL, national_number=int(national[:2] + "9" + national[2:]),
     )
-    if (
-        phonenumbers.is_valid_number(upgraded)
-        and phonenumbers.number_type(upgraded) == phonenumbers.PhoneNumberType.MOBILE
-    ):
-        return upgraded
-    return None
+    return upgraded if phonenumbers.is_valid_number(upgraded) else None
 
 
 def _read(number: str, region: str) -> tuple[Optional[str], bool]:
@@ -229,8 +224,9 @@ def read_address_book(numbers: list[str], home_region: str = "US") -> AddressBoo
             reading is None or (second_dominates and country_of(reading) == home_region)
         )
         if wants_second:
+            # Never the first reading again: that one is a home number or none.
             alternative, alternative_took_nine = _read(number, second)
-            if alternative and alternative not in entry:
+            if alternative:
                 entry.append(alternative)
                 took_nine = took_nine or alternative_took_nine
                 if reading is None:

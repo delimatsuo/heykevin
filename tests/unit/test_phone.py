@@ -183,6 +183,31 @@ def test_an_old_brazilian_mobile_is_read_with_its_nine():
     assert book.ninth_digit == 1
 
 
+def test_only_brazilian_numbers_are_given_a_nine():
+    # Shaped like an old Brazilian mobile after its country code, but American.
+    assert read_address_book(["+1 118 765 4321"], "US").readings == [[]]
+
+
+def test_a_short_brazilian_number_stays_unread():
+    assert read_address_book(["+55 11"], "US").readings == [[]]
+
+
+def test_a_number_dialed_abroad_from_home_gets_one_reading():
+    # "011" dials out of the US: a St Helena number, though after a trunk 0 the
+    # same digits are a São Paulo landline. Only home numbers are read both ways.
+    book = read_address_book(BRAZIL_CODED + ["011 290 22345", "011 55 11 98765-4321"], "US")
+
+    assert book.readings[-2:] == [["+29022345"], ["+5511987654321"]]
+    assert book.both_ways == 0
+
+
+def test_a_number_dialed_abroad_does_not_make_a_second_country():
+    book = read_address_book(BRAZIL_CODED[:2] + ["011 55 11 98765-4321", "0 11 2345-6789"], "US")
+
+    assert book.second_country is None
+    assert book.readings[-1] == []
+
+
 def test_a_brazilian_landline_is_read_as_it_is():
     book = read_address_book(["+55 21 2345-6789"], "US")
 

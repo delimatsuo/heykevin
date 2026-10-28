@@ -347,9 +347,9 @@ async def startup():
 
     validate_runtime_safety()
 
-    # Warn loudly if vapi_webhook_secret is not set in production
-    if not settings.vapi_webhook_secret and settings.environment != "development":
-        logger.critical("SECURITY WARNING: vapi_webhook_secret is not set — Vapi webhook is unauthenticated")
+    # No Vapi warning here: the legacy Vapi webhook is not mounted, and its
+    # handler rejects every event while vapi_webhook_secret is unset. Logging
+    # CRITICAL on each instance start only fired the production error alert.
 
     await _configure_background_workers()
 

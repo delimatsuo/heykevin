@@ -469,6 +469,50 @@ async def test_local_numbers_follow_the_owners_phone_first(env):
 
 
 @pytest.mark.asyncio
+async def test_unreadable_numbers_are_logged_as_counts_only(env, caplog):
+    # Made-up Brazilian numbers saved without +55, beside readable US numbers.
+    brazilian = ["(11) 98765-4321", "11 97654-3210"]
+    numbers = _numbers(3) + brazilian + ["+55 11 98765-1234"]
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert response["synced"] == 4
+    [line] = [r.getMessage() for r in caplog.records if "unreadable" in r.getMessage()]
+    assert "2 of 6 numbers unreadable as US numbers" in line
+    assert "'national/11': 2" in line
+    assert "'BR': 2" in line
+    assert "readable numbers by country: {'US': 3, 'BR': 1}" in line
+    for number in brazilian:
+        assert "".join(ch for ch in number if ch.isdigit())[-4:] not in line
+
+
+@pytest.mark.asyncio
+async def test_a_sync_with_only_readable_numbers_logs_no_summary(env, caplog):
+    numbers = _numbers(3)
+
+    with caplog.at_level("INFO", logger=contacts_db.logger.name):
+        await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert not [r for r in caplog.records if "unreadable" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_summary_never_fails_the_sync(env, monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("summary bug")
+
+    monkeypatch.setattr("app.utils.phone.describe_unreadable_numbers", broken)
+    numbers = _numbers(3) + ["(11) 98765-4321"]
+
+    response = await _post(env, numbers, contacts_hash=_app_hash(numbers), at=START)
+
+    assert response["status"] == "ok"
+    assert response["synced"] == 3
+    assert _whitelisted(env) == _all(_numbers(3))
+
+
+@pytest.mark.asyncio
 async def test_a_failed_write_does_not_record_the_hash(env):
     env.fs.fail_commits = True
     numbers = _numbers(20)

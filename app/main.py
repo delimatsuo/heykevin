@@ -249,10 +249,15 @@ def _get_background_cutover_store():
     return BackgroundWorkerCutoverStore(get_firestore_client())
 
 
+# Repeat an unchanged drain hold every 15 minutes at the 5-second poll.
+_DRAIN_HOLD_LOG_POLLS = 180
+
+
 async def _wait_for_embedded_cutover(store, *, fallback: bool) -> None:
     """Drain any admitted external child before restarting embedded loops."""
     global _effective_background_worker_mode
 
+    logged_hold, polls_since_log = (), 0
     while True:
         try:
             ready = await asyncio.to_thread(store.begin_embedded)
@@ -263,9 +268,20 @@ async def _wait_for_embedded_cutover(store, *, fallback: bool) -> None:
             await asyncio.sleep(5)
             continue
         if ready:
+            if logged_hold:
+                logger.info("Background-worker drain released; starting embedded loops")
             _start_embedded_background_loops()
             _effective_background_worker_mode = "embedded_fallback" if fallback else "embedded"
             return
+        # A held ledger row never clears on its own (see
+        # docs/cloud-run-background-workers.md), so name it for the operator.
+        held, polls_since_log = store.held_jobs, polls_since_log + 1
+        if held and (held != logged_hold or polls_since_log >= _DRAIN_HOLD_LOG_POLLS):
+            logger.warning(
+                "Background-worker drain held by ledger jobs: %s",
+                ", ".join(f"{job}={reason}" for job, reason in held),
+            )
+            logged_hold, polls_since_log = held, 0
         await asyncio.sleep(5)
 
 

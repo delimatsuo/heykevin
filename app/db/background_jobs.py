@@ -148,6 +148,19 @@ def _settled_job_snapshot(job: str, snapshot) -> bool:
     return True
 
 
+def _job_hold_reason(job: str, snapshot) -> str | None:
+    """A fixed label for why a ledger row holds embedded fallback, or None.
+
+    Only these labels are logged, never stored values, so a malformed row
+    cannot write arbitrary text into the drain log.
+    """
+    if _settled_job_snapshot(job, snapshot):
+        return None
+    data = snapshot.to_dict()
+    status = data.get("status") if isinstance(data, dict) else None
+    return status if status in ("running", "needs_attention") else "malformed"
+
+
 def _authoritative_batch_snapshots(db, refs, *, transaction=None, error_message: str) -> list:
     """Return batch reads in caller order, never trusting Firestore stream order."""
     expected = {ref.path for ref in refs}
@@ -182,6 +195,8 @@ class BackgroundWorkerCutoverStore:
         self.db = db
         self.trusted_clock = trusted_clock
         self.transaction_factory = transaction_factory or (lambda: BoundedTransaction(db, max_attempts=1))
+        # (job, reason) for each ledger row that held the last begin_embedded().
+        self.held_jobs: tuple[tuple[str, str], ...] = ()
 
     def _ref(self):
         return self.db.collection(CUTOVER_COLLECTION).document(CUTOVER_DOCUMENT)
@@ -299,11 +314,12 @@ class BackgroundWorkerCutoverStore:
         def body(transaction):
             control, *jobs = self._snapshots(refs, transaction)
             data = control.to_dict() or {}
-            unsettled = any(
-                not _settled_job_snapshot(job, snapshot)
+            self.held_jobs = tuple(
+                (job, reason)
                 for job, snapshot in zip(JOB_INTERVALS, jobs)
+                if (reason := _job_hold_reason(job, snapshot)) is not None
             )
-            if unsettled:
+            if self.held_jobs:
                 if not control.exists or data.get("state") != "external_draining":
                     transaction.set(ref, {**data, "state": "external_draining"})
                 return False

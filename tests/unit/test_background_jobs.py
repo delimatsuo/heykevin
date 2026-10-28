@@ -257,6 +257,7 @@ def test_expired_external_lease_never_admits_work_and_reverts_to_embedded():
     assert external.admit("orphan_calls").status == "cutover_blocked"
     assert not cutover.begin_embedded()
     assert db.data[_CUTOVER_KEY]["state"] == "external_draining"
+    assert cutover.held_jobs == ()
     assert cutover.begin_embedded()
     assert db.data[_CUTOVER_KEY] == {"state": "embedded", "protocol_version": 1}
 
@@ -308,6 +309,34 @@ def test_held_external_job_blocks_embedded_fallback_until_operator_reconciles_it
     assert cutover.begin_embedded()
 
 
+def test_begin_embedded_names_each_job_holding_the_drain():
+    db = Database()
+    cutover = db.cutover()
+    assert cutover.begin_embedded()
+    assert cutover.held_jobs == ()
+
+    running = db.store().admit("post_calls")
+    db.data["estimates"] = {
+        "status": "needs_attention", "nonce": "held",
+        "next_due_at": 1060, "continuation": {"processing": None},
+    }
+    # Ledger values never reach the log; anything unrecognised is "malformed".
+    db.data["call_retention"] = {"status": "forged\nlog line"}
+
+    assert not cutover.begin_embedded()
+    assert cutover.held_jobs == (
+        ("call_retention", "malformed"),
+        ("post_calls", "running"),
+        ("estimates", "needs_attention"),
+    )
+
+    assert db.store().finish("post_calls", running.nonce, completed=True)
+    db.data["estimates"]["status"] = "completed"
+    del db.data["call_retention"]
+    assert cutover.begin_embedded()
+    assert cutover.held_jobs == ()
+
+
 @pytest.mark.parametrize("job,record", [
     ("estimates", {"status": "completed"}),
     ("estimates", {"status": "completed", "next_due_at": -1, "continuation": {}}),
@@ -325,3 +354,4 @@ def test_malformed_completed_job_blocks_embedded_fallback(job, record):
     assert db.store().admit(job).status == "needs_attention"
     assert not cutover.begin_embedded()
     assert db.data[_CUTOVER_KEY]["state"] == "external_draining"
+    assert cutover.held_jobs == ((job, "malformed"),)

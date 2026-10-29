@@ -74,6 +74,7 @@ struct SettingsHost<Root: View>: View {
     @State private var isImporting = false
     @State private var importMessage = ""
     @State private var syncMessage = ""
+    @State private var syncFailed = false
     @State private var showModeChangeAlert = false
     @State private var isSwitchingMode = false
     @State private var modeChangeError = ""
@@ -333,6 +334,7 @@ struct SettingsHost<Root: View>: View {
         isImporting = false
         importMessage = ""
         syncMessage = ""
+        syncFailed = false
         isProvisioningNumber = false
         accountDeletionFence.reset(for: newAuth)
         showDeleteAccountAlert = false
@@ -968,6 +970,7 @@ struct SettingsHost<Root: View>: View {
                         contractorId: appState.contractorId,
                         force: true
                     )
+                    syncFailed = result.isFailure
                     switch result {
                     case .success(let synced, _):
                         syncMessage = String(localized: "Synced \(synced) contacts")
@@ -988,7 +991,7 @@ struct SettingsHost<Root: View>: View {
                     if !syncMessage.isEmpty {
                         Text(syncMessage)
                             .font(.caption)
-                            .foregroundStyle(syncMessage.contains("Error") || syncMessage.contains("denied") ? Color.hkRed : Color.hkGreen)
+                            .foregroundStyle(syncFailed ? Color.hkRed : Color.hkGreen)
                     }
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .foregroundStyle(Color.hkInkSecondary)

@@ -13,6 +13,21 @@ enum SyncResult: Equatable {
     case permissionDenied
     case rateLimited
     case error(String)
+
+    /// Shown in red. Decided by the case, not the message text, which is localized.
+    var isFailure: Bool {
+        switch self {
+        case .permissionDenied, .error: return true
+        case .success, .rateLimited: return false
+        }
+    }
+}
+
+/// What iOS's Contacts permission allows right now.
+enum ContactsAccess: Equatable {
+    case readable
+    case notAsked
+    case denied
 }
 
 actor ContactSyncManager {
@@ -27,7 +42,6 @@ actor ContactSyncManager {
     static let lastSyncAttemptKey = "lastContactSyncAttemptAt.v2"
     /// The most numbers one upload carries; the server accepts no more per request.
     static let maxContacts = 5000
-    private let permissionDeniedKey = "contactsPermissionDenied"
     private let minSyncInterval: TimeInterval = 300 // 5 minutes
     private let automaticSyncInterval: TimeInterval = 24 * 3600
 
@@ -44,12 +58,6 @@ actor ContactSyncManager {
         guard !isSyncing else {
             debugLog("Contact sync: already in progress")
             return .error("Sync already in progress")
-        }
-
-        // Skip if permission was previously denied
-        if UserDefaults.standard.bool(forKey: permissionDeniedKey) {
-            debugLog("Contact sync: permission previously denied")
-            return .permissionDenied
         }
 
         if !force {
@@ -72,19 +80,19 @@ actor ContactSyncManager {
 
         // Check authorization
         let status = CNContactStore.authorizationStatus(for: .contacts)
-        if status == .notDetermined {
+        switch Self.access(for: status) {
+        case .readable:
+            break
+        case .notAsked:
             do {
-                let granted = try await store.requestAccess(for: .contacts)
-                if !granted {
-                    UserDefaults.standard.set(true, forKey: permissionDeniedKey)
+                guard try await store.requestAccess(for: .contacts) else {
                     return .permissionDenied
                 }
             } catch {
                 debugLog("Contact access request failed: \(error)")
                 return .error("Contact access request failed: \(error.localizedDescription)")
             }
-        } else if status != .authorized {
-            UserDefaults.standard.set(true, forKey: permissionDeniedKey)
+        case .denied:
             debugLog("Contact access not authorized: \(status.rawValue)")
             return .permissionDenied
         }
@@ -196,27 +204,33 @@ actor ContactSyncManager {
         }
     }
 
-    /// Request contacts permission (used during onboarding).
-    func requestAccess() async -> Bool {
-        let status = CNContactStore.authorizationStatus(for: .contacts)
-        if status == .authorized { return true }
-        if status == .notDetermined {
-            do {
-                let granted = try await store.requestAccess(for: .contacts)
-                if !granted {
-                    UserDefaults.standard.set(true, forKey: permissionDeniedKey)
-                }
-                return granted
-            } catch {
-                return false
-            }
+    /// What a Contacts authorization status allows. Read from iOS on every
+    /// sync and never remembered: builds that cached a denial kept refusing
+    /// after the owner granted access in iOS Settings. Limited access (iOS 18)
+    /// syncs the contacts the owner chose to share; since each upload is the
+    /// complete list, contacts no longer shared stop ringing through.
+    static func access(for status: CNAuthorizationStatus) -> ContactsAccess {
+        switch status {
+        case .authorized, .limited:
+            return .readable
+        case .notDetermined:
+            return .notAsked
+        case .denied, .restricted:
+            return .denied
+        @unknown default:
+            return .denied
         }
-        UserDefaults.standard.set(true, forKey: permissionDeniedKey)
-        return false
     }
 
-    /// Reset permission denied cache (e.g., if user changes in Settings).
-    func resetPermissionCache() {
-        UserDefaults.standard.removeObject(forKey: permissionDeniedKey)
+    /// Request contacts permission (used during onboarding).
+    func requestAccess() async -> Bool {
+        switch Self.access(for: CNContactStore.authorizationStatus(for: .contacts)) {
+        case .readable:
+            return true
+        case .notAsked:
+            return (try? await store.requestAccess(for: .contacts)) ?? false
+        case .denied:
+            return false
+        }
     }
 }

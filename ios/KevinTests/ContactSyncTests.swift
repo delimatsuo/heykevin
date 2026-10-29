@@ -176,4 +176,28 @@ final class ContactSyncTests: XCTestCase {
         XCTAssertEqual(ContactSyncManager.result(for: .rateLimited, uploadedCount: 415).result, .rateLimited)
         XCTAssertEqual(ContactSyncManager.result(for: .failed, uploadedCount: 415).result, .error("Sync failed"))
     }
+
+    func testOnlyDenialsAndErrorsShowAsFailures() {
+        XCTAssertTrue(SyncResult.permissionDenied.isFailure)
+        XCTAssertTrue(SyncResult.error("Sync failed").isFailure)
+        XCTAssertFalse(SyncResult.success(synced: 412, removed: 3).isFailure)
+        XCTAssertFalse(SyncResult.rateLimited.isFailure)
+    }
+}
+
+final class ContactsAccessTests: XCTestCase {
+    func testAccessGrantedInSettingsAfterADenialCountsAtOnce() {
+        XCTAssertEqual(ContactSyncManager.access(for: .denied), .denied)
+        XCTAssertEqual(ContactSyncManager.access(for: .authorized), .readable)
+    }
+
+    func testRestrictedIsDeniedAndUndecidedIsAsked() {
+        XCTAssertEqual(ContactSyncManager.access(for: .restricted), .denied)
+        XCTAssertEqual(ContactSyncManager.access(for: .notDetermined), .notAsked)
+    }
+
+    func testLimitedAccessSyncsTheSharedContacts() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("Limited access needs iOS 18") }
+        XCTAssertEqual(ContactSyncManager.access(for: .limited), .readable)
+    }
 }

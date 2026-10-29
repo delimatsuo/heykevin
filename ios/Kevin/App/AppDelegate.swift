@@ -283,7 +283,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         let store = CNContactStore()
         let status = CNContactStore.authorizationStatus(for: .contacts)
-        guard status == .authorized else { return "" }
+        guard ContactSyncManager.access(for: status) == .readable else { return "" }
 
         // Normalize: strip everything except digits
         let digits = phone.filter { $0.isNumber }

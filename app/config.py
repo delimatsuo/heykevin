@@ -118,6 +118,11 @@ class Settings(DotenvProtectedBaseSettings):
     # owner action (env change + deploy). The deleted-app release path is
     # unaffected by this flag.
     lapsed_number_release_enabled: bool = False
+    # When a call reaches an `active` account whose expiry passed 3+ days ago,
+    # ask the App Store for its receipt's status and apply Apple's explicit
+    # answer (app/services/subscription_recheck.py). Default OFF: enabling in
+    # production is an owner action (env change + deploy).
+    appstore_stale_recheck_enabled: bool = False
     gemini_live_model: str = "gemini-2.5-flash-native-audio-latest"
     gemini_live_thinking_budget: int = 0
     gemini_live_temperature: float = 0.4

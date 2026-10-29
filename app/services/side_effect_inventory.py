@@ -174,6 +174,13 @@ SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
         risk="sensitive_read",
     ),
     SideEffectSurface(
+        path="app/services/subscription_recheck.py",
+        current_behavior="When a call reaches an active account whose expiry passed 3+ days ago, asks the App Store about the account's bound receipt, writes the renewed expiry or an expired status, and sends the subscription-ended push.",
+        required_gate="APPSTORE_STALE_RECHECK_ENABLED (default off); only Apple's explicit ACTIVE, EXPIRED or REVOKED answer for the account's own bound receipt writes, conditional on the stale expiry it read and through the number-release guard.",
+        required_evidence="Re-check tests for each Apple answer, receipt mismatches, a renewal racing the re-check, the number-release hold, and the disabled flag.",
+        risk="user_contact",
+    ),
+    SideEffectSurface(
         path="app/services/push_notification.py",
         current_behavior="Sends VoIP, urgent, regular, and summary pushes; can delete expired device tokens.",
         required_gate="Payloads must be lock-screen-safe; token deletion must be contractor-scoped or otherwise safe.",

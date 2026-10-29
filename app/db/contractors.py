@@ -996,6 +996,49 @@ async def update_contractor(contractor_id: str, updates: dict) -> bool:
     return True
 
 
+class StaleSubscriptionUpdate(str, Enum):
+    """Result of writing an App Store re-check's answer."""
+
+    APPLIED = "applied"
+    MOVED_ON = "moved_on"  # renewed, expired or deactivated since the re-check read it
+    HELD = "held"  # held by an in-flight number release
+
+
+async def update_stale_subscription(
+    contractor_id: str,
+    stale_expires: float,
+    updates: dict,
+) -> StaleSubscriptionUpdate:
+    """Write an App Store re-check's answer to the account it asked about.
+
+    Writes only while the account is still live, `active`, and carries the exact
+    expiry the re-check read. A renewal notification that lands while Apple is
+    being asked has already moved that expiry, so the re-check's answer is
+    dropped instead of overwriting it. The number-release guard applies as in
+    update_contractor.
+    """
+    db = get_firestore_client()
+    loop = asyncio.get_event_loop()
+    doc_ref = db.collection(COLLECTION).document(contractor_id)
+
+    @firestore.transactional
+    def _txn(transaction) -> StaleSubscriptionUpdate:
+        snapshot = doc_ref.get(transaction=transaction)
+        data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+        if (
+            data.get("active") is not True
+            or data.get("subscription_status") != "active"
+            or data.get("subscription_expires") != stale_expires
+        ):
+            return StaleSubscriptionUpdate.MOVED_ON
+        outcome = apply_release_aware_contractor_update(transaction, doc_ref, data, updates)
+        if outcome is ReleaseAwareMutationResult.HELD:
+            return StaleSubscriptionUpdate.HELD
+        return StaleSubscriptionUpdate.APPLIED
+
+    return await loop.run_in_executor(None, lambda: _txn(db.transaction()))
+
+
 @dataclass(frozen=True)
 class StrictNumberReleaseClaim:
     """Opaque ownership token for one Twilio release attempt.

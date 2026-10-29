@@ -173,6 +173,10 @@ async def recheck_stale_subscription(contractor_id: str, now: Optional[float] = 
     stale_expires = _stale_expiry(contractor, now)
     if stale_expires is None:
         return "not_stale"
+    if contractor.get("subscription_forwarded_from"):
+        # The entitlement is a deleted account's receipt, forwarded here; this
+        # account's own receipt says nothing about it.
+        return "forwarded_entitlement"
 
     original_id = str(contractor.get("subscription_original_transaction_id") or "").strip()
     if not original_id:

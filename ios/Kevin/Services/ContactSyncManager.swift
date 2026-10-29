@@ -208,7 +208,8 @@ actor ContactSyncManager {
     /// sync and never remembered: builds that cached a denial kept refusing
     /// after the owner granted access in iOS Settings. Limited access (iOS 18)
     /// syncs the contacts the owner chose to share; since each upload is the
-    /// complete list, contacts no longer shared stop ringing through.
+    /// complete list, contacts no longer shared stop ringing through. Sharing
+    /// none with a number uploads nothing, so earlier ones keep ringing through.
     static func access(for status: CNAuthorizationStatus) -> ContactsAccess {
         switch status {
         case .authorized, .limited:

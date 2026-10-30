@@ -530,6 +530,126 @@ def test_revoke_requires_reason():
         admin_api.RevokeContractorRequest(reason="")
 
 
+def test_test_account_mark_requires_reason():
+    with pytest.raises(ValidationError):
+        admin_api.SetTestAccountRequest(enabled=True, reason="")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_test_account_mark_is_written_and_audited(monkeypatch, enabled):
+    fake_db = _FakeFirestore([
+        _FakeDoc("contractor-1", {
+            "active": True,
+            "subscription_status": "active",
+            "subscription_expires": 100,
+            "subscription_test_account": not enabled,
+        }),
+    ])
+    audit_events = []
+
+    async def _write_audit_event(**kwargs):
+        audit_events.append(kwargs)
+
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(admin_api, "write_admin_audit_event", _write_audit_event)
+
+    response = await admin_api.admin_set_test_account(
+        "contractor-1",
+        admin_api.SetTestAccountRequest(enabled=enabled, reason="owner's internal test account"),
+        _admin_request(),
+    )
+
+    doc = fake_db.collection("contractors").document("contractor-1").get().to_dict()
+    assert response == {"status": "ok", "subscription_test_account": enabled}
+    assert doc["subscription_test_account"] is enabled
+    # Nothing else about the subscription moves.
+    assert doc["subscription_status"] == "active" and doc["subscription_expires"] == 100
+    assert audit_events[0]["action"] == "set_test_account"
+    assert audit_events[0]["target_id"] == "contractor-1"
+    assert audit_events[0]["reason"] == "owner's internal test account"
+    assert audit_events[0]["before"] == {"subscription_test_account": not enabled}
+    assert audit_events[0]["after"] == {"subscription_test_account": enabled}
+
+
+@pytest.mark.asyncio
+async def test_only_the_global_admin_can_set_the_test_account_mark(monkeypatch):
+    from fastapi import HTTPException
+
+    fake_db = _FakeFirestore([_FakeDoc("contractor-1", {"active": True})])
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    tenant_request = SimpleNamespace(
+        state=SimpleNamespace(is_admin=False, contractor_id="contractor-1"),
+        headers={"user-agent": "pytest"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_api.admin_set_test_account(
+            "contractor-1",
+            admin_api.SetTestAccountRequest(enabled=True, reason="exempt myself"),
+            tenant_request,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert "subscription_test_account" not in fake_db.collection("contractors").document("contractor-1").get().to_dict()
+
+
+@pytest.mark.asyncio
+async def test_test_account_mark_on_a_missing_account_is_404(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: _FakeFirestore([]))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_api.admin_set_test_account(
+            "missing",
+            admin_api.SetTestAccountRequest(enabled=True, reason="internal account"),
+            _admin_request(),
+        )
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_test_account_mark_respects_a_number_release_in_progress(monkeypatch):
+    from fastapi import HTTPException
+    from app.db import contractors
+
+    fake_db = _FakeFirestore([
+        _FakeDoc("contractor-1", {
+            "active": True,
+            contractors.NUMBER_RELEASE_CLAIM_FIELD: {"state": contractors.NUMBER_RELEASE_CLAIM_DELETING},
+        }),
+    ])
+    audit_events = []
+
+    async def _write_audit_event(**kwargs):
+        audit_events.append(kwargs)
+
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    monkeypatch.setattr(admin_api, "write_admin_audit_event", _write_audit_event)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_api.admin_set_test_account(
+            "contractor-1",
+            admin_api.SetTestAccountRequest(enabled=True, reason="internal account"),
+            _admin_request(),
+        )
+
+    doc = fake_db.collection("contractors").document("contractor-1").get().to_dict()
+    assert exc_info.value.status_code == 409
+    assert "subscription_test_account" not in doc
+    assert audit_events == []
+
+
+def test_contractor_list_shows_the_test_account_mark():
+    marked = admin_api._contractor_list_item(_FakeDoc("c1", {"subscription_test_account": True}))
+    unmarked = admin_api._contractor_list_item(_FakeDoc("c2", {"subscription_test_account": "yes"}))
+
+    assert marked["subscription_test_account"] is True
+    assert unmarked["subscription_test_account"] is False
+
+
 @pytest.mark.asyncio
 async def test_extend_trial_writes_audit_event(monkeypatch):
     fake_db = _FakeFirestore([

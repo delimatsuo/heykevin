@@ -227,6 +227,22 @@ async def test_a_receipt_not_bound_to_this_account_is_never_asked_about(world, b
 
 
 @pytest.mark.asyncio
+async def test_a_marked_test_account_is_never_asked_about(world):
+    world.account["subscription_test_account"] = True
+
+    assert await _run(world) == "test_account"
+    assert world.apple_asked == [] and world.updates == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [False, "true", 1, None])
+async def test_only_an_explicit_true_marks_a_test_account(world, value):
+    world.account["subscription_test_account"] = value
+
+    assert await _run(world) == "expired"
+
+
+@pytest.mark.asyncio
 async def test_a_forwarded_entitlement_is_never_judged_by_this_accounts_receipt(world):
     # A rebound account carries a deleted account's paid term; its own lapsed
     # receipt must not expire it while Apple keeps billing the forwarded one.

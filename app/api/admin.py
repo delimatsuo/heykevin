@@ -150,6 +150,7 @@ def _contractor_list_item(doc) -> dict:
         "subscription_status": d.get("subscription_status", ""),
         "subscription_tier": d.get("subscription_tier", ""),
         "subscription_expires": d.get("subscription_expires"),
+        "subscription_test_account": d.get("subscription_test_account") is True,
         "trial_start": d.get("trial_start"),
         "created_at": d.get("created_at"),
         "deleted_app_detected_at": d.get("deleted_app_detected_at"),
@@ -668,6 +669,11 @@ class RevokeContractorRequest(BaseModel):
     mode: str = Field(default="expire_now", pattern="^(expire_now|disable_account)$")
 
 
+class SetTestAccountRequest(BaseModel):
+    enabled: bool
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
 @router.post("/contractors/{contractor_id}/extend-trial")
 async def admin_extend_trial(contractor_id: str, body: ExtendTrialRequest, request: Request):
     """Extend a contractor's trial by N days."""
@@ -718,6 +724,59 @@ async def admin_extend_trial(contractor_id: str, body: ExtendTrialRequest, reque
 
     logger.info(f"Admin extended trial for {contractor_id} by {body.days} days")
     return {"status": "ok", "subscription_expires": new_expires}
+
+
+# ---------------------------------------------------------------------------
+# Test account
+# ---------------------------------------------------------------------------
+
+@router.post("/contractors/{contractor_id}/test-account")
+async def admin_set_test_account(contractor_id: str, body: SetTestAccountRequest, request: Request):
+    """Mark or unmark an internal test account.
+
+    A marked account is skipped by the App Store re-check
+    (app/services/subscription_recheck.py), so it keeps working whatever its
+    receipt says. Nothing else changes: the call gate and Apple's notifications
+    treat it like any other account.
+    """
+    _require_admin(request)
+
+    loop = asyncio.get_event_loop()
+    db = get_firestore_client()
+    ref = db.collection("contractors").document(contractor_id)
+
+    @firestore.transactional
+    def _set(transaction):
+        doc = ref.get(transaction=transaction)
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        before = {"subscription_test_account": data.get("subscription_test_account") is True}
+        after = {"subscription_test_account": body.enabled}
+        outcome = apply_release_aware_contractor_update(transaction, ref, data, after)
+        if outcome is ReleaseAwareMutationResult.HELD:
+            return "release_conflict"
+        return before, after
+
+    result = await loop.run_in_executor(None, lambda: _set(db.transaction()))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Contractor not found")
+    if result == "release_conflict":
+        raise HTTPException(status_code=409, detail="Number release requires reconciliation")
+
+    before, after = result
+    await write_admin_audit_event(
+        request=request,
+        action="set_test_account",
+        target_type="contractor",
+        target_id=contractor_id,
+        reason=body.reason,
+        before=before,
+        after=after,
+    )
+
+    logger.info(f"Admin set test account for {contractor_id}: {body.enabled}")
+    return {"status": "ok", "subscription_test_account": body.enabled}
 
 
 # ---------------------------------------------------------------------------

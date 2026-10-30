@@ -61,6 +61,10 @@
     return `<span class="badge badge-${safe}">${safe}</span>`;
   }
 
+  function testBadge(contractor) {
+    return contractor.subscription_test_account === true ? '<span class="badge badge-test">test</span>' : '';
+  }
+
   function setError(message) {
     els.globalError.hidden = !message;
     els.globalError.textContent = message || '';
@@ -216,7 +220,7 @@
       <tr>
         <td><button class="link-button" type="button" data-detail="${esc(c.contractor_id)}">${esc(c.business_name || c.contractor_id)}</button></td>
         <td>${esc(c.owner_name || '-')}</td>
-        <td>${badge(c.subscription_status)}</td>
+        <td>${badge(c.subscription_status)}${testBadge(c)}</td>
         <td>${esc(c.subscription_tier || '-')}</td>
         <td>${fmtDate(c.subscription_expires)}</td>
         <td>${esc(c.twilio_number || '-')}</td>
@@ -449,8 +453,16 @@
         <dl class="key-value">
           <dt>Contractor ID</dt><dd>${esc(contractor.contractor_id)}</dd>
           <dt>Owner</dt><dd>${esc(contractor.owner_name || '-')}</dd>
-          <dt>Status</dt><dd>${badge(contractor.subscription_status)}</dd>
+          <dt>Status</dt><dd>${badge(contractor.subscription_status)}${testBadge(contractor)}</dd>
           <dt>Tier</dt><dd>${esc(contractor.subscription_tier || '-')}</dd>
+          <dt>Test Account</dt><dd>
+            ${contractor.subscription_test_account === true ? 'Yes — skipped by the App Store re-check' : 'No'}
+            <button class="button button-secondary" type="button"
+              data-action="${contractor.subscription_test_account === true ? 'test-off' : 'test-on'}"
+              data-id="${esc(contractor.contractor_id)}">
+              ${contractor.subscription_test_account === true ? 'Remove Test Mark' : 'Mark as Test Account'}
+            </button>
+          </dd>
           <dt>Twilio Number</dt><dd>${esc(contractor.twilio_number || '-')}</dd>
           <dt>Push Token</dt><dd>${device.push_token_present ? 'Present' : 'Missing'}</dd>
           <dt>VoIP Token</dt><dd>${device.voip_token_present ? 'Present' : 'Missing'}</dd>
@@ -562,12 +574,19 @@
   function openAction(type, contractorId) {
     const contractor = state.contractors.find(item => item.contractor_id === contractorId) || { contractor_id: contractorId };
     const isRevoke = type === 'revoke';
+    const titles = {
+      revoke: 'Revoke Subscription',
+      extend: 'Extend Trial',
+      'test-on': 'Mark as Test Account',
+      'test-off': 'Remove Test Mark',
+    };
     state.pendingAction = { type, contractorId };
-    els.actionTitle.textContent = isRevoke ? 'Revoke Subscription' : 'Extend Trial';
+    els.actionTitle.textContent = titles[type] || 'Admin Action';
     els.actionBefore.innerHTML = `
       <strong>${esc(contractor.business_name || contractor.contractor_id)}</strong><br>
       Status: ${esc(contractor.subscription_status || '-')}<br>
-      Expires: ${fmtDate(contractor.subscription_expires)}
+      Expires: ${fmtDate(contractor.subscription_expires)}<br>
+      Test account: ${contractor.subscription_test_account === true ? 'yes' : 'no'}
     `;
     els.actionReason.value = '';
     els.actionConfirm.value = '';
@@ -595,15 +614,25 @@
     if (!pending) return;
     els.actionSubmit.disabled = true;
     const reason = els.actionReason.value.trim();
+    const id = encodeURIComponent(pending.contractorId);
+    const isTestMark = pending.type === 'test-on' || pending.type === 'test-off';
     try {
       if (pending.type === 'extend') {
-        await apiPost(`/api/admin/contractors/${encodeURIComponent(pending.contractorId)}/extend-trial`, { days: 7, reason });
+        await apiPost(`/api/admin/contractors/${id}/extend-trial`, { days: 7, reason });
+      } else if (isTestMark) {
+        await apiPost(`/api/admin/contractors/${id}/test-account`, { enabled: pending.type === 'test-on', reason });
       } else {
-        await apiPost(`/api/admin/contractors/${encodeURIComponent(pending.contractorId)}/revoke`, { reason, mode: 'expire_now' });
+        await apiPost(`/api/admin/contractors/${id}/revoke`, { reason, mode: 'expire_now' });
       }
-      toast(pending.type === 'extend' ? 'Trial extended' : 'Subscription revoked');
+      const messages = {
+        extend: 'Trial extended',
+        'test-on': 'Marked as test account',
+        'test-off': 'Test mark removed',
+      };
+      toast(messages[pending.type] || 'Subscription revoked');
       closeAction();
       await loadAll();
+      if (isTestMark) await loadDetail(pending.contractorId);
     } catch (error) {
       toast(`Error: ${error.message}`, 'err');
       validateAction();

@@ -42,6 +42,10 @@ PROTECTED_FIELDS = frozenset({
     "subscription_auto_renews",
     "subscription_renewal_status_signed_at_ms",
     "subscription_forwarded_from",
+    # Set only by the admin test-account switch; exempts the account from the
+    # App Store re-check, so a client that could set it would keep a lapsed
+    # subscription's paid features.
+    "subscription_test_account",
     "twilio_number",
     # Public-demo identity is a server-owned routing boundary. A client must
     # never be able to turn an ordinary tenant into a public ingress target.

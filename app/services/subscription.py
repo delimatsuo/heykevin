@@ -1103,6 +1103,81 @@ def _validate_cross_payload_field(
     return True, None
 
 
+# Notifications that mean Apple charged the customer.
+_CHARGE_NOTIFICATION_TYPES = frozenset({"DID_RENEW", "SUBSCRIBED"})
+
+
+async def _note_unmatched_notification(
+    payload: dict,
+    transaction_info: dict,
+    app_account_token: str,
+    found: Optional[dict],
+) -> None:
+    """Log and keep a notification that matched no account. Never raises.
+
+    `found` is the include_inactive lookup: None when no document carries the
+    token, else a document whose `active` is neither True nor False. A charge
+    logs at ERROR, which the production error alert emails; anything else logs
+    a warning.
+    """
+    notification_type = str(payload.get("notificationType") or "")
+    try:
+        if not isinstance(transaction_info, dict):
+            transaction_info = {}
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        original_id = _resolve_original_transaction_id(transaction_info)
+        transaction_id = str(transaction_info.get("transactionId") or "")
+        environment = str(transaction_info.get("environment") or data.get("environment") or "")
+        product_id = str(transaction_info.get("productId") or "")
+        found_id = str((found or {}).get("contractor_id") or "")
+        lookup = "unexpected_active" if found else "no_account"
+
+        bound_to = ""
+        if original_id:
+            try:
+                from app.db.apple_transactions import get_transaction_binding
+                binding = await get_transaction_binding(original_id)
+                bound_to = str((binding or {}).get("contractor_id") or "")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Unmatched notification binding lookup failed: %s", type(e).__name__)
+
+        is_charge = notification_type in _CHARGE_NOTIFICATION_TYPES
+        (logger.error if is_charge else logger.warning)(
+            "App Store %s matched no account: type=%s lookup=%s found=%s env=%s product=%s "
+            "token_prefix=%s original_tx=%s bound_to=%s",
+            "charge" if is_charge else "notification",
+            notification_type, lookup, found_id or "-", environment or "-", product_id or "-",
+            app_account_token[:8] or "(empty)", original_id or "-", bound_to or "-",
+        )
+
+        notification_id = str(payload.get("notificationUUID") or "") or (
+            f"{original_id or 'unknown'}:{transaction_id or 'unknown'}:{notification_type or 'unknown'}"
+        )
+        from app.db.appstore_unmatched import record_unmatched_notification
+        await record_unmatched_notification(notification_id, {
+            "notification_type": notification_type,
+            "subtype": str(payload.get("subtype") or ""),
+            "signed_date": payload.get("signedDate"),
+            "environment": environment,
+            "product_id": product_id,
+            "original_transaction_id": original_id,
+            "transaction_id": transaction_id,
+            "purchase_date": transaction_info.get("purchaseDate"),
+            "expires_date": transaction_info.get("expiresDate"),
+            "app_account_token": app_account_token,
+            "is_charge": is_charge,
+            "lookup": lookup,
+            "found_contractor_id": found_id,
+            "found_active_type": type((found or {}).get("active")).__name__ if found else "",
+            "bound_contractor_id": bound_to,
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "Unmatched App Store notification not recorded: type=%s err=%s",
+            notification_type, type(e).__name__,
+        )
+
+
 async def handle_appstore_notification(payload: dict) -> bool:
     """Process an App Store Server Notification V2 payload.
 
@@ -1332,10 +1407,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
                 return False
             return True
 
-        logger.warning(
-            "Contractor not found for appAccountToken (subscription_uuid prefix=%s)",
-            (app_account_token[:8] if app_account_token else "(empty)"),
-        )
+        await _note_unmatched_notification(payload, transaction_info, app_account_token, inactive)
         return False
 
     # Other notification types (DID_RENEW, SUBSCRIBED, EXPIRED, etc.)
@@ -1468,10 +1540,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
                 )
             return True
 
-        logger.warning(
-            "Contractor not found for appAccountToken (subscription_uuid prefix=%s)",
-            (app_account_token[:8] if app_account_token else "(empty)"),
-        )
+        await _note_unmatched_notification(payload, transaction_info, app_account_token, inactive)
         return False
     contractor_id = contractor["contractor_id"]
 

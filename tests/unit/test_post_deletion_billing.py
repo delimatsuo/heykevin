@@ -56,9 +56,19 @@ def wired(monkeypatch):
         "lookups": [],
         "claims": [],
         "inactive_docs": {},
+        "unmatched": [],
     }
 
     monkeypatch.setattr(sub_service, "_decode_jws_payload", lambda _s: _transaction_info())
+
+    async def fake_record_unmatched(notification_id, fields):
+        calls["unmatched"].append((notification_id, fields))
+
+    async def no_binding(_original_id):
+        return None
+
+    monkeypatch.setattr("app.db.appstore_unmatched.record_unmatched_notification", fake_record_unmatched)
+    monkeypatch.setattr("app.db.apple_transactions.get_transaction_binding", no_binding)
 
     async def fake_claim(**kwargs):
         calls["claims"].append(kwargs)
@@ -192,6 +202,8 @@ async def test_unknown_token_still_returns_false(monkeypatch, wired):
 
     assert handled is False
     assert wired["updates"] == []
+    [(_id, fields)] = wired["unmatched"]
+    assert fields["lookup"] == "no_account" and fields["is_charge"] is True
 
 
 @pytest.mark.asyncio
@@ -255,6 +267,9 @@ async def test_fallback_requires_explicit_inactive(monkeypatch, wired):
 
     assert handled is False
     assert wired["updates"] == []
+    [(_id, fields)] = wired["unmatched"]
+    assert fields["lookup"] == "unexpected_active"
+    assert fields["found_contractor_id"] == "c1"
 
 
 @pytest.mark.asyncio

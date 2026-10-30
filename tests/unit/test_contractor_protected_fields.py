@@ -268,6 +268,29 @@ async def test_patch_contractor_strips_telephony_service_binding_fields(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_patch_contractor_cannot_mark_a_test_account(monkeypatch):
+    """A client that could set the admin test mark would escape the App Store re-check."""
+    captured_updates = {}
+
+    async def fake_update_contractor(contractor_id, updates):
+        captured_updates.update(updates)
+        return True
+
+    monkeypatch.setattr(contractors_api, "update_contractor", fake_update_contractor)
+
+    class PermissiveUpdate(contractors_api.ContractorUpdate):
+        class Config:
+            extra = "allow"
+
+    payload = PermissiveUpdate(business_name="Acme", subscription_test_account=True)
+
+    resp = await contractors_api.api_update_contractor("contractor-1", payload, _admin_request())
+
+    assert resp == {"status": "ok"}
+    assert captured_updates == {"business_name": "Acme"}
+
+
+@pytest.mark.asyncio
 async def test_held_profile_mutations_return_reconciliation_conflict(monkeypatch):
     """Services and knowledge endpoints never claim a held write was saved."""
     async def held_update(*_args, **_kwargs):

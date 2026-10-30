@@ -250,6 +250,7 @@ tr:last-child td { border-bottom: 0; }
 .badge-active { color: #7eeba7; background: rgba(53, 196, 111, .16); }
 .badge-expired, .badge-cancelled { color: #ffaaaa; background: rgba(239, 91, 91, .16); }
 .badge-unknown { color: var(--muted); background: rgba(154, 163, 178, .15); }
+.badge-test { color: #9cc7ff; background: rgba(77, 148, 255, .16); margin-left: 4px; }
 
 .button, .icon-button {
   border: 0;

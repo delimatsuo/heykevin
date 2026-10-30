@@ -21,3 +21,11 @@ def test_admin_dashboard_exposes_jobber_visibility_controls():
     assert "renderJobberPanel" in script
     assert "jobberCell" in script
     assert "/api/integrations/jobber/lead-capture" in script
+
+
+def test_admin_dashboard_can_mark_a_test_account():
+    script = Path("app/static/admin.js").read_text()
+
+    assert "/test-account" in script
+    assert "'test-on'" in script and "'test-off'" in script
+    assert "subscription_test_account" in script

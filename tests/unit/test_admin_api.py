@@ -573,6 +573,29 @@ async def test_test_account_mark_is_written_and_audited(monkeypatch, enabled):
 
 
 @pytest.mark.asyncio
+async def test_only_the_global_admin_can_set_the_test_account_mark(monkeypatch):
+    from fastapi import HTTPException
+
+    fake_db = _FakeFirestore([_FakeDoc("contractor-1", {"active": True})])
+    monkeypatch.setattr(admin_api, "get_firestore_client", lambda: fake_db)
+    tenant_request = SimpleNamespace(
+        state=SimpleNamespace(is_admin=False, contractor_id="contractor-1"),
+        headers={"user-agent": "pytest"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await admin_api.admin_set_test_account(
+            "contractor-1",
+            admin_api.SetTestAccountRequest(enabled=True, reason="exempt myself"),
+            tenant_request,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert "subscription_test_account" not in fake_db.collection("contractors").document("contractor-1").get().to_dict()
+
+
+@pytest.mark.asyncio
 async def test_test_account_mark_on_a_missing_account_is_404(monkeypatch):
     from fastapi import HTTPException
 

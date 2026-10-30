@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from google.cloud import firestore
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.db import calls as call_db
 from app.db import post_call_handoffs as handoff_db
 from app.db.admin_audit import list_admin_audit_events, write_admin_audit_event
@@ -477,6 +478,20 @@ async def admin_list_contractors(
 
     contractors = await loop.run_in_executor(None, _fetch)
     return {"contractors": contractors, "count": len(contractors)}
+
+
+@router.get("/auth-config")
+async def admin_auth_config():
+    """Public: what the admin page needs to show "Sign in with Google".
+
+    The OAuth client ID is public by design (it is embedded in every Google
+    sign-in page); the allowlist is never returned.
+    """
+    from app.middleware.admin_google import google_sign_in_enabled
+
+    return {
+        "google_client_id": settings.admin_google_client_id.strip() if google_sign_in_enabled() else None,
+    }
 
 
 @router.get("/contractors/{contractor_id}")

@@ -377,6 +377,18 @@ pre {
   color: var(--muted);
 }
 
+.google-signin {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.auth-box .auth-or {
+  margin: 0 0 12px;
+  font-size: 12px;
+  text-align: center;
+}
+
 .auth-error {
   min-height: 18px;
   margin-top: 8px;

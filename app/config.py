@@ -59,6 +59,12 @@ class Settings(DotenvProtectedBaseSettings):
 
     # API auth
     api_bearer_token: str = ""
+    # Admin page Google sign-in (app/middleware/admin_google.py): the OAuth Web
+    # client ID the page's "Sign in with Google" button uses, and the
+    # comma-separated Google accounts allowed in. Both unset leaves the admin
+    # page on the bearer token alone.
+    admin_google_client_id: str = ""
+    admin_emails: str = ""
 
     # vCard URL signing (F-08): dedicated HMAC secret. If unset in production
     # the server still boots, but a clear warning is logged at startup and

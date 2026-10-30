@@ -20,6 +20,7 @@
       query: '',
     },
     pendingAction: null,
+    googleReady: false,
   };
 
   const els = {
@@ -27,6 +28,8 @@
     authForm: document.getElementById('auth-box'),
     authInput: document.getElementById('auth-input'),
     authError: document.getElementById('auth-error'),
+    googleSignIn: document.getElementById('google-signin'),
+    authOr: document.getElementById('auth-or'),
     refreshDot: document.getElementById('refresh-dot'),
     lastUpdated: document.getElementById('last-updated'),
     globalError: document.getElementById('global-error'),
@@ -113,6 +116,48 @@
     els.overlay.hidden = false;
     els.overlay.style.display = 'flex';
     els.authInput.focus();
+    // A Google session lasts an hour; offer the signed-in account again.
+    if (state.googleReady) window.google.accounts.id.prompt();
+  }
+
+  function signIn(token) {
+    els.authError.textContent = '';
+    state.token = token;
+    sessionStorage.setItem(AUTH_KEY, token);
+    hideAuth();
+    renderAll();
+    loadAll();
+  }
+
+  async function setUpGoogleSignIn() {
+    let config;
+    try {
+      const res = await fetch('/api/admin/auth-config');
+      if (!res.ok) return;
+      config = await res.json();
+    } catch (_error) {
+      return;
+    }
+    if (!config.google_client_id) return;
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.onload = () => {
+      window.google.accounts.id.initialize({
+        client_id: config.google_client_id,
+        callback: response => signIn(response.credential),
+        auto_select: true,
+      });
+      window.google.accounts.id.renderButton(els.googleSignIn, {
+        theme: 'outline',
+        size: 'large',
+        text: 'signin_with',
+      });
+      els.googleSignIn.hidden = false;
+      els.authOr.hidden = false;
+      state.googleReady = true;
+    };
+    document.head.appendChild(script);
   }
 
   function hideAuth() {
@@ -124,12 +169,7 @@
     event.preventDefault();
     const token = els.authInput.value.trim();
     if (!token) return;
-    els.authError.textContent = '';
-    state.token = token;
-    sessionStorage.setItem(AUTH_KEY, token);
-    hideAuth();
-    renderAll();
-    loadAll();
+    signIn(token);
   }
 
   function metric(label, value, tone = '') {
@@ -691,6 +731,7 @@
   }
 
   bindEvents();
+  setUpGoogleSignIn();
   if (state.token) {
     hideAuth();
     renderAll();

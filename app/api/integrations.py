@@ -789,7 +789,7 @@ async def jobber_update_lead_capture(
         result = await update_jobber_lead_capture_cas(
             contractor_id=contractor_id,
             enabled=body.enabled,
-            actor="global_admin_token",
+            actor=getattr(getattr(request, "state", None), "admin_actor", None) or "global_admin_token",
             reason=body.reason or "admin toggled Jobber lead capture",
             request_metadata=req_meta,
             db=db,

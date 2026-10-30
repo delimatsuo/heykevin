@@ -17,6 +17,9 @@ dependencies = [
     "google-cloud-firestore==2.21.0",
     "google-cloud-storage==3.4.1",
     "firebase-admin==7.1.0",
+    # Verifies Google ID tokens for admin page sign-in. Already installed via
+    # google-api-core; declared because the admin login relies on it directly.
+    "google-auth[requests]==2.62.0",
     "google-cloud-secret-manager==2.16.4",
     "google-cloud-tasks==2.21.0",
     "google-cloud-logging==3.12.1",

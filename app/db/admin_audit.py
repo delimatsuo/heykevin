@@ -78,8 +78,10 @@ async def write_admin_audit_event(
     if db is None:
         db = get_firestore_client()
     headers = getattr(request, "headers", {}) or {} if request is not None else {}
+    # A Google sign-in names the admin; the global token can't.
+    actor = getattr(getattr(request, "state", None), "admin_actor", None)
     event = {
-        "actor_type": "global_admin_token",
+        "actor_type": actor if isinstance(actor, str) and actor else "global_admin_token",
         "action": action,
         "target_type": target_type,
         "target_id": target_id,

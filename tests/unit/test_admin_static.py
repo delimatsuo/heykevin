@@ -23,6 +23,16 @@ def test_admin_dashboard_exposes_jobber_visibility_controls():
     assert "/api/integrations/jobber/lead-capture" in script
 
 
+def test_admin_dashboard_offers_google_sign_in_when_configured():
+    html = Path("app/static/admin.html").read_text()
+    script = Path("app/static/admin.js").read_text()
+
+    assert 'id="google-signin"' in html
+    assert "fetch('/api/admin/auth-config')" in script
+    assert "https://accounts.google.com/gsi/client" in script
+    assert "if (!config.google_client_id) return;" in script
+
+
 def test_admin_dashboard_can_mark_a_test_account():
     script = Path("app/static/admin.js").read_text()
 

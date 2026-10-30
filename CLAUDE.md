@@ -275,7 +275,9 @@ Key variables — full list managed via `gcloud run services update`:
 | `APPSTORE_ISSUER_ID` | `4b083963-2537-4f41-80ac-8976760521aa` |
 | `APPSTORE_PRIVATE_KEY` | In-App Purchase .p8 key (pipe-separated) |
 | `APPSTORE_ENVIRONMENT` | `sandbox` or `production` |
-| `API_BEARER_TOKEN` | Global admin token |
+| `API_BEARER_TOKEN` | Global admin token (Secret Manager `kevin-api-bearer-token-production`). Scripts use it; the admin page also accepts Google sign-in, below. |
+| `ADMIN_GOOGLE_CLIENT_ID` | OAuth 2.0 Web client ID for the admin page's "Sign in with Google" (Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → Web application; Authorized JavaScript origins: the `kevin-api` and `kevin-api-staging` URLs). Public by design. Off unless `ADMIN_EMAILS` is set too. |
+| `ADMIN_EMAILS` | Comma-separated Google accounts allowed into the admin page: Gmail addresses or Google Workspace accounts only (a consumer Google account made with another address is refused). A signed-in session reaches only `/api/admin/*` and the Jobber lead-capture toggle, and audit events record `google:<email>` as the actor. Removing an address ends that account's access on its next request. |
 | `VCARD_HMAC_SECRET` | Dedicated HMAC key for signing vCard download URLs (F-08). Decoupled from `API_BEARER_TOKEN` so rotating the admin token doesn't break already-shared vCards and a bearer-token leak doesn't allow vCard URL forgery. Required in production; if unset, signing falls back to a value derived from `API_BEARER_TOKEN` and a warning is logged. |
 | `PIN_RATE_LIMIT` | Max dial-in PIN attempts per source key per window (F-15). Default `10`. |
 | `PIN_RATE_WINDOW_SECONDS` | Rolling-window length for `PIN_RATE_LIMIT`, in seconds (F-15). Default `3600` (60 min). |

@@ -3029,12 +3029,24 @@ async def test_service_outcomes_and_failure_boundaries(monkeypatch, caplog):
         assert "Post-deletion renewal clock advanced" not in caplog.text
         assert "Post-deletion notification redelivery ignored" not in caplog.text
 
-    # 7. Contractor not found -> returns False
+    # 7. Contractor not found -> returns False, and the notification is kept
     async def fake_lookup_none(uuid, include_inactive=False):
         return None
+
+    unmatched = []
+
+    async def fake_record_unmatched(notification_id, fields):
+        unmatched.append(fields)
+
+    async def no_binding(_original_id):
+        return None
+
     monkeypatch.setattr("app.db.contractors.get_contractor_by_subscription_uuid", fake_lookup_none)
+    monkeypatch.setattr("app.db.appstore_unmatched.record_unmatched_notification", fake_record_unmatched)
+    monkeypatch.setattr("app.db.apple_transactions.get_transaction_binding", no_binding)
     caplog.clear()
     assert await sub_service.handle_appstore_notification(_renewal_payload("AUTO_RENEW_DISABLED")) is False
+    assert [f["notification_type"] for f in unmatched] == ["DID_CHANGE_RENEWAL_STATUS"]
 
 
 # ---------------------------------------------------------------------------

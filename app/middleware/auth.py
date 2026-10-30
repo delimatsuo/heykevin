@@ -46,6 +46,9 @@ async def verify_api_token(request: Request):
     # Health check and docs are public
     if request.url.path in ("/health", "/docs", "/openapi.json"):
         return
+    # The admin page reads its sign-in settings before anyone has signed in
+    if request.url.path == "/api/admin/auth-config" and request.method == "GET":
+        return
     # Onboarding endpoints use Apple identity token auth, not bearer tokens
     if request.url.path in ("/api/contractors/lookup-by-apple-id", "/api/contractors"):
         if request.method in ("GET", "POST"):
@@ -72,6 +75,15 @@ async def verify_api_token(request: Request):
     if hmac.compare_digest(token, settings.api_bearer_token):
         request.state.contractor_id = ""  # Admin has access to all
         request.state.is_admin = True
+        return
+
+    # An allowlisted Google account signed in on the admin page
+    from app.middleware.admin_google import admin_email_for_token
+    admin_email = await admin_email_for_token(token, request.url.path)
+    if admin_email:
+        request.state.contractor_id = ""
+        request.state.is_admin = True
+        request.state.admin_actor = f"google:{admin_email}"
         return
 
     # Check per-contractor token

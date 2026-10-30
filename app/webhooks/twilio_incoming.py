@@ -443,6 +443,9 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                 contractor_id,
                 (now - (contractor.get("subscription_expires") or now)) / 86400,
             )
+            from app.services.subscription_recheck import schedule_stale_subscription_recheck
+
+            schedule_stale_subscription_recheck(contractor, now)
 
         if not is_subscription_active and contractor:
             # Expired subscription — special handling

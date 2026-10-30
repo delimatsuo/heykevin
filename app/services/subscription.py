@@ -1533,17 +1533,22 @@ async def handle_appstore_notification(payload: dict) -> bool:
         # Only notify after the terminal profile mutation commits. A held
         # mutation may belong to a paid account that raced number deletion.
         if updated:
-            try:
-                from app.services.push_notification import send_regular_push, get_device_token
-                device_token = await get_device_token(contractor_id=contractor_id)
-                if device_token:
-                    await send_regular_push(
-                        device_token=device_token,
-                        title="Your Kevin subscription has ended",
-                        body="Subscribe to keep Kevin screening your calls.",
-                        contractor_id=contractor_id,
-                    )
-            except Exception as push_err:
-                logger.warning(f"Expiry push failed (non-critical): {push_err}")
+            await notify_subscription_ended(contractor_id)
 
     return True
+
+
+async def notify_subscription_ended(contractor_id: str) -> None:
+    """Tell the owner their subscription ended. Never raises."""
+    try:
+        from app.services.push_notification import send_regular_push, get_device_token
+        device_token = await get_device_token(contractor_id=contractor_id)
+        if device_token:
+            await send_regular_push(
+                device_token=device_token,
+                title="Your Kevin subscription has ended",
+                body="Subscribe to keep Kevin screening your calls.",
+                contractor_id=contractor_id,
+            )
+    except Exception as push_err:
+        logger.warning(f"Expiry push failed (non-critical): {push_err}")

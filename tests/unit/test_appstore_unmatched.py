@@ -130,6 +130,19 @@ async def test_an_unmatched_non_charge_is_recorded_without_alerting(unmatched, c
 
 
 @pytest.mark.asyncio
+async def test_a_sandbox_charge_is_recorded_without_alerting(unmatched, caplog):
+    # TestFlight purchases reach staging, where no production account matches.
+    unmatched["transaction"] = _transaction(environment="Sandbox")
+
+    with caplog.at_level(logging.INFO, logger="app.services.subscription"):
+        await sub_service.handle_appstore_notification(_payload("DID_RENEW"))
+
+    assert _levels(caplog, "App Store charge matched no account") == [logging.WARNING]
+    [(_id, fields)] = unmatched["records"]
+    assert fields["is_charge"] is True and fields["environment"] == "Sandbox"
+
+
+@pytest.mark.asyncio
 async def test_a_document_with_an_unexpected_active_value_is_named(unmatched):
     unmatched["found"] = {"contractor_id": "c-odd", "active": None}
 
@@ -151,6 +164,17 @@ async def test_a_redelivery_without_a_notification_id_still_has_a_stable_key(unm
 
     ids = [notification_id for notification_id, _fields in unmatched["records"]]
     assert ids == ["otx-1:tx-2:DID_RENEW", "otx-1:tx-2:DID_RENEW"]
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_key_keeps_subtypes_apart(unmatched):
+    for subtype in ("BILLING_RECOVERY", "AUTO_RENEW_DISABLED"):
+        payload = _payload("DID_RENEW", subtype=subtype)
+        del payload["notificationUUID"]
+        await sub_service.handle_appstore_notification(payload)
+
+    ids = [notification_id for notification_id, _fields in unmatched["records"]]
+    assert ids == ["otx-1:tx-2:DID_RENEW:BILLING_RECOVERY", "otx-1:tx-2:DID_RENEW:AUTO_RENEW_DISABLED"]
 
 
 @pytest.mark.asyncio
@@ -206,26 +230,20 @@ async def test_an_unmatched_renewal_status_change_is_recorded(unmatched, monkeyp
 # --- the store --------------------------------------------------------------
 
 
-class _Snapshot:
-    def __init__(self, data):
-        self.exists = data is not None
-
-
 class _Ref:
     def __init__(self, store, doc_id):
         self.store, self.doc_id = store, doc_id
 
-    def get(self):
-        return _Snapshot(self.store.get(self.doc_id))
+    def create(self, data):
+        from google.api_core.exceptions import AlreadyExists
 
-    def set(self, data):
+        if self.doc_id in self.store:
+            raise AlreadyExists("exists")
         self.store[self.doc_id] = dict(data)
 
     def update(self, data):
-        for key, value in data.items():
-            if key == "deliveries":
-                value = self.store[self.doc_id]["deliveries"] + 1  # stands in for Increment(1)
-            self.store[self.doc_id][key] = value
+        # Keep the raw values, transforms included, so a test sees what was sent.
+        self.store[self.doc_id].update(data)
 
 
 class _Db:
@@ -243,16 +261,21 @@ class _Db:
 
 @pytest.mark.asyncio
 async def test_the_first_delivery_is_stored_and_a_redelivery_is_counted(monkeypatch):
+    from google.cloud import firestore
+
     store: dict = {}
     db = _Db(store)
     monkeypatch.setattr(appstore_unmatched, "get_firestore_client", lambda: db)
 
     await appstore_unmatched.record_unmatched_notification("notif-1", {"notification_type": "DID_RENEW"})
-    first_seen = store["notif-1"]["first_seen_at"]
-    await appstore_unmatched.record_unmatched_notification("notif-1", {"notification_type": "DID_RENEW"})
+    first = dict(store["notif-1"])
+    await appstore_unmatched.record_unmatched_notification("notif-1", {"notification_type": "OVERWRITTEN"})
 
     assert db.collections == ["appstore_unmatched_notifications"] * 2
+    assert first["deliveries"] == 1
+    # The redelivery keeps the first record and asks Firestore to add one.
     assert store["notif-1"]["notification_type"] == "DID_RENEW"
-    assert store["notif-1"]["deliveries"] == 2
-    assert store["notif-1"]["first_seen_at"] == first_seen
-    assert store["notif-1"]["last_seen_at"] >= first_seen
+    assert store["notif-1"]["first_seen_at"] == first["first_seen_at"]
+    assert store["notif-1"]["last_seen_at"] >= first["first_seen_at"]
+    deliveries = store["notif-1"]["deliveries"]
+    assert isinstance(deliveries, firestore.Increment) and deliveries.value == 1

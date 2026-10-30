@@ -1117,8 +1117,9 @@ async def _note_unmatched_notification(
 
     `found` is the include_inactive lookup: None when no document carries the
     token, else a document whose `active` is neither True nor False. A charge
-    logs at ERROR, which the production error alert emails; anything else logs
-    a warning.
+    outside the sandbox logs at ERROR, which the production error alert
+    emails; anything else, including TestFlight purchases reaching staging,
+    logs a warning.
     """
     notification_type = str(payload.get("notificationType") or "")
     try:
@@ -1142,7 +1143,8 @@ async def _note_unmatched_notification(
                 logger.warning("Unmatched notification binding lookup failed: %s", type(e).__name__)
 
         is_charge = notification_type in _CHARGE_NOTIFICATION_TYPES
-        (logger.error if is_charge else logger.warning)(
+        alert = is_charge and environment.lower() != "sandbox"
+        (logger.error if alert else logger.warning)(
             "App Store %s matched no account: type=%s lookup=%s found=%s env=%s product=%s "
             "token_prefix=%s original_tx=%s bound_to=%s",
             "charge" if is_charge else "notification",
@@ -1150,13 +1152,14 @@ async def _note_unmatched_notification(
             app_account_token[:8] or "(empty)", original_id or "-", bound_to or "-",
         )
 
-        notification_id = str(payload.get("notificationUUID") or "") or (
-            f"{original_id or 'unknown'}:{transaction_id or 'unknown'}:{notification_type or 'unknown'}"
-        )
+        subtype = str(payload.get("subtype") or "")
+        notification_id = str(payload.get("notificationUUID") or "") or ":".join(filter(None, (
+            original_id or "unknown", transaction_id or "unknown", notification_type or "unknown", subtype,
+        )))
         from app.db.appstore_unmatched import record_unmatched_notification
         await record_unmatched_notification(notification_id, {
             "notification_type": notification_type,
-            "subtype": str(payload.get("subtype") or ""),
+            "subtype": subtype,
             "signed_date": payload.get("signedDate"),
             "environment": environment,
             "product_id": product_id,

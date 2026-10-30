@@ -136,7 +136,7 @@ Caller dials user's Kevin number (Twilio)
 These fields are in `PROTECTED_FIELDS` — the contractor PATCH endpoint silently drops any client attempt to write them.
 
 ### Unmatched App Store notifications
-A notification whose `appAccountToken` matches no account (no document, or one whose `active` is neither true nor false) is still acked 200, so Apple won't retry it, but it is kept in the `appstore_unmatched_notifications` collection, keyed by Apple's `notificationUUID`. Each record holds the type, environment, product, transaction ids, token, signed date, and any `apple_transactions` binding for the receipt. A charge (DID_RENEW, SUBSCRIBED) logs "App Store charge matched no account" at ERROR, which the production error alert emails; other types log a warning. Nothing is applied to any account. Added 2026-10-30 after a production DID_RENEW on 2026-10-10 matched no account.
+A notification whose `appAccountToken` matches no account (no document, or one whose `active` is neither true nor false) is still acked 200, so Apple won't retry it, but it is kept in the `appstore_unmatched_notifications` collection, keyed by Apple's `notificationUUID`. Each record holds the type, environment, product, transaction ids, token, signed date, and any `apple_transactions` binding for the receipt. A charge (DID_RENEW, SUBSCRIBED) outside the sandbox logs "App Store charge matched no account" at ERROR, which the production error alert emails; sandbox charges (TestFlight purchases reaching staging) and other types log a warning. Nothing is applied to any account. Added 2026-10-30 after a production DID_RENEW on 2026-10-10 matched no account.
 
 ### Product IDs (App Store Connect)
 | Product | ID | Promo Offer ID |

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+from google.api_core.exceptions import AlreadyExists
 from google.cloud import firestore
 
 from app.db.firestore_client import get_firestore_client
@@ -28,9 +29,11 @@ async def record_unmatched_notification(notification_id: str, fields: dict) -> N
     now = time.time()
 
     def _write():
-        if ref.get().exists:
+        # create() fails if the document exists, so two overlapping deliveries
+        # of one notification can't both write a first record.
+        try:
+            ref.create({**fields, "first_seen_at": now, "last_seen_at": now, "deliveries": 1})
+        except AlreadyExists:
             ref.update({"last_seen_at": now, "deliveries": firestore.Increment(1)})
-        else:
-            ref.set({**fields, "first_seen_at": now, "last_seen_at": now, "deliveries": 1})
 
     await loop.run_in_executor(None, _write)

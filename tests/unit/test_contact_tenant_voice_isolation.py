@@ -90,7 +90,7 @@ async def _run_incoming_call(
     monkeypatch.setattr("app.services.circuit_breaker.is_circuit_open", lambda: False)
     monkeypatch.setattr(
         "app.services.quiet_hours.get_quiet_hours_routing_override",
-        lambda _score: None,
+        lambda _score, **_kwargs: None,
     )
     monkeypatch.setattr(
         "app.services.conference_registry.new_conference_name",

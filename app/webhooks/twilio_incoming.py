@@ -555,9 +555,33 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             route = Route.AI_SCREENING
             logger.info("Ring-through contacts disabled — downgrading to AI screening")
 
-        # Quiet hours override
-        from app.services.quiet_hours import get_quiet_hours_routing_override
-        override = get_quiet_hours_routing_override(trust_score)
+        # Quiet hours use this account's settings. A missing or unread
+        # document leaves the trust-score route unchanged. Spam stays blocked.
+        from app.services.quiet_hours import (
+            get_quiet_hours_routing_override,
+            load_quiet_hours_preferences,
+            quiet_hours_routing_args,
+        )
+
+        preferences: dict = {}
+        if contractor_id:
+            try:
+                loaded = await asyncio.wait_for(
+                    load_quiet_hours_preferences(contractor_id),
+                    timeout=1.0,
+                )
+                if isinstance(loaded, dict):
+                    preferences = loaded
+            except Exception:
+                logger.error(
+                    "Quiet hours settings unavailable for %s — leaving normal routing",
+                    contractor_id,
+                    exc_info=True,
+                )
+        override = get_quiet_hours_routing_override(
+            trust_score,
+            **quiet_hours_routing_args(preferences),
+        )
         if override and route != Route.SPAM_BLOCK:
             route = Route.AI_SCREENING
 

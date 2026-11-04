@@ -202,7 +202,7 @@ async def test_forwarding_write_cannot_abort_the_inbound_stamp(monkeypatch):
 
     Both write the contractor document and the stamp is single-attempt, so a
     forwarding commit landing inside it failed the stamp and sent the caller to
-    direct ring, skipping Kevin: 8 production calls from 2026-10-28 to 2026-11-04.
+    direct ring, skipping Kevin, as production logs showed from 2026-10-28.
     """
     async def stamp(*_args, **_kwargs):
         # Stands in for the open transaction: Firestore aborts it when another
@@ -225,11 +225,11 @@ async def test_forwarding_write_cannot_abort_the_inbound_stamp(monkeypatch):
     await asyncio.sleep(0.01)  # let the fire-and-forget writes finish
 
     assert gate_reached == ["c1"]
-    assert set(writes) == {
-        "forwarding_last_seen_at",
+    assert sorted(writes) == [
         "first_forwarded_observed_at",
         "first_inbound_observed_at",
-    }
+        "forwarding_last_seen_at",
+    ]
 
 
 async def _stamp_unacknowledged(*_args, **_kwargs):
@@ -253,7 +253,7 @@ async def test_direct_ring_still_records_forwarding_evidence(monkeypatch, stamp)
 
     assert b"<Dial" in response.body
     assert b"+14155551234" in response.body
-    assert set(writes) == {"forwarding_last_seen_at", "first_forwarded_observed_at"}
+    assert sorted(writes) == ["first_forwarded_observed_at", "forwarding_last_seen_at"]
 
 
 # --- latest_call_timestamp -------------------------------------------------

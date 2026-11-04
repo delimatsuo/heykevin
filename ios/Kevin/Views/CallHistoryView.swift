@@ -42,6 +42,7 @@ struct CallHistoryView: View {
                         activeProfileBanner
                         searchBar
                         filterPicker
+                        tagFilterRow
                         if !historyModel.showingCountLabel.isEmpty {
                             Text(historyModel.showingCountLabel)
                                 .font(.footnote)
@@ -342,6 +343,26 @@ struct CallHistoryView: View {
         )
     }
 
+    @ViewBuilder
+    private var tagFilterRow: some View {
+        if !historyModel.availableTags.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(historyModel.availableTags) { tag in
+                        let isSelected = historyModel.selectedTag == tag
+                        Button {
+                            historyModel.setTagFilter(isSelected ? nil : tag)
+                        } label: {
+                            CallTagChip(tag: tag, isSelected: isSelected)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    }
+                }
+            }
+        }
+    }
+
     private var filterPicker: some View {
         let layout = dynamicTypeSize.isAccessibilitySize
             ? AnyLayout(VStackLayout(spacing: 8))
@@ -505,6 +526,25 @@ struct CallHistoryView: View {
 
 // MARK: - Call Row
 
+struct CallTagChip: View {
+    let tag: CallTag
+    var isSelected: Bool = false
+
+    private var foreground: Color {
+        if isSelected { return .white }
+        return tag.isUrgent ? Color.hkRed : Color.hkInkSecondary
+    }
+
+    var body: some View {
+        Text(tag.localizedTitle)
+            .font(.system(size: 11.5, weight: .semibold))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(isSelected ? Color.hkInk : Color.hkWarmCanvas, in: Capsule())
+            .foregroundStyle(foreground)
+    }
+}
+
 struct CallRow: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let call: CallRecord
@@ -558,6 +598,14 @@ struct CallRow: View {
                 }
             }
 
+            if !call.tags.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(call.tags) { tag in
+                        CallTagChip(tag: tag)
+                    }
+                }
+            }
+
             if turnCount > 0 {
                 HStack(spacing: 6) {
                     Image(systemName: "text.bubble")
@@ -590,7 +638,13 @@ struct CallRow: View {
                 .stroke(Color.hkDivider, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(call.displayName), \(call.callerExcerpt), \(Self.timeLabel(for: call.timestamp)), \(isUnread ? String(localized: "Unread") : String(localized: "Read"))")
+        .accessibilityLabel(Self.accessibilitySummary(call: call, isUnread: isUnread))
+    }
+
+    static func accessibilitySummary(call: CallRecord, isUnread: Bool) -> String {
+        let summary = "\(call.displayName), \(call.callerExcerpt), \(timeLabel(for: call.timestamp)), \(isUnread ? String(localized: "Unread") : String(localized: "Read"))"
+        let tags = call.tags.map(\.localizedTitle)
+        return ([summary] + tags).joined(separator: ", ")
     }
 
     static func timeLabel(for date: Date) -> String {

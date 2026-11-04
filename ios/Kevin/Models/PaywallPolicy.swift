@@ -31,26 +31,16 @@ enum PaywallPolicy {
         businessProProductID,
     ]
 
-    // No longer offered on the paywall. These stay eligible so an existing
-    // subscriber's purchase flow, restore, and plan name keep working.
-    static let retiredProductIDs: Set<String> = [
-        businessProProductID,
-    ]
-
     static func isEligible(productID: String, for purpose: PaywallPurpose) -> Bool {
         purpose.allowedProductIDs.contains(productID)
-    }
-
-    static func isOffered(productID: String, for purpose: PaywallPurpose) -> Bool {
-        isEligible(productID: productID, for: purpose) && !retiredProductIDs.contains(productID)
     }
 
     static func filterEligibleProductIDs(_ productIDs: [String], for purpose: PaywallPurpose) -> [String] {
         productIDs.filter { isEligible(productID: $0, for: purpose) }
     }
 
-    static func filterOfferedProducts(_ products: [Product], for purpose: PaywallPurpose) -> [Product] {
-        products.filter { isOffered(productID: $0.id, for: purpose) }
+    static func filterEligibleProducts(_ products: [Product], for purpose: PaywallPurpose) -> [Product] {
+        products.filter { isEligible(productID: $0.id, for: purpose) }
     }
 
     static func resolveSelectedProductID(

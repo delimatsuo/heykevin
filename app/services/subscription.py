@@ -1181,6 +1181,9 @@ async def _note_unmatched_notification(
         )
 
 
+TERMINAL_NOTIFICATION_TYPES = ("EXPIRED", "REFUND", "REVOKE")
+
+
 async def handle_appstore_notification(payload: dict) -> bool:
     """Process an App Store Server Notification V2 payload.
 
@@ -1504,7 +1507,7 @@ async def handle_appstore_notification(payload: dict) -> bool:
                                 cid, rebound["contractor_id"], fwd_err,
                             )
                 elif (
-                    notification_type in ("EXPIRED", "DID_FAIL_TO_RENEW", "REFUND", "REVOKE")
+                    notification_type in TERMINAL_NOTIFICATION_TYPES
                     and rebound.get("subscription_forwarded_from") == cid
                 ):
                     try:
@@ -1563,7 +1566,10 @@ async def handle_appstore_notification(payload: dict) -> bool:
             )
             return False
 
-    if notification_type in ("DID_RENEW", "SUBSCRIBED"):
+    # Apple applies an upgrade immediately. A downgrade waits for the next
+    # renewal, so DID_RENEW carries it and DOWNGRADE changes nothing here.
+    is_upgrade = notification_type == "DID_CHANGE_RENEWAL_PREF" and subtype == "UPGRADE"
+    if notification_type in ("DID_RENEW", "SUBSCRIBED") or is_upgrade:
         product_id = transaction_info.get("productId", "")
         tier = PRODUCT_TO_TIER.get(product_id, "")
         expires_ts = _active_subscription_expires_ts(transaction_info)
@@ -1589,7 +1595,13 @@ async def handle_appstore_notification(payload: dict) -> bool:
             logger.warning(f"Rejected active subscription notification: {contractor_id} product={product_id}")
             return False
 
-    elif notification_type in ("EXPIRED", "DID_FAIL_TO_RENEW", "REFUND", "REVOKE"):
+    elif notification_type == "DID_FAIL_TO_RENEW":
+        # Apple is still retrying the payment, for up to 60 days. Service stays
+        # on until DID_RENEW recovers it or EXPIRED ends it.
+        logger.info(f"Subscription in billing retry: {contractor_id}")
+        await notify_renewal_payment_failed(contractor_id)
+
+    elif notification_type in TERMINAL_NOTIFICATION_TYPES:
         updated = await update_contractor(contractor_id, {
             "subscription_status": "expired",
         })
@@ -1608,6 +1620,22 @@ async def handle_appstore_notification(payload: dict) -> bool:
             await notify_subscription_ended(contractor_id)
 
     return True
+
+
+async def notify_renewal_payment_failed(contractor_id: str) -> None:
+    """Ask the owner to fix a failed renewal payment. Never raises."""
+    try:
+        from app.services.push_notification import send_regular_push, get_device_token
+        device_token = await get_device_token(contractor_id=contractor_id)
+        if device_token:
+            await send_regular_push(
+                device_token=device_token,
+                title="Your Kevin payment didn't go through",
+                body="Update your payment method in the App Store to keep Kevin screening your calls.",
+                contractor_id=contractor_id,
+            )
+    except Exception as push_err:
+        logger.warning(f"Payment-failed push failed (non-critical): {push_err}")
 
 
 async def notify_subscription_ended(contractor_id: str) -> None:

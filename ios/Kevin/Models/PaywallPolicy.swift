@@ -4,6 +4,7 @@ import StoreKit
 enum PaywallPurpose: Hashable, Equatable, Sendable {
     case allPlans
     case businessActivation
+    case proUpgrade
 
     var allowedProductIDs: Set<String> {
         switch self {
@@ -11,6 +12,8 @@ enum PaywallPurpose: Hashable, Equatable, Sendable {
             return PaywallPolicy.allKnownProductIDs
         case .businessActivation:
             return PaywallPolicy.businessProductIDs
+        case .proUpgrade:
+            return [PaywallPolicy.businessProProductID]
         }
     }
 }

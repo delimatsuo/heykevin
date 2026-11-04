@@ -1446,7 +1446,7 @@ class VoicePipeline:
         return anthropic_tool_declarations()
 
     def _has_service_request_context(self) -> bool:
-        from app.services.integration_tokens import has_usable_token
+        from app.services.entitlements import has_entitled_token
 
         context = self._contractor_config.get("service_request_context")
         return (
@@ -1456,18 +1456,18 @@ class VoicePipeline:
             and provider_mutation_infrastructure_ready()
             and self._contractor_config.get("service_request_mutations_enabled") is True
             and self._contractor_config.get("integration_write_status") == "approved"
-            and has_usable_token(self._contractor_config, "google_calendar", "access")
+            and has_entitled_token(self._contractor_config, "google_calendar", "access")
         )
 
     def _managed_provider_create_enabled(self) -> bool:
         """Fail closed unless this tenant is enrolled in durable provider writes."""
-        from app.services.integration_tokens import has_usable_token
+        from app.services.entitlements import has_entitled_token
 
         return (
             provider_mutation_infrastructure_ready()
             and self._contractor_config.get("service_request_mutations_enabled") is True
             and self._contractor_config.get("integration_write_status") == "approved"
-            and has_usable_token(self._contractor_config, "google_calendar", "access")
+            and has_entitled_token(self._contractor_config, "google_calendar", "access")
         )
 
     def _service_request_executor(self):
@@ -1622,15 +1622,15 @@ class VoicePipeline:
 
     def _has_jobber(self) -> bool:
         """Check if the contractor has Jobber connected."""
-        from app.services.integration_tokens import has_usable_token
+        from app.services.entitlements import has_entitled_token
 
-        return has_usable_token(self._contractor_config, "jobber")
+        return has_entitled_token(self._contractor_config, "jobber")
 
     def _has_google_calendar(self) -> bool:
         """Check if the contractor has Google Calendar connected (fallback)."""
-        from app.services.integration_tokens import has_usable_token
+        from app.services.entitlements import has_entitled_token
 
-        return has_usable_token(self._contractor_config, "google_calendar")
+        return has_entitled_token(self._contractor_config, "google_calendar")
 
     def _get_jobber_token(self) -> str:
         from app.services.integration_tokens import resolve_usable_token

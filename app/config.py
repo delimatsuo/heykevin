@@ -183,6 +183,9 @@ class Settings(DotenvProtectedBaseSettings):
     # Emergency kill switch for StoreKit promotional offers. Keep disabled
     # until eligibility is derived from verified Apple subscription history.
     subscription_promotional_offers_enabled: bool = False
+    # Unix time. 0 leaves Jobber and Google Calendar open to every plan. Once set,
+    # they need Business Pro, except Business accounts already connected before it.
+    pro_integrations_cutoff: float = 0.0
 
     # Acquisition and activation measurement (default OFF)
     acquisition_measurement_enabled: bool = False

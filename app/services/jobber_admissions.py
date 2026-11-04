@@ -1047,7 +1047,11 @@ async def connect(*, contractor_id, access_token, refresh_token, jobber_account_
         updates = _token_updates(data, contractor_id, access_token, refresh_token, now=now, expires_at=expires_at, expires_in=expires_in)
         updates.update({key: DELETE_FIELD for key in ENFORCEMENT_FIELDS})
         updates.update(jobber_generation=next_gen, jobber_lifecycle_epoch=next_epoch,
-            jobber_connected_at=now, jobber_disconnected_at=DELETE_FIELD, jobber_token_refreshed_at=DELETE_FIELD,
+            jobber_connected_at=now,
+            # Survives a reauthorization, so a connection kept past the Pro
+            # cutoff isn't lost when its token has to be renewed.
+            jobber_first_connected_at=data.get("jobber_first_connected_at") or data.get("jobber_connected_at") or now,
+            jobber_disconnected_at=DELETE_FIELD, jobber_token_refreshed_at=DELETE_FIELD,
             jobber_account_id=jobber_account_id)
         # Provider suspension preemption already forced capture false at state
         # creation; additionally require a currently accepted source binding.

@@ -21,6 +21,7 @@ enum JobberManagementError: Error, LocalizedError, Equatable {
     case providerMismatch
     case credentialDeletionUnacknowledged
     case invalidAuthorizeURL
+    case businessProRequired
     case operationInProgress
     case staleLease
 
@@ -32,6 +33,8 @@ enum JobberManagementError: Error, LocalizedError, Equatable {
             return String(localized: "Request failed with status \(code).")
         case .malformedResponse, .inconsistentCaptureState, .identityMismatch, .providerMismatch, .credentialDeletionUnacknowledged, .invalidAuthorizeURL:
             return String(localized: "Received an invalid response from the server.")
+        case .businessProRequired:
+            return String(localized: "This connection is included with Business Pro.")
         case .operationInProgress:
             return String(localized: "An operation is already in progress.")
         case .staleLease:
@@ -309,7 +312,18 @@ enum JobberAuthorizeURLValidator {
 }
 
 enum JobberConnectResponseParser {
+    static func isBusinessProRequired(data: Data, statusCode: Int) -> Bool {
+        guard statusCode == 403,
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return false
+        }
+        return json["detail"] as? String == "business_pro_required"
+    }
+
     static func parse(data: Data, response: HTTPURLResponse) throws -> URL {
+        if isBusinessProRequired(data: data, statusCode: response.statusCode) {
+            throw JobberManagementError.businessProRequired
+        }
         guard response.statusCode == 200 else {
             throw JobberManagementError.httpError(statusCode: response.statusCode)
         }
@@ -441,6 +455,7 @@ final class JobberManagementModel: ObservableObject {
     @Published private(set) var unconfirmedRevocationNotice: String? = nil
     @Published private(set) var statusErrorMessage: String? = nil
     @Published private(set) var browserPromptMessage: String? = nil
+    @Published var requiresBusinessPro: Bool = false
     @Published private(set) var lastConnectedAt: Double? = nil
     @Published private(set) var activeLease: JobberOperationLease? = nil
 
@@ -703,7 +718,11 @@ final class JobberManagementModel: ObservableObject {
             if let currentLiveAfterError = normalizedLiveAfterError,
                currentLiveAfterError == lease.auth,
                activeLease?.id == lease.id {
-                statusErrorMessage = Self.fixedConnectErrorMessage
+                if case JobberManagementError.businessProRequired = error {
+                    requiresBusinessPro = true
+                } else {
+                    statusErrorMessage = Self.fixedConnectErrorMessage
+                }
                 browserPromptMessage = nil
             }
         }

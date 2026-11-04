@@ -7242,6 +7242,23 @@
         }
       }
     },
+    "This connection is included with Business Pro." : {
+      "comment" : "Shown when connecting Jobber or Google Calendar without the Business Pro plan.",
+      "localizations" : {
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esta conexión está incluida en Business Pro."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esta conexão está incluída no Business Pro."
+          }
+        }
+      }
+    },
     "Connects to Jobber and Google Calendar" : {
       "comment" : "Tagline for the \"Business Pro\" tier of the Call Screen app.",
       "localizations" : {

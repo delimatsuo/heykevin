@@ -1359,7 +1359,11 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         request.timeoutInterval = 10
         authorize(&request)
 
-        let (data, _) = try await retryRequest(request)
+        let (data, response) = try await retryRequest(request)
+        if let http = response as? HTTPURLResponse,
+           JobberConnectResponseParser.isBusinessProRequired(data: data, statusCode: http.statusCode) {
+            throw JobberManagementError.businessProRequired
+        }
         if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
             return json["authorize_url"] as? String
         }

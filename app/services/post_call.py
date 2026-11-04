@@ -513,10 +513,10 @@ async def _process_business(
     _record_effect(tracker, "job_record", True)
 
     # 2b. Best-effort Jobber lead capture for service requests.
-    from app.services.integration_tokens import has_usable_token
+    from app.services.entitlements import has_entitled_token
 
     if (
-        has_usable_token(contractor, "jobber")
+        has_entitled_token(contractor, "jobber")
         and job_data.get("call_type") == "service_request"
         and _jobber_lead_capture_enabled(contractor)
     ):
@@ -1274,9 +1274,9 @@ def _mask_phone_like_text(text: str) -> str:
 
 async def _capture_jobber_lead(contractor: dict, job_data: dict, job_id: str):
     """Best-effort: capture a service-request call as a Jobber Request."""
-    from app.services.integration_tokens import has_usable_token
+    from app.services.entitlements import has_entitled_token
 
-    if not _jobber_lead_capture_enabled(contractor) or not has_usable_token(contractor, "jobber"):
+    if not _jobber_lead_capture_enabled(contractor) or not has_entitled_token(contractor, "jobber"):
         return None
 
     call_sid = job_data.get("call_sid", "")

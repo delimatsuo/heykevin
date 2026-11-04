@@ -1,5 +1,38 @@
 import Foundation
 
+/// An AI tag on a call. Declaration order is display order.
+enum CallTag: String, CaseIterable, Identifiable, Sendable {
+    case emergency = "emergency"
+    case sameDay = "same_day"
+    case routine = "routine"
+    case quote = "quote"
+    case serviceRequest = "service_request"
+    case outOfScope = "out_of_scope"
+    case personal = "personal"
+    case business = "business"
+    case spam = "spam"
+
+    var id: String { rawValue }
+
+    var isUrgent: Bool {
+        self == .emergency || self == .sameDay
+    }
+
+    var localizedTitle: String {
+        switch self {
+        case .emergency:      return String(localized: "Emergency")
+        case .sameDay:        return String(localized: "Same day")
+        case .routine:        return String(localized: "Routine")
+        case .quote:          return String(localized: "Quote")
+        case .serviceRequest: return String(localized: "Service request")
+        case .outOfScope:     return String(localized: "Out of scope")
+        case .personal:       return String(localized: "Personal")
+        case .business:       return String(localized: "Business")
+        case .spam:           return String(localized: "Spam")
+        }
+    }
+}
+
 /// Represents a screened call record.
 struct CallRecord: Identifiable, Equatable, Hashable, Sendable {
     let id: String
@@ -20,6 +53,7 @@ struct CallRecord: Identifiable, Equatable, Hashable, Sendable {
     /// suppressed the line for every historical confirmation, because the
     /// in-view state only learns the answer from a confirm this session.
     let appointmentCallerNotified: Bool
+    let tags: [CallTag]
 
     init(
         id: String,
@@ -35,7 +69,8 @@ struct CallRecord: Identifiable, Equatable, Hashable, Sendable {
         appointmentStatus: String? = nil,
         appointmentStartTime: String? = nil,
         appointmentTitle: String? = nil,
-        appointmentCallerNotified: Bool = false
+        appointmentCallerNotified: Bool = false,
+        tags: [CallTag] = []
     ) {
         self.id = id
         self.callerPhone = callerPhone
@@ -51,6 +86,7 @@ struct CallRecord: Identifiable, Equatable, Hashable, Sendable {
         self.appointmentStartTime = appointmentStartTime
         self.appointmentTitle = appointmentTitle
         self.appointmentCallerNotified = appointmentCallerNotified
+        self.tags = tags
     }
 
     /// Whether the caller left a message (has transcript with caller speech beyond the initial exchange).

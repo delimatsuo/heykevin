@@ -7269,6 +7269,72 @@
           }
         }
       }
+    },
+    "Emergency" : {
+      "comment" : "AI tag on a call in Recents.",
+      "localizations" : {
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Emergência"
+          }
+        }
+      }
+    },
+    "Same day" : {
+      "comment" : "AI tag on a call in Recents.",
+      "localizations" : {
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mesmo dia"
+          }
+        }
+      }
+    },
+    "Routine" : {
+      "comment" : "AI tag on a call in Recents.",
+      "localizations" : {
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rotina"
+          }
+        }
+      }
+    },
+    "Quote" : {
+      "comment" : "AI tag on a call in Recents.",
+      "localizations" : {
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Orçamento"
+          }
+        }
+      }
+    },
+    "Service request" : {
+      "comment" : "AI tag on a call in Recents.",
+      "localizations" : {
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pedido de serviço"
+          }
+        }
+      }
+    },
+    "Out of scope" : {
+      "comment" : "AI tag on a call in Recents.",
+      "localizations" : {
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fora do escopo"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

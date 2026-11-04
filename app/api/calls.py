@@ -9,6 +9,8 @@ from app.db.calls import get_call, get_calls_for_contractor, cleanup_old_calls
 from app.db.contractors import get_contractor
 from app.db.firestore_client import get_firestore_client
 from app.services.appointment_confirm import AppointmentConfirmError, confirm_appointment
+from app.services.call_tags import tags_for_call
+from app.services.entitlements import has_business_pro_entitlement
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -16,11 +18,24 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/calls", dependencies=[Depends(verify_api_token)])
 
 
+async def _add_tags_for_pro(contractor_id: str, calls: List[dict]) -> None:
+    """Tag calls for Business Pro. A failed plan lookup leaves the calls untagged."""
+    try:
+        contractor = await get_contractor(contractor_id)
+    except Exception as e:
+        logger.warning("Call tags skipped: plan lookup failed: exception_type=%s", type(e).__name__)
+        return
+    if has_business_pro_entitlement(contractor):
+        for call in calls:
+            call["tags"] = tags_for_call(call)
+
+
 @router.get("")
 async def api_list_calls(request: Request, contractor_id: str = Query(..., description="Contractor ID to filter calls")):
     """List up to 100 recent calls for a contractor from the last 90 days."""
     require_contractor_access(request, contractor_id)
     calls = await get_calls_for_contractor(contractor_id)
+    await _add_tags_for_pro(contractor_id, calls)
     return {"calls": calls, "count": len(calls)}
 
 
@@ -31,6 +46,7 @@ async def api_get_call(call_sid: str, request: Request):
     if not call:
         return {"error": "Not found"}
     require_contractor_access(request, call.get("contractor_id", ""))
+    await _add_tags_for_pro(call.get("contractor_id", ""), [call])
     return call
 
 

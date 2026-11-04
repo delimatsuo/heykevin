@@ -80,6 +80,7 @@ final class CallHistoryModel: ObservableObject {
     @Published private(set) var allCalls: [CallRecord] = []
     @Published var visibleLimit: Int = CallHistoryModel.pageSize
     @Published var selectedFilter: CallHistoryFilter = .all
+    @Published private(set) var selectedTag: CallTag? = nil
     @Published var searchQuery: String = ""
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var rawErrorMessage: String? = nil
@@ -240,10 +241,11 @@ final class CallHistoryModel: ObservableObject {
         case .spam:
             callsToFilter = allCalls.filter { $0.isSpamOrBlocked }
         }
+        let tagged = selectedTag.map { tag in callsToFilter.filter { $0.tags.contains(tag) } } ?? callsToFilter
 
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            return callsToFilter
+            return tagged
         }
 
         let isPhoneLikeQuery = query.allSatisfy { char in
@@ -251,7 +253,7 @@ final class CallHistoryModel: ObservableObject {
         }
         let queryDigits = query.filter { $0.isNumber }
 
-        return callsToFilter.filter { call in
+        return tagged.filter { call in
             // 1. Caller Name search (case- and diacritic-insensitive)
             if call.callerName.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil {
                 return true
@@ -390,7 +392,8 @@ final class CallHistoryModel: ObservableObject {
             appointmentStatus: "confirmed",
             appointmentStartTime: existing.appointmentStartTime,
             appointmentTitle: existing.appointmentTitle,
-            appointmentCallerNotified: callerNotified
+            appointmentCallerNotified: callerNotified,
+            tags: existing.tags
         )
 
         allCalls[index] = confirmed
@@ -436,6 +439,9 @@ final class CallHistoryModel: ObservableObject {
             )
 
             self.allCalls = normalized
+            if let tag = selectedTag, !availableTags.contains(tag) {
+                selectedTag = nil
+            }
             self.activeAuthContext = requestAuth
             self.lastLoadedRevision = capturedRevision
 
@@ -486,6 +492,7 @@ final class CallHistoryModel: ObservableObject {
         allCalls = []
         visibleLimit = Self.pageSize
         selectedFilter = .all
+        selectedTag = nil
         searchQuery = ""
         isLoading = false
         rawErrorMessage = nil
@@ -509,6 +516,17 @@ final class CallHistoryModel: ObservableObject {
 
     func setFilter(_ filter: CallHistoryFilter) {
         selectedFilter = filter
+        visibleLimit = Self.pageSize
+    }
+
+    /// Tags on the loaded calls, in display order. Only Business Pro responses carry tags.
+    var availableTags: [CallTag] {
+        let present = Set(allCalls.flatMap(\.tags))
+        return CallTag.allCases.filter(present.contains)
+    }
+
+    func setTagFilter(_ tag: CallTag?) {
+        selectedTag = tag
         visibleLimit = Self.pageSize
     }
 

@@ -328,7 +328,8 @@ enum CallHistoryResponseParser {
                 appointmentStatus: appointment?["status"] as? String,
                 appointmentStartTime: appointment?["start_time"] as? String,
                 appointmentTitle: appointment?["title"] as? String,
-                appointmentCallerNotified: appointment?["caller_notified_at"] != nil
+                appointmentCallerNotified: appointment?["caller_notified_at"] != nil,
+                tags: (dict["tags"] as? [Any] ?? []).compactMap { ($0 as? String).flatMap(CallTag.init(rawValue:)) }
             )
         }
     }

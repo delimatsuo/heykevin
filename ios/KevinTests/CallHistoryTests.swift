@@ -1353,6 +1353,127 @@ final class CallHistoryTests: XCTestCase {
         XCTAssertTrue(openedURLs.isEmpty)
     }
 
+    // MARK: - AI call tags
+
+    private func makeTaggedRecord(id: String, tags: [CallTag], at now: Date) -> CallRecord {
+        CallRecord(
+            id: id,
+            callerPhone: "5551234567",
+            callerName: "Test Caller",
+            timestamp: now,
+            trustScore: 80,
+            outcome: "screened",
+            transcript: "Kevin: Hello\nCaller: I need help.",
+            voicemailURL: nil,
+            callbackNumber: nil,
+            readOnServer: false,
+            tags: tags
+        )
+    }
+
+    func testDecoderReadsKnownTagsAndIgnoresUnknownOnes() throws {
+        let json = #"{"calls":[{"call_sid":"CA1","timestamp":1773532800,"tags":["service_request","future_tag","emergency",7]}]}"#
+        let records = try CallHistoryResponseParser.parse(
+            data: json.data(using: .utf8)!,
+            response: makeHTTPResponse(statusCode: 200)
+        )
+        XCTAssertEqual(records.first?.tags, [.serviceRequest, .emergency])
+    }
+
+    func testDecoderTreatsAbsentOrMalformedTagsAsNone() throws {
+        for tags in ["", #","tags":"emergency""#, #","tags":null"#] {
+            let json = #"{"calls":[{"call_sid":"CA1","timestamp":1773532800"# + tags + "}]}"
+            let records = try CallHistoryResponseParser.parse(
+                data: json.data(using: .utf8)!,
+                response: makeHTTPResponse(statusCode: 200)
+            )
+            XCTAssertEqual(records.first?.tags, [])
+        }
+    }
+
+    func testTagFilterShowsOnlyMatchingCalls() async {
+        let auth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let records = [
+            makeTaggedRecord(id: "CA1", tags: [.serviceRequest, .emergency], at: now),
+            makeTaggedRecord(id: "CA2", tags: [.serviceRequest, .routine], at: now.addingTimeInterval(-60)),
+            makeTaggedRecord(id: "CA3", tags: [], at: now.addingTimeInterval(-120)),
+        ]
+        let (model, _) = makeTestModel(authProvider: { auth }, fetchCalls: { _ in records }, clock: { now })
+        await model.loadCalls()
+
+        XCTAssertEqual(model.filteredCalls.count, 3)
+        model.setTagFilter(.emergency)
+        XCTAssertEqual(model.filteredCalls.map(\.id), ["CA1"])
+        model.setTagFilter(.serviceRequest)
+        XCTAssertEqual(model.filteredCalls.map(\.id), ["CA1", "CA2"])
+        model.setTagFilter(nil)
+        XCTAssertEqual(model.filteredCalls.count, 3)
+    }
+
+    func testAvailableTagsListOnlyTagsPresentInDisplayOrder() async {
+        let auth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let records = [
+            makeTaggedRecord(id: "CA1", tags: [.personal], at: now),
+            makeTaggedRecord(id: "CA2", tags: [.serviceRequest, .emergency], at: now.addingTimeInterval(-60)),
+        ]
+        let (model, _) = makeTestModel(authProvider: { auth }, fetchCalls: { _ in records }, clock: { now })
+        await model.loadCalls()
+
+        XCTAssertEqual(model.availableTags, [.emergency, .serviceRequest, .personal])
+    }
+
+    func testNoTagsMeansNoTagFilters() async {
+        let auth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let records = [makeTaggedRecord(id: "CA1", tags: [], at: now)]
+        let (model, _) = makeTestModel(authProvider: { auth }, fetchCalls: { _ in records }, clock: { now })
+        await model.loadCalls()
+
+        XCTAssertEqual(model.availableTags, [])
+    }
+
+    func testTagFilterClearsWhenItsTagIsNoLongerPresent() async {
+        let auth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        var records = [makeTaggedRecord(id: "CA1", tags: [.emergency], at: now)]
+        let (model, _) = makeTestModel(authProvider: { auth }, fetchCalls: { _ in records }, clock: { now })
+        await model.loadCalls()
+        model.setTagFilter(.emergency)
+
+        records = [makeTaggedRecord(id: "CA2", tags: [], at: now)]
+        await model.loadCalls()
+
+        XCTAssertNil(model.selectedTag)
+        XCTAssertEqual(model.filteredCalls.map(\.id), ["CA2"])
+    }
+
+    func testTagFilterClearsOnAccountChange() async {
+        let auth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let records = [makeTaggedRecord(id: "CA1", tags: [.emergency], at: now)]
+        let (model, _) = makeTestModel(authProvider: { auth }, fetchCalls: { _ in records }, clock: { now })
+        await model.loadCalls()
+        model.setTagFilter(.emergency)
+
+        model.invalidate()
+
+        XCTAssertNil(model.selectedTag)
+    }
+
+    func testAppointmentConfirmationKeepsTags() async {
+        let auth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let records = [makeTaggedRecord(id: "CA1", tags: [.serviceRequest, .routine], at: now)]
+        let (model, _) = makeTestModel(authProvider: { auth }, fetchCalls: { _ in records }, clock: { now })
+        await model.loadCalls()
+
+        XCTAssertTrue(model.applyAppointmentConfirmation(callId: "CA1", callerNotified: true, expectedAuth: auth))
+
+        XCTAssertEqual(model.allCalls.first?.tags, [.serviceRequest, .routine])
+    }
+
     // MARK: - CALLS-01: applyAppointmentConfirmation Tests
 
     func testAppointmentReceiptSurvivesReopenAndPreservesHistory() async {

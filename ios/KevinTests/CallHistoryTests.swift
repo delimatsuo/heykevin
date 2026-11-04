@@ -1462,6 +1462,22 @@ final class CallHistoryTests: XCTestCase {
         XCTAssertNil(model.selectedTag)
     }
 
+    func testRowAccessibilityLabelAnnouncesTags() {
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let tagged = makeTaggedRecord(id: "CA1", tags: [.serviceRequest, .emergency], at: now)
+        let label = CallRow.accessibilitySummary(call: tagged, isUnread: false)
+        XCTAssertTrue(label.contains(CallTag.serviceRequest.localizedTitle))
+        XCTAssertTrue(label.contains(CallTag.emergency.localizedTitle))
+    }
+
+    func testRowAccessibilityLabelWithoutTagsStaysAsItWas() {
+        let now = Date(timeIntervalSince1970: 1773532800)
+        let call = makeTaggedRecord(id: "CA1", tags: [], at: now)
+        let label = CallRow.accessibilitySummary(call: call, isUnread: false)
+        XCTAssertTrue(label.hasPrefix(call.displayName))
+        XCTAssertFalse(label.hasSuffix(", "))
+    }
+
     func testAppointmentConfirmationKeepsTags() async {
         let auth = CallAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
         let now = Date(timeIntervalSince1970: 1773532800)

@@ -638,7 +638,13 @@ struct CallRow: View {
                 .stroke(Color.hkDivider, lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(call.displayName), \(call.callerExcerpt), \(Self.timeLabel(for: call.timestamp)), \(isUnread ? String(localized: "Unread") : String(localized: "Read"))")
+        .accessibilityLabel(Self.accessibilitySummary(call: call, isUnread: isUnread))
+    }
+
+    static func accessibilitySummary(call: CallRecord, isUnread: Bool) -> String {
+        let summary = "\(call.displayName), \(call.callerExcerpt), \(timeLabel(for: call.timestamp)), \(isUnread ? String(localized: "Unread") : String(localized: "Read"))"
+        let tags = call.tags.map(\.localizedTitle)
+        return ([summary] + tags).joined(separator: ", ")
     }
 
     static func timeLabel(for date: Date) -> String {

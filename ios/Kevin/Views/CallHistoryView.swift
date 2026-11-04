@@ -353,7 +353,7 @@ struct CallHistoryView: View {
                         Button {
                             historyModel.setTagFilter(isSelected ? nil : tag)
                         } label: {
-                            CallTagChip(tag: tag, isSelected: isSelected)
+                            CallTagChip(tag: tag, isSelected: isSelected, isFilter: true)
                         }
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -529,18 +529,30 @@ struct CallHistoryView: View {
 struct CallTagChip: View {
     let tag: CallTag
     var isSelected: Bool = false
+    /// Filter chips sit on the page background, which is the same colour as a call row's chip fill.
+    var isFilter: Bool = false
 
     private var foreground: Color {
         if isSelected { return .white }
         return tag.isUrgent ? Color.hkRed : Color.hkInkSecondary
     }
 
+    private var fill: Color {
+        if isSelected { return .hkInk }
+        return isFilter ? .hkSurface : .hkWarmCanvas
+    }
+
     var body: some View {
         Text(tag.localizedTitle)
             .font(.system(size: 11.5, weight: .semibold))
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(isSelected ? Color.hkInk : Color.hkWarmCanvas, in: Capsule())
+            .padding(.horizontal, isFilter ? 12 : 9)
+            .padding(.vertical, isFilter ? 8 : 4)
+            .background(fill, in: Capsule())
+            .overlay {
+                if isFilter && !isSelected {
+                    Capsule().strokeBorder(Color.hkDivider, lineWidth: 1)
+                }
+            }
             .foregroundStyle(foreground)
     }
 }

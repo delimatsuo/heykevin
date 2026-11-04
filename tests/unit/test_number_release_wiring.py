@@ -201,7 +201,7 @@ async def test_forwarding_write_cannot_abort_the_inbound_stamp(monkeypatch):
     """Both hourly stamps coming due on one forwarded call must not collide.
 
     Both write the contractor document and the stamp is single-attempt, so a
-    forwarding commit landing inside it aborted the stamp and sent the caller to
+    forwarding commit landing inside it failed the stamp and sent the caller to
     direct ring, skipping Kevin: 8 production calls from 2026-10-28 to 2026-11-04.
     """
     async def stamp(*_args, **_kwargs):

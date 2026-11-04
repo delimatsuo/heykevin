@@ -156,14 +156,14 @@ class _ReachedSubscriptionGate(Exception):
 
 
 def _patch_forwarded_call(monkeypatch, stamp):
-    """Wire a forwarded call's lookups; returns the forwarding writes it makes."""
+    """Wire a forwarded call's lookups; returns the contractor fields it writes."""
     account = {
         "contractor_id": "c1",
         "owner_name": "Owner",
         "owner_phone": "+14155551234",
         "business_name": "Test Business",
     }
-    writes: list[dict] = []
+    writes: list[str] = []
 
     async def fake_lookup(_number):
         return account
@@ -172,20 +172,26 @@ def _patch_forwarded_call(monkeypatch, stamp):
         return account
 
     async def fake_update(_contractor_id, updates):
-        writes.append(updates)
+        writes.extend(updates)
         return True
 
-    async def no_measurement(*_args, **_kwargs):
-        return None
+    async def fake_inbound_measurement(*_args, **_kwargs):
+        writes.append("first_inbound_observed_at")
+
+    async def fake_forwarded_measurement(*_args, **_kwargs):
+        writes.append("first_forwarded_observed_at")
 
     import app.db.contractors as contractors
     monkeypatch.setattr(contractors, "get_contractor_by_twilio_number", fake_lookup)
     monkeypatch.setattr(contractors, "get_contractor", fake_get)
     monkeypatch.setattr(contractors, "update_contractor", fake_update)
     monkeypatch.setattr(contractors, "record_inbound_call_evidence", stamp)
-    monkeypatch.setattr(twilio_incoming, "_record_inbound_call_measurement", no_measurement)
     monkeypatch.setattr(
-        "app.services.acquisition.record_forwarded_call_measurement", no_measurement,
+        twilio_incoming, "_record_inbound_call_measurement", fake_inbound_measurement,
+    )
+    monkeypatch.setattr(
+        "app.services.acquisition.record_forwarded_call_measurement",
+        fake_forwarded_measurement,
     )
     return writes
 
@@ -216,26 +222,38 @@ async def test_forwarding_write_cannot_abort_the_inbound_stamp(monkeypatch):
     monkeypatch.setattr("app.services.circuit_breaker.record_error", lambda: None)
 
     await twilio_incoming.handle_incoming_call(_ForwardedCallRequest(), None)
-    await asyncio.sleep(0.01)  # let the fire-and-forget forwarding write finish
+    await asyncio.sleep(0.01)  # let the fire-and-forget writes finish
 
     assert gate_reached == ["c1"]
-    assert [list(update) for update in writes] == [["forwarding_last_seen_at"]]
+    assert set(writes) == {
+        "forwarding_last_seen_at",
+        "first_forwarded_observed_at",
+        "first_inbound_observed_at",
+    }
+
+
+async def _stamp_unacknowledged(*_args, **_kwargs):
+    return False
+
+
+async def _stamp_past_its_budget(*_args, **_kwargs):
+    await asyncio.sleep(0.1)
+    return True
 
 
 @pytest.mark.asyncio
-async def test_unacknowledged_stamp_still_records_forwarding_evidence(monkeypatch):
+@pytest.mark.parametrize("stamp", [_stamp_unacknowledged, _stamp_past_its_budget])
+async def test_direct_ring_still_records_forwarding_evidence(monkeypatch, stamp):
     """A call sent to direct ring still proves the owner's forwarding is live."""
-    async def stamp(*_args, **_kwargs):
-        return False
-
     writes = _patch_forwarded_call(monkeypatch, stamp)
+    monkeypatch.setattr(twilio_incoming, "INBOUND_EVIDENCE_TIMEOUT_SECONDS", 0.01)
 
     response = await twilio_incoming.handle_incoming_call(_ForwardedCallRequest(), None)
-    await asyncio.sleep(0.01)  # let the fire-and-forget forwarding write finish
+    await asyncio.sleep(0.01)  # let the fire-and-forget writes finish
 
     assert b"<Dial" in response.body
     assert b"+14155551234" in response.body
-    assert [list(update) for update in writes] == [["forwarding_last_seen_at"]]
+    assert set(writes) == {"forwarding_last_seen_at", "first_forwarded_observed_at"}
 
 
 # --- latest_call_timestamp -------------------------------------------------

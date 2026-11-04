@@ -398,9 +398,9 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             # ForwardedFrom is the only positive proof that a user's call
             # forwarding is actually live — iOS exposes no forwarding state and
             # the onboarding step cannot verify itself. Carrier-dependent, so
-            # absence means nothing; presence is conclusive. This waits for the
-            # stamp to settle: both write this document, and the single-attempt
-            # stamp would lose a collision, sending the call to direct ring.
+            # absence means nothing; presence is conclusive. Started only after
+            # the wait above: both write this document, and the single-attempt
+            # stamp can lose a collision, which sends the call to direct ring.
             from app.utils.phone import forwarding_confirms_owner
 
             if forwarding_confirms_owner(form_data.get("ForwardedFrom", ""), owner_phone):

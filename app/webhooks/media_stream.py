@@ -766,9 +766,9 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
                         ),
                     )
                 )
-            from app.services.integration_tokens import has_usable_token
+            from app.services.entitlements import has_entitled_token
 
-            if contractor_config_loaded.get("customer_memory") or has_usable_token(
+            if contractor_config_loaded.get("customer_memory") or has_entitled_token(
                 contractor_config_loaded, "google_calendar"
             ):
                 from app.db.service_requests import FirestoreServiceRequestRepository
@@ -781,7 +781,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
 
                 provider_adapter = (
                     GoogleCalendarRequestProvider(contractor_config_loaded)
-                    if has_usable_token(contractor_config_loaded, "google_calendar")
+                    if has_entitled_token(contractor_config_loaded, "google_calendar")
                     else None
                 )
                 contractor_config_loaded["service_request_command_service"] = (

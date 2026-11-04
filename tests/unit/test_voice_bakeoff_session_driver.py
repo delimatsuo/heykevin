@@ -91,8 +91,9 @@ _EXPECTED_LIVE_HASHES = {
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.
+    # Re-pinned 2026-11-04 for the Business Pro check on Jobber and Google Calendar.
     Path("app/webhooks/media_stream.py"):
-        "e34b315dee73cbffe6cb7fe36b862c58a96be5319414f7e9b125d7d88c84fb72",
+        "10ff96e1217c4b4e76ae301c9b5478c46b45799202db78ad76b05c49e02d1042",
     Path("app/experiments/voice_bakeoff_app.py"):
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
 }

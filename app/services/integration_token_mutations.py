@@ -157,6 +157,7 @@ def _build_deleted_credential_keys(provider: str) -> set[str]:
         f"{provider}_refresh_token",
         f"{provider}_token_expires_at",
         f"{provider}_connected_at",
+        f"{provider}_first_connected_at",
         f"{provider}_token_refreshed_at",
         f"{provider}_refresh_outcome_unknown",
         f"{provider}_reauthorization_required",
@@ -2676,6 +2677,7 @@ def _build_tombstone_forbidden_fields(provider: str) -> frozenset[str]:
         f"{provider}_token_expires_at",
         f"{provider}_expires_at",
         f"{provider}_connected_at",
+        f"{provider}_first_connected_at",
         f"{provider}_token_refreshed_at",
         f"{provider}_token_quarantine",
         f"{provider}_token_quarantine_reason",
@@ -4436,6 +4438,13 @@ async def connect_provider_cas(
             f"{provider}_generation": next_gen,
             f"{provider}_lifecycle_epoch": next_epoch,
             f"{provider}_connected_at": server_now,
+            # Survives a reauthorization, so a connection kept past the Pro
+            # cutoff isn't lost when its token has to be renewed.
+            f"{provider}_first_connected_at": (
+                d_data.get(f"{provider}_first_connected_at")
+                or d_data.get(f"{provider}_connected_at")
+                or server_now
+            ),
             f"{provider}_disconnected_at": DELETE_FIELD,
             f"{provider}_token_refreshed_at": DELETE_FIELD,
             f"{provider}_access_token": final_access,

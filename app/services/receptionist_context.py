@@ -140,7 +140,7 @@ def build_customer_memory_prompt(config: dict[str, Any] | None) -> str:
     The request identifiers and revisions are model-facing tool arguments, not
     caller-facing copy. The prompt explicitly prohibits speaking them.
     """
-    from app.services.integration_tokens import has_usable_token
+    from app.services.entitlements import has_entitled_token
 
     config = config or {}
     personalization_enabled = config.get("customer_memory_personalization_enabled") is True
@@ -148,7 +148,7 @@ def build_customer_memory_prompt(config: dict[str, Any] | None) -> str:
         settings.service_request_recovery_enabled is True
         and config.get("service_request_mutations_enabled") is True
         and config.get("integration_write_status") == "approved"
-        and has_usable_token(config, "google_calendar")
+        and has_entitled_token(config, "google_calendar")
     )
     if not personalization_enabled and not request_continuity_enabled:
         return ""

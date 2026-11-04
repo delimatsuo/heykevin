@@ -213,6 +213,13 @@ final class JobberManagementTests: XCTestCase {
 
     // MARK: - Status Parser Tests
 
+    func testConnectParserRecognizesBusinessProRequired() {
+        let body = Data(#"{"detail":"business_pro_required"}"#.utf8)
+        XCTAssertTrue(JobberConnectResponseParser.isBusinessProRequired(data: body, statusCode: 403))
+        XCTAssertFalse(JobberConnectResponseParser.isBusinessProRequired(data: body, statusCode: 500))
+        XCTAssertFalse(JobberConnectResponseParser.isBusinessProRequired(data: Data(#"{"detail":"forbidden"}"#.utf8), statusCode: 403))
+    }
+
     func testStatusParserValidConnectedWithLeadCapture() throws {
         let jsonStr = """
         {"connected": true, "lead_capture_enabled": true, "connected_at": 1700000000.0}

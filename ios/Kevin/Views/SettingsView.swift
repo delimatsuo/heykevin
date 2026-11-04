@@ -462,6 +462,11 @@ struct SettingsHost<Root: View>: View {
                 PaywallView(canDismiss: true)
                     .environmentObject(appState)
             }
+            .onChange(of: jobberModel.requiresBusinessPro) { _, required in
+                guard required else { return }
+                jobberModel.requiresBusinessPro = false
+                activePaywallDestination = .assistant
+            }
             .alert(String(localized: "Change How Kevin Answers"), isPresented: $showModeChangeAlert) {
                 Button(String(localized: "Switch")) {
                     Task { await switchMode() }
@@ -2477,6 +2482,8 @@ struct SettingsHost<Root: View>: View {
                     UIApplication.shared.open(url)
                 }
             }
+        } catch JobberManagementError.businessProRequired {
+            await MainActor.run { activePaywallDestination = .assistant }
         } catch {
             debugLog("Connect Google Calendar failed: \(error)")
         }

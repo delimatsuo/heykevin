@@ -1621,10 +1621,10 @@ class GeminiPipeline:
         if mode == "personal":
             return []
 
-        from app.services.integration_tokens import has_usable_token
+        from app.services.entitlements import has_entitled_token
 
-        has_jobber = has_usable_token(self._contractor_config, "jobber")
-        has_gcal = has_usable_token(self._contractor_config, "google_calendar")
+        has_jobber = has_entitled_token(self._contractor_config, "jobber")
+        has_gcal = has_entitled_token(self._contractor_config, "google_calendar")
 
         declarations = []
 
@@ -1690,7 +1690,7 @@ class GeminiPipeline:
             and settings.service_request_recovery_enabled is True
             and self._contractor_config.get("service_request_mutations_enabled") is True
             and self._contractor_config.get("integration_write_status") == "approved"
-            and has_usable_token(self._contractor_config, "google_calendar")
+            and has_entitled_token(self._contractor_config, "google_calendar")
         ):
             from app.services.receptionist_tools import gemini_tool_declarations
 

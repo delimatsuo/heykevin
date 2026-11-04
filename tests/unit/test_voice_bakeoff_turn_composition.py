@@ -126,8 +126,9 @@ _BASELINE_HASHES = {
     # Re-pinned 2026-09-14 for reviewed, owner-approved urgent handoff and
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.
+    # Re-pinned 2026-11-04 for the Business Pro check on Jobber and Google Calendar.
     "app/webhooks/media_stream.py":
-        "e34b315dee73cbffe6cb7fe36b862c58a96be5319414f7e9b125d7d88c84fb72",
+        "10ff96e1217c4b4e76ae301c9b5478c46b45799202db78ad76b05c49e02d1042",
 }
 
 

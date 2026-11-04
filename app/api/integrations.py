@@ -432,6 +432,17 @@ async def jobber_manage():
 
 # ── Connect (start OAuth flow) ──────────────────────────────────────
 
+async def _require_integration_plan(contractor_id: str, provider: str) -> None:
+    """Refuse to start a connection this account's plan doesn't include."""
+    from app.db.contractors import get_contractor
+    from app.services.entitlements import can_use_integration
+
+    if not settings.pro_integrations_cutoff:
+        return
+    if not can_use_integration(await get_contractor(contractor_id), provider):
+        raise HTTPException(status_code=403, detail="business_pro_required")
+
+
 @router.get("/jobber/connect", dependencies=[Depends(verify_api_token)])
 async def jobber_connect(contractor_id: str = Query(...), request: Request = None):
     """Generate a Jobber OAuth authorize URL with PKCE challenge for the contractor."""
@@ -440,6 +451,7 @@ async def jobber_connect(contractor_id: str = Query(...), request: Request = Non
     require_contractor_access(request, contractor_id)
     if not settings.jobber_client_id:
         raise HTTPException(status_code=501, detail="Jobber integration not configured")
+    await _require_integration_plan(contractor_id, "jobber")
 
     state = secrets.token_urlsafe(32)
 
@@ -864,6 +876,7 @@ async def google_calendar_connect(contractor_id: str = Query(...), request: Requ
             status_code=500,
             detail="Google Calendar integration is not configured",
         )
+    await _require_integration_plan(contractor_id, "google_calendar")
 
     db = _get_firestore()
 

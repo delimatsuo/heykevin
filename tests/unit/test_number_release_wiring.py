@@ -9,6 +9,7 @@ re-pinned on the broken file. These tests make that class of mistake loud.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import os
 import time
@@ -138,6 +139,103 @@ async def test_inbound_stamp_timeout_returns_controlled_direct_ring(monkeypatch)
     assert response.status_code == 200
     assert b"<Dial" in response.body
     assert b"+15555550123" in response.body
+
+
+class _ForwardedCallRequest:
+    async def form(self):
+        return {
+            "CallSid": "CA-forwarded",
+            "From": "+15555550100",
+            "To": "+15555550199",
+            "ForwardedFrom": "+14155551234",
+        }
+
+
+class _ReachedSubscriptionGate(Exception):
+    pass
+
+
+def _patch_forwarded_call(monkeypatch, stamp):
+    """Wire a forwarded call's lookups; returns the forwarding writes it makes."""
+    account = {
+        "contractor_id": "c1",
+        "owner_name": "Owner",
+        "owner_phone": "+14155551234",
+        "business_name": "Test Business",
+    }
+    writes: list[dict] = []
+
+    async def fake_lookup(_number):
+        return account
+
+    async def fake_get(_contractor_id):
+        return account
+
+    async def fake_update(_contractor_id, updates):
+        writes.append(updates)
+        return True
+
+    async def no_measurement(*_args, **_kwargs):
+        return None
+
+    import app.db.contractors as contractors
+    monkeypatch.setattr(contractors, "get_contractor_by_twilio_number", fake_lookup)
+    monkeypatch.setattr(contractors, "get_contractor", fake_get)
+    monkeypatch.setattr(contractors, "update_contractor", fake_update)
+    monkeypatch.setattr(contractors, "record_inbound_call_evidence", stamp)
+    monkeypatch.setattr(twilio_incoming, "_record_inbound_call_measurement", no_measurement)
+    monkeypatch.setattr(
+        "app.services.acquisition.record_forwarded_call_measurement", no_measurement,
+    )
+    return writes
+
+
+@pytest.mark.asyncio
+async def test_forwarding_write_cannot_abort_the_inbound_stamp(monkeypatch):
+    """Both hourly stamps coming due on one forwarded call must not collide.
+
+    Both write the contractor document and the stamp is single-attempt, so a
+    forwarding commit landing inside it aborted the stamp and sent the caller to
+    direct ring, skipping Kevin: 8 production calls from 2026-10-28 to 2026-11-04.
+    """
+    async def stamp(*_args, **_kwargs):
+        # Stands in for the open transaction: Firestore aborts it when another
+        # commit lands on the document before it commits.
+        writes_when_opened = len(writes)
+        await asyncio.sleep(0.01)
+        return len(writes) == writes_when_opened
+
+    writes = _patch_forwarded_call(monkeypatch, stamp)
+    gate_reached = []
+
+    def fake_gate(contractor, _now):
+        gate_reached.append(contractor["contractor_id"])
+        raise _ReachedSubscriptionGate()
+
+    monkeypatch.setattr("app.services.subscription.evaluate_subscription_access", fake_gate)
+    monkeypatch.setattr("app.services.circuit_breaker.record_error", lambda: None)
+
+    await twilio_incoming.handle_incoming_call(_ForwardedCallRequest(), None)
+    await asyncio.sleep(0.01)  # let the fire-and-forget forwarding write finish
+
+    assert gate_reached == ["c1"]
+    assert [list(update) for update in writes] == [["forwarding_last_seen_at"]]
+
+
+@pytest.mark.asyncio
+async def test_unacknowledged_stamp_still_records_forwarding_evidence(monkeypatch):
+    """A call sent to direct ring still proves the owner's forwarding is live."""
+    async def stamp(*_args, **_kwargs):
+        return False
+
+    writes = _patch_forwarded_call(monkeypatch, stamp)
+
+    response = await twilio_incoming.handle_incoming_call(_ForwardedCallRequest(), None)
+    await asyncio.sleep(0.01)  # let the fire-and-forget forwarding write finish
+
+    assert b"<Dial" in response.body
+    assert b"+14155551234" in response.body
+    assert [list(update) for update in writes] == [["forwarding_last_seen_at"]]
 
 
 # --- latest_call_timestamp -------------------------------------------------

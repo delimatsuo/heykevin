@@ -25,7 +25,7 @@ struct PaywallView: View {
     @State private var selectedProductID: String?
 
     private var eligibleProducts: [Product] {
-        PaywallPolicy.filterEligibleProducts(subscriptionManager.products, for: purpose)
+        PaywallPolicy.filterOfferedProducts(subscriptionManager.products, for: purpose)
     }
 
     private var resolvedSelectedProductID: String? {
@@ -410,7 +410,6 @@ private struct TierCard: View {
         switch product.id {
         case "com.kevin.callscreen.personal.monthly":    return String(localized: "For your personal line")
         case "com.kevin.callscreen.business.monthly":    return String(localized: "A full AI receptionist")
-        case "com.kevin.callscreen.businesspro.monthly": return String(localized: "Multi-line, custom routing")
         default: return ""
         }
     }
@@ -429,12 +428,7 @@ private struct TierCard: View {
                 String(localized: "Smart intake questions for every call"),
                 String(localized: "Business hours and after-hours mode"),
                 String(localized: "Knowledge base for pricing and FAQs"),
-            ]
-        case "com.kevin.callscreen.businesspro.monthly":
-            return [
-                String(localized: "Everything in Business"),
                 String(localized: "Jobber + Google Calendar integration"),
-                String(localized: "AI price estimates and call tagging"),
             ]
         default:
             return []

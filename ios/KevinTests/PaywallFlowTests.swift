@@ -21,6 +21,16 @@ final class PaywallFlowTests: XCTestCase {
         XCTAssertFalse(PaywallPolicy.isEligible(productID: "unknown.product.id", for: purpose))
     }
 
+    func testPolicy_businessPro_isNotOfferedButStaysEligible() {
+        for purpose in [PaywallPurpose.allPlans, .businessActivation] {
+            XCTAssertFalse(PaywallPolicy.isOffered(productID: PaywallPolicy.businessProProductID, for: purpose))
+            XCTAssertTrue(PaywallPolicy.isEligible(productID: PaywallPolicy.businessProProductID, for: purpose))
+            XCTAssertTrue(PaywallPolicy.isOffered(productID: PaywallPolicy.businessProductID, for: purpose))
+        }
+        XCTAssertTrue(PaywallPolicy.isOffered(productID: PaywallPolicy.personalProductID, for: .allPlans))
+        XCTAssertFalse(PaywallPolicy.isOffered(productID: PaywallPolicy.personalProductID, for: .businessActivation))
+    }
+
     func testPolicy_allPlansPurpose_allowsAllThreeKnownProducts() {
         let purpose = PaywallPurpose.allPlans
         XCTAssertTrue(PaywallPolicy.isEligible(productID: PaywallPolicy.personalProductID, for: purpose))

@@ -24,7 +24,7 @@ HOW IT WORKS
 3. When a routed call arrives, Kevin asks the caller what they need.
 4. Watch live, pick up, or review the conversation afterward.
 
-Kevin supports Personal, Business, and Business Pro subscriptions. Trial eligibility and subscription pricing are shown in the app and Apple purchase sheet. Availability and call-forwarding behavior depend on your carrier and region.
+Kevin supports Personal and Business subscriptions. Trial eligibility and subscription pricing are shown in the app and Apple purchase sheet. Availability and call-forwarding behavior depend on your carrier and region.
 
 Currently available in the United States and Canada.
 

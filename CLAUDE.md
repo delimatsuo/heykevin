@@ -145,6 +145,8 @@ A notification whose `appAccountToken` matches no account (no document, or one w
 | Business ($49.99/mo) | `com.kevin.callscreen.business.monthly` | `founding_member_75off_business` |
 | Business Pro ($79.99/mo) | `com.kevin.callscreen.businesspro.monthly` | `founding_member_75off` |
 
+Business Pro is no longer offered: decided 2026-11-04 because nothing it sold was exclusive or shipped, and Jobber and Google Calendar now belong to Business. The product ID stays in the code so any existing subscriber keeps working. Bring it back only with a shipped differentiator.
+
 Founding member promo: 75% off for 3 months, first 1,000 users. Atomic Firestore transaction enforces the 1,000-user limit.
 
 ### iOS trial/paywall behavior

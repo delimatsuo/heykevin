@@ -434,6 +434,7 @@ private struct TierCard: View {
             return [
                 String(localized: "Everything in Business"),
                 String(localized: "Jobber + Google Calendar integration"),
+                String(localized: "AI call tags and filters in Recents"),
             ]
         default:
             return []

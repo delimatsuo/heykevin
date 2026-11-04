@@ -16,9 +16,9 @@ handed back to Twilio:
     until that is LAPSED_NUMBER_RELEASE_DAYS old. The marker is written
     whether or not the flag is on, so the window elapses while the flag is
     still off.
-  * an Apple re-check. `expired` is written on DID_FAIL_TO_RENEW, i.e. at the
-    start of Apple's billing retry, and the webhook that keeps it current was
-    broken for weeks (PR #215). An account that ever bound an Apple receipt
+  * an Apple re-check. `expired` was written on DID_FAIL_TO_RENEW, i.e. at the
+    start of Apple's billing retry, until 2026-11, so older accounts may still
+    carry it, and the webhook that keeps it current was broken for weeks (PR #215). An account that ever bound an Apple receipt
     is asked about live, in every environment this service may see --
     production first, then sandbox, on the production service (a receipt
     bound in the sandbox, e.g. a TestFlight tester, is unknown to production

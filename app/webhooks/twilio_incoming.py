@@ -375,16 +375,6 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             business_name = contractor.get("business_name", f"{owner_name}'s office")
             logger.info(f"Contractor found: {business_name} ({contractor_id})")
 
-            # ForwardedFrom is the only positive proof that a user's call
-            # forwarding is actually live — iOS exposes no forwarding state and
-            # the onboarding step cannot verify itself. Carrier-dependent, so
-            # absence means nothing; presence is conclusive.
-            from app.utils.phone import forwarding_confirms_owner
-
-            if forwarding_confirms_owner(form_data.get("ForwardedFrom", ""), owner_phone):
-                asyncio.create_task(
-                    _record_forwarding_evidence(contractor_id, time.time())
-                )
             # Every inbound call attempts the transactional safety stamp before
             # the subscription branch. Cap that wait so a Firestore outage
             # cannot consume Twilio's routing deadline and strand the call.
@@ -403,6 +393,19 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                 logger.error(
                     "Inbound call safety stamp exceeded its response budget: %s",
                     contractor_id,
+                )
+
+            # ForwardedFrom is the only positive proof that a user's call
+            # forwarding is actually live — iOS exposes no forwarding state and
+            # the onboarding step cannot verify itself. Carrier-dependent, so
+            # absence means nothing; presence is conclusive. Started only after
+            # the wait above: both write this document, and the single-attempt
+            # stamp can lose a collision, which sends the call to direct ring.
+            from app.utils.phone import forwarding_confirms_owner
+
+            if forwarding_confirms_owner(form_data.get("ForwardedFrom", ""), owner_phone):
+                asyncio.create_task(
+                    _record_forwarding_evidence(contractor_id, time.time())
                 )
 
             if not inbound_recorded:

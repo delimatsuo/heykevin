@@ -270,6 +270,10 @@ struct ContentView: View {
             showForcedPaywall = appState.subscriptionStatus == "expired"
             if !showForcedPaywall {
                 showWhatsNew = WhatsNewSheet.shouldPresent(isOnboarded: appState.isOnboarded)
+                    && WhatsNewSheet.appliesTo(
+                        hasBusinessPro: appState.hasBusinessProEntitlement,
+                        calendarConnected: appState.googleCalendarConnected
+                    )
             }
             frontendNav.handleLegacyTabCommand(appState.selectedTab)
             if callManager.isOnCall,

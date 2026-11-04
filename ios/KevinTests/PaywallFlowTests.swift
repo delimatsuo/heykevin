@@ -28,6 +28,12 @@ final class PaywallFlowTests: XCTestCase {
         XCTAssertFalse(PaywallPolicy.isEligible(productID: PaywallPolicy.personalProductID, for: purpose))
     }
 
+    func testWhatsNew_appliesOnlyToAccountsThatCanUseCalendar() {
+        XCTAssertTrue(WhatsNewSheet.appliesTo(hasBusinessPro: true, calendarConnected: false))
+        XCTAssertTrue(WhatsNewSheet.appliesTo(hasBusinessPro: false, calendarConnected: true))
+        XCTAssertFalse(WhatsNewSheet.appliesTo(hasBusinessPro: false, calendarConnected: false))
+    }
+
     func testPolicy_allPlansPurpose_allowsAllThreeKnownProducts() {
         let purpose = PaywallPurpose.allPlans
         XCTAssertTrue(PaywallPolicy.isEligible(productID: PaywallPolicy.personalProductID, for: purpose))

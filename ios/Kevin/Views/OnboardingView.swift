@@ -265,8 +265,8 @@ struct OnboardingView: View {
                 )
                 welcomeFeature(
                     icon: "shield.lefthalf.filled",
-                    title: String(localized: "Robocalls handled silently"),
-                    sub: String(localized: "Kevin filters spam so your phone only rings for real leads.")
+                    title: String(localized: "Spam stops at Kevin"),
+                    sub: String(localized: "Calls you miss go to Kevin, not your voicemail. Block a number once and it's rejected from then on.")
                 )
                 welcomeFeature(
                     icon: "person.crop.circle.badge.checkmark",
@@ -823,7 +823,7 @@ struct OnboardingView: View {
                                 mode: "personal",
                                 iconSystemName: "shield",
                                 title: String(localized: "Personal Assistant"),
-                                desc: String(localized: "Screens unknown callers in real time, blocks robocalls silently, and lets your saved contacts ring straight through to you."),
+                                desc: String(localized: "Screens unknown callers in real time and lets your saved contacts ring straight through to you."),
                                 tags: [
                                     String(localized: "Contacts ring through"),
                                     String(localized: "Spam filtering"),

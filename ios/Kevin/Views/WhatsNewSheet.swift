@@ -18,6 +18,12 @@ struct WhatsNewSheet: View {
     /// someone who already dismissed an earlier one.
     static let seenKey = "whatsNewSeen_1_2_8"
 
+    /// The announcement promises bookings in Google Calendar, which needs Business Pro
+    /// or a connection the account already has.
+    static func appliesTo(hasBusinessPro: Bool, calendarConnected: Bool) -> Bool {
+        hasBusinessPro || calendarConnected
+    }
+
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 

@@ -410,7 +410,7 @@ private struct TierCard: View {
         switch product.id {
         case "com.kevin.callscreen.personal.monthly":    return String(localized: "For your personal line")
         case "com.kevin.callscreen.business.monthly":    return String(localized: "A full AI receptionist")
-        case "com.kevin.callscreen.businesspro.monthly": return String(localized: "Multi-line, custom routing")
+        case "com.kevin.callscreen.businesspro.monthly": return String(localized: "Connects to Jobber and Google Calendar")
         default: return ""
         }
     }
@@ -434,7 +434,6 @@ private struct TierCard: View {
             return [
                 String(localized: "Everything in Business"),
                 String(localized: "Jobber + Google Calendar integration"),
-                String(localized: "AI price estimates and call tagging"),
             ]
         default:
             return []

@@ -255,6 +255,15 @@ async def _incoming(
 @pytest.mark.asyncio
 async def test_incoming_call_screens_only_inside_the_account_window(monkeypatch):
     known = {"name": "Sam", "trust_level": 80}
+
+    async def prepare(*_args):
+        return True
+
+    async def ring(**_kwargs):
+        return None
+
+    monkeypatch.setattr(twilio_incoming, "_prepare_direct_call", prepare)
+    monkeypatch.setattr(twilio_incoming, "_ring_contractor", ring)
     enabled = {
         "quiet_hours_enabled": True,
         "quiet_hours_start": "22:00",
@@ -264,10 +273,10 @@ async def test_incoming_call_screens_only_inside_the_account_window(monkeypatch)
 
     during = await _incoming(monkeypatch, known, enabled, EASTERN_NIGHT)
     assert "<Stream" in during
-    assert "<Number" not in during
+    assert "<Conference" not in during
 
     outside_utc_window = await _incoming(monkeypatch, known, enabled, UTC_EVENING)
-    assert "<Number" in outside_utc_window
+    assert "<Conference" in outside_utc_window
     assert "<Stream" not in outside_utc_window
 
     disabled = await _incoming(
@@ -276,7 +285,7 @@ async def test_incoming_call_screens_only_inside_the_account_window(monkeypatch)
         {"quiet_hours_enabled": False, "quiet_hours_tz": "America/New_York"},
         EASTERN_NIGHT,
     )
-    assert "<Number" in disabled
+    assert "<Conference" in disabled
     assert "<Stream" not in disabled
 
 

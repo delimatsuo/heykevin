@@ -135,6 +135,9 @@ Caller dials user's Kevin number (Twilio)
 
 These fields are in `PROTECTED_FIELDS` — the contractor PATCH endpoint silently drops any client attempt to write them.
 
+### Failed renewals
+`DID_FAIL_TO_RENEW` changes nothing on the account and pushes a payment reminder: Apple keeps retrying for up to 60 days, so service stays on until `DID_RENEW` or `EXPIRED`. `DID_CHANGE_RENEWAL_PREF` with subtype `UPGRADE` writes the new tier at once; a downgrade waits for `DID_RENEW`.
+
 ### Unmatched App Store notifications
 A notification whose `appAccountToken` matches no account (no document, or one whose `active` is neither true nor false) is still acked 200, so Apple won't retry it, but it is kept in the `appstore_unmatched_notifications` collection, keyed by Apple's `notificationUUID`. Each record holds the type, environment, product, transaction ids, token, signed date, and any `apple_transactions` binding for the receipt. A charge (DID_RENEW, SUBSCRIBED) outside the sandbox logs "App Store charge matched no account" at ERROR, which the production error alert emails; sandbox charges (TestFlight purchases reaching staging) and other types log a warning. Nothing is applied to any account. Added 2026-10-30 after a production DID_RENEW on 2026-10-10 matched no account.
 

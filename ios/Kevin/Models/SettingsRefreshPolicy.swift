@@ -386,6 +386,7 @@ enum SettingsRefreshPolicy {
 enum SettingsPaywallDestination: Equatable, Sendable {
     case assistant
     case account
+    case proUpgrade
 }
 
 /// Production hydrator executing profile hydration safely on MainActor.

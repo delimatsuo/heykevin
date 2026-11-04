@@ -152,6 +152,17 @@ struct SettingsHost<Root: View>: View {
         )
     }
 
+    private var proUpgradePaywallBinding: Binding<Bool> {
+        Binding(
+            get: { activePaywallDestination == .proUpgrade },
+            set: { isPresented in
+                if !isPresented && activePaywallDestination == .proUpgrade {
+                    activePaywallDestination = nil
+                }
+            }
+        )
+    }
+
     private var accountPaywallBinding: Binding<Bool> {
         Binding(
             get: { activePaywallDestination == .account },
@@ -462,10 +473,19 @@ struct SettingsHost<Root: View>: View {
                 PaywallView(canDismiss: true)
                     .environmentObject(appState)
             }
+            .sheet(isPresented: proUpgradePaywallBinding) {
+                PaywallView(
+                    purpose: .proUpgrade,
+                    canDismiss: true,
+                    preferredProductID: PaywallPolicy.businessProProductID,
+                    showsTrialSkip: false
+                )
+                .environmentObject(appState)
+            }
             .onChange(of: jobberModel.requiresBusinessPro) { _, required in
                 guard required else { return }
                 jobberModel.requiresBusinessPro = false
-                activePaywallDestination = .assistant
+                activePaywallDestination = .proUpgrade
             }
             .alert(String(localized: "Change How Kevin Answers"), isPresented: $showModeChangeAlert) {
                 Button(String(localized: "Switch")) {
@@ -2483,7 +2503,7 @@ struct SettingsHost<Root: View>: View {
                 }
             }
         } catch JobberManagementError.businessProRequired {
-            await MainActor.run { activePaywallDestination = .assistant }
+            await MainActor.run { activePaywallDestination = .proUpgrade }
         } catch {
             debugLog("Connect Google Calendar failed: \(error)")
         }

@@ -144,7 +144,7 @@ struct PaywallView: View {
 
                     // Legal footnote
                     VStack(spacing: 6) {
-                        Text("All plans are auto-renewing monthly subscriptions. New subscribers receive a 2-week free trial — you will not be charged until the trial ends. Payment is charged to your Apple ID at the end of the free trial (or at confirmation of purchase if no trial applies). Subscriptions automatically renew unless cancelled at least 24 hours before the end of the current period. Manage or cancel in Settings > Apple ID > Subscriptions.")
+                        Text("All plans are auto-renewing monthly subscriptions. Eligible new subscribers may receive a 2-week free trial, and are not charged until it ends. Payment is charged to your Apple ID at the end of the free trial (or at confirmation of purchase if no trial applies). Subscriptions automatically renew unless cancelled at least 24 hours before the end of the current period. Manage or cancel in Settings > Apple ID > Subscriptions.")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .multilineTextAlignment(.center)

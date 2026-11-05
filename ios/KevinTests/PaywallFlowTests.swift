@@ -21,6 +21,19 @@ final class PaywallFlowTests: XCTestCase {
         XCTAssertFalse(PaywallPolicy.isEligible(productID: "unknown.product.id", for: purpose))
     }
 
+    func testResume_continuesTheConnectionTheCustomerStarted() {
+        XCTAssertEqual(PaywallPolicy.integrationToResume(.jobber, hasBusinessPro: true), .jobber)
+        XCTAssertEqual(
+            PaywallPolicy.integrationToResume(.googleCalendar, hasBusinessPro: true),
+            .googleCalendar
+        )
+    }
+
+    func testResume_doesNothingWithoutProOrWithoutAStartedConnection() {
+        XCTAssertNil(PaywallPolicy.integrationToResume(.jobber, hasBusinessPro: false))
+        XCTAssertNil(PaywallPolicy.integrationToResume(nil, hasBusinessPro: true))
+    }
+
     func testPolicy_proUpgradePurpose_offersOnlyBusinessPro() {
         let purpose = PaywallPurpose.proUpgrade
         XCTAssertTrue(PaywallPolicy.isEligible(productID: PaywallPolicy.businessProProductID, for: purpose))

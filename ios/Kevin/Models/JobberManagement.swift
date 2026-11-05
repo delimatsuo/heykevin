@@ -479,7 +479,7 @@ final class JobberManagementModel: ObservableObject {
         localized: "Couldn't disconnect Jobber. Tap Refresh to check current status."
     )
     static let fixedBrowserPromptMessage = String(
-        localized: "Finish connecting in your browser, then return to Kevin and tap Refresh."
+        localized: "Finish signing in to Jobber to connect."
     )
 
     init(

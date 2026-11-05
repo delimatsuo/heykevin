@@ -41,6 +41,9 @@ GOOGLE_CALENDAR_REDIRECT_URI = f"{settings.cloud_run_url}/api/integrations/googl
 GOOGLE_REDIRECT_URI = GOOGLE_CALENDAR_REDIRECT_URI
 GOOGLE_CALENDAR_SCOPE = CANONICAL_GOOGLE_CALENDAR_SCOPE
 GOOGLE_CALENDAR_SCOPES = GOOGLE_CALENDAR_SCOPE.split(" ")
+GOOGLE_CALENDAR_APP_LINK = "heykevin://integrations/google-calendar"
+JOBBER_APP_LINK = "heykevin://integrations/jobber"
+REDUCED_SCOPE_DETAIL = "Invalid or reduced scope in Google response"
 
 
 def _setup_page_html() -> str:
@@ -288,10 +291,55 @@ def _manage_page_html() -> str:
 </html>"""
 
 
+def _not_connected_page(message: str) -> str:
+    """Return a page for a Google Calendar connection that didn't finish."""
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Not connected - Hey Kevin</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #faf7f2;
+            color: #1c1b19;
+            text-align: center;
+        }}
+        .card {{ max-width: 340px; padding: 32px 24px; }}
+        h1 {{ font-size: 22px; margin: 0 0 12px; }}
+        p {{ font-size: 16px; line-height: 1.4; margin: 0 0 24px; }}
+        a {{
+            display: inline-block;
+            background: #1c1b19;
+            color: #fff;
+            text-decoration: none;
+            font-size: 15px;
+            font-weight: 600;
+            padding: 12px 24px;
+            border-radius: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Google Calendar wasn't connected</h1>
+        <p>{message}</p>
+        <a href="{GOOGLE_CALENDAR_APP_LINK}">Return to Hey Kevin</a>
+    </div>
+</body>
+</html>"""
+
+
 def _success_page(service_name: str) -> str:
     """Return a styled HTML success page after OAuth connection."""
     is_jobber = service_name.strip().lower() == "jobber"
-    return_link_html = '<a href="heykevin://integrations/jobber" class="return-btn">Return to Hey Kevin</a>\n        ' if is_jobber else ""
+    app_link = JOBBER_APP_LINK if is_jobber else GOOGLE_CALENDAR_APP_LINK
+    return_link_html = f'<a href="{app_link}" class="return-btn">Return to Hey Kevin</a>\n        '
     jobber_css = (
         "\n        body { background: #0f172a; }"
         "\n        .card { background: #1e293b; }"
@@ -303,6 +351,7 @@ def _success_page(service_name: str) -> str:
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Connected - Hey Kevin</title>
+    <meta http-equiv="refresh" content="1;url={app_link}">
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -904,8 +953,35 @@ async def google_calendar_connect(contractor_id: str = Query(...), request: Requ
     return {"authorize_url": url}
 
 
-@router.get("/google-calendar/callback")
-async def google_calendar_callback(code: str = Query(...), state: str = Query(...), request: Request = None):
+@router.get("/google-calendar/callback", response_class=HTMLResponse)
+async def google_calendar_oauth_return(
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    request: Request = None,
+):
+    """Finish the connection, or explain in plain words why it didn't finish."""
+    # Canceling on Google's page returns here with an error and no code.
+    if not code or not state:
+        return HTMLResponse(
+            _not_connected_page("You canceled before approving. Nothing was changed."),
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        return await google_calendar_callback(code=code, state=state, request=request)
+    except HTTPException as exc:
+        message = (
+            "Kevin needs both calendar permissions. Tap Connect again and tick both boxes."
+            if exc.detail == REDUCED_SCOPE_DETAIL
+            else "Something went wrong on our side. Tap Connect in Hey Kevin to try again."
+        )
+        return HTMLResponse(
+            _not_connected_page(message),
+            status_code=exc.status_code,
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+async def google_calendar_callback(code: str, state: str, request: Request = None):
     """Exchange authorization code for access + refresh tokens."""
     from app.services.integration_token_mutations import (
         connect_provider_cas,
@@ -1112,7 +1188,7 @@ async def google_calendar_callback(code: str = Query(...), state: str = Query(..
         )
         if not valid_scope_ok or effective_scope is None or type(effective_scope) is not str:
             logger.error("Google token exchange returned invalid or reduced scope")
-            raise HTTPException(status_code=400, detail="Invalid or reduced scope in Google response")
+            raise HTTPException(status_code=400, detail=REDUCED_SCOPE_DETAIL)
     else:
         effective_scope = CANONICAL_GOOGLE_CALENDAR_SCOPE
 

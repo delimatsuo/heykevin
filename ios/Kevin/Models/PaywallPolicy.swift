@@ -18,7 +18,20 @@ enum PaywallPurpose: Hashable, Equatable, Sendable {
     }
 }
 
+enum ProOnlyIntegration: Equatable, Sendable {
+    case jobber
+    case googleCalendar
+}
+
 enum PaywallPolicy {
+    /// The connection to continue once the customer who started it has Business Pro.
+    static func integrationToResume(
+        _ started: ProOnlyIntegration?,
+        hasBusinessPro: Bool
+    ) -> ProOnlyIntegration? {
+        hasBusinessPro ? started : nil
+    }
+
     static let personalProductID = "com.kevin.callscreen.personal.monthly"
     static let businessProductID = "com.kevin.callscreen.business.monthly"
     static let businessProProductID = "com.kevin.callscreen.businesspro.monthly"

@@ -1,3 +1,4 @@
+import AuthenticationServices
 import SwiftUI
 import UserNotifications
 import AVFoundation
@@ -44,6 +45,8 @@ struct SettingsHost<Root: View>: View {
 
     @StateObject private var jobberModel = JobberManagementModel()
     @State private var activePaywallDestination: SettingsPaywallDestination? = nil
+    @State private var startedProIntegration: ProOnlyIntegration? = nil
+    @State private var showGoogleCalendarConnectError = false
     @State private var loadCoordinator = SettingsLoadCoordinator()
     @State private var confirmedBaseline = SettingsConfirmedBaseline(
         regulatoryAddress: AppState.shared.businessAddress,
@@ -473,7 +476,12 @@ struct SettingsHost<Root: View>: View {
                 PaywallView(canDismiss: true)
                     .environmentObject(appState)
             }
-            .sheet(isPresented: proUpgradePaywallBinding) {
+            .alert(String(localized: "Google Calendar"), isPresented: $showGoogleCalendarConnectError) {
+                Button(String(localized: "OK"), role: .cancel) {}
+            } message: {
+                Text(String(localized: "Couldn't start the connection. Check your internet connection and try again."))
+            }
+            .sheet(isPresented: proUpgradePaywallBinding, onDismiss: resumeConnectAfterProUpgrade) {
                 PaywallView(
                     purpose: .proUpgrade,
                     canDismiss: true,
@@ -485,6 +493,7 @@ struct SettingsHost<Root: View>: View {
             .onChange(of: jobberModel.requiresBusinessPro) { _, required in
                 guard required else { return }
                 jobberModel.requiresBusinessPro = false
+                startedProIntegration = .jobber
                 activePaywallDestination = .proUpgrade
             }
             .alert(String(localized: "Change How Kevin Answers"), isPresented: $showModeChangeAlert) {
@@ -2425,7 +2434,10 @@ struct SettingsHost<Root: View>: View {
                 guard appState.sessionState == .ready, appState.isOnboarded, !appState.isPersonalMode, appState.currentAuthContext() == auth else {
                     return false
                 }
-                return await UIApplication.shared.open(url)
+                return OAuthWebSession.shared.start(url: url) {
+                    jobberModel.clearBrowserPrompt()
+                    Task { await coalesceLoad(isForegroundOrTabSwitch: true) }
+                }
             }
             syncJobberConnectedState(auth: auth)
         }
@@ -2495,17 +2507,38 @@ struct SettingsHost<Root: View>: View {
                       let scheme = url.scheme, scheme == "https",
                       let host = url.host,
                       host == "google.com" || host.hasSuffix(".google.com") else {
+                    await MainActor.run { showGoogleCalendarConnectError = true }
                     return
                 }
                 await MainActor.run {
                     guard appState.currentAuthContext() == auth else { return }
-                    UIApplication.shared.open(url)
+                    let started = OAuthWebSession.shared.start(url: url) {
+                        Task { await coalesceLoad(isForegroundOrTabSwitch: true) }
+                    }
+                    if !started { showGoogleCalendarConnectError = true }
                 }
             }
         } catch JobberManagementError.businessProRequired {
-            await MainActor.run { activePaywallDestination = .proUpgrade }
+            await MainActor.run {
+                startedProIntegration = .googleCalendar
+                activePaywallDestination = .proUpgrade
+            }
         } catch {
             debugLog("Connect Google Calendar failed: \(error)")
+            await MainActor.run { showGoogleCalendarConnectError = true }
+        }
+    }
+
+    private func resumeConnectAfterProUpgrade() {
+        let started = startedProIntegration
+        startedProIntegration = nil
+        switch PaywallPolicy.integrationToResume(started, hasBusinessPro: appState.hasBusinessProEntitlement) {
+        case .jobber:
+            performJobberConnect()
+        case .googleCalendar:
+            Task { await connectGoogleCalendar() }
+        case nil:
+            break
         }
     }
 
@@ -3074,6 +3107,38 @@ private struct SetupRow<ActionLabel: View>: View {
                 }
                 .buttonStyle(.borderless)
             }
+        }
+    }
+}
+
+/// Runs an integration's sign-in on Apple's sheet, which returns to the app by itself.
+@MainActor
+private final class OAuthWebSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+    static let shared = OAuthWebSession()
+
+    private var session: ASWebAuthenticationSession?
+
+    /// Returns false if the sheet couldn't open. `onFinish` runs however the sheet ends,
+    /// so the caller asks the server what happened instead of trusting the sheet's result.
+    func start(url: URL, onFinish: @escaping @MainActor () -> Void) -> Bool {
+        session?.cancel()
+        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "heykevin") { [weak self] _, _ in
+            Task { @MainActor in
+                self?.session = nil
+                onFinish()
+            }
+        }
+        session.presentationContextProvider = self
+        self.session = session
+        return session.start()
+    }
+
+    nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        MainActor.assumeIsolated {
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows)
+                .first(where: \.isKeyWindow) ?? ASPresentationAnchor()
         }
     }
 }

@@ -95,12 +95,11 @@ def test_jobber_success_page_contains_fixed_deep_link():
 
 
 def test_google_calendar_success_page_contains_no_jobber_deep_link():
-    """Google Calendar success page preserves original behavior and omits Jobber return link."""
+    """Google Calendar success page returns to the app without using the Jobber link."""
     html = integrations._success_page("Google Calendar")
     assert "Google Calendar Connected" in html
     assert "heykevin://integrations/jobber" not in html
-    assert "heykevin://" not in html
-    assert "Return to Hey Kevin" not in html
+    assert "heykevin://integrations/google-calendar" in html
 
 
 @pytest.mark.asyncio

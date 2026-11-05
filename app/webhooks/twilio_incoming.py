@@ -551,10 +551,10 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         trust_score, score_breakdown = calculate_trust_score(caller_phone, lookups)
         route = determine_route(trust_score)
 
-        # Ring-through toggle: if OFF, downgrade whitelist forwards to screening
+        # Ring-through toggle: if OFF, every caller who would ring the owner is screened
         rtc_value = contractor.get("ring_through_contacts", True)
         logger.info(f"Ring-through check: ring_through_contacts={rtc_value!r} (type={type(rtc_value).__name__}), route={route.value}")
-        if not rtc_value and route == Route.WHITELIST_FORWARD:
+        if not rtc_value and route in (Route.WHITELIST_FORWARD, Route.RING_THEN_SCREEN):
             route = Route.AI_SCREENING
             logger.info("Ring-through contacts disabled — downgrading to AI screening")
 
@@ -674,23 +674,25 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             extra={"route": route.value, "trust_score": trust_score, "duration_ms": duration_ms},
         )
 
-        # Fast-track known/whitelisted contacts — ring the contractor directly
-        if contact and contact.get("is_whitelisted") and route == Route.WHITELIST_FORWARD:
+        # Ring the contractor in the app; Kevin takes over if nobody answers.
+        if route in (Route.WHITELIST_FORWARD, Route.RING_THEN_SCREEN):
+            # A name the caller gave Kevin is their own claim, so it never labels the ring.
+            ring_name = caller_name if caller_name_trusted else ""
+
             # F-07/F-13: opaque random conference name (was f"direct_{call_sid}").
             conference_name = new_conference_name("direct")
             if contractor_id:
                 await register_conference(conference_name, contractor_id, call_sid)
 
             # Direct rings need the same durable live authority as screening calls.
-            if not await _prepare_direct_call(call_sid, contractor_id, conference_name, caller_phone,
-                                              caller_name or contact.get("name", "")):
+            if not await _prepare_direct_call(call_sid, contractor_id, conference_name, caller_phone, ring_name):
                 return twiml_response(_forward_twiml(owner_phone or settings.user_phone, caller_id=to_number))
 
             # Start background task to send VoIP push and handle timeout
             asyncio.create_task(_ring_contractor(
                 call_sid=call_sid,
                 caller_phone=caller_phone,
-                caller_name=caller_name or contact.get("name", ""),
+                caller_name=ring_name,
                 conference_name=conference_name,
                 contractor_id=contractor_id,
                 user_language=contractor.get("user_language", "en"),
@@ -699,14 +701,7 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
             return twiml_response(_conference_twiml(call_sid, conference_name))
 
         # Return the correct TwiML directly — no async update needed
-        if route == Route.WHITELIST_FORWARD:
-            return twiml_response(_forward_twiml(owner_phone or settings.user_phone, caller_id=to_number))
-
-        elif route == Route.RING_THEN_SCREEN:
-            # For now, forward to user
-            return twiml_response(_forward_twiml(owner_phone or settings.user_phone, caller_id=to_number))
-
-        elif route == Route.AI_SCREENING:
+        if route == Route.AI_SCREENING:
             # Engine per contractor: "relay" hands the audio layer to Twilio
             # ConversationRelay; anything else keeps the Media Streams bridge.
             if is_relay:

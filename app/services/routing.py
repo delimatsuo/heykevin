@@ -8,7 +8,7 @@ logger = get_logger(__name__)
 
 
 class Route(str, Enum):
-    WHITELIST_FORWARD = "whitelist_forward"   # Score 90-100: forward directly
+    WHITELIST_FORWARD = "whitelist_forward"   # Score 90-100: ring user, then Kevin
     RING_THEN_SCREEN = "ring_then_screen"     # Score 70-89: ring user, then Kevin
     AI_SCREENING = "ai_screening"             # Score 30-69: Kevin answers immediately
     SPAM_BLOCK = "spam_block"                 # Score 0-29: block or silent voicemail

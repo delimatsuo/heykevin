@@ -37,7 +37,18 @@ JOBBER_REDIRECT_URI = f"{settings.cloud_run_url}/api/integrations/jobber/callbac
 
 GOOGLE_CALENDAR_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_CALENDAR_REDIRECT_URI = f"{settings.cloud_run_url}/api/integrations/google-calendar/callback"
+
+
+def google_calendar_redirect_uri(redirect_base_url: str, cloud_run_url: str) -> str:
+    """Return the callback Google redirects to, on our own domain when one is configured."""
+    base = (redirect_base_url or cloud_run_url).rstrip("/")
+    return f"{base}/api/integrations/google-calendar/callback"
+
+
+GOOGLE_CALENDAR_REDIRECT_URI = google_calendar_redirect_uri(
+    settings.google_calendar_redirect_base_url,
+    settings.cloud_run_url,
+)
 GOOGLE_REDIRECT_URI = GOOGLE_CALENDAR_REDIRECT_URI
 GOOGLE_CALENDAR_SCOPE = CANONICAL_GOOGLE_CALENDAR_SCOPE
 GOOGLE_CALENDAR_SCOPES = GOOGLE_CALENDAR_SCOPE.split(" ")

@@ -41,6 +41,15 @@ Merging a reviewed-clean, default-off PR to `main` is allowed: **push to `main`
 does not deploy.** Activating behavior in production still needs an explicit
 owner deploy plus any flag change.
 
+## One supervisor
+
+From November 6, 2026, one supervising agent coordinates all Hey Kevin work, by Deli's decision. This applies to every tool, including Claude, Codex, Cursor and Antigravity.
+
+- Only the supervisor merges to `main`, dispatches deploys or changes flags. Owner gates above still apply.
+- Before starting work, ask Deli who the supervisor is. Don't start from a handoff that hasn't been routed through the supervisor.
+- Other agents work in their own worktree on their own branch, and report the commit and evidence to the supervisor.
+- This repository is public. Keep private detail out of commits, PR text and issues.
+
 ## Workspace (standing trap)
 
 Work in a git worktree of the **current clone**, never the primary checkout.

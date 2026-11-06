@@ -734,6 +734,10 @@ def _build_deepgram_keyterms(config: Optional[dict] = None) -> list[str]:
     return terms[:24]
 
 
+DEEPGRAM_CONNECT_ATTEMPTS = 2
+DEEPGRAM_OPEN_TIMEOUT_SECONDS = 4
+
+
 class VoicePipeline:
     """Full-duplex voice pipeline with proper Deepgram end-of-utterance detection.
 
@@ -850,7 +854,7 @@ class VoicePipeline:
 
     async def start(self):
         """Connect to Deepgram and send Kevin's greeting."""
-        connected = await self._connect_deepgram()
+        connected = await self._connect_deepgram_with_retry()
         if not connected:
             logger.error("Failed to connect to Deepgram")
             return False
@@ -1088,6 +1092,13 @@ class VoicePipeline:
 
     # --- Deepgram STT ---
 
+    async def _connect_deepgram_with_retry(self) -> bool:
+        """Give a slow connection another try, since failing here drops the caller."""
+        for _ in range(DEEPGRAM_CONNECT_ATTEMPTS):
+            if await self._connect_deepgram():
+                return True
+        return False
+
     async def _connect_deepgram(self) -> bool:
         """Connect to Deepgram with proper conversational AI settings.
 
@@ -1134,6 +1145,7 @@ class VoicePipeline:
             self._deepgram_ws = await websockets.connect(
                 url,
                 additional_headers={"Authorization": f"Token {settings.deepgram_api_key}"},
+                open_timeout=DEEPGRAM_OPEN_TIMEOUT_SECONDS,
             )
 
             self._deepgram_task = asyncio.create_task(self._deepgram_receive_loop())

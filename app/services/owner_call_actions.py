@@ -614,6 +614,39 @@ async def _cleanup_legacy_snapshot(call_sid, snapshot):
         pass  # Future polls may retry cleanup; instruction delivery stays acknowledged.
 
 
+async def release_stranded_fallback_redirect(call_sid, *, contractor_id, conference_name):
+    """Decide whether a failed fallback redirect may be sent again.
+
+    A lost provider response can hide a redirect that worked, so a retry needs proof that it
+    didn't: the caller still in the ring conference. Returns 'retry' after freeing the attempt,
+    'wait' when that proof isn't available yet, and 'stop' once the call has moved on.
+    """
+    def eligible(record):
+        return (live_record(record, contractor_id) and not record.get('accepted')
+                and record.get('owner_action') != 'accept'
+                and record.get('conference_name') == conference_name
+                and record.get('kevin_redirect_status') in (None, 'pending'))
+    record = await read_record(call_sid)
+    if not eligible(record):
+        return 'stop'
+    try:
+        waiting = await _conference_contains_call(conference_name, call_sid, contractor_id)
+    except Exception:
+        return 'wait'
+    if not waiting:
+        return 'wait'
+    nonce = record.get('kevin_redirect_nonce')
+    def release(current):
+        if not eligible(current) or current.get('kevin_redirect_nonce') != nonce:
+            return current
+        return {k: v for k, v in current.items()
+                if k not in ('kevin_redirect_nonce', 'kevin_redirect_status')}
+    committed = await _run_rtdb_transaction(call_sid, release)
+    if not eligible(committed) or committed.get('kevin_redirect_nonce'):
+        return 'stop'
+    return 'retry'
+
+
 async def confirm_fallback_stream(call_sid, *, contractor_id, ws_token, redirect_nonce):
     """Authenticated stream arrival proves this exact fallback reached Twilio."""
     validate_call_sid(call_sid)

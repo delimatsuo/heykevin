@@ -34,6 +34,9 @@ INBOUND_EVIDENCE_TIMEOUT_SECONDS = 1.0
 
 router = APIRouter()
 
+REDIRECT_RECOVERY_ATTEMPTS = 3
+REDIRECT_RECOVERY_DELAY_SECONDS = 3
+
 
 def _forward_twiml(phone: str, caller_id: str = "") -> str:
     """TwiML to forward call directly to a number."""
@@ -753,7 +756,7 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
         device_token = await get_device_token(token_type="voip", contractor_id=contractor_id)
         if not device_token:
             logger.warning("No VoIP token — falling back to Kevin screening")
-            await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
+            await _hand_off_to_kevin(call_sid, contractor_id, conference_name)
             return
 
         # F-07: bind the Twilio access token's identity to this contractor so a
@@ -829,15 +832,35 @@ async def _ring_contractor(call_sid: str, caller_phone: str, caller_name: str, c
             return  # An unresolved pickup also owns this call; timeout cannot redirect it.
         # Timeout — contractor didn't answer or decline
         logger.info("Contractor didn't answer in 20s — Kevin taking over")
-        try:
-            await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
-        except Exception as e:
-            logger.error("Redirect to Kevin failed")
-            await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
+        await _hand_off_to_kevin(call_sid, contractor_id, conference_name)
 
     except Exception as e:
         logger.error("Ring contractor failed: type=%s", type(e).__name__)
-        await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name)
+        await _hand_off_to_kevin(call_sid, contractor_id, conference_name)
+
+
+async def _hand_off_to_kevin(call_sid: str, contractor_id: str, conference_name: str) -> bool:
+    """Move a ringing caller to Kevin, retrying only while they are provably still waiting."""
+    from app.services.owner_call_actions import release_stranded_fallback_redirect
+
+    if await _async_redirect_to_kevin(call_sid, contractor_id, expected_conference=conference_name):
+        return True
+    for _ in range(REDIRECT_RECOVERY_ATTEMPTS):
+        await asyncio.sleep(REDIRECT_RECOVERY_DELAY_SECONDS)
+        try:
+            decision = await release_stranded_fallback_redirect(
+                call_sid, contractor_id=contractor_id, conference_name=conference_name
+            )
+        except Exception:
+            decision = "wait"
+        if decision == "stop":
+            return False
+        if decision == "retry" and await _async_redirect_to_kevin(
+            call_sid, contractor_id, expected_conference=conference_name
+        ):
+            return True
+    logger.error("Hand-off to Kevin unconfirmed; the caller may still be waiting")
+    return False
 
 
 async def _async_redirect_to_kevin(call_sid: str, contractor_id: str, *, expected_conference: str | None = None):

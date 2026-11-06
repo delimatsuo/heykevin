@@ -193,6 +193,8 @@ class Settings(DotenvProtectedBaseSettings):
 
     # Cloud Run URL (for WebSocket URL generation)
     cloud_run_url: str = PRODUCTION_CLOUD_RUN_URL
+    # Google requires the sign-in callback on a domain we own. Empty uses cloud_run_url.
+    google_calendar_redirect_base_url: str = ""
 
     # GCS Bucket for estimate media archives
     estimate_media_bucket: str = ""

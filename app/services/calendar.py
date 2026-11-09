@@ -136,16 +136,6 @@ def _token_expires_soon(contractor: dict, leeway_seconds: int = 120) -> bool:
     return (type(expires_at) in (int, float) and type(expires_at) is not bool) and expires_at <= _epoch_now() + leeway_seconds
 
 
-def _refresh_lock_key(contractor: dict) -> str:
-    contractor_id = str(contractor.get("contractor_id", ""))
-    if contractor_id:
-        return contractor_id
-    # Fall back to a hash, not the raw refresh token, as the in-process dict key —
-    # avoids a live OAuth secret sitting in something a future debug dump might print.
-    refresh_token = str(contractor.get("google_calendar_refresh_token", ""))
-    return hashlib.sha256(refresh_token.encode()).hexdigest()[:16]
-
-
 async def refresh_access_token(contractor: dict, *, force: bool = False) -> str | None:
     """Refresh and persist Google Calendar OAuth tokens for a contractor with durable CAS."""
     from app.config import settings

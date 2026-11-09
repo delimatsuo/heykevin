@@ -257,8 +257,6 @@ def validate_outbox_record(
 
     actual_keys = frozenset(data.keys())
     if actual_keys != EXPECTED_OUTBOX_KEYS:
-        missing = EXPECTED_OUTBOX_KEYS - actual_keys
-        extra = actual_keys - EXPECTED_OUTBOX_KEYS
         raise ValueError("Outbox record key mismatch")
 
     # schema_version (exact int 1, not bool)
@@ -397,8 +395,6 @@ def validate_disconnect_audit_record(
 
     actual_keys = frozenset(data.keys())
     if actual_keys != EXPECTED_DISCONNECT_AUDIT_KEYS:
-        missing = EXPECTED_DISCONNECT_AUDIT_KEYS - actual_keys
-        extra = actual_keys - EXPECTED_DISCONNECT_AUDIT_KEYS
         raise ValueError("Disconnect audit record key mismatch")
 
     # schema_version

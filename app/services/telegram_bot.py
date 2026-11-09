@@ -1,6 +1,5 @@
 """Telegram bot service — notifications with inline action buttons and live transcript."""
 
-import asyncio
 from typing import Optional
 
 import httpx
@@ -97,18 +96,6 @@ def _build_active_call_keyboard(call_sid: str) -> dict:
             ],
             [
                 {"text": "Ignore", "callback_data": f"ignore:{call_sid}"},
-            ],
-        ]
-    }
-
-
-def _build_dial_in_keyboard(conference_number: str, pin: str = "") -> dict:
-    """Button shown after user taps Pick Up — tap to dial into the conference."""
-    tel_uri = f"tel:{conference_number}"
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "\U0001f4de  Tap to Join Call", "url": tel_uri},
             ],
         ]
     }

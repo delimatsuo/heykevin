@@ -185,11 +185,6 @@ def _extract_exp_from_jwt(access_token: str) -> float | None:
         return None
 
 
-def _timestamp_expires_soon(expires_at: float, leeway_seconds: int = 120) -> bool:
-    """Return True when an explicit expiration timestamp is expired or close to expiring."""
-    return (type(expires_at) in (int, float) and type(expires_at) is not bool) and expires_at <= time.time() + leeway_seconds
-
-
 def _hydrate_jobber_snapshot(contractor: dict, snapshot: dict) -> None:
     from app.services.jobber_admissions import BINDING_KEYS
     keys = BINDING_KEYS | {"jobber_access_token", "jobber_refresh_token", "jobber_generation",

@@ -10,7 +10,6 @@ from dataclasses import dataclass
 import math
 import re
 import secrets
-from typing import Any
 
 from fastapi import HTTPException
 from google.cloud.firestore_v1 import DELETE_FIELD

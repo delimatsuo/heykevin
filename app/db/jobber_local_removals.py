@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import Any
 from google.cloud.firestore_v1 import DELETE_FIELD
 from app.db.integration_lifecycle_audit import VALID_DISCONNECT_ACTORS
 from app.services.integration_tokens import MAX_KEY_VERSION, IntegrationTokenCASConflict, validate_token_string

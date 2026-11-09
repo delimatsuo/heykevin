@@ -1085,15 +1085,6 @@ async def _send_summary_push(job_data: dict, contractor: dict):
         return False
 
 
-def _detect_spanish(transcript_text: str) -> bool:
-    """Simple check if transcript is likely in Spanish."""
-    spanish_indicators = ["hola", "gracias", "por favor", "necesito", "quiero", "puede",
-                          "llamar", "ayuda", "buenos", "buenas", "señor", "señora"]
-    text_lower = transcript_text.lower()
-    matches = sum(1 for word in spanish_indicators if word in text_lower)
-    return matches >= 2
-
-
 async def _send_auto_reply(
     caller_phone: str,
     contractor: dict,

@@ -1,6 +1,5 @@
 """Global error handlers — the last line of defense. Never drop a call."""
 
-from fastapi import Request
 from fastapi.responses import Response
 
 from app.config import settings

@@ -6,7 +6,6 @@ import math
 import re
 import secrets
 import time
-from typing import Optional
 
 from fastapi import HTTPException
 from app.config import settings

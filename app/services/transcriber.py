@@ -6,7 +6,6 @@ produces text transcripts for the iOS app and Telegram.
 
 import asyncio
 import json
-import base64
 from typing import Callable, Awaitable, Optional
 
 import websockets

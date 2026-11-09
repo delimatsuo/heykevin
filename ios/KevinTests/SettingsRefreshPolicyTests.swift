@@ -1669,3 +1669,225 @@ final class SettingsRefreshPolicyTests: XCTestCase {
         XCTAssertNil(coalesced); XCTAssertEqual(events, ["permission", "auth"])
     }
 }
+
+private final class KnowledgeSaveURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) throws -> (URLResponse, Data))?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        do {
+            let handler = try XCTUnwrap(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+    override func stopLoading() {}
+}
+
+final class KnowledgeSaveAPITests: XCTestCase {
+    private let auth = CallAuthContext(contractorId: "fixture-owner", bearerToken: "fixture-token", generation: 1)
+
+    private func withClient(_ check: (APIClient) async throws -> Void) async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [KnowledgeSaveURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer {
+            session.invalidateAndCancel()
+            KnowledgeSaveURLProtocol.handler = nil
+        }
+        try await check(APIClient(session: session))
+    }
+
+    func testSavesExactDraftAndEmptyKnowledgeWithCapturedCredentials() async throws {
+        for knowledge in ["Repairs & manutenção\nCall before arrival", ""] {
+            var requests = 0
+            KnowledgeSaveURLProtocol.handler = { request in
+                requests += 1
+                XCTAssertEqual(request.httpMethod, "PUT")
+                XCTAssertEqual(request.url?.path, "/api/contractors/fixture-owner/knowledge")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-token")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+                let stream = try XCTUnwrap(request.httpBodyStream)
+                stream.open()
+                defer { stream.close() }
+                var data = Data()
+                var buffer = [UInt8](repeating: 0, count: 1024)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    guard count > 0 else { break }
+                    data.append(buffer, count: count)
+                }
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
+                XCTAssertEqual(body, ["knowledge": knowledge])
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"status":"ok"}"#.utf8))
+            }
+            try await withClient { client in
+                try await client.updateKnowledge(knowledge: knowledge, auth: auth)
+            }
+            XCTAssertEqual(requests, 1)
+        }
+    }
+
+    func testRejectsHTTPFailuresAndUnconfirmedResponsesWithoutRetry() async throws {
+        for (status, body) in [(401, #"{"status":"ok"}"#), (403, #"{"status":"ok"}"#),
+                               (500, #"{"status":"ok"}"#), (202, #"{"status":"ok"}"#),
+                               (200, #"{"status":"error"}"#), (200, "{}"), (200, "not JSON")] {
+            var requests = 0
+            KnowledgeSaveURLProtocol.handler = { request in
+                requests += 1
+                return (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
+            }
+            try await withClient { client in
+                do {
+                    try await client.updateKnowledge(knowledge: "draft", auth: auth)
+                    XCTFail("Unconfirmed save must fail for \(status), \(body)")
+                } catch { XCTAssertEqual((error as? URLError)?.code, .badServerResponse) }
+            }
+            XCTAssertEqual(requests, 1)
+        }
+    }
+
+    func testTransportErrorIsPropagated() async throws {
+        KnowledgeSaveURLProtocol.handler = { _ in throw URLError(.notConnectedToInternet) }
+        try await withClient { client in
+            do {
+                try await client.updateKnowledge(knowledge: "draft", auth: auth)
+                XCTFail("Transport failure must be reported")
+            } catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
+        }
+    }
+
+    func testInvalidAuthDoesNotSendARequest() async throws {
+        KnowledgeSaveURLProtocol.handler = { _ in
+            XCTFail("Invalid credentials must not reach transport")
+            throw URLError(.badServerResponse)
+        }
+        for invalid in [CallAuthContext(contractorId: "", bearerToken: "token", generation: 1),
+                        CallAuthContext(contractorId: "owner", bearerToken: "", generation: 1)] {
+            try await withClient { client in
+                do {
+                    try await client.updateKnowledge(knowledge: "draft", auth: invalid)
+                    XCTFail("Invalid auth must fail")
+                } catch { XCTAssertEqual((error as? URLError)?.code, .userAuthenticationRequired) }
+            }
+        }
+    }
+}
+
+@MainActor
+private final class KnowledgeSaveGate {
+    let started = XCTestExpectation(description: "save started")
+    var completion: CheckedContinuation<Void, Error>?
+    func persist(_ knowledge: String, _ auth: CallAuthContext) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            completion = continuation
+            started.fulfill()
+        }
+    }
+}
+
+@MainActor
+final class KnowledgeSaveCoordinatorTests: XCTestCase {
+    private let auth = CallAuthContext(contractorId: "owner-A", bearerToken: "token-A", generation: 1)
+
+    func testFailureRetainsDraftAndRetryCanComplete() async {
+        let model = KnowledgeSaveCoordinator()
+        let draft = "Unchanged business details"
+        let failed = await model.save(knowledge: draft, auth: auth, currentAuth: { self.auth }, currentKnowledge: { draft }) { _, _ in
+            throw URLError(.timedOut)
+        }
+        XCTAssertFalse(failed)
+        XCTAssertFalse(model.isSaving)
+        XCTAssertNotNil(model.errorMessage)
+        let retried = await model.save(knowledge: draft, auth: auth, currentAuth: { self.auth }, currentKnowledge: { draft }) { sent, captured in
+            XCTAssertEqual(sent, draft)
+            XCTAssertEqual(captured, self.auth)
+        }
+        XCTAssertTrue(retried)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isSaving)
+    }
+
+    func testDuplicateSaveIsCoalescedAndChangedDraftKeepsEditorOpen() async {
+        let model = KnowledgeSaveCoordinator()
+        let gate = KnowledgeSaveGate()
+        var draft = "first draft"
+        let first = Task { await model.save(knowledge: draft, auth: auth, currentAuth: { self.auth }, currentKnowledge: { draft }, persist: gate.persist) }
+        await fulfillment(of: [gate.started], timeout: 2)
+        XCTAssertTrue(model.isSaving)
+        let duplicate = await model.save(knowledge: draft, auth: auth, currentAuth: { self.auth }, currentKnowledge: { draft }) { _, _ in
+            XCTFail("Duplicate save must not send a request")
+        }
+        XCTAssertFalse(duplicate)
+        XCTAssertTrue(model.isSaving)
+        draft = "newer draft"
+        gate.completion?.resume()
+        let mayDismiss = await first.value
+        XCTAssertFalse(mayDismiss)
+        XCTAssertEqual(draft, "newer draft")
+        XCTAssertFalse(model.isSaving)
+    }
+
+    func testAccountChangeAndReturnRejectOldSuccessAndFailure() async {
+        for succeeds in [true, false] {
+            let model = KnowledgeSaveCoordinator()
+            let gate = KnowledgeSaveGate()
+            var currentAuth = auth
+            let save = Task { await model.save(knowledge: "draft", auth: auth, currentAuth: { currentAuth }, currentKnowledge: { "draft" }, persist: gate.persist) }
+            await fulfillment(of: [gate.started], timeout: 2)
+            currentAuth = CallAuthContext(contractorId: "owner-B", bearerToken: "token-B", generation: 2)
+            currentAuth = CallAuthContext(contractorId: auth.contractorId, bearerToken: auth.bearerToken, generation: 3)
+            if succeeds { gate.completion?.resume() }
+            else { gate.completion?.resume(throwing: URLError(.timedOut)) }
+            let mayDismiss = await save.value
+            XCTAssertFalse(mayDismiss)
+            XCTAssertNil(model.errorMessage)
+        }
+    }
+
+    func testDismissalInvalidatesCompletionWithoutClearingNewSave() async {
+        let model = KnowledgeSaveCoordinator()
+        let oldGate = KnowledgeSaveGate()
+        let newGate = KnowledgeSaveGate()
+        let old = Task { await model.save(knowledge: "old", auth: auth, currentAuth: { self.auth }, currentKnowledge: { "old" }, persist: oldGate.persist) }
+        await fulfillment(of: [oldGate.started], timeout: 2)
+        model.invalidate()
+        let new = Task { await model.save(knowledge: "new", auth: auth, currentAuth: { self.auth }, currentKnowledge: { "new" }, persist: newGate.persist) }
+        await fulfillment(of: [newGate.started], timeout: 2)
+        oldGate.completion?.resume()
+        let oldMayDismiss = await old.value
+        XCTAssertFalse(oldMayDismiss)
+        XCTAssertTrue(model.isSaving)
+        newGate.completion?.resume()
+        let newMayDismiss = await new.value
+        XCTAssertTrue(newMayDismiss)
+        XCTAssertFalse(model.isSaving)
+    }
+
+    func testCancellationDoesNotPublishSuccessOrError() async {
+        let model = KnowledgeSaveCoordinator()
+        let gate = KnowledgeSaveGate()
+        let task = Task { await model.save(knowledge: "draft", auth: auth, currentAuth: { self.auth }, currentKnowledge: { "draft" }, persist: gate.persist) }
+        await fulfillment(of: [gate.started], timeout: 2)
+        task.cancel()
+        gate.completion?.resume(throwing: URLError(.cancelled))
+        let mayDismiss = await task.value
+        XCTAssertFalse(mayDismiss)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isSaving)
+    }
+
+    func testOldEditorCannotStartSaveForNewAccount() async {
+        let model = KnowledgeSaveCoordinator()
+        let newAuth = CallAuthContext(contractorId: "owner-B", bearerToken: "token-B", generation: 2)
+        let mayDismiss = await model.save(knowledge: "old draft", auth: auth, currentAuth: { newAuth }, currentKnowledge: { "old draft" }) { _, _ in
+            XCTFail("Old draft must not be submitted for a new account")
+        }
+        XCTAssertFalse(mayDismiss)
+        XCTAssertFalse(model.isSaving)
+    }
+}

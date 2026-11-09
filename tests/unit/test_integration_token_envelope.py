@@ -4157,7 +4157,7 @@ def test_strict_ast_token_field_inventory():
         ("app/db/contractors.py", "jobber_access_token"): 1,
         ("app/db/contractors.py", "jobber_refresh_token"): 1,
         ("app/services/calendar.py", "google_calendar_access_token"): 8,
-        ("app/services/calendar.py", "google_calendar_refresh_token"): 9,
+        ("app/services/calendar.py", "google_calendar_refresh_token"): 8,
         ("app/services/integration_token_mutations.py", "google_calendar_access_token"): 1,
         ("app/services/integration_token_mutations.py", "google_calendar_refresh_token"): 1,
         ("app/services/integration_token_mutations.py", "jobber_access_token"): 1,

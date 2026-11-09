@@ -1015,20 +1015,22 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         return nil
     }
 
-    func updateKnowledge(contractorId: String, knowledge: String) async {
-        do {
-            let encodedId = contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? contractorId
-            let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)/knowledge")!
-            var request = URLRequest(url: url)
-            request.httpMethod = "PUT"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 10
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["knowledge": knowledge])
-            authorize(&request)
+    func updateKnowledge(knowledge: String, auth: CallAuthContext) async throws {
+        guard auth.isValid else { throw URLError(.userAuthenticationRequired) }
+        let encodedId = auth.contractorId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? auth.contractorId
+        let url = URL(string: "\(baseURL)/api/contractors/\(encodedId)/knowledge")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(auth.bearerToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["knowledge": knowledge])
 
-            let (_, _) = try await session.data(for: request)
-        } catch {
-            debugLog("Update knowledge failed: \(error.localizedDescription)")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              body["status"] as? String == "ok" else {
+            throw URLError(.badServerResponse)
         }
     }
 

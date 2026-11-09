@@ -318,6 +318,7 @@ struct SettingsHost<Root: View>: View {
     }
 
     private func handleAuthChange(newAuth: CallAuthContext) {
+        showKnowledgeEditor = false
         activePaywallDestination = nil
         cancelPendingDeleteConfirmation()
         loadCoordinator.handleAuthChange(newAuth: newAuth)
@@ -2746,7 +2747,8 @@ struct KnowledgeEditorView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var appState: AppState
     @Binding var knowledgeText: String
-    @State private var isSaving = false
+    @StateObject private var saveCoordinator = KnowledgeSaveCoordinator()
+    @State private var editorAuth: CallAuthContext?
     @State private var isRecording = false
     @State private var audioRecorder: AVAudioRecorder?
     @State private var isTranscribing = false
@@ -2870,6 +2872,14 @@ San Jose, Santa Clara, Campbell
                 )
                 .padding(.top, 8)
 
+                if let errorMessage = saveCoordinator.errorMessage {
+                    Text(errorMessage)
+                        .font(.callout)
+                        .foregroundStyle(Color.hkRed)
+                        .padding(.horizontal)
+                        .accessibilityIdentifier("knowledgeSaveError")
+                }
+
                 if !knowledgeLengthWarning.isEmpty {
                     Text(knowledgeLengthWarning)
                         .font(.caption)
@@ -2896,7 +2906,16 @@ San Jose, Santa Clara, Campbell
                     .disabled(isFixtureMode)
                 }
             }
+            .disabled(saveCoordinator.isSaving)
             .background(Color.hkWarmCanvas.ignoresSafeArea())
+            .onAppear {
+                if editorAuth == nil { editorAuth = appState.currentAuthContext() }
+            }
+            .onDisappear { saveCoordinator.invalidate() }
+            .onChange(of: appState.currentAuthContext()) { _, _ in
+                saveCoordinator.invalidate()
+            }
+            .interactiveDismissDisabled(saveCoordinator.isSaving)
             .preferredColorScheme(.light)
             .onChange(of: knowledgeText) { _, newValue in
                 if newValue.count > 10_000 {
@@ -2910,8 +2929,12 @@ San Jose, Santa Clara, Campbell
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(String(localized: "Cancel")) { dismiss() }
-                        .foregroundStyle(Color.hkInk)
+                    Button(String(localized: "Cancel")) {
+                        saveCoordinator.invalidate()
+                        dismiss()
+                    }
+                    .foregroundStyle(Color.hkInk)
+                    .disabled(saveCoordinator.isSaving)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(String(localized: "Save")) {
@@ -2919,7 +2942,7 @@ San Jose, Santa Clara, Campbell
                     }
                     .fontWeight(.semibold)
                     .foregroundStyle(Color.hkGreen)
-                    .disabled(isSaving || knowledgeText.isEmpty || isFixtureMode)
+                    .disabled(saveCoordinator.isSaving || isRecording || isTranscribing || isFixtureMode)
                 }
             }
             .confirmationDialog(
@@ -3058,19 +3081,17 @@ San Jose, Santa Clara, Campbell
     }
 
     private func saveKnowledge() async {
-        let auth = appState.currentAuthContext()
-        guard auth.isValid else { return }
-        isSaving = true
-        #if DEBUG
-        if isFixtureMode {
-            isSaving = false
-            dismiss()
-            return
-        }
-        #endif
-        await APIClient.shared.updateKnowledge(contractorId: auth.contractorId, knowledge: knowledgeText)
-        isSaving = false
-        dismiss()
+        guard let auth = editorAuth, !isRecording, !isTranscribing, !isFixtureMode else { return }
+        let saved = await saveCoordinator.save(
+            knowledge: knowledgeText,
+            auth: auth,
+            currentAuth: { appState.currentAuthContext() },
+            currentKnowledge: { knowledgeText },
+            persist: { knowledge, auth in
+                try await APIClient.shared.updateKnowledge(knowledge: knowledge, auth: auth)
+            }
+        )
+        if saved { dismiss() }
     }
 }
 

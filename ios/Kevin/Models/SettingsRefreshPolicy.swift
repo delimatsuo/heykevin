@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Snapshot of draft and transient editing values held locally in SettingsHost.
 struct SettingsDraftSnapshot: Equatable, Sendable {
@@ -717,5 +718,52 @@ struct AccountDeletionFence: Equatable, Sendable {
     mutating func reset(for newAuth: CallAuthContext? = nil) {
         currentAuth = newAuth
         activeToken = nil
+    }
+}
+
+/// A save belongs to the presented editor and its captured account session.
+@MainActor
+final class KnowledgeSaveCoordinator: ObservableObject {
+    @Published private(set) var isSaving = false
+    @Published private(set) var errorMessage: String?
+    private var fence = PreferenceWriteFence()
+
+    func save(
+        knowledge: String,
+        auth: CallAuthContext,
+        currentAuth: () -> CallAuthContext,
+        currentKnowledge: () -> String,
+        persist: (String, CallAuthContext) async throws -> Void
+    ) async -> Bool {
+        guard currentAuth() == auth, !Task.isCancelled else { return false }
+        guard auth.isValid else {
+            errorMessage = String(localized: "Sign in again before saving your business knowledge.")
+            return false
+        }
+        guard let operation = fence.beginSave() else { return false }
+        isSaving = true
+        errorMessage = nil
+
+        let saved: Bool
+        do {
+            try await persist(knowledge, auth)
+            saved = true
+        } catch {
+            saved = false
+        }
+
+        guard fence.finish(operation) else { return false }
+        isSaving = false
+        guard currentAuth() == auth, !Task.isCancelled else { return false }
+        if !saved {
+            errorMessage = String(localized: "Couldn't save your business knowledge. Your draft is still here. Please try again.")
+        }
+        return saved && currentKnowledge() == knowledge
+    }
+
+    func invalidate() {
+        fence = PreferenceWriteFence()
+        isSaving = false
+        errorMessage = nil
     }
 }

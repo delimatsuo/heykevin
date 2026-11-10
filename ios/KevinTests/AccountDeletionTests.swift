@@ -242,6 +242,7 @@ final class AccountDeletionCompletionTests: XCTestCase {
         let state = f.state
         let token = try f.begin()
         state.pushToken = "fixture-apns"; state.voipToken = "fixture-voip"
+        state.isVerizonCarrier = true
         state.readCallIds = ["fixture-read"]; state.unreadCallCount = 1
         state.notificationCallSid = "fixture-call"; state.notificationCallMessage = "fixture-message"
         state.serviceBinding = ServiceBinding(countryCode: "US")
@@ -274,6 +275,7 @@ final class AccountDeletionCompletionTests: XCTestCase {
         XCTAssertNil(state.serviceBinding)
         XCTAssertEqual(state.pushToken, "fixture-apns")
         XCTAssertEqual(state.voipToken, "fixture-voip")
+        XCTAssertTrue(state.isVerizonCarrier)
     }
 
     func testFailureReturnsErrorWithoutChangingSessionAndPermitsRetry() throws {
@@ -282,6 +284,7 @@ final class AccountDeletionCompletionTests: XCTestCase {
         let token = try f.begin()
         state.businessName = "fixture business"
         state.contactsUploadConsent = true
+        state.isVerizonCarrier = true
         state.setActiveCall(callSid: "fixture-call", callerPhone: "", callerName: "", authContext: token.auth)
         let lease = try XCTUnwrap(state.ownedActiveCallLease)
 
@@ -296,6 +299,7 @@ final class AccountDeletionCompletionTests: XCTestCase {
         XCTAssertEqual(state.ownedActiveCallLease, lease)
         XCTAssertEqual(state.businessName, "fixture business")
         XCTAssertTrue(state.contactsUploadConsent)
+        XCTAssertTrue(state.isVerizonCarrier)
         XCTAssertTrue(f.bearerWrites.isEmpty)
         XCTAssertNotEqual(try f.begin(), token)
     }
@@ -355,9 +359,12 @@ final class AccountDeletionCompletionTests: XCTestCase {
         expectResetGap("deleted-explicit-contact-consent", !state.contactsUploadConsent)
     }
 
-    private func expectResetGap(_ tag: String, _ invariant: Bool, file: StaticString = #filePath, line: UInt = #line) {
+    private func expectResetGap(_ tag: String, _ invariant: Bool, file: String = #filePath, line: Int = #line) {
         XCTExpectFailure("Account deletion reset: \(tag)", strict: true, failingBlock: {
-            XCTAssertTrue(invariant, tag, file: file, line: line)
-        }, issueMatcher: { $0.type == .assertionFailure && $0.compactDescription.hasSuffix(tag) })
+            guard !invariant else { return }
+            let location = XCTSourceCodeLocation(filePath: file, lineNumber: line)
+            record(XCTIssue(type: .assertionFailure, compactDescription: tag,
+                            sourceCodeContext: XCTSourceCodeContext(location: location)))
+        }, issueMatcher: { $0.type == .assertionFailure && $0.compactDescription == tag })
     }
 }

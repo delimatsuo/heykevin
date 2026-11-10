@@ -24,12 +24,13 @@ from typing import Awaitable, Callable, Optional
 import httpx
 
 from app.services.call_tasks import pipeline_tasks
-from app.config import settings
+from app.config import settings, staging_native_live_safety_controls_enabled
 from app.services.entitlements import effective_mode
 from app.services.quiet_hours import is_business_hours
 from app.services.urgency import find_urgent_signal
 from app.services.voice_events import _call_label
 from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold
+from app.services.voice_tool_declarations import build_gemini_voice_tools, personal_mode_disables_tools
 from app.services.voice_tool_dispatch import (
     GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
     VoiceToolContext,
@@ -767,20 +768,14 @@ class RelayPipeline:
     # --- tools -----------------------------------------------------------
 
     def _build_tools(self) -> list:
-        """Reuse the Gemini-format tool declarations from the live engine."""
-        mode = self._contractor_config.get("effective_mode")
-        if not mode and "mode" in self._contractor_config:
-            mode = effective_mode(self._contractor_config)
-        if mode == "personal":
+        """Select Gemini-format declarations for this ConversationRelay session."""
+        if personal_mode_disables_tools(self._contractor_config):
             return []
 
-        from app.services.gemini_pipeline import GeminiPipeline
-
-        borrowed = GeminiPipeline.__new__(GeminiPipeline)
-        borrowed._contractor_config = self._contractor_config
-        borrowed._log_voice_timing = lambda *args, **kwargs: None
         try:
-            return borrowed._build_gemini_tools()
+            if staging_native_live_safety_controls_enabled():
+                return []
+            return build_gemini_voice_tools(self._contractor_config)
         except Exception as error:
             logger.error(
                 "relay_event event=tool_build_error call=%s type=%s",

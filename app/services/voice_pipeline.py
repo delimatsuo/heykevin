@@ -43,6 +43,7 @@ from app.services.voice_events import (
     _log_voice_exception,
     _tool_label,
 )
+from app.services.voice_tool_declarations import ANTHROPIC_CALENDAR_TOOLS, ANTHROPIC_JOBBER_TOOLS
 from app.services.voice_tool_dispatch import VoiceToolContext, VoiceToolDispatcher
 from app.utils.logging import get_logger
 
@@ -1209,76 +1210,8 @@ class VoicePipeline:
         async with self._response_lock:
             await self._handle_caller_speech(text)
 
-    # --- Jobber tool definitions (only included if contractor has Jobber connected) ---
-
-    JOBBER_TOOLS = [
-        {
-            "name": "check_customer",
-            "description": "Look up the caller in the business's customer database by phone number. Returns customer name and address if found.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "phone": {
-                        "type": "string",
-                        "description": "The caller's phone number in E.164 format (e.g. +14155551234)",
-                    }
-                },
-                "required": ["phone"],
-            },
-        },
-    ]
-
-    # --- Google Calendar tool definitions (fallback when Jobber is not connected) ---
-
-    CALENDAR_TOOLS = [
-        {
-            "name": "check_availability",
-            "description": "Check the business owner's Google Calendar for available appointment slots in the next 7 days.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "days_ahead": {
-                        "type": "integer",
-                        "description": "Number of days ahead to check (default 7, max 14)",
-                    }
-                },
-                "required": [],
-            },
-        },
-        {
-            "name": "book_appointment",
-            "description": "Create an appointment on the business owner's Google Calendar.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Short description of the appointment (e.g. 'Faucet repair - John Smith')",
-                    },
-                    "start_time": {
-                        "type": "string",
-                        "description": (
-                            "Start time in ISO 8601 with the business owner's timezone offset. "
-                            "Copy start_iso from check_availability when available. "
-                            "Never use Z; 12pm Eastern is 2026-08-21T12:00:00-04:00, not 12:00:00Z."
-                        ),
-                    },
-                    "end_time": {
-                        "type": "string",
-                        "description": (
-                            "End time in ISO 8601 with the business owner's timezone offset. "
-                            "Copy end_iso from check_availability when available. Never use Z."
-                        ),
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Additional notes about the appointment",
-                    },
-                },
-                "required": ["title", "start_time", "end_time"],
-            },
-        },
-    ]
+    JOBBER_TOOLS = ANTHROPIC_JOBBER_TOOLS
+    CALENDAR_TOOLS = ANTHROPIC_CALENDAR_TOOLS
 
     @staticmethod
     def _service_request_tools() -> list[dict]:

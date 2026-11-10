@@ -1,0 +1,221 @@
+{
+  "gemini": {
+    "check_customer": {
+      "name": "check_customer",
+      "description": "Look up the caller in the business's customer database by phone number.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "phone": {
+            "type": "STRING",
+            "description": "Phone number in E.164 format"
+          }
+        },
+        "required": [
+          "phone"
+        ]
+      }
+    },
+    "check_availability": {
+      "name": "check_availability",
+      "description": "Check the business owner's calendar for available appointment slots.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "days_ahead": {
+            "type": "INTEGER",
+            "description": "Days ahead to check (default 7, max 14)"
+          }
+        }
+      }
+    },
+    "book_appointment": {
+      "name": "book_appointment",
+      "description": "Create an appointment on the business owner's calendar.",
+      "parameters": {
+        "type": "OBJECT",
+        "properties": {
+          "title": {
+            "type": "STRING",
+            "description": "Short description of the appointment"
+          },
+          "start_time": {
+            "type": "STRING",
+            "description": "Start time in ISO 8601 with the business owner's timezone offset. Copy start_iso from check_availability. Never use Z."
+          },
+          "end_time": {
+            "type": "STRING",
+            "description": "End time in ISO 8601 with the business owner's timezone offset. Copy end_iso from check_availability. Never use Z."
+          },
+          "description": {
+            "type": "STRING",
+            "description": "Additional notes"
+          }
+        },
+        "required": [
+          "title",
+          "start_time",
+          "end_time"
+        ]
+      }
+    },
+    "cancel_service_request": {
+      "name": "cancel_service_request",
+      "description": "Cancel an existing service request after the caller clearly asks to cancel it. Report success only when the tool result says the change was applied.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "ID of the caller's current service request. Do not guess it."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Current request revision from trusted customer context."
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_revision"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reschedule_service_request": {
+      "name": "reschedule_service_request",
+      "description": "Move an existing service request to a caller-confirmed date and time. Report success only when the tool result says the change was applied.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "ID of the caller's current service request. Do not guess it."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Current request revision from trusted customer context."
+          },
+          "scheduled_start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Caller-confirmed new start time in ISO 8601 format."
+          },
+          "scheduled_end": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Caller-confirmed new end time in ISO 8601 format."
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_revision",
+          "scheduled_start",
+          "scheduled_end"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "add_service_to_request": {
+      "name": "add_service_to_request",
+      "description": "Add one caller-requested service to an existing service request. Report success only when the tool result says the change was applied.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "ID of the caller's current service request. Do not guess it."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Current request revision from trusted customer context."
+          },
+          "service": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "The additional service requested by the caller."
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_revision",
+          "service"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "anthropic_jobber": [
+    {
+      "name": "check_customer",
+      "description": "Look up the caller in the business's customer database by phone number. Returns customer name and address if found.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "phone": {
+            "type": "string",
+            "description": "The caller's phone number in E.164 format (e.g. +14155551234)"
+          }
+        },
+        "required": [
+          "phone"
+        ]
+      }
+    }
+  ],
+  "anthropic_calendar": [
+    {
+      "name": "check_availability",
+      "description": "Check the business owner's Google Calendar for available appointment slots in the next 7 days.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "days_ahead": {
+            "type": "integer",
+            "description": "Number of days ahead to check (default 7, max 14)"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "book_appointment",
+      "description": "Create an appointment on the business owner's Google Calendar.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Short description of the appointment (e.g. 'Faucet repair - John Smith')"
+          },
+          "start_time": {
+            "type": "string",
+            "description": "Start time in ISO 8601 with the business owner's timezone offset. Copy start_iso from check_availability when available. Never use Z; 12pm Eastern is 2026-08-21T12:00:00-04:00, not 12:00:00Z."
+          },
+          "end_time": {
+            "type": "string",
+            "description": "End time in ISO 8601 with the business owner's timezone offset. Copy end_iso from check_availability when available. Never use Z."
+          },
+          "description": {
+            "type": "string",
+            "description": "Additional notes about the appointment"
+          }
+        },
+        "required": [
+          "title",
+          "start_time",
+          "end_time"
+        ]
+      }
+    }
+  ]
+}

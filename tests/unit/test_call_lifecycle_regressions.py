@@ -76,28 +76,24 @@ async def _settle(tasks):
             raise result
 
 
-@pytest.mark.parametrize(
-    "reverse_completion",
-    [
-        False,
-        pytest.param(True, marks=_gap("older live transcript can overwrite newer text")),
-    ],
-)
+@pytest.mark.parametrize("reverse_completion", [False, True])
 async def test_latest_transcript_survives_write_completion_order(monkeypatch, reverse_completion):
     proxy = _AsyncioProxy()
     monkeypatch.setattr(media_stream, "asyncio", proxy)
     first_entered, release_first = asyncio.Event(), asyncio.Event()
     stored = []
 
-    async def update(_sid, data):
-        if data["transcript_buffer"] == "Caller: Hello":
+    async def update(_sid, transcript, **_kwargs):
+        if transcript == "Caller: Hello":
             first_entered.set()
             await release_first.wait()
-        stored.append(data["transcript_buffer"])
+        stored.append(transcript)
 
-    monkeypatch.setattr(media_stream, "update_active_call", update)
+    monkeypatch.setattr(media_stream, "update_live_transcript", update)
     lines = ["Caller: Hello"]
-    pusher = media_stream.LiveTranscriptPusher("CA_lifecycle", lines, throttle=0)
+    pusher = media_stream.LiveTranscriptPusher(
+        "CA_lifecycle", lines, throttle=0, contractor_id="test-owner", ws_token="test-token"
+    )
     try:
         async with asyncio.timeout(2):
             pusher.push()
@@ -117,63 +113,57 @@ async def test_latest_transcript_survives_write_completion_order(monkeypatch, re
         await _settle(proxy.tasks)
 
     assert stored and stored.count("\n".join(lines)) == 1
-    if stored[-1] != "\n".join(lines):
-        raise KnownLifecycleGap("older write completed last and replaced newer transcript")
+    assert stored[-1] == "\n".join(lines)
 
 
-class _MemoryReference:
-    """Synthetic partial-update store, not a Firebase emulator."""
-
-    def __init__(self):
-        self.record = {"contractor_id": "test-owner", "ws_token": "test-token"}
-
-    def update(self, updates):
-        self.record = {**(self.record or {}), **updates}
-
-    def delete(self):
-        self.record = None
-
-
-@pytest.mark.parametrize(
-    "delete_while_pending",
-    [
-        False,
-        pytest.param(
-            True, marks=_gap("a pending transcript update can outlive active-call deletion")
-        ),
-    ],
-)
+@pytest.mark.parametrize("delete_while_pending", [False, True])
 async def test_transcript_write_does_not_recreate_deleted_call(monkeypatch, delete_while_pending):
-    proxy, reference = _AsyncioProxy(), _MemoryReference()
+    from tests.fixtures.fake_rtdb import use_fake_rtdb
+
+    records = use_fake_rtdb(
+        monkeypatch,
+        active_calls={
+            "CA_lifecycle": {
+                "contractor_id": "test-owner",
+                "ws_token": "test-token",
+                "state": "screening",
+            }
+        },
+    )["active_calls"].records
+    proxy = _AsyncioProxy()
     monkeypatch.setattr(media_stream, "asyncio", proxy)
-    monkeypatch.setattr(cache, "_get_ref", lambda _sid: reference)
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def delayed_update(sid, data):
+    async def delayed_update(sid, transcript, **kwargs):
         entered.set()
         await release.wait()
-        await cache.update_active_call(sid, data)
+        await cache.update_live_transcript(sid, transcript, **kwargs)
 
-    monkeypatch.setattr(media_stream, "update_active_call", delayed_update)
-    pusher = media_stream.LiveTranscriptPusher("CA_lifecycle", ["Caller: Hello"], throttle=0)
+    monkeypatch.setattr(media_stream, "update_live_transcript", delayed_update)
+    pusher = media_stream.LiveTranscriptPusher(
+        "CA_lifecycle",
+        ["Caller: Hello"],
+        throttle=0,
+        contractor_id="test-owner",
+        ws_token="test-token",
+    )
     try:
         async with asyncio.timeout(2):
             pusher.push()
             await entered.wait()
             if delete_while_pending:
                 await cache.delete_active_call("CA_lifecycle")
-                assert reference.record is None
+                assert "CA_lifecycle" not in records
             release.set()
             await asyncio.gather(*proxy.tasks)
             if not delete_while_pending:
-                assert reference.record["transcript_buffer"] == "Caller: Hello"
+                assert records["CA_lifecycle"]["transcript_buffer"] == "Caller: Hello"
                 await cache.delete_active_call("CA_lifecycle")
     finally:
         release.set()
         await _settle(proxy.tasks)
 
-    if reference.record is not None:
-        raise KnownLifecycleGap("pending transcript update recreated a deleted synthetic record")
+    assert "CA_lifecycle" not in records
 
 
 async def _noop(*_args):

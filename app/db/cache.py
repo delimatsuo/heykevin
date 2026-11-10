@@ -5,6 +5,8 @@ Provides atomic state transitions via RTDB transactions.
 """
 
 import asyncio
+import math
+import threading
 import time
 from typing import Optional
 
@@ -12,7 +14,7 @@ import firebase_admin
 from firebase_admin import credentials, db as rtdb
 
 from app.config import settings
-from app.services.state_machine import ActiveCall, CallState, can_transition
+from app.services.state_machine import ACTIVE_STATES, ActiveCall, CallState, can_transition
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -164,6 +166,67 @@ async def update_active_call(call_sid: str, updates: dict):
         await loop.run_in_executor(None, ref.update, updates)
     except Exception as e:
         logger.error(f"RTDB update failed: {e}", exc_info=True)
+
+
+class _TranscriptWriteRejected(Exception):
+    """The captured call authority no longer permits a transcript write."""
+
+
+async def update_live_transcript(
+    call_sid: str,
+    transcript: str,
+    *,
+    contractor_id: str,
+    ws_token: str,
+    observed_at: float,
+    cancelled: threading.Event,
+) -> bool:
+    """Publish text and its activity time on the same existing, active call.
+
+    Cancellation cannot recall an SDK request already sent by the executor.
+    Recheck authority on every transaction retry so a late request cannot
+    recreate a deleted record or overwrite a rotated token/terminal call.
+    Streams sharing one token are not arbitrated by this helper.
+    """
+    if (
+        not contractor_id or not ws_token or cancelled.is_set()
+        or isinstance(observed_at, bool) or not isinstance(observed_at, (int, float))
+        or not math.isfinite(observed_at) or observed_at <= 0
+    ):
+        return False
+
+    def update(current):
+        if (
+            cancelled.is_set()
+            or not isinstance(current, dict)
+            or current.get("contractor_id") != contractor_id
+            or current.get("ws_token") != ws_token
+            or current.get("call_sid", call_sid) != call_sid
+            or current.get("state") not in ACTIVE_STATES
+            or current.get("accepted")
+        ):
+            raise _TranscriptWriteRejected()
+        # Preserve the existing call-activity heartbeat, using observation time
+        # rather than a delayed commit's time. Never regress newer owner activity.
+        stamp = current.get("state_updated_at")
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp):
+            stamp = observed_at
+        return {
+            **current, "transcript_buffer": transcript,
+            "state_updated_at": max(stamp, observed_at),
+        }
+
+    try:
+        ref = _get_ref(call_sid)
+        await asyncio.get_running_loop().run_in_executor(
+            None, run_rtdb_transaction, ref, update
+        )
+        return True
+    except _TranscriptWriteRejected:
+        return False
+    except Exception as error:
+        logger.warning("Live transcript write failed: %s", type(error).__name__)
+        return False
 
 
 async def delete_active_call(call_sid: str):

@@ -5,6 +5,7 @@ import base64
 import binascii
 from dataclasses import dataclass
 import json
+import threading
 import time
 from types import SimpleNamespace
 from typing import Callable
@@ -13,7 +14,7 @@ from fastapi import APIRouter, WebSocket
 
 from app.config import settings
 from app.services.voice_pipeline import VoicePipeline
-from app.db.cache import get_active_call, update_active_call, _init_firebase, ACTIVE_CALLS_PATH
+from app.db.cache import get_active_call, update_active_call, update_live_transcript, _init_firebase, ACTIVE_CALLS_PATH
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -538,46 +539,72 @@ TRANSCRIPT_THROTTLE = 1.0
 
 
 class LiveTranscriptPusher:
-    """Throttled live-view pusher whose last line always lands.
+    """One owned writer, coalescing snapshots while a write or throttle is pending."""
 
-    The inline throttle both streams used ("push only if a full window has
-    passed") silently dropped any line arriving inside the window with no
-    line after it. On CAa5e0de Kevin's final reply came 0.7s after the
-    caller's line and the call then went silent, so the app's live view never
-    showed the one line that mattered. A suppressed push now schedules a
-    trailing flush for the moment the window reopens.
-
-    `lines` is the caller's own mutable list; the flush reads it at flush
-    time, so a coalesced flush carries everything said in the window.
-    """
-
-    def __init__(self, call_sid: str, lines: list, throttle: float = TRANSCRIPT_THROTTLE):
+    def __init__(
+        self, call_sid: str, lines: list, throttle: float = TRANSCRIPT_THROTTLE,
+        *, contractor_id: str, ws_token: str,
+    ):
         self._call_sid = call_sid
         self._lines = lines
+        self._contractor_id = contractor_id
+        self._ws_token = ws_token
         self._throttle = throttle
-        self._last_push = 0.0
-        self._pending: asyncio.Task | None = None
+        self._last_push: float | None = None
+        self._pending_snapshot: tuple[str, float] | None = None
+        self._worker: asyncio.Task | None = None
+        self._closed = False
+        self._closing = asyncio.Event()
+        self._cancelled = threading.Event()
 
     def push(self) -> None:
-        now = time.time()
-        remaining = self._throttle - (now - self._last_push)
-        if remaining <= 0:
-            self._last_push = now
-            task = asyncio.create_task(self._write())
-            task.add_done_callback(_log_task_exception)
-        elif self._pending is None or self._pending.done():
-            self._pending = asyncio.create_task(self._flush_later(remaining))
-            self._pending.add_done_callback(_log_task_exception)
+        if self._closed:
+            return
+        self._pending_snapshot = ("\n".join(self._lines), time.time())
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._run())
+            self._worker.add_done_callback(_log_task_exception)
 
-    async def _flush_later(self, delay: float) -> None:
-        await asyncio.sleep(delay)
-        self._last_push = time.time()
-        await self._write()
+    async def _run(self) -> None:
+        while self._pending_snapshot is not None and not self._cancelled.is_set():
+            if self._last_push is not None and not self._closed:
+                remaining = self._throttle - (time.monotonic() - self._last_push)
+                if remaining > 0:
+                    try:
+                        await asyncio.wait_for(self._closing.wait(), timeout=remaining)
+                    except TimeoutError:
+                        pass
+            text, observed_at = self._pending_snapshot
+            self._pending_snapshot = None
+            self._last_push = time.monotonic()
+            await update_live_transcript(
+                self._call_sid, text,
+                contractor_id=self._contractor_id, ws_token=self._ws_token,
+                observed_at=observed_at,
+                cancelled=self._cancelled,
+            )
 
-    async def _write(self) -> None:
-        await update_active_call(
-            self._call_sid, {"transcript_buffer": "\n".join(self._lines)}
-        )
+    async def close(self, timeout: float = 1.0) -> None:
+        """Seal input and flush the last snapshot within a bounded drain window.
+
+        A timed-out executor may finish its current conditional request later;
+        the cancellation flag suppresses retries, not an already-sent commit.
+        """
+        self._closed = True
+        self._closing.set()  # closing bypasses the trailing throttle
+        task = self._worker
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait({task}, timeout=max(0.0, timeout))
+        finally:
+            if not task.done():
+                self._cancelled.set()
+                self._pending_snapshot = None
+                task.cancel()
+                # Yield for cooperative cancellation without extending the bound
+                # to include an executor request that Python cannot recall.
+                await asyncio.wait({task}, timeout=0)
 
 
 def _active_call_fallback(call_sid: str, call_data: dict | None):
@@ -719,7 +746,6 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     stream_sid = start_stream_sid
     pipeline = None
     transcript_lines = []
-    transcript_pusher = LiveTranscriptPusher(call_sid, transcript_lines)
 
     try:
         active_call = await _resolve_active_call(call_sid, call_data)
@@ -798,6 +824,11 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         except Exception:
             pass
         return
+
+    transcript_pusher = LiveTranscriptPusher(
+        call_sid, transcript_lines,
+        contractor_id=call_data.get("contractor_id", ""), ws_token=ws_token,
+    )
 
     async def on_audio_out(mulaw_chunk: bytes):
         """Voice pipeline produced audio — send to Twilio."""
@@ -988,16 +1019,18 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
         _log_safe_exception("stream_error", error, call_sid)
 
     finally:
-        await _cancel_task(ingress_task)
-
-        if pipeline:
-            try:
-                await pipeline.stop()
-            except Exception as error:
-                logger.error(
-                    "Voice pipeline shutdown failed: %s",
-                    type(error).__name__,
-                )
+        try:
+            await _cancel_task(ingress_task)
+            if pipeline:
+                try:
+                    await pipeline.stop()
+                except Exception as error:
+                    logger.error(
+                        "Voice pipeline shutdown failed: %s",
+                        type(error).__name__,
+                    )
+        finally:
+            await transcript_pusher.close()
 
         try:
             await websocket.close()

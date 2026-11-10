@@ -615,16 +615,16 @@ final class AccountDeletionPersistenceTests: XCTestCase {
     func testSnapshotsBeforeAndAfterBearerRemovalHydrateBeforeQueuedDefaults() async throws {
         let original = try await readyA()
         let token = try original.begin()
-        var beforeBearer: Snapshot?
-        var afterBearer: Snapshot?
+        var beforeBearer: Result<Snapshot, Error>?
+        var afterBearer: Result<Snapshot, Error>?
         let result = original.complete(.deleted, token, beforeBearer: {
-            XCTAssertNoThrow(beforeBearer = try original.snapshot())
+            beforeBearer = Result { try original.snapshot() }
         }, afterBearer: {
-            XCTAssertNoThrow(afterBearer = try original.snapshot())
+            afterBearer = Result { try original.snapshot() }
         })
         XCTAssertEqual(result, .deleted)
-        let before = try XCTUnwrap(beforeBearer)
-        let after = try XCTUnwrap(afterBearer)
+        let before = try XCTUnwrap(beforeBearer).get()
+        let after = try XCTUnwrap(afterBearer).get()
         XCTAssertEqual(try before.secureValues()["contractorApiToken"], "bearer-A")
         XCTAssertNil(try after.secureValues()["contractorApiToken"])
         await Self.drainMainQueue()
@@ -840,12 +840,12 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         preferences["readCallIds_legacy-account"] = [String]()
         let original = try await readyA(preferences: preferences)
         let token = try original.begin()
-        var justRemoved: Snapshot?
+        var justRemoved: Result<Snapshot, Error>?
         let result = original.complete(.deleted, token, afterBearer: {
-            XCTAssertNoThrow(justRemoved = try original.snapshot())
+            justRemoved = Result { try original.snapshot() }
         })
         XCTAssertEqual(result, .deleted)
-        let image = try XCTUnwrap(justRemoved)
+        let image = try XCTUnwrap(justRemoved).get()
         XCTAssertNil(try image.secureValues()["contractorId"])
         XCTAssertNil(try image.secureValues()["contractorApiToken"])
         XCTAssertEqual(image.defaults["contractorId"] as? String, "legacy-account")

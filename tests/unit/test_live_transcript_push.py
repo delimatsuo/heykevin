@@ -25,12 +25,12 @@ from app.webhooks.media_stream import LiveTranscriptPusher
 def writes(monkeypatch):
     written = []
 
-    async def fake_update(call_sid, data):
-        written.append((call_sid, data.get("transcript_buffer", "")))
+    async def fake_update(call_sid, transcript, **_kwargs):
+        written.append((call_sid, transcript))
         return True
 
     monkeypatch.setattr(
-        "app.webhooks.media_stream.update_active_call", fake_update
+        "app.webhooks.media_stream.update_live_transcript", fake_update
     )
     return written
 
@@ -38,7 +38,7 @@ def writes(monkeypatch):
 @pytest.mark.asyncio
 async def test_burst_followed_by_silence_still_flushes_the_last_line(writes):
     lines: list[str] = []
-    pusher = LiveTranscriptPusher("CA_test", lines, throttle=0.05)
+    pusher = LiveTranscriptPusher("CA_test", lines, throttle=0.05, contractor_id="test-owner", ws_token="test-token")
 
     lines.append("Caller: Do you guys do toilet replacement?")
     pusher.push()
@@ -53,10 +53,11 @@ async def test_burst_followed_by_silence_still_flushes_the_last_line(writes):
 @pytest.mark.asyncio
 async def test_rapid_lines_coalesce_into_one_trailing_flush(writes):
     lines: list[str] = []
-    pusher = LiveTranscriptPusher("CA_test", lines, throttle=0.05)
+    pusher = LiveTranscriptPusher("CA_test", lines, throttle=0.05, contractor_id="test-owner", ws_token="test-token")
 
     lines.append("Caller: Hi")
     pusher.push()
+    await asyncio.sleep(0)  # let the immediate snapshot finish before the burst
     for i in range(5):
         lines.append(f"Kevin: part {i}")
         pusher.push()
@@ -70,7 +71,7 @@ async def test_rapid_lines_coalesce_into_one_trailing_flush(writes):
 @pytest.mark.asyncio
 async def test_spaced_lines_push_immediately(writes):
     lines: list[str] = []
-    pusher = LiveTranscriptPusher("CA_test", lines, throttle=0.02)
+    pusher = LiveTranscriptPusher("CA_test", lines, throttle=0.02, contractor_id="test-owner", ws_token="test-token")
 
     lines.append("Caller: Hi")
     pusher.push()

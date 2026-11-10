@@ -108,7 +108,6 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
             return
 
     transcript_lines: list[str] = []
-    transcript_pusher = LiveTranscriptPusher(call_sid, transcript_lines)
     call_redirected = False
     pipeline = None
     active_call = None
@@ -185,6 +184,11 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         await websocket.close(code=1011)
         return
 
+    transcript_pusher = LiveTranscriptPusher(
+        call_sid, transcript_lines,
+        contractor_id=call_data.get("contractor_id", ""), ws_token=ws_token,
+    )
+
     async def send_to_twilio(message: dict) -> None:
         await websocket.send_text(json.dumps(message))
 
@@ -225,25 +229,25 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
     async def on_call_complete():
         session_done.set()
 
-    pipeline = RelayPipeline(
-        contractor_config=contractor_config_loaded,
-        call_sid=call_sid,
-        caller_phone=active_call.caller_phone if active_call else "",
-        send_to_twilio=send_to_twilio,
-        on_transcript=on_transcript,
-        on_urgency_detected=on_urgency_detected,
-        on_call_complete=on_call_complete,
-        spoken_greeting=spoken_greeting,
-    )
-    pipeline._command_ws_token = ws_token
-    pipeline.start_background_tasks()
-    logger.info(
-        "relay_event event=pipeline_selected call=%s engine=relay",
-        _call_label(call_sid),
-    )
-
-    started_at = time.monotonic()
     try:
+        pipeline = RelayPipeline(
+            contractor_config=contractor_config_loaded,
+            call_sid=call_sid,
+            caller_phone=active_call.caller_phone if active_call else "",
+            send_to_twilio=send_to_twilio,
+            on_transcript=on_transcript,
+            on_urgency_detected=on_urgency_detected,
+            on_call_complete=on_call_complete,
+            spoken_greeting=spoken_greeting,
+        )
+        pipeline._command_ws_token = ws_token
+        pipeline.start_background_tasks()
+        logger.info(
+            "relay_event event=pipeline_selected call=%s engine=relay",
+            _call_label(call_sid),
+        )
+
+        started_at = time.monotonic()
         while not session_done.is_set():
             remaining = MAX_CALL_DURATION - (time.monotonic() - started_at)
             if remaining <= 0:
@@ -267,11 +271,14 @@ async def relay_stream_ws(websocket: WebSocket, call_sid: str):
         # Includes the normal WebSocket disconnect when the call ends.
         _log_safe_exception("relay_stream_closed", error, call_sid)
     finally:
-        if pipeline:
-            try:
-                await pipeline.stop()
-            except Exception:
-                pass
+        try:
+            if pipeline:
+                try:
+                    await pipeline.stop()
+                except Exception:
+                    pass
+        finally:
+            await transcript_pusher.close()
         try:
             await websocket.close()
         except Exception:

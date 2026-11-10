@@ -93,30 +93,47 @@ class KeychainManager {
         read(key).stringValue
     }
 
+    @discardableResult
+    static func removeNonemptyLegacyValue(forKey key: String, in defaults: UserDefaults) -> Bool {
+        guard let legacy = defaults.string(forKey: key), !legacy.isEmpty else { return false }
+        defaults.removeObject(forKey: key)
+        return true
+    }
+
     /// An unavailable read is not absence, and a failed migration is not a
     /// usable secure credential. Keep the legacy value until readback succeeds.
     func readMigratingLegacy(_ key: String, defaults: UserDefaults = .standard) -> KeychainReadResult {
         let result = read(key)
-        guard result == .missing,
-              let legacy = defaults.string(forKey: key), !legacy.isEmpty else { return result }
-        guard save(key, value: legacy) else { return .error(errSecNotAvailable) }
-        let confirmed = read(key)
-        guard confirmed == .value(legacy) else { return .error(errSecNotAvailable) }
-        defaults.removeObject(forKey: key)
-        return confirmed
+        switch result {
+        case .value:
+            _ = Self.removeNonemptyLegacyValue(forKey: key, in: defaults)
+            return result
+        case .error:
+            return result
+        case .missing:
+            guard let legacy = defaults.string(forKey: key), !legacy.isEmpty else { return .missing }
+            guard save(key, value: legacy) else { return .error(errSecNotAvailable) }
+            let confirmed = read(key)
+            guard confirmed == .value(legacy) else { return .error(errSecNotAvailable) }
+            defaults.removeObject(forKey: key)
+            return confirmed
+        }
     }
 
-    func delete(_ key: String) {
+    @discardableResult
+    func delete(_ key: String) -> Bool {
         if let remover {
             remover(key)
-            return
+            return read(key) == .missing
         }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: key,
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { return false }
+        return read(key) == .missing
     }
 
     @discardableResult

@@ -348,16 +348,18 @@ final class AccountDeletionCompletionTests: XCTestCase {
         state.subscriptionStatus = "active"; state.subscriptionTier = "businessPro"
         state.subscriptionUUID = "00000000-0000-4000-8000-000000000001"
         state.contactsUploadConsent = true
+        XCTAssertTrue(state.hasOwnedContactsUploadConsent(for: "account-a"))
         XCTAssertTrue(state.hasBusinessProEntitlement)
         let token = try f.begin()
         XCTAssertEqual(f.complete(.deleted, token: token), .deleted)
         XCTAssertEqual(state.sessionState, .notOnboarded)
         XCTAssertEqual(f.bearerWrites, [""])
+        XCTAssertFalse(state.contactsUploadConsent)
+        XCTAssertNil(state.contactsUploadConsentOwner)
 
         expectResetGap("deleted-profile-and-apple-identity", state.businessName.isEmpty && state.appleUserId.isEmpty)
         expectResetGap("deleted-subscription-cache", state.subscriptionStatus != "active"
             && state.subscriptionTier != "businessPro" && state.subscriptionUUID.isEmpty)
-        expectResetGap("deleted-explicit-contact-consent", !state.contactsUploadConsent)
     }
 
     private func expectResetGap(_ tag: String, _ invariant: Bool, file: String = #filePath, line: Int = #line) {
@@ -530,6 +532,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         expectedDefaults["kevinNumber"] = ""
         expectedDefaults["countryCode"] = ""
         expectedDefaults["isOnboarded"] = false
+        expectedDefaults["contactsUploadConsent"] = false
         XCTAssertEqual(image.defaults as NSDictionary, expectedDefaults as NSDictionary)
         var expectedSecure = Self.secureA
         expectedSecure.removeValue(forKey: "contractorId")
@@ -556,7 +559,8 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(state.subscriptionStatus, "active")
         XCTAssertEqual(state.subscriptionTier, "businessPro")
         XCTAssertEqual(state.subscriptionUUID, Self.secureA["subscriptionUUID"])
-        XCTAssertTrue(state.contactsUploadConsent)
+        XCTAssertFalse(state.contactsUploadConsent)
+        XCTAssertNil(state.contactsUploadConsentOwner)
         XCTAssertTrue(state.jobberConnected)
         XCTAssertTrue(state.googleCalendarConnected)
         XCTAssertTrue(state.forwardingActivated)
@@ -572,7 +576,6 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         expectDurableGap("durable-deleted-subscription-status", state.subscriptionStatus != "active")
         expectDurableGap("durable-deleted-subscription-tier", state.subscriptionTier != "businessPro")
         expectDurableGap("durable-deleted-subscription-uuid", state.subscriptionUUID.isEmpty)
-        expectDurableGap("durable-deleted-contact-consent", !state.contactsUploadConsent)
     }
 
     private func expectDurableGap(_ tag: String, _ invariant: Bool, file: String = #filePath, line: Int = #line) {
@@ -675,15 +678,15 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         })
         XCTAssertEqual(result, .deleted)
         XCTAssertFalse(original.fence.isPending)
-        // The setter sees the read error as an empty old value and skips an equal write.
-        XCTAssertEqual(original.secure.attemptedRemovals, ["contractorId"])
-        XCTAssertEqual(original.state.sessionGeneration, token.auth.generation + 2)
+        // A denied Keychain read is not verified absence, so the setter still attempts deletion.
+        XCTAssertEqual(original.secure.attemptedRemovals, ["contractorId", "contractorApiToken"])
+        XCTAssertEqual(original.state.sessionGeneration, token.auth.generation + 3)
         XCTAssertNil(original.secure.values["contractorId"])
-        XCTAssertEqual(original.secure.values["contractorApiToken"], "bearer-A")
+        XCTAssertNil(original.secure.values["contractorApiToken"])
         await Self.drainMainQueue()
         let fresh = try reopen(original)
         XCTAssertEqual(fresh.state.sessionState, .notOnboarded)
-        XCTAssertEqual(fresh.api.contractorToken, "bearer-A")
+        XCTAssertEqual(fresh.api.contractorToken, "")
         XCTAssertFalse(fresh.state.currentAuthContext().isValid)
     }
 
@@ -730,7 +733,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(state.contractorId, "")
         XCTAssertEqual(state.kevinNumber, "")
         XCTAssertEqual(state.appleUserId, "apple-A")
-        XCTAssertTrue(state.contactsUploadConsent)
+        XCTAssertFalse(state.contactsUploadConsent)
         XCTAssertNil(state.pendingAccountRecovery)
 
         let uuidB = "00000000-0000-4000-8000-00000000000b"
@@ -799,25 +802,30 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         preferences["contractorId"] = "account-B"
         preferences["contractorApiToken"] = "legacy-bearer-B"
         let original = try await readyA(preferences: preferences)
+        let readyImage = try original.snapshot()
+        XCTAssertNil(readyImage.defaults["contractorId"])
+        XCTAssertNil(readyImage.defaults["contractorApiToken"])
         let token = try original.begin()
         var removed: Result<Snapshot, Error>?
         XCTAssertEqual(original.complete(.deleted, token, afterBearer: {
             removed = Result { try original.snapshot() }
         }), .deleted)
+        XCTAssertFalse(original.state.contactsUploadConsent)
         let checkpoint = try XCTUnwrap(removed).get()
         XCTAssertNil(try checkpoint.secureValues()["contractorId"])
         XCTAssertNil(try checkpoint.secureValues()["contractorApiToken"])
-        XCTAssertEqual(checkpoint.defaults["contractorId"] as? String, "account-B")
-        XCTAssertEqual(checkpoint.defaults["contactsUploadConsent"] as? Bool, true)
+        XCTAssertNil(checkpoint.defaults["contractorId"])
+        XCTAssertNil(checkpoint.defaults["contractorApiToken"])
+        XCTAssertEqual(checkpoint.defaults["contactsUploadConsent"] as? Bool, false)
         await Self.drainMainQueue()
 
         let signedOut = try reopen(original)
         let state = signedOut.state
         XCTAssertEqual(state.sessionState, .notOnboarded)
-        XCTAssertEqual(state.contractorId, "account-B")
-        XCTAssertEqual(signedOut.api.contractorToken, "legacy-bearer-B")
+        XCTAssertEqual(state.contractorId, "")
+        XCTAssertEqual(signedOut.api.contractorToken, "")
         XCTAssertEqual(state.appleUserId, "apple-A")
-        XCTAssertTrue(state.contactsUploadConsent)
+        XCTAssertFalse(state.contactsUploadConsent)
         XCTAssertNil(state.pendingAccountRecovery)
 
         var lookups = 0
@@ -847,7 +855,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(lookups, 1)
         XCTAssertEqual(profiles, 1)
         XCTAssertEqual(reconciliations, 1)
-        XCTAssertEqual(syncTargets, ["account-B"], "Only the injected counting callback is invoked")
+        XCTAssertTrue(syncTargets.isEmpty)
         await Self.drainMainQueue()
         let image = try signedOut.snapshot()
         let fresh = try reopen(signedOut)
@@ -856,9 +864,8 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(fresh.state.currentAuthContext().bearerToken, "verified-bearer-B")
         XCTAssertEqual(fresh.state.appleUserId, "apple-B")
         XCTAssertEqual(fresh.state.userName, "owner-B")
-        XCTAssertEqual(image.defaults["contactsUploadConsent"] as? Bool, fresh.state.contactsUploadConsent)
-        expectDurableGap("durable-legacy-consent-owner", !fresh.state.contactsUploadConsent)
-        expectDurableGap("durable-legacy-no-contact-sync", syncTargets.isEmpty)
+        XCTAssertFalse(fresh.state.contactsUploadConsent)
+        XCTAssertEqual(image.defaults["contactsUploadConsent"] as? Bool, false)
     }
 
     func testQueuedDefaultsReadCurrentPropertyWhileConsentAndReadIDsWriteImmediately() async throws {
@@ -906,6 +913,10 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         preferences["contractorApiToken"] = "legacy-bearer"
         preferences["readCallIds_legacy-account"] = [String]()
         let original = try await readyA(preferences: preferences)
+        let readyImage = try original.snapshot()
+        XCTAssertNil(readyImage.defaults["contractorId"])
+        XCTAssertNil(readyImage.defaults["contractorApiToken"])
+
         let token = try original.begin()
         var justRemoved: Result<Snapshot, Error>?
         let result = original.complete(.deleted, token, afterBearer: {
@@ -915,20 +926,221 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         let image = try XCTUnwrap(justRemoved).get()
         XCTAssertNil(try image.secureValues()["contractorId"])
         XCTAssertNil(try image.secureValues()["contractorApiToken"])
-        XCTAssertEqual(image.defaults["contractorId"] as? String, "legacy-account")
-        XCTAssertEqual(image.defaults["contractorApiToken"] as? String, "legacy-bearer")
+        XCTAssertNil(image.defaults["contractorId"])
+        XCTAssertNil(image.defaults["contractorApiToken"])
 
-        // A queued epoch notification may read the bearer before the next AppState is constructed.
         await Self.drainMainQueue()
         let fresh = try reopen(original)
         XCTAssertEqual(fresh.state.sessionState, .notOnboarded)
-        XCTAssertEqual(fresh.state.currentAuthContext().contractorId, "legacy-account")
-        XCTAssertEqual(fresh.state.currentAuthContext().bearerToken, "legacy-bearer")
-        XCTAssertTrue(fresh.state.currentAuthContext().isValid)
-        let migrated = try fresh.snapshot()
-        XCTAssertNil(migrated.defaults["contractorId"])
-        XCTAssertNil(migrated.defaults["contractorApiToken"])
-        XCTAssertEqual(try migrated.secureValues()["contractorId"], "legacy-account")
-        XCTAssertEqual(try migrated.secureValues()["contractorApiToken"], "legacy-bearer")
+        XCTAssertEqual(fresh.state.currentAuthContext().contractorId, "")
+        XCTAssertEqual(fresh.state.currentAuthContext().bearerToken, "")
+        XCTAssertFalse(fresh.state.currentAuthContext().isValid)
+
+        // Also prove deletion itself scrubs duplicate legacy defaults injected right before completion
+        // without relying on an earlier readMigratingLegacy call.
+        let injected = try await readyA()
+        let injectedToken = try injected.begin()
+        injected.defaults.set("late-legacy-account", forKey: "contractorId")
+        var afterDirectScrub: Result<Snapshot, Error>?
+        let injectedResult = injected.complete(.deleted, injectedToken, beforeBearer: {
+            injected.defaults.set("late-legacy-bearer", forKey: "contractorApiToken")
+        }, afterBearer: {
+            afterDirectScrub = Result { try injected.snapshot() }
+        })
+        XCTAssertEqual(injectedResult, .deleted)
+        let scrubbed = try XCTUnwrap(afterDirectScrub).get()
+        XCTAssertNil(try scrubbed.secureValues()["contractorId"])
+        XCTAssertNil(try scrubbed.secureValues()["contractorApiToken"])
+        XCTAssertNil(scrubbed.defaults["contractorId"])
+        XCTAssertNil(scrubbed.defaults["contractorApiToken"])
+        await Self.drainMainQueue()
+        let reopenedInjected = try reopen(injected)
+        XCTAssertEqual(reopenedInjected.state.sessionState, .notOnboarded)
+        XCTAssertEqual(reopenedInjected.state.currentAuthContext().contractorId, "")
+        XCTAssertEqual(reopenedInjected.state.currentAuthContext().bearerToken, "")
+        XCTAssertFalse(reopenedInjected.state.currentAuthContext().isValid)
+    }
+
+    func testHistoricalPreFixDeletedStoreWithMigratedIdentityRejectsUnownedAndMismatchedConsent() async throws {
+        var baseSecure = Self.secureA
+        baseSecure.removeValue(forKey: "contractorId")
+        baseSecure.removeValue(forKey: "contractorApiToken")
+
+        let variants: [(name: String, isOnboarded: Bool, owner: String?)] = [
+            ("bare-signed-out", false, nil),
+            ("bare-interrupted-onboarded", true, nil),
+            ("owned-by-deleted-account-A", false, "account-A"),
+            ("stale-owner-matching-migrated-B", false, "account-B"),
+        ]
+
+        for variant in variants {
+            var defaults = Self.preferencesA
+            defaults["isOnboarded"] = variant.isOnboarded
+            defaults["kevinNumber"] = ""
+            defaults["countryCode"] = ""
+            defaults["contractorId"] = "account-B"
+            defaults["contractorApiToken"] = "legacy-bearer-B"
+            defaults["contactsUploadConsent"] = true
+            if let owner = variant.owner {
+                defaults["contactsUploadConsentOwner"] = owner
+            } else {
+                defaults.removeValue(forKey: "contactsUploadConsentOwner")
+            }
+
+            let signedOut = try open(Snapshot(defaults: defaults, secure: baseSecure))
+            signedOut.state.refreshSecureStorageForActiveUse()
+            XCTAssertEqual(signedOut.state.contractorId, "account-B", variant.name)
+            XCTAssertFalse(signedOut.state.contactsUploadConsent, variant.name)
+            XCTAssertNil(signedOut.state.contactsUploadConsentOwner, variant.name)
+            XCTAssertFalse(signedOut.state.hasOwnedContactsUploadConsent(for: "account-B"), variant.name)
+
+            var syncTargets: [String] = []
+            let coordinator = AccountRestoreCoordinator(state: signedOut.state, lookupHandler: { apple, identityToken in
+                XCTAssertEqual(apple, "apple-B")
+                XCTAssertEqual(identityToken, "identity-B")
+                return .found(contractorId: "account-B", apiToken: "verified-bearer-B")
+            }, profileFetcher: { account, bearer in
+                XCTAssertEqual(account, "account-B")
+                XCTAssertEqual(bearer, "verified-bearer-B")
+                return ["contractor_id": account, "active": true, "twilio_number": "number-B",
+                        "owner_name": "owner-B", "subscription_status": "trial",
+                        "subscription_tier": "personal", "country_code": "CA"]
+            }, notificationReconciler: {},
+               contactSyncHandler: { syncTargets.append($0) })
+
+            let revision = try XCTUnwrap(coordinator.beginAttempt())
+            let outcome = await coordinator.restoreAccount(
+                appleUserId: "apple-B",
+                appleIdentityToken: "identity-B",
+                isRecoveryMode: false,
+                retainedContractorId: signedOut.state.contractorId,
+                retainedAppleUserId: signedOut.state.appleUserId,
+                retainedKevinNumber: signedOut.state.kevinNumber,
+                attemptRevision: revision
+            )
+            XCTAssertEqual(outcome, .success(contractorId: "account-B", needsProvisioning: false), variant.name)
+            XCTAssertTrue(syncTargets.isEmpty, variant.name)
+            await Self.drainMainQueue()
+            let fresh = try reopen(signedOut)
+            XCTAssertFalse(fresh.state.contactsUploadConsent, variant.name)
+            XCTAssertNil(fresh.state.contactsUploadConsentOwner, variant.name)
+            XCTAssertFalse(fresh.state.hasOwnedContactsUploadConsent(for: "account-B"), variant.name)
+        }
+    }
+
+    func testLockedColdLaunchPreservesOwnedConsentUntilUnlockAndSameAccountRecoveryKeepsConsent() async throws {
+        var bareLegacyPrefs = Self.preferencesA
+        bareLegacyPrefs["contractorId"] = "stale-legacy-id"
+        bareLegacyPrefs["contractorApiToken"] = "stale-legacy-token"
+        bareLegacyPrefs["appleUserId"] = "stale-legacy-apple"
+
+        let lockedBare = try open(Snapshot(defaults: bareLegacyPrefs, secure: Self.secureA), locked: true)
+        lockedBare.state.refreshSecureStorageForActiveUse()
+        XCTAssertTrue(lockedBare.state.sessionState.isUnavailable)
+        XCTAssertFalse(lockedBare.state.contactsUploadConsent)
+        XCTAssertNil(lockedBare.state.contactsUploadConsentOwner)
+        XCTAssertFalse(lockedBare.state.hasOwnedContactsUploadConsent(for: "account-A"))
+        let whileLockedBare = try lockedBare.snapshot()
+        XCTAssertEqual(whileLockedBare.defaults["contactsUploadConsent"] as? Bool, true)
+        XCTAssertEqual(whileLockedBare.defaults["contractorId"] as? String, "stale-legacy-id")
+        XCTAssertEqual(whileLockedBare.defaults["contractorApiToken"] as? String, "stale-legacy-token")
+        XCTAssertEqual(whileLockedBare.defaults["appleUserId"] as? String, "stale-legacy-apple")
+
+        lockedBare.secure.locked = false
+        lockedBare.state.refreshSecureStorageForActiveUse()
+        XCTAssertEqual(lockedBare.state.sessionState, .ready)
+        XCTAssertTrue(lockedBare.state.contactsUploadConsent)
+        XCTAssertEqual(lockedBare.state.contactsUploadConsentOwner, "account-A")
+        XCTAssertTrue(lockedBare.state.hasOwnedContactsUploadConsent(for: "account-A"))
+        let unlockedBareSnap = try lockedBare.snapshot()
+        XCTAssertEqual(unlockedBareSnap.defaults["contactsUploadConsent"] as? Bool, true)
+        XCTAssertEqual(unlockedBareSnap.defaults["contactsUploadConsentOwner"] as? String, "account-A")
+        XCTAssertNil(unlockedBareSnap.defaults["contractorId"])
+        XCTAssertNil(unlockedBareSnap.defaults["contractorApiToken"])
+        XCTAssertNil(unlockedBareSnap.defaults["appleUserId"])
+
+        let lockedExplicit = try open(unlockedBareSnap, locked: true)
+        lockedExplicit.state.refreshSecureStorageForActiveUse()
+        XCTAssertTrue(lockedExplicit.state.sessionState.isUnavailable)
+        XCTAssertFalse(lockedExplicit.state.contactsUploadConsent)
+        XCTAssertNil(lockedExplicit.state.contactsUploadConsentOwner)
+        XCTAssertEqual(try lockedExplicit.snapshot().defaults["contactsUploadConsent"] as? Bool, true)
+        XCTAssertEqual(try lockedExplicit.snapshot().defaults["contactsUploadConsentOwner"] as? String, "account-A")
+
+        lockedExplicit.secure.locked = false
+        lockedExplicit.state.refreshSecureStorageForActiveUse()
+        XCTAssertEqual(lockedExplicit.state.sessionState, .ready)
+        XCTAssertTrue(lockedExplicit.state.contactsUploadConsent)
+        XCTAssertEqual(lockedExplicit.state.contactsUploadConsentOwner, "account-A")
+        XCTAssertTrue(lockedExplicit.state.hasOwnedContactsUploadConsent(for: "account-A"))
+
+        lockedExplicit.secure.values.removeValue(forKey: "contractorApiToken")
+        let recovering = try reopen(lockedExplicit)
+        XCTAssertEqual(recovering.state.sessionState, .needsRecovery)
+        XCTAssertEqual(recovering.state.contractorId, "account-A")
+        XCTAssertTrue(recovering.state.hasOwnedContactsUploadConsent(for: "account-A"))
+
+        var syncTargets: [String] = []
+        let coordinator = AccountRestoreCoordinator(state: recovering.state, lookupHandler: { apple, identityToken in
+            XCTAssertEqual(apple, "apple-A")
+            XCTAssertEqual(identityToken, "identity-A")
+            return .found(contractorId: "account-A", apiToken: "recovered-bearer-A")
+        }, profileFetcher: { account, bearer in
+            XCTAssertEqual(account, "account-A")
+            XCTAssertEqual(bearer, "recovered-bearer-A")
+            return ["contractor_id": account, "active": true, "twilio_number": "number-A",
+                    "owner_name": "owner-A", "business_name": "business-A",
+                    "subscription_status": "active", "subscription_tier": "businessPro",
+                    "subscription_uuid": Self.secureA["subscriptionUUID"] ?? "", "country_code": "US"]
+        }, notificationReconciler: {},
+           contactSyncHandler: { syncTargets.append($0) })
+
+        let revision = try XCTUnwrap(coordinator.beginAttempt())
+        let outcome = await coordinator.restoreAccount(
+            appleUserId: "apple-A",
+            appleIdentityToken: "identity-A",
+            isRecoveryMode: true,
+            retainedContractorId: recovering.state.contractorId,
+            retainedAppleUserId: recovering.state.appleUserId,
+            retainedKevinNumber: recovering.state.kevinNumber,
+            attemptRevision: revision
+        )
+        XCTAssertEqual(outcome, .success(contractorId: "account-A", needsProvisioning: false))
+        XCTAssertEqual(syncTargets, ["account-A"])
+        await Self.drainMainQueue()
+
+        let fresh = try reopen(recovering)
+        XCTAssertEqual(fresh.state.sessionState, .ready)
+        XCTAssertTrue(fresh.state.contactsUploadConsent)
+        XCTAssertEqual(fresh.state.contactsUploadConsentOwner, "account-A")
+        XCTAssertTrue(fresh.state.hasOwnedContactsUploadConsent(for: "account-A"))
+
+        fresh.state.revokeContactsUploadConsent()
+        XCTAssertFalse(fresh.state.contactsUploadConsent)
+        XCTAssertNil(fresh.state.contactsUploadConsentOwner)
+        XCTAssertFalse(fresh.state.hasOwnedContactsUploadConsent(for: "account-A"))
+        let revokedSnap = try fresh.snapshot()
+        XCTAssertEqual(revokedSnap.defaults["contactsUploadConsent"] as? Bool, false)
+        XCTAssertNil(revokedSnap.defaults["contactsUploadConsentOwner"])
+
+        fresh.state.grantContactsUploadConsent(for: "account-A")
+        XCTAssertTrue(fresh.state.contactsUploadConsent)
+        XCTAssertEqual(fresh.state.contactsUploadConsentOwner, "account-A")
+        XCTAssertTrue(fresh.state.hasOwnedContactsUploadConsent(for: "account-A"))
+        let grantedSnap = try fresh.snapshot()
+        XCTAssertEqual(grantedSnap.defaults["contactsUploadConsent"] as? Bool, true)
+        XCTAssertEqual(grantedSnap.defaults["contactsUploadConsentOwner"] as? String, "account-A")
+
+        fresh.secure.values.removeValue(forKey: "contractorId")
+        fresh.secure.values.removeValue(forKey: "contractorApiToken")
+        XCTAssertEqual(fresh.state.contractorId, "account-A")
+        fresh.state.refreshSecureStorageForActiveUse()
+        XCTAssertEqual(fresh.state.sessionState, .needsRecovery)
+        XCTAssertFalse(fresh.state.contactsUploadConsent)
+        XCTAssertNil(fresh.state.contactsUploadConsentOwner)
+        XCTAssertFalse(fresh.state.hasOwnedContactsUploadConsent(for: "account-A"))
+        let wipedSnap = try fresh.snapshot()
+        XCTAssertEqual(wipedSnap.defaults["contactsUploadConsent"] as? Bool, false)
+        XCTAssertNil(wipedSnap.defaults["contactsUploadConsentOwner"])
     }
 }

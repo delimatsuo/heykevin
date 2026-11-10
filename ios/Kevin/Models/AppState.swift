@@ -70,9 +70,15 @@ class AppState: ObservableObject {
     private(set) var recoveryCommitPending = false
     private(set) var pendingAccountRecovery: AccountRecoveryCheckpoint?
     private static let recoveryMarkerKey = "accountRecoveryCommit"
+    static let contactsUploadConsentKey = "contactsUploadConsent"
+    static let contactsUploadConsentOwnerKey = "contactsUploadConsentOwner"
+    private var isUpdatingConsentState = false
+    private(set) var contactsUploadConsentOwner: String? = nil
 
     private func migrateToKeychain(_ key: String) -> String {
-        persistence.keychain.readMigratingLegacy(key, defaults: persistence.defaults).stringValue ?? ""
+        (injectedSecureStore == nil
+            ? persistence.readMigratingLegacy(key)
+            : secureStore.readMigratingLegacy(key, defaults: persistence.defaults)).stringValue ?? ""
     }
 
     init(authProvider: (() -> CallAuthContext)? = nil, inMemory: Bool = false,
@@ -99,7 +105,6 @@ class AppState: ObservableObject {
             self.serviceType = persistence.defaults.string(forKey: "serviceType") ?? ""
             self.mode = persistence.defaults.string(forKey: "kevinMode") ?? "business"
             self.ringThroughContacts = persistence.defaults.object(forKey: "ringThroughContacts") as? Bool ?? true
-            self.contactsUploadConsent = persistence.defaults.bool(forKey: "contactsUploadConsent")
             self.isVerizonCarrier = persistence.defaults.bool(forKey: "isVerizonCarrier")
             self.sitToneEnabled = persistence.defaults.object(forKey: "sitToneEnabled") as? Bool ?? false
             self.autoReplySms = persistence.defaults.object(forKey: "autoReplySms") as? Bool ?? false
@@ -109,6 +114,7 @@ class AppState: ObservableObject {
             self.readCallIds = loadReadCallIds(for: initialContractor)
             self.jobberConnected = persistence.defaults.bool(forKey: "jobberConnected")
             self.googleCalendarConnected = persistence.defaults.bool(forKey: "googleCalendarConnected")
+            reconcilePersistedConsent()
         }
 
         if !inMemory {
@@ -196,12 +202,21 @@ class AppState: ObservableObject {
             let changed = oldValue != contractorId
             if !inScreenshotFixture && !inMemory {
                 if contractorId.isEmpty {
+                    _ = KeychainManager.removeNonemptyLegacyValue(forKey: "contractorId", in: persistence.defaults)
+                    persistence.clearMigratedLegacyKey("contractorId")
                     persistence.keychain.delete("contractorId")
                 } else {
-                    persistence.keychain.save("contractorId", value: contractorId)
+                    if persistence.keychain.save("contractorId", value: contractorId) {
+                        _ = KeychainManager.removeNonemptyLegacyValue(forKey: "contractorId", in: persistence.defaults)
+                    }
                 }
             }
             if changed {
+                let newTrimmed = contractorId.trimmingCharacters(in: .whitespacesAndNewlines)
+                if (contactsUploadConsent || contactsUploadConsentOwner != nil)
+                    && (newTrimmed.isEmpty || contactsUploadConsentOwner != newTrimmed) {
+                    revokeContactsUploadConsent()
+                }
                 if inMemory { inMemoryGeneration += 1 }
                 callLifecycleRevision += 1
                 if !inMemory && !inScreenshotFixture {
@@ -296,11 +311,16 @@ class AppState: ObservableObject {
     }
     @Published var appleUserId: String = "" {
         didSet {
-            if inScreenshotFixture || inMemory { return }
-            if appleUserId.isEmpty {
-                persistence.keychain.delete("appleUserId")
-            } else {
-                persistence.keychain.save("appleUserId", value: appleUserId)
+            if !inScreenshotFixture && !inMemory {
+                if appleUserId.isEmpty {
+                    _ = KeychainManager.removeNonemptyLegacyValue(forKey: "appleUserId", in: persistence.defaults)
+                    persistence.clearMigratedLegacyKey("appleUserId")
+                    persistence.keychain.delete("appleUserId")
+                } else {
+                    if persistence.keychain.save("appleUserId", value: appleUserId) {
+                        _ = KeychainManager.removeNonemptyLegacyValue(forKey: "appleUserId", in: persistence.defaults)
+                    }
+                }
             }
         }
     }
@@ -421,8 +441,163 @@ class AppState: ObservableObject {
     // Explicit consent to upload contacts to the server. Separate from iOS contacts permission.
     @Published var contactsUploadConsent: Bool = false {
         didSet {
-            if inScreenshotFixture || inMemory { return }
-            persistence.defaults.set(contactsUploadConsent, forKey: "contactsUploadConsent")
+            guard !isUpdatingConsentState else { return }
+            if contactsUploadConsent {
+                let trimmed = contractorId.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && !recoveryCommitPending && pendingAccountRecovery == nil {
+                    contactsUploadConsentOwner = trimmed
+                    if !inScreenshotFixture && !inMemory {
+                        persistence.clearMigratedLegacyKey("contractorId")
+                        persistence.defaults.set(true, forKey: Self.contactsUploadConsentKey)
+                        persistence.defaults.set(trimmed, forKey: Self.contactsUploadConsentOwnerKey)
+                    }
+                } else {
+                    contactsUploadConsentOwner = nil
+                    if !inScreenshotFixture && !inMemory {
+                        persistence.defaults.set(false, forKey: Self.contactsUploadConsentKey)
+                        persistence.defaults.removeObject(forKey: Self.contactsUploadConsentOwnerKey)
+                    }
+                }
+            } else {
+                contactsUploadConsentOwner = nil
+                if !inScreenshotFixture && !inMemory {
+                    persistence.defaults.set(false, forKey: Self.contactsUploadConsentKey)
+                    persistence.defaults.removeObject(forKey: Self.contactsUploadConsentOwnerKey)
+                }
+            }
+        }
+    }
+
+    func grantContactsUploadConsent(for accountId: String) {
+        let trimmed = accountId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !recoveryCommitPending, pendingAccountRecovery == nil else {
+            revokeContactsUploadConsent()
+            return
+        }
+        isUpdatingConsentState = true
+        contactsUploadConsentOwner = trimmed
+        if !contactsUploadConsent { contactsUploadConsent = true }
+        isUpdatingConsentState = false
+        if !inScreenshotFixture && !inMemory {
+            persistence.clearMigratedLegacyKey("contractorId")
+            persistence.defaults.set(true, forKey: Self.contactsUploadConsentKey)
+            persistence.defaults.set(trimmed, forKey: Self.contactsUploadConsentOwnerKey)
+        }
+    }
+
+    func revokeContactsUploadConsent() {
+        isUpdatingConsentState = true
+        contactsUploadConsentOwner = nil
+        if contactsUploadConsent { contactsUploadConsent = false }
+        isUpdatingConsentState = false
+        if !inScreenshotFixture && !inMemory {
+            persistence.defaults.set(false, forKey: Self.contactsUploadConsentKey)
+            persistence.defaults.removeObject(forKey: Self.contactsUploadConsentOwnerKey)
+        }
+    }
+
+    func hasOwnedContactsUploadConsent(for accountId: String) -> Bool {
+        let trimmed = accountId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && contactsUploadConsent && contactsUploadConsentOwner == trimmed
+    }
+
+    private func reconcilePersistedConsent(pendingRecovery: Bool? = nil) {
+        guard !inMemory && !inScreenshotFixture else { return }
+        let marker = secureStore.read(Self.recoveryMarkerKey)
+        let idRead = secureStore.read("contractorId")
+        let tokenRead = secureStore.read("contractorApiToken")
+        if case .error = marker {
+            isUpdatingConsentState = true
+            contactsUploadConsentOwner = nil
+            if contactsUploadConsent { contactsUploadConsent = false }
+            isUpdatingConsentState = false
+            return
+        }
+        if case .error = idRead {
+            isUpdatingConsentState = true
+            contactsUploadConsentOwner = nil
+            if contactsUploadConsent { contactsUploadConsent = false }
+            isUpdatingConsentState = false
+            return
+        }
+        if case .error = tokenRead {
+            isUpdatingConsentState = true
+            contactsUploadConsentOwner = nil
+            if contactsUploadConsent { contactsUploadConsent = false }
+            isUpdatingConsentState = false
+            return
+        }
+        let markerPending: Bool
+        switch marker {
+        case .missing, .value("complete"):
+            markerPending = false
+        case .value:
+            markerPending = true
+        case .error:
+            return
+        }
+        let hasPending = recoveryCommitPending || pendingAccountRecovery != nil || (pendingRecovery ?? markerPending)
+        let rawConsent = persistence.defaults.bool(forKey: Self.contactsUploadConsentKey)
+        let storedOwner = (persistence.defaults.string(forKey: Self.contactsUploadConsentOwnerKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeId = contractorId.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !rawConsent {
+            isUpdatingConsentState = true
+            contactsUploadConsentOwner = nil
+            if contactsUploadConsent { contactsUploadConsent = false }
+            isUpdatingConsentState = false
+            if persistence.defaults.object(forKey: Self.contactsUploadConsentOwnerKey) != nil {
+                persistence.defaults.removeObject(forKey: Self.contactsUploadConsentOwnerKey)
+            }
+            return
+        }
+        if hasPending {
+            revokeContactsUploadConsent()
+            return
+        }
+        let validId: Bool
+        if case .value(let kcId) = idRead, kcId.trimmingCharacters(in: .whitespacesAndNewlines) == activeId {
+            validId = true
+        } else {
+            validId = false
+        }
+        if !storedOwner.isEmpty {
+            let valid = !activeId.isEmpty && activeId == storedOwner && validId && !persistence.didMigrateLegacyKey("contractorId")
+            if valid {
+                isUpdatingConsentState = true
+                contactsUploadConsentOwner = storedOwner
+                if !contactsUploadConsent { contactsUploadConsent = true }
+                isUpdatingConsentState = false
+            } else {
+                revokeContactsUploadConsent()
+            }
+            return
+        }
+
+        if case .value = tokenRead {
+            _ = KeychainManager.removeNonemptyLegacyValue(forKey: "contractorApiToken", in: persistence.defaults)
+        }
+        let validToken: Bool
+        if case .value(let tok) = tokenRead, !tok.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            validToken = true
+        } else {
+            validToken = false
+        }
+        let valid = isOnboarded
+            && !activeId.isEmpty
+            && validId
+            && validToken
+            && !persistence.didMigrateLegacyKey("contractorId")
+            && !persistence.didMigrateLegacyKey("contractorApiToken")
+        if valid {
+            isUpdatingConsentState = true
+            contactsUploadConsentOwner = activeId
+            if !contactsUploadConsent { contactsUploadConsent = true }
+            isUpdatingConsentState = false
+            persistence.defaults.set(activeId, forKey: Self.contactsUploadConsentOwnerKey)
+        } else {
+            revokeContactsUploadConsent()
         }
     }
 
@@ -709,6 +884,12 @@ class AppState: ObservableObject {
             guard let value = values[key], secureStore.save(key, value: value),
                   secureStore.read(key) == .value(value) else { return false }
         }
+        if !inMemory && !inScreenshotFixture {
+            for key in ["contractorId", "contractorApiToken", "appleUserId"] {
+                _ = KeychainManager.removeNonemptyLegacyValue(forKey: key, in: persistence.defaults)
+                persistence.clearMigratedLegacyKey(key)
+            }
+        }
         return true
     }
 
@@ -763,7 +944,13 @@ class AppState: ObservableObject {
         let pending = recoveryCommitPending ? pendingAccountRecovery : storedCheckpoint
         // A clean installation can also contain an interrupted returning-user
         // commit. Inspect it before permitting ordinary onboarding.
-        guard isOnboarded || pending != nil else { sessionState = .notOnboarded; return }
+        guard isOnboarded || pending != nil else {
+            if !inMemory {
+                reconcilePersistedConsent(pendingRecovery: false)
+            }
+            sessionState = .notOnboarded
+            return
+        }
         var reads = Dictionary(uniqueKeysWithValues: Self.keychainBackedKeys.map { ($0, secureStore.read($0)) })
         for result in [marker] + Array(reads.values) {
             if case .error = result {
@@ -772,11 +959,20 @@ class AppState: ObservableObject {
             }
         }
         if !inMemory {
-            for key in ["contractorId", "contractorApiToken", "appleUserId"] where reads[key] == .missing {
-                let migrated = secureStore.readMigratingLegacy(key, defaults: persistence.defaults)
-                guard case .error = migrated else { reads[key] = migrated; continue }
-                sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
-                return
+            for key in ["contractorId", "contractorApiToken", "appleUserId"] {
+                switch reads[key] {
+                case .missing:
+                    let migrated = injectedSecureStore == nil
+                        ? persistence.readMigratingLegacy(key)
+                        : secureStore.readMigratingLegacy(key, defaults: persistence.defaults)
+                    guard case .error = migrated else { reads[key] = migrated; continue }
+                    sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
+                    return
+                case .value:
+                    _ = KeychainManager.removeNonemptyLegacyValue(forKey: key, in: persistence.defaults)
+                case .error, .none:
+                    break
+                }
             }
         }
         // Surviving identity constrains recovery even if the other credential
@@ -785,11 +981,14 @@ class AppState: ObservableObject {
         let retainedApple = pending.flatMap { $0.appleUserId.isEmpty ? nil : $0.appleUserId } ?? reads["appleUserId"]?.stringValue
         if let cid = retainedId, !cid.isEmpty, contractorId != cid { contractorId = cid }
         if let apple = retainedApple, !apple.isEmpty, appleUserId != apple { appleUserId = apple }
+        if !inMemory {
+            reconcilePersistedConsent(pendingRecovery: pending != nil)
+        }
         if let pending {
             if !recoveryCommitPending {
                 // After an interrupted commit, the stored ID may be staged.
                 // Cached consent cannot establish its original owner.
-                contactsUploadConsent = false
+                revokeContactsUploadConsent()
             }
             recoveryCommitPending = true
             pendingAccountRecovery = pending

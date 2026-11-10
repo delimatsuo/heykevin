@@ -342,6 +342,7 @@ final class AccountPersistence {
     let defaults: UserDefaults
     let keychain: KeychainManager
     let epoch: CallSessionEpoch
+    private var migratedLegacyKeys: Set<String> = []
 
     init(defaults: UserDefaults, keychain: KeychainManager, epoch: CallSessionEpoch) {
         self.defaults = defaults
@@ -349,18 +350,57 @@ final class AccountPersistence {
         self.epoch = epoch
     }
 
+    func readMigratingLegacy(_ key: String) -> KeychainReadResult {
+        epoch.synchronized {
+            let preRead = keychain.read(key)
+            let result = keychain.readMigratingLegacy(key, defaults: defaults)
+            if preRead == .missing, case .value = result {
+                migratedLegacyKeys.insert(key)
+            }
+            return result
+        }
+    }
+
+    func didMigrateLegacyKey(_ key: String) -> Bool {
+        epoch.synchronized {
+            migratedLegacyKeys.contains(key)
+        }
+    }
+
+    func clearMigratedLegacyKey(_ key: String) {
+        epoch.synchronized {
+            _ = migratedLegacyKeys.remove(key)
+        }
+    }
+
     /// Per-contractor API token stored securely in Keychain
     /// Migrates from UserDefaults on first access for existing users
     var contractorToken: String {
         get {
-            keychain.readMigratingLegacy("contractorApiToken", defaults: defaults).stringValue ?? ""
+            readMigratingLegacy("contractorApiToken").stringValue ?? ""
         }
         set {
             let changed = epoch.synchronized { () -> Bool in
-                let old = contractorToken
-                guard old != newValue else { return false }
-                if newValue.isEmpty { keychain.delete("contractorApiToken") }
-                else { keychain.save("contractorApiToken", value: newValue) }
+                let current = keychain.read("contractorApiToken")
+                if newValue.isEmpty {
+                    let hadLegacy = KeychainManager.removeNonemptyLegacyValue(forKey: "contractorApiToken", in: defaults)
+                    _ = migratedLegacyKeys.remove("contractorApiToken")
+                    if current == .missing {
+                        return hadLegacy
+                    }
+                    // Unavailable storage (.error) is not verified absence; always attempt deletion.
+                    _ = keychain.delete("contractorApiToken")
+                    return true
+                }
+                if current == .value(newValue) {
+                    _ = KeychainManager.removeNonemptyLegacyValue(forKey: "contractorApiToken", in: defaults)
+                    _ = migratedLegacyKeys.remove("contractorApiToken")
+                    return false
+                }
+                if keychain.save("contractorApiToken", value: newValue) {
+                    _ = KeychainManager.removeNonemptyLegacyValue(forKey: "contractorApiToken", in: defaults)
+                    _ = migratedLegacyKeys.remove("contractorApiToken")
+                }
                 return true
             }
             if changed {

@@ -32,6 +32,7 @@ struct OnboardingView: View {
     @State private var isLoading = false
     @State private var signInAttemptRevision: Int?
     @State private var signupContinuation: SignupContinuation?
+    @State private var explicitOnboardingContactConsent = false
     @State private var kevinNumber = ""
     @State private var errorMessage = ""
     @State private var marketCountryCode: String?
@@ -1020,8 +1021,11 @@ struct OnboardingView: View {
                     Task {
                         let granted = await ContactSyncManager.shared.requestAccess()
                         if granted {
-                            appState.contactsUploadConsent = true
+                            explicitOnboardingContactConsent = true
                             signupContinuation?.explicitContactConsent = true
+                            if !appState.contractorId.isEmpty {
+                                appState.grantContactsUploadConsent(for: appState.contractorId)
+                            }
                         }
                         step = .provisioning
                         await provision(mode: selectedMode)
@@ -1037,8 +1041,9 @@ struct OnboardingView: View {
                 .padding(.horizontal)
 
                 Button(String(localized: "Not now")) {
-                    appState.contactsUploadConsent = false
+                    explicitOnboardingContactConsent = false
                     signupContinuation?.explicitContactConsent = false
+                    appState.revokeContactsUploadConsent()
                     step = .provisioning
                     Task { await provision(mode: selectedMode) }
                 }
@@ -2186,6 +2191,8 @@ struct OnboardingView: View {
                 }
 
                 Button(String(localized: "Start Over")) {
+                    signupContinuation = nil
+                    explicitOnboardingContactConsent = false
                     step = .welcome
                     errorMessage = ""
                 }
@@ -2522,6 +2529,7 @@ struct OnboardingView: View {
                 case .newAccountNeeded:
                     guard !isRecoveryMode else { return }
                     signupContinuation = nil
+                    explicitOnboardingContactConsent = false
                     appState.appleUserId = credential.user
                     appState.appleIdentityToken = token
                     if !name.isEmpty { ownerName = name }
@@ -2928,6 +2936,9 @@ struct OnboardingView: View {
                 return
             }
             appState.contractorId = newContractorId
+            if explicitOnboardingContactConsent {
+                appState.grantContactsUploadConsent(for: newContractorId)
+            }
             if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
                 APIClient.shared.contractorToken = apiToken
             }
@@ -2961,7 +2972,7 @@ struct OnboardingView: View {
                     bearerToken: opAuthContext.bearerToken
                 )
             },
-            syncContacts: appState.contactsUploadConsent ? {
+            syncContacts: appState.hasOwnedContactsUploadConsent(for: opAuthContext.contractorId) ? {
                 let syncResult = await ContactSyncManager.shared.syncContacts(
                     contractorId: opAuthContext.contractorId,
                     force: true

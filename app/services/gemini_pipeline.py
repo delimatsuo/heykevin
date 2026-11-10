@@ -24,6 +24,7 @@ from app.services.urgency import (
 )
 from app.services.voice_events import _call_label, _log_tool_execution_failure, _tool_label
 from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold
+from app.services.voice_tool_declarations import build_gemini_voice_tools
 from app.services.voice_tool_dispatch import (
     GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
     VoiceToolContext,
@@ -1621,88 +1622,7 @@ class GeminiPipeline:
             self._log_voice_timing("live_tools_disabled", reason="staging_native_safety")
             return []
 
-        mode = self._contractor_config.get("effective_mode")
-        if not mode and "mode" in self._contractor_config:
-            mode = effective_mode(self._contractor_config)
-        if mode == "personal":
-            return []
-
-        from app.services.entitlements import has_entitled_token
-
-        has_jobber = has_entitled_token(self._contractor_config, "jobber")
-        has_gcal = has_entitled_token(self._contractor_config, "google_calendar")
-
-        declarations = []
-
-        if has_jobber:
-            declarations.append(
-                {
-                    "name": "check_customer",
-                    "description": "Look up the caller in the business's customer database by phone number.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "phone": {"type": "STRING", "description": "Phone number in E.164 format"}
-                        },
-                        "required": ["phone"],
-                    },
-                }
-            )
-        elif has_gcal:
-            declarations.extend([
-                {
-                    "name": "check_availability",
-                    "description": "Check the business owner's calendar for available appointment slots.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "days_ahead": {"type": "INTEGER", "description": "Days ahead to check (default 7, max 14)"}
-                        },
-                    },
-                },
-                {
-                    "name": "book_appointment",
-                    "description": "Create an appointment on the business owner's calendar.",
-                    "parameters": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "title": {"type": "STRING", "description": "Short description of the appointment"},
-                            "start_time": {
-                                "type": "STRING",
-                                "description": (
-                                    "Start time in ISO 8601 with the business owner's timezone offset. "
-                                    "Copy start_iso from check_availability. Never use Z."
-                                ),
-                            },
-                            "end_time": {
-                                "type": "STRING",
-                                "description": (
-                                    "End time in ISO 8601 with the business owner's timezone offset. "
-                                    "Copy end_iso from check_availability. Never use Z."
-                                ),
-                            },
-                            "description": {"type": "STRING", "description": "Additional notes"},
-                        },
-                        "required": ["title", "start_time", "end_time"],
-                    },
-                },
-            ])
-
-        request_context = self._contractor_config.get("service_request_context")
-        if (
-            isinstance(request_context, dict)
-            and request_context.get("customer_key")
-            and request_context.get("open_service_requests")
-            and settings.service_request_recovery_enabled is True
-            and self._contractor_config.get("service_request_mutations_enabled") is True
-            and self._contractor_config.get("integration_write_status") == "approved"
-            and has_entitled_token(self._contractor_config, "google_calendar")
-        ):
-            from app.services.receptionist_tools import gemini_tool_declarations
-
-            declarations.extend(gemini_tool_declarations())
-
-        return [{"function_declarations": declarations}] if declarations else []
+        return build_gemini_voice_tools(self._contractor_config)
 
     async def _handle_tool_calls(
         self,

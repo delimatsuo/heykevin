@@ -335,6 +335,41 @@ enum CallHistoryResponseParser {
     }
 }
 
+/// The local account stores and the process-local epoch shared by AppState and API authorization.
+final class AccountPersistence {
+    static let live = AccountPersistence(defaults: .standard, keychain: .shared, epoch: .shared)
+
+    let defaults: UserDefaults
+    let keychain: KeychainManager
+    let epoch: CallSessionEpoch
+
+    init(defaults: UserDefaults, keychain: KeychainManager, epoch: CallSessionEpoch) {
+        self.defaults = defaults
+        self.keychain = keychain
+        self.epoch = epoch
+    }
+
+    /// Per-contractor API token stored securely in Keychain
+    /// Migrates from UserDefaults on first access for existing users
+    var contractorToken: String {
+        get {
+            keychain.readMigratingLegacy("contractorApiToken", defaults: defaults).stringValue ?? ""
+        }
+        set {
+            let changed = epoch.synchronized { () -> Bool in
+                let old = contractorToken
+                guard old != newValue else { return false }
+                if newValue.isEmpty { keychain.delete("contractorApiToken") }
+                else { keychain.save("contractorApiToken", value: newValue) }
+                return true
+            }
+            if changed {
+                epoch.advance()
+            }
+        }
+    }
+}
+
 final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
     static let shared = APIClient()
 
@@ -354,29 +389,17 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
         return url
     }()
 
-    /// Per-contractor API token stored securely in Keychain
-    /// Migrates from UserDefaults on first access for existing users
+    private let persistence: AccountPersistence
+
     var contractorToken: String {
-        get {
-            KeychainManager.shared.readMigratingLegacy("contractorApiToken").stringValue ?? ""
-        }
-        set {
-            let changed = CallSessionEpoch.shared.synchronized { () -> Bool in
-                let old = contractorToken
-                guard old != newValue else { return false }
-                if newValue.isEmpty { KeychainManager.shared.delete("contractorApiToken") }
-                else { KeychainManager.shared.save("contractorApiToken", value: newValue) }
-                return true
-            }
-            if changed {
-                CallSessionEpoch.shared.advance()
-            }
-        }
+        get { persistence.contractorToken }
+        set { persistence.contractorToken = newValue }
     }
 
     private let customSession: URLSession?
 
-    init(session: URLSession? = nil) {
+    init(session: URLSession? = nil, persistence: AccountPersistence = .live) {
+        self.persistence = persistence
         self.customSession = session
     }
 

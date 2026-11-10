@@ -93,7 +93,7 @@ _EXPECTED_LIVE_HASHES = {
     # activation remain prohibited by the structural assertions below.
     # Re-pinned 2026-11-04 for the Business Pro check on Jobber and Google Calendar.
     Path("app/webhooks/media_stream.py"):
-        "10ff96e1217c4b4e76ae301c9b5478c46b45799202db78ad76b05c49e02d1042",
+        "92062163c6b005b9fa19f635c4a5acf8b818e47fea7834af9413ce757ac97606",
     Path("app/experiments/voice_bakeoff_app.py"):
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
 }

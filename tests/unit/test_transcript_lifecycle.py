@@ -428,18 +428,22 @@ async def test_handler_always_closes_writer_after_final_pipeline_callbacks(
     if engine == "media":
         monkeypatch.setattr(module, "_serve_pipeline_ingress", serve)
     entry = module.media_stream_ws if engine == "media" else module.relay_stream_ws
-    async with asyncio.timeout(2):
-        if ending in {"cancel", "stop-cancel"}:
-            with pytest.raises(asyncio.CancelledError):
+    try:
+        async with asyncio.timeout(2):
+            if ending in {"cancel", "stop-cancel"}:
+                with pytest.raises(asyncio.CancelledError):
+                    await entry(Socket(), "CA_transcript")
+            else:
                 await entry(Socket(), "CA_transcript")
-        else:
-            await entry(Socket(), "CA_transcript")
-    assert len(observed) == 1 and observed[0]._closed
-    if ending == "constructor-error":
-        assert observed[0]._worker is None and not writes and not persisted
-        return
-    assert observed[0]._worker.done()
-    assert writes[-1][0] == "CA_transcript" and writes[-1][1].endswith("Kevin: final callback")
-    assert writes[-1][2:] == ("test-owner", "test-token")
-    if ending != "stop-cancel":
-        assert persisted[-1].endswith("Kevin: final callback")
+        assert len(observed) == 1 and observed[0]._closed
+        if ending == "constructor-error":
+            assert observed[0]._worker is None and not writes and not persisted
+            return
+        assert observed[0]._worker.done()
+        assert writes[-1][0] == "CA_transcript" and writes[-1][1].endswith("Kevin: final callback")
+        assert writes[-1][2:] == ("test-owner", "test-token")
+        if ending != "stop-cancel":
+            assert persisted[-1].endswith("Kevin: final callback")
+    finally:
+        for pusher in observed:
+            await pusher.close(timeout=0)

@@ -291,33 +291,38 @@ class SubscriptionManager: ObservableObject {
                 context: context
             )
         }
-        guard isCurrent(context) else { return .rejected(reason: "account_changed") }
+        return await Self.reconcileVerification(
+            outcome, context: context, appState: .shared,
+            fetchProfile: APIClient.shared.getContractorProfile(contractorId:bearerToken:)
+        )
+    }
+
+    static func reconcileVerification(
+        _ outcome: SubscriptionVerificationOutcome,
+        context: SubscriptionVerificationContext,
+        appState: AppState,
+        fetchProfile: (_ contractorId: String, _ bearerToken: String) async -> [String: Any]?
+    ) async -> SubscriptionServerResolution {
+        let auth = CallAuthContext(
+            contractorId: context.contractorID, bearerToken: context.bearerToken, generation: context.generation
+        )
+        guard auth.isValid, appState.currentAuthContext() == auth else {
+            return .rejected(reason: "account_changed")
+        }
 
         switch outcome {
-        case .active:
-            // The verify endpoint updates Firestore before returning. Refresh
-            // the server-authoritative profile before reporting purchase or
-            // restore success. A duplicate old transaction may be processed
-            // successfully while the current account is now inactive.
-            guard let serverStatus = await refreshServerSubscriptionState(
-                context: context
-            ) else {
-                if !isCurrent(context) {
-                    return .rejected(reason: "account_changed")
-                }
-                return .retryable(after: 30)
-            }
-            return serverStatus == "active" ? .active : .inactive
-
-        case .inactive:
-            // Apple verified the receipt and the server acknowledged it as
-            // terminal without granting access. Refresh if available, but the
-            // acknowledgement itself is sufficient to drain StoreKit safely.
-            _ = await refreshServerSubscriptionState(context: context)
-            guard isCurrent(context) else {
+        case .active, .inactive:
+            let profile = await fetchProfile(auth.contractorId, auth.bearerToken)
+            let serverStatus = profile.flatMap { appState.applySubscriptionProfile($0, for: auth) }
+            guard appState.currentAuthContext() == auth else {
                 return .rejected(reason: "account_changed")
             }
-            return .inactive
+
+            // An inactive acknowledgement is terminal even if the profile is unavailable.
+            // An active acknowledgement needs fresh status because an old receipt can be replayed.
+            if outcome == .inactive { return .inactive }
+            guard let serverStatus else { return .retryable(after: 30) }
+            return serverStatus == "active" ? .active : .inactive
 
         case .retryable(let retryAfter):
             return .retryable(after: retryAfter)
@@ -342,25 +347,6 @@ class SubscriptionManager: ObservableObject {
             for: transaction,
             context: context
         )
-    }
-
-    private func refreshServerSubscriptionState(
-        context: SubscriptionVerificationContext
-    ) async -> String? {
-        guard isCurrent(context),
-              let profile = await APIClient.shared.getContractorProfile(
-                  contractorId: context.contractorID,
-                  bearerToken: context.bearerToken
-              ) else {
-            return nil
-        }
-        guard isCurrent(context) else { return nil }
-
-        let status = profile["subscription_status"] as? String ?? ""
-        let tier = profile["subscription_tier"] as? String ?? ""
-        if !status.isEmpty { AppState.shared.subscriptionStatus = status }
-        if !tier.isEmpty { AppState.shared.subscriptionTier = tier }
-        return status.isEmpty ? nil : status
     }
 
     @discardableResult

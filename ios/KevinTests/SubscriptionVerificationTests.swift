@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import Kevin
@@ -160,6 +161,195 @@ final class SubscriptionVerificationTests: XCTestCase {
             SubscriptionServerResolution.rejected(reason: "ownership_mismatch")
                 .shouldFinishTransaction
         )
+    }
+
+    func testOwnedProfileAppliesEachSuppliedStringAndReturnsFreshStatus() {
+        let auth = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 1)
+        let cases: [(status: Any?, tier: Any?, savedStatus: String, savedTier: String, fresh: String?)] = [
+            ("active", "businessPro", "active", "businessPro", "active"),
+            ("trial", "personal", "trial", "personal", "trial"),
+            ("expired", "none", "expired", "none", "expired"),
+            ("cancelled", "business", "cancelled", "business", "cancelled"),
+            ("expired", nil, "expired", "businessPro", "expired"),
+            (nil, "personal", "active", "personal", nil),
+            (nil, nil, "active", "businessPro", nil),
+            (NSNull(), "business", "active", "business", nil),
+            ("cancelled", NSNull(), "cancelled", "businessPro", "cancelled"),
+            (false, "personal", "active", "personal", nil),
+            ("trial", ["business"], "trial", "businessPro", "trial"),
+            ("", "business", "active", "business", nil),
+            ("expired", "", "expired", "businessPro", "expired"),
+            (" future ", " ", " future ", " ", " future "),
+        ]
+        for (index, row) in cases.enumerated() {
+            let state = AppState(authProvider: { auth }, inMemory: true)
+            state.subscriptionStatus = "active"
+            state.subscriptionTier = "businessPro"
+            var profile: [String: Any] = ["contractor_id": auth.contractorId]
+            profile["subscription_status"] = row.status
+            profile["subscription_tier"] = row.tier
+            let fresh = state.applySubscriptionProfile(profile, for: auth)
+            XCTAssertEqual(fresh, row.fresh, "row \(index)")
+            XCTAssertEqual(state.subscriptionStatus, row.savedStatus, "row \(index)")
+            XCTAssertEqual(state.subscriptionTier, row.savedTier, "row \(index)")
+        }
+    }
+
+    func testSubscriptionRefreshRequiresTheExactRequestedProfileID() {
+        let auth = CallAuthContext(contractorId: "café", bearerToken: "token-1", generation: 1)
+        let state = AppState(authProvider: { auth }, inMemory: true)
+        let invalidIDs: [Any?] = [nil, NSNull(), false, 123, "", "other", " café", "cafe\u{301}"]
+        for (index, invalidID) in invalidIDs.enumerated() {
+            var profile: [String: Any] = ["subscription_status": "active", "subscription_tier": "business"]
+            profile["contractor_id"] = invalidID
+            XCTAssertNil(state.applySubscriptionProfile(profile, for: auth), "row \(index)")
+            XCTAssertEqual(state.subscriptionStatus, "trial", "row \(index)")
+            XCTAssertEqual(state.subscriptionTier, "none", "row \(index)")
+        }
+    }
+
+    func testProfileRequiresCurrentContractorTokenGenerationAndValidAuth() {
+        let captured = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 1)
+        var current = captured
+        let state = AppState(authProvider: { current }, inMemory: true)
+        let profile: [String: Any] = [
+            "contractor_id": captured.contractorId, "subscription_status": "expired", "subscription_tier": "personal",
+        ]
+        let staleSessions = [
+            CallAuthContext(contractorId: "c2", bearerToken: "token-1", generation: 1),
+            CallAuthContext(contractorId: "c1", bearerToken: "token-2", generation: 1),
+            CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 2),
+        ]
+        for newSession in staleSessions {
+            current = newSession
+            XCTAssertNil(state.applySubscriptionProfile(profile, for: captured))
+            XCTAssertEqual(state.subscriptionStatus, "trial")
+            XCTAssertEqual(state.subscriptionTier, "none")
+        }
+        current = CallAuthContext(contractorId: captured.contractorId, bearerToken: "", generation: 3)
+        XCTAssertNil(state.applySubscriptionProfile(profile, for: current))
+        XCTAssertEqual(state.subscriptionStatus, "trial")
+        XCTAssertEqual(state.subscriptionTier, "none")
+    }
+
+    func testLaunchRefreshChecksReadinessWhenTheWriteRuns() async {
+        let auth = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 1)
+        let state = AppState(authProvider: { auth }, inMemory: true)
+        let profile: [String: Any] = [
+            "contractor_id": auth.contractorId, "subscription_status": "active", "subscription_tier": "personal",
+        ]
+        state.sessionState = .ready
+        let queuedWrite = Task { @MainActor in
+            state.applySubscriptionProfile(profile, for: auth, requiresReadySession: true)
+        }
+        // This test holds the main actor until the following await.
+        state.sessionState = .needsRecovery
+        let fresh = await queuedWrite.value
+        XCTAssertNil(fresh)
+        XCTAssertEqual(state.subscriptionStatus, "trial")
+        XCTAssertEqual(state.subscriptionTier, "none")
+        state.sessionState = .ready
+        XCTAssertEqual(state.applySubscriptionProfile(profile, for: auth, requiresReadySession: true), "active")
+        XCTAssertEqual(state.subscriptionTier, "personal")
+    }
+
+    func testRefreshPublishesOnlySubscriptionFieldsInOrderAndPreservesAccountAndCallState() throws {
+        let auth = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 1)
+        let state = AppState(authProvider: { auth }, inMemory: true)
+        state.contractorId = auth.contractorId
+        state.appleUserId = "apple-A"
+        state.subscriptionUUID = "uuid-A"
+        state.contactsUploadConsent = true
+        state.isVerizonCarrier = true
+        let binding = ServiceBinding(countryCode: "US", provider: "fixture")
+        state.serviceBinding = binding
+        state.setActiveCall(callSid: "call-A", callerPhone: "", callerName: "", authContext: auth)
+        let lease = try XCTUnwrap(state.ownedActiveCallLease)
+
+        var events: [String] = []
+        let statusObserver = state.$subscriptionStatus.dropFirst().sink { events.append("status \($0)") }
+        let tierObserver = state.$subscriptionTier.dropFirst().sink { events.append("tier \($0)") }
+        withExtendedLifetime((statusObserver, tierObserver)) {
+            for contractor in ["c1", "c2"] {
+                let profile: [String: Any] = [
+                    "contractor_id": contractor, "subscription_status": "active", "subscription_tier": "businessPro",
+                    "subscription_uuid": "foreign", "service_binding": NSNull(), "contacts_upload_consent": false,
+                ]
+                let fresh = state.applySubscriptionProfile(profile, for: auth)
+                XCTAssertEqual(fresh, contractor == "c1" ? "active" : nil)
+                XCTAssertEqual(events, ["status active", "tier businessPro"])
+                XCTAssertEqual(state.subscriptionStatus, "active")
+                XCTAssertEqual(state.subscriptionTier, "businessPro")
+                XCTAssertEqual(state.contractorId, auth.contractorId)
+                XCTAssertEqual(state.currentAuthContext(), auth)
+                XCTAssertEqual(state.appleUserId, "apple-A")
+                XCTAssertEqual(state.subscriptionUUID, "uuid-A")
+                XCTAssertTrue(state.contactsUploadConsent)
+                XCTAssertTrue(state.isVerizonCarrier)
+                XCTAssertEqual(state.serviceBinding, binding)
+                XCTAssertEqual(state.ownedActiveCallLease, lease)
+            }
+        }
+    }
+
+    func testPurchaseReconciliationUsesFreshStatusAndPreservesInactiveAcknowledgement() async {
+        let context = SubscriptionVerificationContext(contractorID: "c1", bearerToken: "token-1", generation: 4)
+        let auth = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 4)
+        let cases: [(SubscriptionVerificationOutcome, [String: Any]?, SubscriptionServerResolution, String, String)] = [
+            (.active, nil, .retryable(after: 30), "active", "businessPro"),
+            (.active, ["contractor_id": "c1", "subscription_tier": "personal"], .retryable(after: 30), "active", "personal"),
+            (.active, ["contractor_id": "c2", "subscription_status": "active"], .retryable(after: 30), "active", "businessPro"),
+            (.active, ["contractor_id": "c1", "subscription_status": "active"], .active, "active", "businessPro"),
+            (.active, ["contractor_id": "c1", "subscription_status": "future"], .inactive, "future", "businessPro"),
+            (.inactive, nil, .inactive, "active", "businessPro"),
+            (.inactive, ["contractor_id": "c1", "subscription_status": "expired"], .inactive, "expired", "businessPro"),
+        ]
+        for (acknowledgement, profile, expected, status, tier) in cases {
+            let state = AppState(authProvider: { auth }, inMemory: true)
+            state.sessionState = .notOnboarded
+            state.subscriptionStatus = "active"
+            state.subscriptionTier = "businessPro"
+            let resolution = await SubscriptionManager.reconcileVerification(
+                acknowledgement, context: context, appState: state
+            ) { id, token in
+                XCTAssertEqual(id, context.contractorID)
+                XCTAssertEqual(token, context.bearerToken)
+                return profile
+            }
+            XCTAssertEqual(resolution, expected)
+            XCTAssertEqual(state.subscriptionStatus, status)
+            XCTAssertEqual(state.subscriptionTier, tier)
+        }
+    }
+
+    func testHeldPurchaseRefreshRejectsAcknowledgementAfterAccountSwitchAndReturn() async {
+        let context = SubscriptionVerificationContext(contractorID: "c1", bearerToken: "token-1", generation: 1)
+        var current = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 1)
+        let state = AppState(authProvider: { current }, inMemory: true)
+        for acknowledgement in [SubscriptionVerificationOutcome.active, .inactive] {
+            let gate = AsyncGate()
+            defer { gate.open() }
+            current = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 1)
+            let task = Task {
+                await SubscriptionManager.reconcileVerification(
+                    acknowledgement, context: context, appState: state
+                ) { _, _ in
+                    await gate.signalAndPause()
+                    if acknowledgement == .inactive { return nil }
+                    return ["contractor_id": "c1", "subscription_status": "active", "subscription_tier": "business"]
+                }
+            }
+            let entered = await gate.waitForEntry()
+            XCTAssertTrue(entered)
+            current = CallAuthContext(contractorId: "c2", bearerToken: "token-2", generation: 2)
+            XCTAssertEqual(state.currentAuthContext().contractorId, "c2")
+            current = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 3)
+            gate.open()
+            let resolution = await task.value
+            XCTAssertEqual(resolution, .rejected(reason: "account_changed"))
+            XCTAssertEqual(state.subscriptionStatus, "trial")
+            XCTAssertEqual(state.subscriptionTier, "none")
+        }
     }
 
     func testConcurrentRequestsAreSingleFlight() async {

@@ -1,5 +1,24 @@
 import Foundation
 
+/// The two independently supplied subscription fields in a contractor profile.
+struct SubscriptionProfileUpdate {
+    let contractorId: String
+    let status: String?
+    let tier: String?
+
+    init?(profile: [String: Any]) {
+        func nonemptyString(_ key: String) -> String? {
+            guard let value = profile[key] as? String, !value.isEmpty else { return nil }
+            return value
+        }
+
+        guard let contractorId = nonemptyString("contractor_id") else { return nil }
+        self.contractorId = contractorId
+        status = nonemptyString("subscription_status")
+        tier = nonemptyString("subscription_tier")
+    }
+}
+
 /// One atomic Keychain value preserves the verified recovery target even if
 /// the process stops before writing the first individual credential.
 struct AccountRecoveryCheckpoint: Codable, Equatable {

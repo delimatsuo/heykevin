@@ -185,7 +185,7 @@ struct KevinApp: App {
                 }
 
                 // Delay API calls on cold start — iOS networking needs time to initialize
-                Task {
+                Task { @MainActor in
                     if wasFirstLaunch {
                         try? await Task.sleep(nanoseconds: 3_000_000_000)
                     }
@@ -193,22 +193,13 @@ struct KevinApp: App {
                     let auth = appState.currentAuthContext()
                     guard appState.isOnboarded, appState.sessionState == .ready, auth.isValid else { return }
                     if wasFirstLaunch {
-                        // Keep the server subscription snapshot bound to this session.
-                        if auth.isValid {
-                            if let profile = await APIClient.shared.getContractorProfile(
-                                contractorId: auth.contractorId, bearerToken: auth.bearerToken
-                            ) {
-                                guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
-                                let status = profile["subscription_status"] as? String ?? ""
-                                let tier = profile["subscription_tier"] as? String ?? ""
-                                await MainActor.run {
-                                    if !status.isEmpty { appState.subscriptionStatus = status }
-                                    if !tier.isEmpty { appState.subscriptionTier = tier }
-                                }
-                            }
-                            guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
-                            await SubscriptionManager.shared.verifyCurrentEntitlements()
+                        if let profile = await APIClient.shared.getContractorProfile(
+                            contractorId: auth.contractorId, bearerToken: auth.bearerToken
+                        ) {
+                            appState.applySubscriptionProfile(profile, for: auth, requiresReadySession: true)
                         }
+                        guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
+                        await SubscriptionManager.shared.verifyCurrentEntitlements()
                     }
                     guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
                     appState.checkForActiveCall()

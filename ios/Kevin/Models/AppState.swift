@@ -255,6 +255,24 @@ class AppState: ObservableObject {
         subscriptionStatus == "trial" || subscriptionStatus == "active"
     }
 
+    /// A tier-only response updates the cache and returns nil to callers verifying a purchase.
+    @MainActor
+    @discardableResult
+    func applySubscriptionProfile(
+        _ profile: [String: Any],
+        for capturedAuth: CallAuthContext,
+        requiresReadySession: Bool = false
+    ) -> String? {
+        guard capturedAuth.isValid, currentAuthContext() == capturedAuth,
+              !requiresReadySession || sessionState == .ready,
+              let update = SubscriptionProfileUpdate(profile: profile),
+              update.contractorId.utf8.elementsEqual(capturedAuth.contractorId.utf8) else { return nil }
+
+        if let status = update.status { subscriptionStatus = status }
+        if let tier = update.tier { subscriptionTier = tier }
+        return update.status
+    }
+
     @Published var kevinNumber: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }

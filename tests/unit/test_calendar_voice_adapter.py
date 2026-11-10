@@ -146,7 +146,7 @@ async def test_google_calendar_budget_covers_token_refresh_round_trips(
     })
     if helper == "managed_create":
         monkeypatch.setattr(
-            pipeline,
+            pipeline._tool_dispatcher,
             "_create_managed_google_booking",
             slow_helper,
         )
@@ -161,7 +161,7 @@ async def test_google_calendar_budget_covers_token_refresh_round_trips(
 def test_gemini_tool_dispatch_budget_exceeds_calendar_tool_budget():
     """GeminiPipeline's outer tool budget must not cap the calendar budget.
 
-    GeminiPipeline delegates to VoicePipeline._execute_tool inside its own
+    GeminiPipeline calls the shared tool dispatcher inside its own
     asyncio.wait_for. Gemini is the primary voice engine, so if that outer
     budget is the smaller of the two it wins, and the Google Calendar
     401-refresh-retry recovery gets aborted with a generic "Tool execution
@@ -169,7 +169,7 @@ def test_gemini_tool_dispatch_budget_exceeds_calendar_tool_budget():
     making the wider inner budget dead code on the path that actually runs.
     """
     from app.services.gemini_pipeline import GeminiPipeline
-    from app.services.voice_pipeline import GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS
+    from app.services.voice_tool_dispatch import GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS
 
     assert GeminiPipeline.TOOL_DISPATCH_TIMEOUT_SECONDS > GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS
 
@@ -177,6 +177,6 @@ def test_gemini_tool_dispatch_budget_exceeds_calendar_tool_budget():
 def test_relay_tool_dispatch_budget_exceeds_calendar_tool_budget():
     """ConversationRelay must also leave the managed saga time to finalize."""
     from app.services.relay_pipeline import TOOL_DISPATCH_TIMEOUT_SECONDS
-    from app.services.voice_pipeline import GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS
+    from app.services.voice_tool_dispatch import GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS
 
     assert TOOL_DISPATCH_TIMEOUT_SECONDS > GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS

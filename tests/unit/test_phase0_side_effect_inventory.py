@@ -4,6 +4,7 @@ from app.services.side_effect_inventory import SIDE_EFFECT_SURFACES, surfaces_by
 REQUIRED_PATHS = {
     "app/services/post_call.py",
     "app/services/voice_pipeline.py",
+    "app/services/voice_tool_dispatch.py",
     "app/services/gemini_pipeline.py",
     "app/services/sms.py",
     "app/api/calls.py",

@@ -22,15 +22,14 @@ from app.services.urgency import (
     URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
     find_urgent_signal,
 )
-from app.services.voice_pipeline import (
+from app.services.voice_events import _call_label, _log_tool_execution_failure, _tool_label
+from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold
+from app.services.voice_tool_dispatch import (
     GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
-    _call_label,
-    _log_tool_execution_failure,
-    _tool_label,
+    VoiceToolContext,
+    VoiceToolDispatcher,
     _tool_execution_error_response,
     _tool_timeout_response,
-    build_system_prompt,
-    is_owner_availability_hold,
 )
 from app.services.message_taking import (
     build_gemini_instruction_text,
@@ -96,7 +95,7 @@ class GeminiPipeline:
     PING_INTERVAL_SECONDS = 10.0
     PING_TIMEOUT_SECONDS = 5.0
     CLOSE_TIMEOUT_SECONDS = 1.0
-    # Outer backstop around VoicePipeline._execute_tool. Must stay strictly
+    # Outer backstop around the shared tool dispatcher. Must stay strictly
     # above the widest per-tool budget inside it, otherwise this generic
     # timeout pre-empts the tool's own — in particular it would abort the
     # Google Calendar 401-refresh-retry recovery and make that wider budget
@@ -1733,15 +1732,15 @@ class GeminiPipeline:
                 }
             }))
             return
-        from app.services.voice_pipeline import VoicePipeline
 
-        # Reuse VoicePipeline's _execute_tool — it has all the Jobber/Calendar logic
-        temp_pipeline = VoicePipeline.__new__(VoicePipeline)
-        temp_pipeline._contractor_config = self._contractor_config
-        temp_pipeline._call_sid = self._call_sid
-        temp_pipeline._caller_phone = self._caller_phone
-        if hasattr(self, "_receptionist_tool_executor"):
-            temp_pipeline._receptionist_tool_executor = self._receptionist_tool_executor
+        dispatcher = VoiceToolDispatcher(
+            VoiceToolContext(
+                contractor_config=self._contractor_config,
+                call_sid=self._call_sid,
+                caller_phone=self._caller_phone,
+            ),
+            receptionist_executor=getattr(self, "_receptionist_tool_executor", None),
+        )
 
         responses = []
         for fc in function_calls:
@@ -1764,7 +1763,7 @@ class GeminiPipeline:
                     else {}
                 )
                 result_str = await asyncio.wait_for(
-                    temp_pipeline._execute_tool(
+                    dispatcher.execute(
                         tool_name,
                         tool_args,
                         **execution_kwargs,

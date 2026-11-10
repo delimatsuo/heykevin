@@ -25,6 +25,7 @@ from app.services.service_request_repository import (
     customer_key_for_phone,
 )
 from app.services.voice_pipeline import VoicePipeline
+from app.services.voice_tool_dispatch import VoiceToolContext, VoiceToolDispatcher
 
 
 async def _noop(*_args, **_kwargs):
@@ -208,8 +209,7 @@ def test_request_mutation_tools_fail_closed_when_integration_write_is_revoked(mo
 
 @pytest.mark.asyncio
 async def test_undeclared_request_mutation_still_fails_closed_when_write_is_revoked():
-    pipeline = VoicePipeline.__new__(VoicePipeline)
-    pipeline._contractor_config = {
+    config = {
         "contractor_id": "contractor-1",
         "service_request_context": _request_context("customer-key"),
         "service_request_mutations_enabled": True,
@@ -217,11 +217,14 @@ async def test_undeclared_request_mutation_still_fails_closed_when_write_is_revo
         "google_calendar_access_token": "test-token",
         "google_calendar_refresh_token": "test-refresh",
     }
-    pipeline._caller_phone = "+16175550123"
-    pipeline._call_sid = "CA-revoked"
+    dispatcher = VoiceToolDispatcher(VoiceToolContext(
+        contractor_config=config,
+        caller_phone="+16175550123",
+        call_sid="CA-revoked",
+    ))
 
     result = json.loads(
-        await pipeline._execute_tool(
+        await dispatcher.execute(
             CANCEL_SERVICE_REQUEST,
             {"request_id": "request-1", "expected_revision": 1},
             operation_id="cancel-1",
@@ -254,8 +257,7 @@ async def test_confirmed_google_booking_atomically_creates_bound_service_request
         provider_adapter=provider,
         clock=lambda: datetime(2026, 8, 12, 16, 0, tzinfo=UTC),
     )
-    pipeline = VoicePipeline.__new__(VoicePipeline)
-    pipeline._contractor_config = {
+    config = {
         "contractor_id": "contractor-1",
         "service_request_command_service": service,
         "service_request_mutations_enabled": True,
@@ -263,10 +265,13 @@ async def test_confirmed_google_booking_atomically_creates_bound_service_request
         "google_calendar_access_token": "test-token",
         "google_calendar_refresh_token": "test-refresh",
     }
-    pipeline._caller_phone = "+16175550123"
-    pipeline._call_sid = "CA-booking"
+    dispatcher = VoiceToolDispatcher(VoiceToolContext(
+        contractor_config=config,
+        caller_phone="+16175550123",
+        call_sid="CA-booking",
+    ))
 
-    result = await pipeline._create_managed_google_booking(
+    result = await dispatcher._create_managed_google_booking(
         tool_input={
             "title": "Furnace tune-up",
             "start_time": "2026-08-20T14:00:00+00:00",
@@ -275,7 +280,7 @@ async def test_confirmed_google_booking_atomically_creates_bound_service_request
         operation_id="tool-book-1",
     )
 
-    from app.services.voice_pipeline import _managed_booking_identity
+    from app.services.voice_tool_dispatch import _managed_booking_identity
 
     customer_key = customer_key_for_phone("+16175550123")
     request_id, event_id, *_ = _managed_booking_identity(
@@ -312,8 +317,7 @@ async def test_managed_google_booking_rechecks_tenant_enrollment():
         create_provider_service_request = AsyncMock()
 
     command_service = _CommandService()
-    pipeline = VoicePipeline.__new__(VoicePipeline)
-    pipeline._contractor_config = {
+    config = {
         "contractor_id": "contractor-1",
         "service_request_command_service": command_service,
         "integration_write_status": "approved",
@@ -321,10 +325,13 @@ async def test_managed_google_booking_rechecks_tenant_enrollment():
         "google_calendar_refresh_token": "test-refresh",
         # service_request_mutations_enabled deliberately absent.
     }
-    pipeline._caller_phone = "+16175550123"
-    pipeline._call_sid = "CA-booking"
+    dispatcher = VoiceToolDispatcher(VoiceToolContext(
+        contractor_config=config,
+        caller_phone="+16175550123",
+        call_sid="CA-booking",
+    ))
 
-    result = await pipeline._create_managed_google_booking(
+    result = await dispatcher._create_managed_google_booking(
         tool_input={
             "title": "Furnace tune-up",
             "start_time": "2026-08-20T14:00:00+00:00",

@@ -16,12 +16,14 @@ twilio_incoming.py) and the session lands on /relay-stream instead of
 """
 
 import asyncio
+
 import json
 import time
 from typing import Awaitable, Callable, Optional
 
 import httpx
 
+from app.services.call_tasks import pipeline_tasks
 from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.quiet_hours import is_business_hours
@@ -189,36 +191,34 @@ class RelayPipeline:
     # --- lifecycle -------------------------------------------------------
 
     def start_background_tasks(self) -> None:
+        if pipeline_tasks(self).stopping:
+            return
         if self._call_sid and (self._command_task is None or self._command_task.done()):
-            self._command_task = asyncio.create_task(self._command_check_loop())
+            self._command_task = pipeline_tasks(self).create(self._command_check_loop())
         if self._silence_task is None or self._silence_task.done():
-            self._silence_task = asyncio.create_task(self._silence_watchdog_loop())
+            self._silence_task = pipeline_tasks(self).create(self._silence_watchdog_loop())
 
     async def stop(self) -> None:
-        self._active = False
-        self._message_taking_pending = False
-        self._message_caller_response_pending = False
-        if getattr(self, '_urgency_task', None):
-            self._urgency_task.cancel()
-        self._turn_epoch += 1
-        for task in (
-            self._generate_task,
-            self._command_task,
-            self._hold_task,
-            self._silence_task,
-            self._summary_task,
-        ):
-            if task and task is not asyncio.current_task() and not task.done():
-                task.cancel()
+        tasks = pipeline_tasks(self)
+        if not tasks.stopping:
+            self._active = False
+            self._message_taking_pending = False
+            self._message_caller_response_pending = False
+            self._turn_epoch += 1
+        tasks.adopt(*(getattr(self, name, None) for name in (
+            '_urgency_task', '_generate_task', '_command_task', '_hold_task',
+            '_silence_task', '_summary_task',
+        )))
+        await tasks.close()
 
     async def wait_idle(self) -> None:
         """Await the in-flight generation, if any (tests and shutdown)."""
         task = self._generate_task
         if task:
             try:
-                await task
+                await asyncio.shield(task)
             except asyncio.CancelledError:
-                pass
+                pipeline_tasks(self).cancel(task)
 
     @property
     def language(self) -> str:
@@ -298,7 +298,7 @@ class RelayPipeline:
         if not self._urgency_signalled and find_urgent_signal(text):
             self._urgency_signalled = True
             if not self._hold_task or self._hold_task.done():
-                self._hold_task = asyncio.create_task(self._owner_hold_timer())
+                self._hold_task = pipeline_tasks(self).create(self._owner_hold_timer())
             if self._on_urgency_detected:
                 from app.services.urgent_handoff import start_urgency_task
                 start_urgency_task(self, self._on_urgency_detected, text)
@@ -370,7 +370,7 @@ class RelayPipeline:
         self._turn_epoch += 1
         task = self._generate_task
         if task and not task.done():
-            task.cancel()
+            pipeline_tasks(self).cancel(task)
         self._generate_task = None
         self._streamed_text = ""
 
@@ -390,12 +390,12 @@ class RelayPipeline:
         *,
         guard: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> None:
-        if self._ending:
+        if self._ending or pipeline_tasks(self).stopping:
             return
         self._turn_epoch += 1
         epoch = self._turn_epoch
         self._streamed_text = ""
-        self._generate_task = asyncio.create_task(
+        self._generate_task = pipeline_tasks(self).create(
             self._generate_reply(epoch, extra_instruction, guard=guard)
         )
 
@@ -861,7 +861,7 @@ class RelayPipeline:
         if getattr(self, "_message_taking_pending", False):
             return
         if not self._hold_task or self._hold_task.done():
-            self._hold_task = asyncio.create_task(self._owner_hold_timer())
+            self._hold_task = pipeline_tasks(self).create(self._owner_hold_timer())
         logger.info(
             "relay_event event=owner_hold_started call=%s",
             _call_label(self._call_sid),
@@ -869,8 +869,8 @@ class RelayPipeline:
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
             if self._summary_task and not self._summary_task.done():
-                self._summary_task.cancel()
-            self._summary_task = asyncio.create_task(self._trigger_screening_summary_push())
+                pipeline_tasks(self).cancel(self._summary_task)
+            self._summary_task = pipeline_tasks(self).create(self._trigger_screening_summary_push())
 
     async def _trigger_screening_summary_push(self) -> None:
         if not self._active or self._ending:
@@ -1084,7 +1084,7 @@ class RelayPipeline:
     async def end_call(self) -> None:
         self._ending = True
         if self._summary_task and not self._summary_task.done():
-            self._summary_task.cancel()
+            pipeline_tasks(self).cancel(self._summary_task)
         try:
             await self._send({"type": "end"})
         except Exception:
@@ -1121,9 +1121,9 @@ class RelayPipeline:
         """Prepare for message delivery: wait for in-flight generation or cancel zero-token turn."""
         self._message_taking_pending = True
         if self._hold_task and not self._hold_task.done() and self._hold_task is not asyncio.current_task():
-            self._hold_task.cancel()
+            pipeline_tasks(self).cancel(self._hold_task)
         if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            self._summary_task.cancel()
+            pipeline_tasks(self).cancel(self._summary_task)
 
         task = self._generate_task
         if task and not task.done():
@@ -1180,9 +1180,9 @@ class RelayPipeline:
         )
 
         if self._hold_task and not self._hold_task.done() and self._hold_task is not asyncio.current_task():
-            self._hold_task.cancel()
+            pipeline_tasks(self).cancel(self._hold_task)
         if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            self._summary_task.cancel()
+            pipeline_tasks(self).cancel(self._summary_task)
 
         await self._supersede_in_flight()
         if not self._active or self._ending:
@@ -1207,7 +1207,7 @@ class RelayPipeline:
             if t and t.strip():
                 owned_actual_sent[0] = True
 
-        task = asyncio.create_task(
+        task = pipeline_tasks(self).create(
             self._generate_reply(
                 epoch,
                 instruction,
@@ -1219,11 +1219,13 @@ class RelayPipeline:
         )
         self._generate_task = task
         try:
-            # Await WITHOUT shield so external cancellation propagates/cancels child
-            success = await asyncio.wait_for(task, timeout=GENERATE_TIMEOUT_SECONDS)
+            # Explicit cancellation below reaches the child once; shielding
+            # prevents parent cancellation from interrupting child cleanup again.
+            success = await asyncio.wait_for(asyncio.shield(task), timeout=GENERATE_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             success = False
         except asyncio.CancelledError:
+            pipeline_tasks(self).cancel(task)
             # If interrupted after actual tokens sent and guard still valid, consider instruction accepted
             if owned_actual_sent[0] and guard is not None:
                 try:
@@ -1241,9 +1243,9 @@ class RelayPipeline:
         finally:
             self._message_instruction = ""
             if not task.done():
-                task.cancel()
+                pipeline_tasks(self).cancel(task)
                 try:
-                    await task
+                    await asyncio.shield(task)
                 except (asyncio.CancelledError, Exception):
                     pass
             if self._generate_task is task:
@@ -1252,7 +1254,7 @@ class RelayPipeline:
         if success:
             self._unavailable_said = True
             if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-                self._summary_task.cancel()
+                pipeline_tasks(self).cancel(self._summary_task)
             return True
         return False
 

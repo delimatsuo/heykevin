@@ -5,6 +5,7 @@ Audio conversion at boundaries: mulaw 8kHz (Twilio) <-> PCM 16kHz/24kHz (Gemini)
 """
 
 import asyncio
+
 import base64
 from collections import deque
 import json
@@ -14,6 +15,7 @@ from typing import Callable, Awaitable, Optional
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from app.services.call_tasks import pipeline_tasks
 from app.config import settings, staging_native_live_safety_controls_enabled
 from app.services.entitlements import effective_mode
 from app.services.urgency import (
@@ -392,6 +394,8 @@ class GeminiPipeline:
         reconnect_context: str = "",
     ) -> bool:
         """Connect to Gemini Live API and send setup message."""
+        if pipeline_tasks(self).stopping:
+            return False
         session_started_at = time.monotonic()
         try:
             connect_started_at = time.monotonic()
@@ -403,6 +407,10 @@ class GeminiPipeline:
                 ping_timeout=self.PING_TIMEOUT_SECONDS,
                 close_timeout=self.CLOSE_TIMEOUT_SECONDS,
             )
+            if pipeline_tasks(self).stopping:
+                websocket, self._ws = self._ws, None
+                await pipeline_tasks(self).close_resource(websocket.close)
+                return False
             self._log_voice_timing(
                 "gemini_ws_connected",
                 phase_ms=self._elapsed_ms(connect_started_at),
@@ -480,6 +488,8 @@ class GeminiPipeline:
                 )
                 return False
 
+            if pipeline_tasks(self).stopping:
+                return False
             self._connected = True
             self._log_voice_timing(
                 "gemini_setup_ack",
@@ -490,7 +500,7 @@ class GeminiPipeline:
             logger.info(f"Gemini Live session established (voice={self._voice}, model={self._model})")
 
             # Start receiving audio/text from Gemini
-            self._receive_task = asyncio.create_task(self._receive_loop())
+            self._receive_task = pipeline_tasks(self).create(self._receive_loop())
             self._ensure_audio_playout_task()
 
             if start_background_tasks:
@@ -508,16 +518,18 @@ class GeminiPipeline:
 
             if start_background_tasks and self._call_sid:
                 # Start RTDB command polling (for decline/take_message from iOS app)
-                self._command_check_task = asyncio.create_task(self._command_check_loop())
+                self._command_check_task = pipeline_tasks(self).create(self._command_check_loop())
 
             if not send_greeting:
                 self._audio_input_ready.set()
                 return True
 
             await self._send_greeting()
+            if pipeline_tasks(self).stopping:
+                return False
             await self._send_opening_intake_instructions()
             self._audio_input_ready.set()
-            return True
+            return not pipeline_tasks(self).stopping
 
         except Exception as e:
             self._log_voice_timing(
@@ -667,48 +679,39 @@ class GeminiPipeline:
         return True
 
     async def stop(self):
-        """Close Gemini session and cancel background tasks."""
-        self._connected = False
-        if getattr(self, '_urgency_task', None):
-            self._urgency_task.cancel()
-        self._audio_input_ready.set()
-        self._reconnecting = False
-        self._interrupt_speaking = True
-        self._current_turn_suppressed = False
-        self._model_turn_generating = False
-        self._assistant_instruction_pending = False
-        self._live_intake_refresh_pending = False
-        self._message_taking_pending = False
-        self._message_response_allowed = False
-        if getattr(self, '_turn_complete_event', None) is not None:
-            self._turn_complete_event.set()
-        self._reset_response_metrics()
-        if self._silence_check_task:
-            self._silence_check_task.cancel()
-        if self._unavailable_task:
-            self._unavailable_task.cancel()
-        if self._command_check_task:
-            self._command_check_task.cancel()
-        if self._summary_task and not self._summary_task.done():
-            self._summary_task.cancel()
-        if self._receive_task:
-            self._receive_task.cancel()
-        if (
-            self._recovery_task
-            and self._recovery_task is not asyncio.current_task()
-        ):
-            self._recovery_task.cancel()
-        self._invalidate_tool_task("stop")
-        if self._audio_playout_task:
-            self._audio_playout_task.cancel()
-        await self._discard_reconnect_audio("stop", end_reconnect=True)
-        await self._clear_audio_queue()
-        if self._ws:
-            try:
-                await self._ws.close()
-            except Exception:
-                pass
-        logger.info("Gemini pipeline stopped")
+        """Quiesce once, then join owned work before releasing resources."""
+        tasks = pipeline_tasks(self)
+        if not tasks.stopping:
+            self._connected = False
+            self._audio_input_ready.set()
+            self._reconnecting = False
+            self._interrupt_speaking = True
+            self._current_turn_suppressed = False
+            self._model_turn_generating = False
+            self._assistant_instruction_pending = False
+            self._live_intake_refresh_pending = False
+            self._message_taking_pending = False
+            self._message_response_allowed = False
+            self._tool_epoch += 1
+            if getattr(self, '_turn_complete_event', None) is not None:
+                self._turn_complete_event.set()
+            self._reset_response_metrics()
+        tasks.adopt(*(getattr(self, name, None) for name in (
+            '_urgency_task', '_silence_check_task', '_unavailable_task',
+            '_command_check_task', '_summary_task', '_receive_task',
+            '_recovery_task', '_tool_task', '_audio_playout_task',
+        )))
+
+        async def close_websocket():
+            websocket, self._ws = self._ws, None
+            if websocket:
+                await websocket.close()
+
+        await tasks.close((
+            lambda: self._discard_reconnect_audio("stop", end_reconnect=True),
+            self._clear_audio_queue,
+            close_websocket,
+        ))
 
     async def _close_current_websocket(self) -> None:
         """Best-effort close of the current Gemini socket with a short bound."""
@@ -727,6 +730,8 @@ class GeminiPipeline:
 
     async def _complete_after_receive_failure(self) -> None:
         """Mark the pipeline unavailable and terminate the call once."""
+        if pipeline_tasks(self).stopping:
+            return
         self._connected = False
         if not self.on_call_complete:
             return
@@ -744,7 +749,7 @@ class GeminiPipeline:
             return
         if self._recovery_task and not self._recovery_task.done():
             return
-        self._recovery_task = asyncio.create_task(
+        self._recovery_task = pipeline_tasks(self).create(
             self._recover_receive_loop(close_websocket=close_websocket)
         )
 
@@ -1103,7 +1108,7 @@ class GeminiPipeline:
         """Ensure model audio is played to Twilio at roughly realtime speed."""
         if self._audio_playout_task and not self._audio_playout_task.done():
             return
-        self._audio_playout_task = asyncio.create_task(self._audio_playout_loop())
+        self._audio_playout_task = pipeline_tasks(self).create(self._audio_playout_loop())
 
     async def _enqueue_model_audio(self, pcm_24k: bytes):
         """Convert Gemini PCM output and enqueue it for paced Twilio playback."""
@@ -1412,7 +1417,7 @@ class GeminiPipeline:
                 self._urgency_detected = True
                 self._log_voice_timing("urgency_detected")
                 if not self._unavailable_task or self._unavailable_task.done():
-                    self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+                    self._unavailable_task = pipeline_tasks(self).create(self._unavailable_timer())
                 from app.services.urgent_handoff import start_urgency_task
                 start_urgency_task(self, self.on_urgency_detected, full_text)
 
@@ -1569,11 +1574,13 @@ class GeminiPipeline:
         self._tool_epoch += 1
         task = self._tool_task
         if task and not task.done():
-            task.cancel()
+            pipeline_tasks(self).cancel(task)
             self._log_voice_timing("tool_task_cancelled", reason=reason)
 
     def _schedule_tool_calls(self, function_calls: list) -> None:
         """Run one epoch-bound tool batch outside the Gemini receive loop."""
+        if pipeline_tasks(self).stopping:
+            return
         if self._tool_task and not self._tool_task.done():
             self._invalidate_tool_task("superseded")
 
@@ -1583,7 +1590,7 @@ class GeminiPipeline:
             return
 
         tool_epoch = self._tool_epoch
-        task = asyncio.create_task(
+        task = pipeline_tasks(self).create(
             self._handle_tool_calls(
                 function_calls,
                 websocket=websocket,
@@ -1813,13 +1820,13 @@ class GeminiPipeline:
         self._owner_availability_wait_started_at = now
         self._caller_silence_prompted_at = None
         if not self._unavailable_task or self._unavailable_task.done():
-            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+            self._unavailable_task = pipeline_tasks(self).create(self._unavailable_timer())
         self._log_voice_timing("owner_availability_hold_started")
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
             if self._summary_task and not self._summary_task.done():
-                self._summary_task.cancel()
-            self._summary_task = asyncio.create_task(self._trigger_screening_summary_push())
+                pipeline_tasks(self).cancel(self._summary_task)
+            self._summary_task = pipeline_tasks(self).create(self._trigger_screening_summary_push())
 
     async def _trigger_screening_summary_push(self) -> None:
         if not self._connected or not self._waiting_for_owner_availability:
@@ -1851,7 +1858,7 @@ class GeminiPipeline:
         self._owner_availability_wait_started_at = 0.0
         self._caller_silence_prompted_at = None
         if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            self._summary_task.cancel()
+            pipeline_tasks(self).cancel(self._summary_task)
 
     def _waiting_on_caller(self) -> bool:
         waiting = (
@@ -1968,7 +1975,7 @@ class GeminiPipeline:
         """Schedule the caller-silence loop, replacing any stale task."""
         if self._silence_check_task and not self._silence_check_task.done():
             return
-        self._silence_check_task = asyncio.create_task(self._silence_check_loop())
+        self._silence_check_task = pipeline_tasks(self).create(self._silence_check_loop())
 
     def _caller_silence_elapsed_seconds(self) -> float:
         """Seconds since the last activity on either side of the call.
@@ -2161,13 +2168,13 @@ class GeminiPipeline:
                 and not self._unavailable_task.done()
                 and self._unavailable_task is not asyncio.current_task()
             ):
-                self._unavailable_task.cancel()
+                pipeline_tasks(self).cancel(self._unavailable_task)
             if (
                 self._summary_task
                 and not self._summary_task.done()
                 and self._summary_task is not asyncio.current_task()
             ):
-                self._summary_task.cancel()
+                pipeline_tasks(self).cancel(self._summary_task)
 
         if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
             return False

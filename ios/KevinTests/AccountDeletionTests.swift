@@ -794,6 +794,73 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertTrue(b.isVerizonCarrier)
     }
 
+    func testLegacyIdentityMatchingRestoredAccountDoesNotEstablishConsentOwnership() async throws {
+        var preferences = Self.preferencesA
+        preferences["contractorId"] = "account-B"
+        preferences["contractorApiToken"] = "legacy-bearer-B"
+        let original = try await readyA(preferences: preferences)
+        let token = try original.begin()
+        var removed: Result<Snapshot, Error>?
+        XCTAssertEqual(original.complete(.deleted, token, afterBearer: {
+            removed = Result { try original.snapshot() }
+        }), .deleted)
+        let checkpoint = try XCTUnwrap(removed).get()
+        XCTAssertNil(try checkpoint.secureValues()["contractorId"])
+        XCTAssertNil(try checkpoint.secureValues()["contractorApiToken"])
+        XCTAssertEqual(checkpoint.defaults["contractorId"] as? String, "account-B")
+        XCTAssertEqual(checkpoint.defaults["contactsUploadConsent"] as? Bool, true)
+        await Self.drainMainQueue()
+
+        let signedOut = try reopen(original)
+        let state = signedOut.state
+        XCTAssertEqual(state.sessionState, .notOnboarded)
+        XCTAssertEqual(state.contractorId, "account-B")
+        XCTAssertEqual(signedOut.api.contractorToken, "legacy-bearer-B")
+        XCTAssertEqual(state.appleUserId, "apple-A")
+        XCTAssertTrue(state.contactsUploadConsent)
+        XCTAssertNil(state.pendingAccountRecovery)
+
+        var lookups = 0
+        var profiles = 0
+        var reconciliations = 0
+        var syncTargets: [String] = []
+        let coordinator = AccountRestoreCoordinator(state: state, lookupHandler: { apple, identityToken in
+            lookups += 1
+            XCTAssertEqual(apple, "apple-B")
+            XCTAssertEqual(identityToken, "identity-B")
+            return .found(contractorId: "account-B", apiToken: "verified-bearer-B")
+        }, profileFetcher: { account, bearer in
+            profiles += 1
+            XCTAssertEqual(account, "account-B")
+            XCTAssertEqual(bearer, "verified-bearer-B")
+            return ["contractor_id": account, "active": true, "twilio_number": "number-B",
+                    "owner_name": "owner-B", "subscription_status": "trial",
+                    "subscription_tier": "personal", "country_code": "CA"]
+        }, notificationReconciler: { reconciliations += 1 },
+           contactSyncHandler: { syncTargets.append($0) })
+        let revision = try XCTUnwrap(coordinator.beginAttempt())
+        let outcome = await coordinator.restoreAccount(appleUserId: "apple-B", appleIdentityToken: "identity-B",
+            isRecoveryMode: false, retainedContractorId: state.contractorId,
+            retainedAppleUserId: state.appleUserId, retainedKevinNumber: state.kevinNumber,
+            attemptRevision: revision)
+        XCTAssertEqual(outcome, .success(contractorId: "account-B", needsProvisioning: false))
+        XCTAssertEqual(lookups, 1)
+        XCTAssertEqual(profiles, 1)
+        XCTAssertEqual(reconciliations, 1)
+        XCTAssertEqual(syncTargets, ["account-B"], "Only the injected counting callback is invoked")
+        await Self.drainMainQueue()
+        let image = try signedOut.snapshot()
+        let fresh = try reopen(signedOut)
+        XCTAssertEqual(fresh.state.sessionState, .ready)
+        XCTAssertEqual(fresh.state.currentAuthContext().contractorId, "account-B")
+        XCTAssertEqual(fresh.state.currentAuthContext().bearerToken, "verified-bearer-B")
+        XCTAssertEqual(fresh.state.appleUserId, "apple-B")
+        XCTAssertEqual(fresh.state.userName, "owner-B")
+        XCTAssertEqual(image.defaults["contactsUploadConsent"] as? Bool, fresh.state.contactsUploadConsent)
+        expectDurableGap("durable-legacy-consent-owner", !fresh.state.contactsUploadConsent)
+        expectDurableGap("durable-legacy-no-contact-sync", syncTargets.isEmpty)
+    }
+
     func testQueuedDefaultsReadCurrentPropertyWhileConsentAndReadIDsWriteImmediately() async throws {
         let launch = try await readyA()
         launch.state.contactsUploadConsent = false

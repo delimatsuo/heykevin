@@ -72,6 +72,7 @@ class AppState: ObservableObject {
     private static let recoveryMarkerKey = "accountRecoveryCommit"
     static let contactsUploadConsentKey = "contactsUploadConsent"
     static let contactsUploadConsentOwnerKey = "contactsUploadConsentOwner"
+    private var isHydratingInitialStorage = false
     private var isUpdatingConsentState = false
     private(set) var contactsUploadConsentOwner: String? = nil
 
@@ -89,31 +90,35 @@ class AppState: ObservableObject {
         self.injectedSecureStore = secureStore
 
         if !inMemory && !inScreenshotFixture {
-            let initialContractor = migrateToKeychain("contractorId")
-            self.contractorId = initialContractor
-            self.isOnboarded = persistence.defaults.bool(forKey: "isOnboarded")
-            self.subscriptionStatus = persistence.keychain.retrieve("subscriptionStatus") ?? "trial"
-            self.subscriptionTier = persistence.keychain.retrieve("subscriptionTier") ?? "none"
-            self.subscriptionUUID = persistence.keychain.retrieve("subscriptionUUID") ?? ""
-            self.kevinNumber = persistence.defaults.string(forKey: "kevinNumber") ?? ""
-            self.forwardingActivated = persistence.defaults.bool(forKey: "forwardingActivated")
-            self.appleUserId = migrateToKeychain("appleUserId")
-            self.userName = persistence.defaults.string(forKey: "userName") ?? ""
-            self.businessName = persistence.defaults.string(forKey: "businessName") ?? ""
-            self.businessAddress = persistence.defaults.string(forKey: "businessAddress") ?? ""
-            self.businessCity = persistence.defaults.string(forKey: "businessCity") ?? ""
-            self.serviceType = persistence.defaults.string(forKey: "serviceType") ?? ""
-            self.mode = persistence.defaults.string(forKey: "kevinMode") ?? "business"
-            self.ringThroughContacts = persistence.defaults.object(forKey: "ringThroughContacts") as? Bool ?? true
-            self.isVerizonCarrier = persistence.defaults.bool(forKey: "isVerizonCarrier")
-            self.sitToneEnabled = persistence.defaults.object(forKey: "sitToneEnabled") as? Bool ?? false
-            self.autoReplySms = persistence.defaults.object(forKey: "autoReplySms") as? Bool ?? false
-            self.smartInterruption = persistence.defaults.object(forKey: "smartInterruption") as? Bool ?? true
-            self.kevinLanguage = persistence.defaults.string(forKey: "kevinLanguage") ?? "auto"
-            self.countryCode = persistence.defaults.string(forKey: "countryCode") ?? ""
-            self.readCallIds = loadReadCallIds(for: initialContractor)
-            self.jobberConnected = persistence.defaults.bool(forKey: "jobberConnected")
-            self.googleCalendarConnected = persistence.defaults.bool(forKey: "googleCalendarConnected")
+            do {
+                isHydratingInitialStorage = true
+                defer { isHydratingInitialStorage = false }
+                let initialContractor = migrateToKeychain("contractorId")
+                self.contractorId = initialContractor
+                self.isOnboarded = persistence.defaults.bool(forKey: "isOnboarded")
+                self.subscriptionStatus = persistence.keychain.retrieve("subscriptionStatus") ?? "trial"
+                self.subscriptionTier = persistence.keychain.retrieve("subscriptionTier") ?? "none"
+                self.subscriptionUUID = persistence.keychain.retrieve("subscriptionUUID") ?? ""
+                self.kevinNumber = persistence.defaults.string(forKey: "kevinNumber") ?? ""
+                self.forwardingActivated = persistence.defaults.bool(forKey: "forwardingActivated")
+                self.appleUserId = migrateToKeychain("appleUserId")
+                self.userName = persistence.defaults.string(forKey: "userName") ?? ""
+                self.businessName = persistence.defaults.string(forKey: "businessName") ?? ""
+                self.businessAddress = persistence.defaults.string(forKey: "businessAddress") ?? ""
+                self.businessCity = persistence.defaults.string(forKey: "businessCity") ?? ""
+                self.serviceType = persistence.defaults.string(forKey: "serviceType") ?? ""
+                self.mode = persistence.defaults.string(forKey: "kevinMode") ?? "business"
+                self.ringThroughContacts = persistence.defaults.object(forKey: "ringThroughContacts") as? Bool ?? true
+                self.isVerizonCarrier = persistence.defaults.bool(forKey: "isVerizonCarrier")
+                self.sitToneEnabled = persistence.defaults.object(forKey: "sitToneEnabled") as? Bool ?? false
+                self.autoReplySms = persistence.defaults.object(forKey: "autoReplySms") as? Bool ?? false
+                self.smartInterruption = persistence.defaults.object(forKey: "smartInterruption") as? Bool ?? true
+                self.kevinLanguage = persistence.defaults.string(forKey: "kevinLanguage") ?? "auto"
+                self.countryCode = persistence.defaults.string(forKey: "countryCode") ?? ""
+                self.readCallIds = loadReadCallIds(for: initialContractor)
+                self.jobberConnected = persistence.defaults.bool(forKey: "jobberConnected")
+                self.googleCalendarConnected = persistence.defaults.bool(forKey: "googleCalendarConnected")
+            }
             reconcilePersistedConsent()
         }
 
@@ -200,7 +205,7 @@ class AppState: ObservableObject {
     @Published var contractorId: String = "" {
         didSet {
             let changed = oldValue != contractorId
-            if !inScreenshotFixture && !inMemory {
+            if !isHydratingInitialStorage && !inScreenshotFixture && !inMemory {
                 if contractorId.isEmpty {
                     _ = KeychainManager.removeNonemptyLegacyValue(forKey: "contractorId", in: persistence.defaults)
                     persistence.clearMigratedLegacyKey("contractorId")
@@ -311,7 +316,7 @@ class AppState: ObservableObject {
     }
     @Published var appleUserId: String = "" {
         didSet {
-            if !inScreenshotFixture && !inMemory {
+            if !isHydratingInitialStorage && !inScreenshotFixture && !inMemory {
                 if appleUserId.isEmpty {
                     _ = KeychainManager.removeNonemptyLegacyValue(forKey: "appleUserId", in: persistence.defaults)
                     persistence.clearMigratedLegacyKey("appleUserId")

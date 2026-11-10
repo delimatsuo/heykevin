@@ -206,3 +206,158 @@ final class AccountDeletionResolveTests: XCTestCase {
         XCTAssertEqual(r.tier, "personal")
     }
 }
+
+@MainActor
+final class AccountDeletionCompletionTests: XCTestCase {
+    @MainActor
+    private final class Fixture {
+        let state = AppState(inMemory: true)
+        var fence = AccountDeletionFence()
+        var bearerWrites: [String] = []
+        var onBearerWrite: (() -> Void)?
+
+        init() {
+            state.contractorId = "account-a"
+            state.kevinNumber = "fixture-number"
+            state.countryCode = "US"
+            state.isOnboarded = true
+            XCTAssertTrue(state.finishAccountRecovery(bearerToken: "fixture-bearer-a"))
+        }
+
+        func begin() throws -> AccountDeletionToken {
+            try XCTUnwrap(fence.begin(auth: state.currentAuthContext()))
+        }
+
+        func complete(_ outcome: AccountDeletionOutcome, token: AccountDeletionToken) -> AccountDeletionOutcome? {
+            AccountDeletionFlow.complete(
+                outcome, token: token, appState: state,
+                finish: { self.fence.finish(token: $0, auth: $1) },
+                writeBearer: { self.bearerWrites.append($0); self.onBearerWrite?() }
+            )
+        }
+    }
+
+    func testSuccessInvalidatesOwnedCallAndWritesEmptyBearerLastOnlyOnce() throws {
+        let f = Fixture()
+        let state = f.state
+        let token = try f.begin()
+        state.pushToken = "fixture-apns"; state.voipToken = "fixture-voip"
+        state.readCallIds = ["fixture-read"]; state.unreadCallCount = 1
+        state.notificationCallSid = "fixture-call"; state.notificationCallMessage = "fixture-message"
+        state.serviceBinding = ServiceBinding(countryCode: "US")
+        state.setActiveCall(callSid: "fixture-call", callerPhone: "", callerName: "", authContext: token.auth)
+        let lease = try XCTUnwrap(state.ownedActiveCallLease)
+        state.updateActiveCallTranscript(text: "fixture line", lease: lease)
+        state.captureScreeningTranscript(for: lease)
+        XCTAssertEqual(state.screeningTranscript(for: lease)?.lines, ["fixture line"])
+
+        f.onBearerWrite = {
+            XCTAssertEqual(state.contractorId, "")
+            XCTAssertEqual(state.kevinNumber, "")
+            XCTAssertEqual(state.countryCode, "")
+            XCTAssertFalse(state.isOnboarded)
+        }
+        XCTAssertEqual(f.complete(.deleted, token: token), .deleted)
+        XCTAssertNil(f.complete(.deleted, token: token))
+        XCTAssertEqual(f.bearerWrites, [""])
+        XCTAssertFalse(f.fence.isPending)
+        XCTAssertEqual(state.sessionState, .notOnboarded)
+        XCTAssertFalse(state.currentAuthContext().isValid)
+        XCTAssertGreaterThan(state.sessionGeneration, token.auth.generation)
+        XCTAssertNil(state.ownedActiveCallLease)
+        XCTAssertEqual(state.callLifecycleSnapshot.callSid, "")
+        XCTAssertNil(state.screeningTranscript(for: lease))
+        XCTAssertTrue(state.readCallIds.isEmpty)
+        XCTAssertEqual(state.unreadCallCount, 0)
+        XCTAssertEqual(state.notificationCallSid, "")
+        XCTAssertEqual(state.notificationCallMessage, "")
+        XCTAssertNil(state.serviceBinding)
+        XCTAssertEqual(state.pushToken, "fixture-apns")
+        XCTAssertEqual(state.voipToken, "fixture-voip")
+    }
+
+    func testFailureReturnsErrorWithoutChangingSessionAndPermitsRetry() throws {
+        let f = Fixture()
+        let state = f.state
+        let token = try f.begin()
+        state.businessName = "fixture business"
+        state.contactsUploadConsent = true
+        state.setActiveCall(callSid: "fixture-call", callerPhone: "", callerName: "", authContext: token.auth)
+        let lease = try XCTUnwrap(state.ownedActiveCallLease)
+
+        XCTAssertEqual(f.complete(.failed, token: token), .failed)
+        XCTAssertNil(f.complete(.deleted, token: token), "A consumed failure cannot later delete the account")
+        XCTAssertFalse(f.fence.isPending)
+        XCTAssertEqual(state.currentAuthContext(), token.auth)
+        XCTAssertEqual(state.sessionState, .ready)
+        XCTAssertTrue(state.isOnboarded)
+        XCTAssertEqual(state.kevinNumber, "fixture-number")
+        XCTAssertEqual(state.countryCode, "US")
+        XCTAssertEqual(state.ownedActiveCallLease, lease)
+        XCTAssertEqual(state.businessName, "fixture business")
+        XCTAssertTrue(state.contactsUploadConsent)
+        XCTAssertTrue(f.bearerWrites.isEmpty)
+        XCTAssertNotEqual(try f.begin(), token)
+    }
+
+    func testLateSuccessAndFailureLeaveNewAccountAndPendingDeletionAlone() throws {
+        let f = Fixture()
+        let stale = try f.begin()
+        f.state.contractorId = "account-b"
+        XCTAssertTrue(f.state.finishAccountRecovery(bearerToken: "fixture-bearer-b"))
+        f.state.kevinNumber = "second-number"
+        let current = try f.begin()
+
+        XCTAssertNil(f.complete(.deleted, token: stale))
+        XCTAssertNil(f.complete(.failed, token: stale))
+        XCTAssertEqual(f.fence.activeToken, current.id)
+        XCTAssertEqual(f.state.currentAuthContext(), current.auth)
+        XCTAssertEqual(f.state.kevinNumber, "second-number")
+        XCTAssertTrue(f.state.isOnboarded)
+        XCTAssertTrue(f.bearerWrites.isEmpty)
+        XCTAssertEqual(f.complete(.failed, token: current), .failed)
+    }
+
+    func testSameCredentialsAfterAccountSwitchCannotConsumeOldOperation() throws {
+        let f = Fixture()
+        let old = try f.begin()
+        f.state.contractorId = "account-b"
+        f.state.contractorId = old.auth.contractorId
+        let current = f.state.currentAuthContext()
+        XCTAssertEqual(current.contractorId, old.auth.contractorId)
+        XCTAssertEqual(current.bearerToken, old.auth.bearerToken)
+        XCTAssertGreaterThan(current.generation, old.auth.generation)
+
+        // Before Settings observes the switch, the old operation is still recorded.
+        XCTAssertEqual(f.fence.activeToken, old.id)
+        XCTAssertNil(f.complete(.deleted, token: old))
+        XCTAssertEqual(f.state.currentAuthContext(), current)
+        XCTAssertTrue(f.state.isOnboarded)
+        XCTAssertTrue(f.bearerWrites.isEmpty)
+    }
+
+    func testConfirmedDeletionAccountStateInvariants() throws {
+        let f = Fixture()
+        let state = f.state
+        state.businessName = "fixture business"; state.appleUserId = "fixture-apple"
+        state.subscriptionStatus = "active"; state.subscriptionTier = "businessPro"
+        state.subscriptionUUID = "00000000-0000-4000-8000-000000000001"
+        state.contactsUploadConsent = true
+        XCTAssertTrue(state.hasBusinessProEntitlement)
+        let token = try f.begin()
+        XCTAssertEqual(f.complete(.deleted, token: token), .deleted)
+        XCTAssertEqual(state.sessionState, .notOnboarded)
+        XCTAssertEqual(f.bearerWrites, [""])
+
+        expectResetGap("deleted-profile-and-apple-identity", state.businessName.isEmpty && state.appleUserId.isEmpty)
+        expectResetGap("deleted-subscription-cache", state.subscriptionStatus != "active"
+            && state.subscriptionTier != "businessPro" && state.subscriptionUUID.isEmpty)
+        expectResetGap("deleted-explicit-contact-consent", !state.contactsUploadConsent)
+    }
+
+    private func expectResetGap(_ tag: String, _ invariant: Bool, file: StaticString = #filePath, line: UInt = #line) {
+        XCTExpectFailure("Account deletion reset: \(tag)", strict: true, failingBlock: {
+            XCTAssertTrue(invariant, tag, file: file, line: line)
+        }, issueMatcher: { $0.type == .assertionFailure && $0.compactDescription.hasSuffix(tag) })
+    }
+}

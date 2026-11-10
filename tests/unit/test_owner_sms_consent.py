@@ -565,9 +565,9 @@ async def test_failed_persistence_returns_real_http_500(monkeypatch, path, form,
     save = AsyncMock(side_effect=RuntimeError("unavailable")) if raises else AsyncMock(return_value=False)
     monkeypatch.setattr(owner_sms_db, "apply_owner_sms_consent_transition", transition)
     monkeypatch.setattr(call_db, "save_call", save)
-    cleanup = Mock()
+    cleanup = Mock(side_effect=lambda update: update(None))
     monkeypatch.setattr("app.db.cache._init_firebase", lambda: None)
-    monkeypatch.setattr("firebase_admin.db.reference", lambda path: SimpleNamespace(delete=cleanup))
+    monkeypatch.setattr("firebase_admin.db.reference", lambda path: SimpleNamespace(transaction=cleanup))
     app = FastAPI()
     app.include_router(twilio_router)
     url = "https://test.kevinai.app" + path

@@ -14,7 +14,7 @@ import re
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Dial, Connect
 
@@ -355,11 +355,17 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
     Runs lookups and scoring synchronously, then returns the correct TwiML
     directly in the response. No async update needed.
     """
+    from app.services.call_registration import RegistrationRejected, RegistrationUnavailable
     start = time.monotonic()
 
     try:
         form_data = await request.form()
-        call_sid = form_data.get("CallSid", "unknown")
+        call_sid = form_data.get("CallSid", "")
+        from app.services.owner_call_actions import validate_call_sid
+        try:
+            validate_call_sid(call_sid)
+        except HTTPException:
+            return twiml_response("<Response><Hangup/></Response>", status_code=400)
         caller_phone = normalize_phone(form_data.get("From", "")) or form_data.get("From", "")
 
         call_sid_var.set(call_sid)
@@ -623,11 +629,33 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         )
 
         conference_name = new_conference_name("call")
-        if contractor_id:
+        if contractor_id and route != Route.AI_SCREENING:
             await register_conference(conference_name, contractor_id, call_sid)
 
         # Generate WebSocket auth token for AI screening media stream
         ws_token = secrets.token_urlsafe(32) if route == Route.AI_SCREENING else ""
+
+        registration = None
+        if route == Route.AI_SCREENING:
+            from app.services.call_registration import register_screening_call
+            from app.services.state_machine import ActiveCall, CallState
+
+            registration = await register_screening_call(ActiveCall(
+                call_sid=call_sid, caller_phone=caller_phone,
+                state=CallState.SCREENING, conference_name=conference_name,
+                trust_score=trust_score, caller_name=caller_name,
+                contractor_id=contractor_id, ws_token=ws_token,
+                caller_name_trusted=caller_name_trusted,
+            ), voice_engine=contractor.get("voice_engine", "elevenlabs"))
+            if registration is None:
+                return twiml_response(_forward_twiml(
+                    owner_phone or settings.user_phone, caller_id=to_number,
+                ))
+            # A retry must emit the original token, never its newly minted one.
+            ws_token = registration.record["ws_token"]
+            conference_name = registration.record["conference_name"]
+            caller_name = registration.record.get("caller_name", "")
+            caller_name_trusted = registration.record.get("caller_name_trusted") is True
 
         greeting_config = dict(contractor)
         if caller_name_trusted:
@@ -638,7 +666,10 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         # established, so only that engine needs a bounded pre-TwiML identity
         # lookup. Request details are loaded later, after WebSocket auth. The
         # media-stream engines do all memory reads after auth and buffer ingress.
-        is_relay = contractor.get("voice_engine") == "relay"
+        is_relay = (
+            registration.record["registration_voice_engine"] == "relay"
+            if registration is not None else contractor.get("voice_engine") == "relay"
+        )
         if route == Route.AI_SCREENING and is_relay:
             from app.services.receptionist_context import load_customer_memory_context
 
@@ -655,21 +686,23 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
                 )
             )
 
-        # Save call record and send notifications in background (don't block response)
-        asyncio.create_task(_post_routing_tasks(
-            call_sid=call_sid,
-            caller_phone=caller_phone,
-            caller_name=caller_name,
-            trust_score=trust_score,
-            score_breakdown=score_breakdown,
-            route=route,
-            lookups=lookups,
-            conference_name=conference_name,
-            contractor_id=contractor_id,
-            ws_token=ws_token,
-            caller_name_trusted=caller_name_trusted,
-            user_language=contractor.get("user_language", "en"),
-        ))
+        # Only the registration winner may send notifications/enrich history.
+        # Essential authority is already acknowledged; history cannot gate audio.
+        if registration is None or registration.created:
+            asyncio.create_task(_post_routing_tasks(
+                call_sid=call_sid,
+                caller_phone=caller_phone,
+                caller_name=caller_name,
+                trust_score=trust_score,
+                score_breakdown=score_breakdown,
+                route=route,
+                lookups=lookups,
+                conference_name=conference_name,
+                contractor_id=contractor_id,
+                ws_token=ws_token,
+                caller_name_trusted=caller_name_trusted,
+                user_language=contractor.get("user_language", "en"),
+            ))
 
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
@@ -725,6 +758,16 @@ async def handle_incoming_call(request: Request, _=Depends(verify_twilio_signatu
         # Default fallback
         return twiml_response(_forward_twiml(owner_phone or settings.user_phone, caller_id=to_number))
 
+    except RegistrationRejected:
+        # Known terminal/owner/identity evidence differs from an unavailable DB.
+        # Never replay or redirect a call whose authority has been superseded.
+        return twiml_response("<Response><Hangup/></Response>")
+    except RegistrationUnavailable:
+        # Preserve the existing caller path on an indeterminate storage result.
+        # A sent SDK write may still commit: this is not a globally fixed route.
+        return twiml_response(_forward_twiml(
+            owner_phone or settings.user_phone, caller_id=to_number,
+        ))
     except Exception as e:
         logger.error(f"Error handling incoming call: {e}", exc_info=True)
         from app.services.circuit_breaker import record_error
@@ -933,55 +976,34 @@ async def _post_routing_tasks(
     caller_name_trusted: bool = False,
     user_language: str = "en",
 ):
-    """Background tasks after routing — save call record, send push, save RTDB state."""
+    """Winner-only side effects with separate bounded, joined lifetimes."""
     call_sid_var.set(call_sid)
+    from app.db.calls import save_call
+    from app.services.routing import Route
 
-    try:
-        from app.db.calls import save_call
-        from app.services.routing import Route
+    carrier = lookups.get("twilio", {}).get("carrier", "")
+    line_type = lookups.get("twilio", {}).get("line_type", "")
+    spam_score = lookups.get("nomorobo", {}).get("spam_score", 0)
 
-        carrier = lookups.get("twilio", {}).get("carrier", "")
-        line_type = lookups.get("twilio", {}).get("line_type", "")
-        spam_score = lookups.get("nomorobo", {}).get("spam_score", 0)
+    # Save call record
+    call_record = {
+        "caller_phone": caller_phone,
+        "caller_name": caller_name,
+        "timestamp": time.time(),
+        "trust_score": trust_score,
+        "score_breakdown": score_breakdown,
+        "route_taken": route.value,
+        "lookup_data": {"carrier": carrier, "line_type": line_type, "spam_score": spam_score},
+    }
+    if contractor_id:
+        call_record["contractor_id"] = contractor_id
 
-        # Save call record
-        call_record = {
-            "caller_phone": caller_phone,
-            "caller_name": caller_name,
-            "timestamp": time.time(),
-            "trust_score": trust_score,
-            "score_breakdown": score_breakdown,
-            "route_taken": route.value,
-            "lookup_data": {"carrier": carrier, "line_type": line_type, "spam_score": spam_score},
-        }
-        if contractor_id:
-            call_record["contractor_id"] = contractor_id
-        await save_call(call_sid, call_record)
-
-        # Push notification is sent after save_active_call below (has contractor_id, fires before transcription)
-
-        # Save active call state to RTDB
-        if route == Route.AI_SCREENING:
-                from app.db.cache import save_active_call
-                from app.services.state_machine import ActiveCall, CallState
-
-                active_call = ActiveCall(
-                    call_sid=call_sid,
-                    caller_phone=caller_phone,
-                    state=CallState.SCREENING,
-                    conference_name=conference_name,
-                    trust_score=trust_score,
-                    caller_name=caller_name,
-                    carrier=carrier,
-                    line_type=line_type,
-                    spam_score=spam_score,
-                    contractor_id=contractor_id,
-                    ws_token=ws_token,
-                    caller_name_trusted=caller_name_trusted,
-                )
-                await save_active_call(active_call)
-
-                # Send push notification now that RTDB is saved and contractor_id is known
+    async def notify():
+        if route != Route.AI_SCREENING:
+            return
+        try:
+            async with asyncio.timeout(5.0):
+                # Essential authority was registered by the request handler.
                 if contractor_id:
                     from app.services.push_notification import send_regular_push, get_device_token
                     from app.services.personal_language import is_portuguese
@@ -1006,38 +1028,50 @@ async def _post_routing_tasks(
                         )
                     else:
                         logger.warning(f"No push token for contractor {contractor_id} — notification not sent")
+        except Exception as error:
+            logger.warning("Incoming notification failed: %s", type(error).__name__)
 
-                # Optional caller-name enrichment runs after routing. Native clients
-                # do not consume carrier/line type, so request CNAM alone.
-                include_cnam = False
-                if not caller_name:
-                    from app.db.contractors import get_contractor
-                    cnam_contractor = await get_contractor(contractor_id) if contractor_id else None
-                    if cnam_contractor and cnam_contractor.get("cnam_lookup_enabled", False):
-                        include_cnam = True
+    async def persist():
+        try:
+            async with asyncio.timeout(10.0):
+                await save_call(call_sid, call_record)
 
-                if include_cnam:
-                    try:
-                        from app.services.lookup import _lookup_twilio
-                        lookup_result = await asyncio.wait_for(
-                            _lookup_twilio(caller_phone, include_cnam=True, include_line_type=False),
-                            timeout=5.0,
-                        )
-                        if lookup_result:
-                            # If CNAM returned a name, save it
-                            cnam_name = lookup_result.get("caller_name", "")
-                            if cnam_name:
-                                # Also update the Firestore call record
-                                from app.db.calls import save_call
-                                await save_call(call_sid, {"caller_name": cnam_name})
-                                from app.db.cache import update_active_call
-                                await update_active_call(call_sid, {"caller_name": cnam_name})
-                                logger.info(f"CNAM lookup resolved: {cnam_name[:1]}***")
-                    except Exception as e:
-                        logger.warning(f"Background Twilio lookup failed: {e}")
+                if route == Route.AI_SCREENING:
+                    # Optional caller-name enrichment runs after routing. Native clients
+                    # do not consume carrier/line type, so request CNAM alone.
+                    include_cnam = False
+                    if not caller_name:
+                        from app.db.contractors import get_contractor
+                        cnam_contractor = await get_contractor(contractor_id) if contractor_id else None
+                        if cnam_contractor and cnam_contractor.get("cnam_lookup_enabled", False):
+                            include_cnam = True
 
-    except Exception as e:
-        logger.error(f"Post-routing task error: {e}", exc_info=True)
+                    if include_cnam:
+                        try:
+                            from app.services.lookup import _lookup_twilio
+                            lookup_result = await asyncio.wait_for(
+                                _lookup_twilio(caller_phone, include_cnam=True, include_line_type=False),
+                                timeout=5.0,
+                            )
+                            if lookup_result:
+                                # If CNAM returned a name, save it
+                                cnam_name = lookup_result.get("caller_name", "")
+                                if cnam_name:
+                                    # Also update the Firestore call record
+                                    await save_call(call_sid, {"caller_name": cnam_name})
+                                    from app.services.call_registration import enrich_registered_caller
+                                    await enrich_registered_caller(call_sid, contractor_id, ws_token, cnam_name)
+                                    logger.info(f"CNAM lookup resolved: {cnam_name[:1]}***")
+                        except Exception as e:
+                            logger.warning(f"Background Twilio lookup failed: {e}")
+        except Exception as error:
+            logger.warning("Post-routing history failed: %s", type(error).__name__)
+
+    # Neither a history outage nor an APNs outage can block the other. This
+    # parent owns and joins both children, including on cancellation.
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(notify())
+        tasks.create_task(persist())
 
 
 @router.post("/webhooks/twilio/ios-voice")
@@ -1491,9 +1525,17 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
     call_sid_var.set(call_sid)
     logger.info(f"Call status update: {status}")
 
+    # Never construct an RTDB path from an absent or path-like provider ID.
+    from app.services.owner_call_actions import validate_call_sid
+    validate_call_sid(call_sid)
+
     # Clean up RTDB active call when call ends
     if status in ("completed", "busy", "no-answer", "canceled", "failed"):
-        persistence_error = None
+        from app.services.call_registration import close_call_registration
+        fenced = await close_call_registration(call_sid)
+        persistence_error = None if fenced else JSONResponse(
+            status_code=500, content={"status": "error", "message": "Failed to close call authority"},
+        )
         updates = {"call_status": status, "ended_at": time.time()}
         duration = form_data.get("CallDuration") or form_data.get("Duration")
         if duration:
@@ -1511,15 +1553,6 @@ async def handle_status(request: Request, _=Depends(verify_twilio_signature)):
             except Exception as e:
                 logger.error("Failed to save call status: %s", type(e).__name__)
                 persistence_error = JSONResponse(status_code=500, content={"status": "error", "message": "Exception saving call status"})
-        try:
-            from app.db.cache import _init_firebase, ACTIVE_CALLS_PATH
-            _init_firebase()
-            from firebase_admin import db as rtdb
-            ref = rtdb.reference(f"{ACTIVE_CALLS_PATH}/{call_sid}")
-            ref.delete()
-            logger.info(f"Active call cleaned up: {call_sid}")
-        except Exception as e:
-            logger.warning(f"Failed to clean up active call: {e}")
         if persistence_error is not None:
             return persistence_error
 

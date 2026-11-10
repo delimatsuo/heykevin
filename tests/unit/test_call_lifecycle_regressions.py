@@ -264,9 +264,7 @@ class _SetupSocket:
     [
         "ready",
         "wrong-token",
-        pytest.param(
-            "history-blocked", marks=_gap("history persistence delays live stream authority")
-        ),
+        "history-blocked",
     ],
 )
 async def test_stream_authorization_does_not_wait_for_call_history(monkeypatch, engine, scenario):
@@ -275,15 +273,21 @@ async def test_stream_authorization_does_not_wait_for_call_history(monkeypatch, 
     monkeypatch.setattr(module, "asyncio", proxy)
     monkeypatch.setattr(module, "_init_firebase", lambda: None)
     entered, release_history = asyncio.Event(), asyncio.Event()
-    records, reads, authorized = {}, [], []
+    from tests.fixtures.call_registration import registration_stores
+    from app.services.call_registration import register_screening_call
+    from app.services.state_machine import ActiveCall, CallState
+    stores = registration_stores(monkeypatch)
+    records, reads, authorized = stores.client.records, [], []
+    assert await register_screening_call(ActiveCall(
+        call_sid="CA_lifecycle", caller_phone="+15550000002",
+        caller_name="Test Caller", state=CallState.SCREENING,
+        contractor_id="test-owner", ws_token="test-token",
+        conference_name="test-conference",
+    ))
 
     async def save_history(_sid, _record):
         entered.set()
         await release_history.wait()
-        return True
-
-    async def save_active(active):
-        records[active.call_sid] = active.to_dict()
         return True
 
     class Reference:
@@ -297,7 +301,6 @@ async def test_stream_authorization_does_not_wait_for_call_history(monkeypatch, 
         raise _SetupProbeComplete()
 
     monkeypatch.setattr("app.db.calls.save_call", save_history)
-    monkeypatch.setattr(cache, "save_active_call", save_active)
     monkeypatch.setattr(
         "app.services.push_notification.get_device_token", AsyncMock(return_value=None)
     )

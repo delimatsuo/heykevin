@@ -26,8 +26,11 @@ class _FakeRtdbReference:
         self._deleted = deleted
         self._path = path
 
-    def delete(self):
+    def transaction(self, update):
+        result = update(None)
+        assert result["state"] == "ended" and "ws_token" not in result
         self._deleted.append(self._path)
+        return result
 
 
 @pytest.mark.asyncio
@@ -76,8 +79,8 @@ async def test_terminal_write_failure_still_cleans_live_call_and_requests_retry(
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
     save = AsyncMock(side_effect=RuntimeError("unavailable")) if save_raises else AsyncMock(return_value=False)
-    cleanup = Mock(side_effect=RuntimeError("unavailable")) if cleanup_raises else Mock()
-    reference = Mock(return_value=SimpleNamespace(delete=cleanup))
+    cleanup = Mock(side_effect=RuntimeError("unavailable")) if cleanup_raises else Mock(side_effect=lambda update: update(None))
+    reference = Mock(return_value=SimpleNamespace(transaction=cleanup))
     monkeypatch.setattr("app.db.calls.save_call", save)
     monkeypatch.setattr("app.db.cache._init_firebase", lambda: None)
     monkeypatch.setattr("firebase_admin.db.reference", reference)

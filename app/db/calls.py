@@ -174,10 +174,10 @@ def _maybe_decrypt_call_doc(doc: Optional[dict]) -> Optional[dict]:
     """Decrypt the transcript field in a call doc, returning a new dict."""
     if not isinstance(doc, dict):
         return doc
-    if "transcript" not in doc:
-        return doc
     out = dict(doc)
-    out["transcript"] = _decrypt_transcript(doc.get("transcript"))
+    out.pop("_screening_registration", None)
+    if "transcript" in doc:
+        out["transcript"] = _decrypt_transcript(doc.get("transcript"))
     return out
 
 
@@ -189,6 +189,20 @@ async def save_call(call_sid: str, data: dict) -> bool:
         data["call_sid"] = call_sid
         data = _maybe_encrypt_call_data(data)
         doc_ref = db.collection(COLLECTION).document(call_sid)
+        if "ended_at" in data:
+            # Status may precede the incoming webhook/history task. Give such
+            # rows a retention timestamp without moving an existing call's age.
+            @firestore.transactional
+            def terminal(transaction):
+                snapshot = doc_ref.get(transaction=transaction)
+                current = snapshot.to_dict() if snapshot.exists else {}
+                updates = dict(data)
+                if not current.get("timestamp") and "timestamp" not in updates:
+                    updates["timestamp"] = data["ended_at"]
+                transaction.set(doc_ref, updates, merge=True)
+
+            await asyncio.to_thread(terminal, db.transaction())
+            return True
         await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: doc_ref.set(data, merge=True),

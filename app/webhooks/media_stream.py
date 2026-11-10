@@ -962,8 +962,12 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str):
     try:
         logger.info("media_event event=twilio_stream_started call=%s", _call_label(call_sid))
 
-        # Select voice pipeline based on contractor config
+        # Initial incoming registration pins the engine across webhook retries
+        # and profile edits before stream setup. Legacy and owner-directed
+        # fallback streams retain their existing configuration behavior.
         voice_engine = contractor_config_loaded.get("voice_engine", "elevenlabs")
+        if not call_data.get("kevin_redirect_nonce"):
+            voice_engine = call_data.get("registration_voice_engine", voice_engine)
 
         if voice_engine == "gemini" and settings.gemini_api_key:
             from app.services.gemini_pipeline import GeminiPipeline

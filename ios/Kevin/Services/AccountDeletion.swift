@@ -52,6 +52,23 @@ enum AccountDeletionFlow {
     static let warningTitle: String.LocalizationValue = "Check Apple Subscription"
     static let warningBody: String.LocalizationValue = "Deleting your Hey Kevin account does not cancel your Apple subscription. Check Manage Subscription first to make sure automatic renewal is off."
 
+    /// A superseded or already-consumed operation has no result to present.
+    @MainActor
+    static func complete(
+        _ outcome: AccountDeletionOutcome, token: AccountDeletionToken, appState: AppState,
+        finish: (AccountDeletionToken, CallAuthContext) -> Bool, writeBearer: (String) -> Void
+    ) -> AccountDeletionOutcome? {
+        guard finish(token, appState.currentAuthContext()) else { return nil }
+        if outcome == .deleted {
+            appState.contractorId = ""
+            appState.kevinNumber = ""
+            appState.countryCode = ""
+            appState.isOnboarded = false
+            writeBearer("")
+        }
+        return outcome
+    }
+
     /// Server truth first, Keychain cache as fallback (field-wise): the
     /// cache defaults to "trial" and can be stale, and a stale skip of the
     /// billing warning means an active subscriber deletes without it.

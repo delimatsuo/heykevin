@@ -1,0 +1,17 @@
+# What iOS clears when account deletion completes
+
+This inventory covers the local Settings completion. The existing [response parser and completion](../ios/Kevin/Services/AccountDeletion.swift) accept an explicit successful response or an already-deleted response (401 or 404). A failed request keeps the session available for a retry. A reply belonging to an obsolete or consumed operation has no effect.
+
+| State | Current behavior | Ordinary storage or lifetime |
+| --- | --- | --- |
+| Contractor ID, Kevin number, country, onboarding, API bearer | Success clears these in that order. Settings passes the empty bearer to the API client after the other four assignments. | ID and bearer use Keychain; number, country and onboarding enqueue writes to standard defaults. |
+| Call presentation, read/notification state, service binding | Changing the ID invalidates the old presentation lease and its screening snapshot. It resets the current read set, unread count, pending call notification and binding. | Call presentation and binding are in memory. Read IDs have a separate defaults key for each contractor; dropping the current set does not erase that contractor's stored key. |
+| Account profile and Apple identity | Completion does not clear owner/business details, service type, mode, the Apple user ID or the transient Apple identity token. | Profile fields are in defaults, Apple user ID is in Keychain, and the identity token is in memory. |
+| Subscription status, tier and account UUID | Completion does not clear these cached values. They describe the account; the server remains authoritative. Deleting a Kevin account does not cancel an Apple subscription. | Keychain. |
+| Explicit consent to upload contacts | Completion does not reset this account decision. The consent bit is separate from the system's Contacts permission. | Standard defaults. |
+| Integration and calling settings | Integration indicators, forwarding activation, carrier selection, contact ringing, tone, reply, interruption and language settings receive no explicit reset here. This inventory does not decide which preferences should follow the device. | Standard defaults for the AppState mirrors. |
+| APNs and VoIP device tokens | Kept. These identify the installation for notifications; keeping them locally does not establish a registration for any account. | Device-scoped values in AppState. |
+
+The [completion tests](../ios/KevinTests/AccountDeletionTests.swift) exercise the real fence and reset on a synthetic, in-memory AppState. The observable bearer writer records the requested value and the state when it is written. The call assertions concern ownership of the presentation and transcript, not native call teardown. Three strict expected failures track the signed-out profile/Apple identity, subscription cache, and explicit consent invariants; an unexpected pass calls for reviewing the corresponding test.
+
+The storage column comes from [AppState's initializer and property observers](../ios/Kevin/Models/AppState.swift) and the [API token setter](../ios/Kevin/Services/APIClient.swift). The recovery store can be injected for a [credential recovery](../ios/KevinTests/AccountSessionRecoveryTests.swift), but ordinary hydration and deletion do not use that seam throughout. This suite does not verify durable removal, deletion during protected-storage failure or interruption, relaunch, or what a different user would see. It does not upload contacts or exercise a server or provider.

@@ -2632,16 +2632,11 @@ struct SettingsHost<Root: View>: View {
             try? await Task.sleep(nanoseconds: alertRedismissalDelay)
         }
         await MainActor.run {
-            let currentAuth = appState.currentAuthContext()
-            guard accountDeletionFence.finish(token: token, auth: currentAuth) else { return }
-            switch outcome {
-            case .deleted:
-                appState.contractorId = ""
-                appState.kevinNumber = ""
-                appState.countryCode = ""
-                appState.isOnboarded = false
-                APIClient.shared.contractorToken = ""
-            case .failed:
+            if AccountDeletionFlow.complete(
+                outcome, token: token, appState: appState,
+                finish: { accountDeletionFence.finish(token: $0, auth: $1) },
+                writeBearer: { APIClient.shared.contractorToken = $0 }
+            ) == .failed {
                 showDeleteAccountError = true
             }
         }

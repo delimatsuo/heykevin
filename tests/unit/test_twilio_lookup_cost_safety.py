@@ -220,7 +220,7 @@ async def test_lookup_twilio_cnam_only_timeout_no_retry(lookup):
 
 @pytest.mark.asyncio
 async def test_post_routing_tasks_ai_screening_known_caller(lookup, twilio_incoming, monkeypatch, active_updates):
-    """Known caller: saves call + active state, sends push, zero lookup calls."""
+    """Known caller: saves history without creating authority, sends push, zero lookup calls."""
     saved_calls = []
     saved_active = []
     sent_pushes = []
@@ -270,9 +270,7 @@ async def test_post_routing_tasks_ai_screening_known_caller(lookup, twilio_incom
 
     assert len(saved_calls) == 1
     assert saved_calls[0][1]["caller_name"] == "Alice Smith"
-    assert len(saved_active) == 1
-    assert saved_active[0].caller_name == "Alice Smith"
-    assert saved_active[0].caller_name_trusted is True
+    assert saved_active == []  # background work must never initialize authority
     assert len(sent_pushes) == 1
     assert len(lookup_calls) == 0
     assert len(MockTwilioClient.fetch_calls) == 0
@@ -281,7 +279,7 @@ async def test_post_routing_tasks_ai_screening_known_caller(lookup, twilio_incom
 
 @pytest.mark.asyncio
 async def test_post_routing_tasks_ai_screening_unknown_caller_cnam_disabled(lookup, twilio_incoming, monkeypatch, active_updates):
-    """Unknown caller with CNAM disabled: saves call + active state, sends push, zero lookup calls."""
+    """Unknown caller with CNAM disabled: saves history without creating authority, sends push, zero lookup calls."""
     saved_calls = []
     saved_active = []
     sent_pushes = []
@@ -331,9 +329,7 @@ async def test_post_routing_tasks_ai_screening_unknown_caller_cnam_disabled(look
 
     assert len(saved_calls) == 1
     assert saved_calls[0][1]["caller_name"] == ""
-    assert len(saved_active) == 1
-    assert saved_active[0].caller_name == ""
-    assert saved_active[0].caller_name_trusted is False
+    assert saved_active == []  # background work must never initialize authority
     assert len(sent_pushes) == 1
     assert len(lookup_calls) == 0
     assert len(MockTwilioClient.fetch_calls) == 0
@@ -355,8 +351,9 @@ async def test_post_routing_tasks_ai_screening_unknown_caller_cnam_enabled(looku
     async def fake_save_active_call(active_call):
         saved_active.append(active_call)
 
-    async def fake_update_active_call(call_sid, updates):
-        updated_active.append((call_sid, updates))
+    async def fake_update_active_call(call_sid, contractor_id, ws_token, caller_name):
+        assert contractor_id == "c1" and ws_token == "ws_tok_3"
+        updated_active.append((call_sid, {"caller_name": caller_name}))
 
     async def fake_send_regular_push(**kwargs):
         sent_pushes.append(kwargs)
@@ -375,7 +372,7 @@ async def test_post_routing_tasks_ai_screening_unknown_caller_cnam_enabled(looku
 
     monkeypatch.setattr("app.db.calls.save_call", fake_save_call)
     monkeypatch.setattr("app.db.cache.save_active_call", fake_save_active_call)
-    monkeypatch.setattr("app.db.cache.update_active_call", fake_update_active_call)
+    monkeypatch.setattr("app.services.call_registration.enrich_registered_caller", fake_update_active_call)
     monkeypatch.setattr("app.services.push_notification.send_regular_push", fake_send_regular_push)
     monkeypatch.setattr("app.services.push_notification.get_device_token", fake_get_device_token)
     monkeypatch.setattr("app.db.contractors.get_contractor", fake_get_contractor)
@@ -404,10 +401,8 @@ async def test_post_routing_tasks_ai_screening_unknown_caller_cnam_enabled(looku
     assert saved_calls[0][1]["caller_name"] == ""
     assert saved_calls[1] == ("CA_UNKNOWN_CNAM_ON", {"caller_name": "Acme Corp"})
 
-    # Active call saved initially, then updated with CNAM caller_name
-    assert len(saved_active) == 1
-    assert saved_active[0].caller_name == ""
-    assert saved_active[0].caller_name_trusted is False
+    # Authority already exists; only conditional CNAM enrichment is requested
+    assert saved_active == []  # background work must never initialize authority
     assert len(updated_active) == 1
     assert updated_active[0] == ("CA_UNKNOWN_CNAM_ON", {"caller_name": "Acme Corp"})
 
@@ -423,7 +418,7 @@ async def test_post_routing_tasks_ai_screening_unknown_caller_cnam_enabled(looku
 
 @pytest.mark.asyncio
 async def test_post_routing_tasks_ai_screening_withheld_caller(lookup, twilio_incoming, monkeypatch, active_updates):
-    """Withheld/anonymous caller: saves call + active state and sends push, no paid Client lookup."""
+    """Withheld/anonymous caller: saves history without creating authority and sends push, no paid Client lookup."""
     saved_calls = []
     saved_active = []
     sent_pushes = []
@@ -472,7 +467,7 @@ async def test_post_routing_tasks_ai_screening_withheld_caller(lookup, twilio_in
     )
 
     assert len(saved_calls) == 1
-    assert len(saved_active) == 1
+    assert saved_active == []  # background work must never initialize authority
     assert len(sent_pushes) == 1
     assert len(lookup_calls) == 1
     # Client is NOT constructed and fetch is NOT called because "anonymous" is noncanonical

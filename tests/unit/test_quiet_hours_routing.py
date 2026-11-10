@@ -245,6 +245,12 @@ async def _incoming(
         "app.services.conference_registry.register_conference",
         register_conference,
     )
+    from app.services.call_registration import RegisteredCall
+
+    async def register(call, *, voice_engine):
+        return RegisteredCall({**call.to_dict(), "registration_voice_engine": voice_engine}, True)
+
+    monkeypatch.setattr("app.services.call_registration.register_screening_call", register)
     monkeypatch.setattr(twilio_incoming, "_post_routing_tasks", record_routing)
 
     response = await twilio_incoming.handle_incoming_call(_FakeFormRequest())

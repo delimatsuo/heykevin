@@ -47,7 +47,8 @@ def _call_is_over(record, now: float) -> bool:
     record goes only with the call's terminal status callback or as stale. Nothing
     consumes a command once its call is over: adoption requires a live record.
     """
-    return record is None or _is_stale(record, now)
+    return (record is None or _is_stale(record, now)
+            or (isinstance(record, dict) and record.get("state") == "ended"))
 
 
 def _delete_command_if_call_over(command_ref, call_ref, now: float) -> bool:

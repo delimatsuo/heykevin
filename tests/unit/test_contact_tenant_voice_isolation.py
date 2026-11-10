@@ -100,10 +100,18 @@ async def _run_incoming_call(
         "app.services.conference_registry.register_conference",
         register_conference,
     )
+    from app.services.call_registration import RegisteredCall
+
+    async def register(call, *, voice_engine):
+        record = {**call.to_dict(), "registration_voice_engine": voice_engine}
+        return RegisteredCall(record, True) if call.contractor_id else None
+
+    monkeypatch.setattr("app.services.call_registration.register_screening_call", register)
     monkeypatch.setattr(twilio_incoming, "_post_routing_tasks", record_routing)
 
     response = await twilio_incoming.handle_incoming_call(_FakeFormRequest())
-    await asyncio.wait_for(recorded.wait(), timeout=1)
+    if contractor:
+        await asyncio.wait_for(recorded.wait(), timeout=1)
     return bytes(response.body).decode(), captured
 
 
@@ -118,10 +126,8 @@ async def test_unmatched_twilio_number_never_consults_global_contacts(monkeypatc
 
     _twiml, captured = await _run_incoming_call(monkeypatch, None)
 
-    assert captured["contractor_id"] == ""
-    assert captured["lookups"]["contact"] is None
-    assert captured["caller_name"] == ""
-    assert captured["caller_name_trusted"] is False
+    assert captured == {}
+    assert "<Number>" in _twiml and "<Stream" not in _twiml
 
 
 @pytest.mark.asyncio

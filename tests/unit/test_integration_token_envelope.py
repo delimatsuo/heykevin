@@ -1090,10 +1090,10 @@ def test_voice_pipeline_tool_gating_rejects_malformed_envelope(monkeypatch):
         call_sid="CA123",
         contractor_config=malformed_config,
     )
-    assert vp._has_jobber() is False
-    assert vp._has_google_calendar() is False
-    assert vp._get_jobber_token() == ""
-    assert vp._get_google_calendar_token() == ""
+    assert vp._tool_dispatcher.has_jobber() is False
+    assert vp._tool_dispatcher.has_google_calendar() is False
+    assert vp._tool_dispatcher._get_jobber_token() == ""
+    assert vp._tool_dispatcher._get_google_calendar_token() == ""
 
     # 2. Valid envelope -> enabled
     valid_jobber_acc = encrypt_integration_token("jobber-valid-token", contractor_id=contractor_id, provider="jobber", token_kind="access")
@@ -1113,10 +1113,10 @@ def test_voice_pipeline_tool_gating_rejects_malformed_envelope(monkeypatch):
         call_sid="CA123",
         contractor_config=valid_config,
     )
-    assert vp_valid._has_jobber() is True
-    assert vp_valid._has_google_calendar() is True
-    assert vp_valid._get_jobber_token() == "jobber-valid-token"
-    assert vp_valid._get_google_calendar_token() == "gcal-valid-token"
+    assert vp_valid._tool_dispatcher.has_jobber() is True
+    assert vp_valid._tool_dispatcher.has_google_calendar() is True
+    assert vp_valid._tool_dispatcher._get_jobber_token() == "jobber-valid-token"
+    assert vp_valid._tool_dispatcher._get_google_calendar_token() == "gcal-valid-token"
 
 
 def test_gemini_pipeline_tool_building_rejects_malformed_envelope(monkeypatch):
@@ -2261,8 +2261,8 @@ def test_regression_voice_pipeline_service_request_gating_malformed_envelope(mon
     vp = voice_pipeline.VoicePipeline(on_audio_out=lambda *a: None, on_transcript=lambda *a: None, call_sid="CA1", contractor_config=contractor_config)
 
     # Both must return False when token is a malformed envelope
-    assert vp._has_service_request_context() is False
-    assert vp._managed_provider_create_enabled() is False
+    assert vp._tool_dispatcher.has_service_request_context() is False
+    assert vp._tool_dispatcher._managed_provider_create_enabled() is False
 
     # Valid encrypted envelope returns True
     valid_access = encrypt_integration_token(
@@ -2280,8 +2280,8 @@ def test_regression_voice_pipeline_service_request_gating_malformed_envelope(mon
     contractor_config["google_calendar_access_token"] = valid_access
     contractor_config["google_calendar_refresh_token"] = valid_refresh
     vp_valid = voice_pipeline.VoicePipeline(on_audio_out=lambda *a: None, on_transcript=lambda *a: None, call_sid="CA1", contractor_config=contractor_config)
-    assert vp_valid._has_service_request_context() is True
-    assert vp_valid._managed_provider_create_enabled() is True
+    assert vp_valid._tool_dispatcher.has_service_request_context() is True
+    assert vp_valid._tool_dispatcher._managed_provider_create_enabled() is True
 
 
 def test_validate_token_expiry_duration_and_timestamp():

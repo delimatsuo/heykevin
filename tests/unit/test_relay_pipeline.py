@@ -12,6 +12,7 @@ import json
 import pytest
 
 from app.services.relay_pipeline import RelayPipeline, build_greeting_text
+from app.services.voice_tool_dispatch import VoiceToolDispatcher
 
 
 
@@ -213,9 +214,7 @@ async def test_tool_round_executes_and_continues(monkeypatch):
         executed["args"] = tool_args
         return json.dumps({"available": ["14:00"]})
 
-    from app.services.voice_pipeline import VoicePipeline
-
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", fake_execute)
 
     await _drive(pipeline,
         {"type": "prompt", "voicePrompt": "Can I book tomorrow?", "last": True}
@@ -322,8 +321,6 @@ def test_relay_history_uses_the_exact_greeting_twilio_already_spoke():
 @pytest.mark.asyncio
 async def test_returning_customer_tool_uses_transport_call_id(monkeypatch):
     from app.services.receptionist_tools import CANCEL_SERVICE_REQUEST
-    from app.services.voice_pipeline import VoicePipeline
-
     captured = {}
 
     async def fake_execute(
@@ -340,7 +337,7 @@ async def test_returning_customer_tool_uses_transport_call_id(monkeypatch):
         )
         return json.dumps({"status": "applied"})
 
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", fake_execute)
     recorder = _Recorder()
     pipeline = RelayPipeline(
         contractor_config=_contractor(),
@@ -419,9 +416,7 @@ async def test_tool_round_preserves_thought_signature_and_call_id(monkeypatch):
     async def fake_execute(self, tool_name, tool_args):
         return json.dumps({"available": ["14:00"]})
 
-    from app.services.voice_pipeline import VoicePipeline
-
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", fake_execute)
 
     pipeline = RelayPipeline(
         contractor_config=_contractor(),

@@ -1,7 +1,7 @@
 """Characterize actual shared tool execution without provider or database I/O.
 
-Only the external boundaries are replaced. In particular, these tests leave
-VoicePipeline._execute_tool, write gates, and ReceptionistToolExecutor intact.
+The real shared dispatcher and write gates run in every case. Request tools
+use the real ReceptionistToolExecutor except when testing explicit injection.
 Transport differences are observations to preserve during extraction, not new
 requirements for accepting malformed model calls.
 """
@@ -21,7 +21,8 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15550000000")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "+15550000001")
 
-from app.services import voice_pipeline
+from app.config import settings
+from app.services import voice_tool_dispatch
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.receptionist_tools import CANCEL_SERVICE_REQUEST
 from app.services.relay_pipeline import RelayPipeline
@@ -29,6 +30,7 @@ from app.services.service_request_repository import (
     InMemoryServiceRequestRepository,
     ServiceRequestCommandService,
 )
+from app.services.voice_pipeline import VoicePipeline
 
 
 async def _noop(*_args, **_kwargs):
@@ -45,7 +47,7 @@ def _offline_boundaries(monkeypatch):
         "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
         lambda: False,
     )
-    monkeypatch.setattr(voice_pipeline.settings, "service_request_recovery_enabled", True)
+    monkeypatch.setattr(settings, "service_request_recovery_enabled", True)
     for target in (
         "app.services.calendar.get_available_slots",
         "app.services.calendar.book_appointment",
@@ -80,7 +82,10 @@ def _contractor(tenant="tenant-a", **overrides):
     return config
 
 
-def _session(engine, config, *, call_sid="CA-synthetic-a", caller_phone="+16175550101"):
+def _session(
+    engine, config, *, call_sid="CA-synthetic-a", caller_phone="+16175550101",
+    receptionist_executor=None,
+):
     if engine == "gemini":
         pipeline = GeminiPipeline(
             on_audio_out=_noop,
@@ -118,6 +123,8 @@ def _session(engine, config, *, call_sid="CA-synthetic-a", caller_phone="+161755
                 {"name": name, "args": arguments, "id": operation_id},
             )
 
+    if receptionist_executor is not None:
+        pipeline._receptionist_tool_executor = receptionist_executor
     return dispatch
 
 
@@ -219,7 +226,7 @@ async def test_booking_gates_produce_requests_without_provider_writes(
     )
     save_call = AsyncMock(return_value=True)
     monkeypatch.setattr("app.db.calls.save_call", save_call)
-    monkeypatch.setattr(voice_pipeline.settings, "service_request_recovery_enabled", recovery_ready)
+    monkeypatch.setattr(settings, "service_request_recovery_enabled", recovery_ready)
     config = _contractor(
         service_request_command_service=service,
         gated_actions={"google_create_event": action_flag},
@@ -300,9 +307,70 @@ async def test_calendar_timeout_cancels_provider_work_before_returning(engine, m
             cancelled.set()
 
     monkeypatch.setattr("app.services.calendar.get_available_slots", blocked_slots)
-    monkeypatch.setattr(voice_pipeline, "GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(voice_tool_dispatch, "GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS", 0.01)
 
     result = await _session(engine, _contractor())("check_availability", {})
 
     assert result == {"error": "Request timed out"}
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "engine_name,expected_services",
+    [
+        ("legacy", ["original", "original", "original"]),
+        ("gemini", ["original", "original", "replacement"]),
+        ("relay", ["original", "replacement", "replacement"]),
+    ],
+)
+async def test_request_executor_binding_lifetime(engine_name, expected_services):
+    used_services = []
+    config = _contractor()
+
+    async def replacement(**_kwargs):
+        used_services.append("replacement")
+        return {"status": "applied", "revision": 2}
+
+    async def original(**_kwargs):
+        used_services.append("original")
+        config["service_request_command_service"] = SimpleNamespace(cancel_service_request=replacement)
+        return {"status": "applied", "revision": 2}
+
+    config["service_request_command_service"] = SimpleNamespace(cancel_service_request=original)
+    arguments = {"request_id": "request-1", "expected_revision": 1}
+    calls = [
+        {"name": CANCEL_SERVICE_REQUEST, "args": arguments, "id": str(i)}
+        for i in range(3)
+    ]
+    binding = {"contractor_config": config, "call_sid": "CA-lifetime", "caller_phone": "+16175550101"}
+    if engine_name == "gemini":
+        pipeline = GeminiPipeline(**binding, on_audio_out=_noop, on_transcript=_noop)
+        pipeline._ws = SimpleNamespace(send=AsyncMock())
+        await pipeline._handle_tool_calls(calls[:2])
+        await pipeline._handle_tool_calls(calls[2:])
+    elif engine_name == "relay":
+        pipeline = RelayPipeline(**binding, send_to_twilio=_noop)
+        for call in calls:
+            await pipeline._execute_tool(call)
+    else:
+        pipeline = VoicePipeline(**binding, on_audio_out=_noop, on_transcript=_noop)
+        try:
+            for call in calls:
+                await pipeline._execute_tool(call["name"], call["args"], operation_id=call["id"])
+        finally:
+            await pipeline._http_client.aclose()
+
+    assert used_services == expected_services
+
+
+@pytest.mark.asyncio
+async def test_alternate_engine_honors_injected_receptionist_executor(engine):
+    arguments = {"request_id": "request-1", "expected_revision": 1}
+    execute = AsyncMock(return_value={"confirmed": True})
+    dispatch = _session(engine, _contractor(), receptionist_executor=SimpleNamespace(execute=execute))
+
+    assert await dispatch(CANCEL_SERVICE_REQUEST, arguments, "provider-7") == {"confirmed": True}
+    execute.assert_awaited_once_with(
+        CANCEL_SERVICE_REQUEST, arguments, operation_id="CA-synthetic-a:provider-7",
+    )

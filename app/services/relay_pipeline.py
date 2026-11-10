@@ -28,12 +28,12 @@ from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.quiet_hours import is_business_hours
 from app.services.urgency import find_urgent_signal
-from app.services.voice_pipeline import (
+from app.services.voice_events import _call_label
+from app.services.voice_pipeline import build_system_prompt, is_owner_availability_hold
+from app.services.voice_tool_dispatch import (
     GOOGLE_CALENDAR_TOOL_TIMEOUT_SECONDS,
-    VoicePipeline,
-    _call_label,
-    build_system_prompt,
-    is_owner_availability_hold,
+    VoiceToolContext,
+    VoiceToolDispatcher,
 )
 from app.services.message_taking import (
     build_relay_instruction_text,
@@ -790,15 +790,17 @@ class RelayPipeline:
             return []
 
     async def _execute_tool(self, function_call: dict) -> dict:
-        """Execute one tool via the shared VoicePipeline implementation."""
+        """Execute one tool and return its decoded result to ConversationRelay."""
         tool_name = function_call.get("name", "")
         tool_args = function_call.get("args", {}) or {}
-        borrowed = VoicePipeline.__new__(VoicePipeline)
-        borrowed._contractor_config = self._contractor_config
-        borrowed._call_sid = self._call_sid
-        borrowed._caller_phone = self._caller_phone
-        if hasattr(self, "_receptionist_tool_executor"):
-            borrowed._receptionist_tool_executor = self._receptionist_tool_executor
+        dispatcher = VoiceToolDispatcher(
+            VoiceToolContext(
+                contractor_config=self._contractor_config,
+                call_sid=self._call_sid,
+                caller_phone=self._caller_phone,
+            ),
+            receptionist_executor=getattr(self, "_receptionist_tool_executor", None),
+        )
         logger.info(
             "relay_event event=tool_call call=%s tool=%s",
             _call_label(self._call_sid),
@@ -813,7 +815,7 @@ class RelayPipeline:
                 else {}
             )
             result_str = await asyncio.wait_for(
-                borrowed._execute_tool(
+                dispatcher.execute(
                     tool_name,
                     tool_args,
                     **execution_kwargs,

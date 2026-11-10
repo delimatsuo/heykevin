@@ -26,6 +26,7 @@ from app.services.voice_pipeline import (
     VoicePipeline,
 )
 from app.services import voice_pipeline as voice_pipeline_module
+from app.services.voice_tool_dispatch import VoiceToolDispatcher
 from app.webhooks.media_stream import _send_twilio_clear
 
 
@@ -2574,7 +2575,7 @@ async def test_gemini_barge_in_preempts_blocked_tool_and_discards_result(monkeyp
             raise
         return json.dumps({"available": True})
 
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", blocked_tool)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", blocked_tool)
 
     class ToolThenInterruptWebSocket(_FakeGeminiWebSocket):
         async def __anext__(self):
@@ -2641,8 +2642,8 @@ async def test_gemini_discards_cancellation_resistant_stale_tool_result(monkeypa
         return json.dumps({"available": True})
 
     monkeypatch.setattr(
-        VoicePipeline,
-        "_execute_tool",
+        VoiceToolDispatcher,
+        "execute",
         cancellation_resistant_tool,
     )
 
@@ -2760,7 +2761,7 @@ async def test_gemini_background_tool_task_returns_current_result(monkeypatch):
     async def available_tool(_self, _name, _args):
         return json.dumps({"available": True})
 
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", available_tool)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", available_tool)
 
     class RecordingWebSocket(_FakeGeminiWebSocket):
         async def send(self, payload: str):

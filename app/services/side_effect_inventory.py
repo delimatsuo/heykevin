@@ -41,6 +41,13 @@ SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
         risk="external_write",
     ),
     SideEffectSurface(
+        path="app/services/voice_tool_dispatch.py",
+        current_behavior="Executes service-request changes, Google Calendar availability and booking, and Jobber customer lookup for all three voice engines. Can save a pending appointment request to the call record.",
+        required_gate="Request changes require trusted call identity, a scoped operation ID, eligible request context, tenant enrollment, an entitled calendar token, approved integration writes and server recovery readiness. Automatic booking also requires the calendar create-event gate.",
+        required_evidence="Cross-engine tests for tenant and caller binding, operation IDs, literal write gates, request-only fallback, and provider timeouts.",
+        risk="external_write",
+    ),
+    SideEffectSurface(
         path="app/services/gemini_pipeline.py",
         current_behavior="Gemini Live shares prompt, callback, transcript, command, urgency, and tool surfaces with the legacy voice pipeline.",
         required_gate="Gemini must obey the same gate registry and sensitive-data rules as the legacy pipeline.",

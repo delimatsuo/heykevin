@@ -25,20 +25,15 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "+15550000001")
 
 from app.services.voice_pipeline import VoicePipeline
+from app.services.voice_tool_dispatch import VoiceToolContext, VoiceToolDispatcher
 
 
-class _Pipe:
-    """Borrow the real method without constructing a full pipeline.
-
-    Mirrors the `__new__` idiom the pipelines already use to share
-    `_execute_tool` across engines.
-    """
-
-    def __init__(self, contractor=None):
-        self._contractor_config = contractor or {"timezone": "America/New_York"}
-        self._call_sid = "CAtest"
-
-    _reject_implausible_slot = VoicePipeline._reject_implausible_slot
+def _dispatcher():
+    return VoiceToolDispatcher(VoiceToolContext(
+        contractor_config={"timezone": "America/New_York"},
+        call_sid="CAtest",
+        caller_phone="",
+    ))
 
 
 def _iso(days_from_now: int, hour: int = 10) -> str:
@@ -47,7 +42,7 @@ def _iso(days_from_now: int, hour: int = 10) -> str:
 
 
 def test_the_original_defect_year_2020_is_rejected():
-    result = _Pipe()._reject_implausible_slot(
+    result = _dispatcher()._reject_implausible_slot(
         {"start_time": "2020-08-21T15:00:00-04:00"}
     )
 
@@ -58,13 +53,13 @@ def test_the_original_defect_year_2020_is_rejected():
 
 
 def test_a_normal_upcoming_slot_passes_through():
-    assert _Pipe()._reject_implausible_slot({"start_time": _iso(4)}) is None
+    assert _dispatcher()._reject_implausible_slot({"start_time": _iso(4)}) is None
 
 
 def test_rejection_tells_the_model_not_to_retry_the_same_value():
     """A bare error reads as a transient fault — that is the PR #156 bug."""
     payload = json.loads(
-        _Pipe()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
+        _dispatcher()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
     )
 
     message = payload["message"]
@@ -82,7 +77,7 @@ def test_rejection_carries_no_error_key():
     be discarded exactly where it is needed.
     """
     payload = json.loads(
-        _Pipe()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
+        _dispatcher()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
     )
 
     assert "error" not in payload
@@ -99,25 +94,25 @@ def test_a_year_out_in_either_direction_is_rejected():
     contractor = {"timezone": "America/New_York"}
     for value in (_iso(-365), _iso(366)):
         assert slot_is_plausible(value, contractor) is True, "precondition"
-        assert _Pipe()._reject_implausible_slot({"start_time": value}) is not None
+        assert _dispatcher()._reject_implausible_slot({"start_time": value}) is not None
 
 
 def test_a_booking_a_few_months_out_is_still_allowed():
     """The window must not be so tight it rejects a real advance booking."""
-    assert _Pipe()._reject_implausible_slot({"start_time": _iso(120)}) is None
+    assert _dispatcher()._reject_implausible_slot({"start_time": _iso(120)}) is None
 
 
 def test_missing_start_time_is_rejected_rather_than_stored_empty():
-    assert _Pipe()._reject_implausible_slot({}) is not None
-    assert _Pipe()._reject_implausible_slot({"start_time": ""}) is not None
+    assert _dispatcher()._reject_implausible_slot({}) is not None
+    assert _dispatcher()._reject_implausible_slot({"start_time": ""}) is not None
 
 
 def test_unparseable_start_time_is_rejected():
-    assert _Pipe()._reject_implausible_slot({"start_time": "next friday-ish"}) is not None
+    assert _dispatcher()._reject_implausible_slot({"start_time": "next friday-ish"}) is not None
 
 
 def test_far_future_is_rejected():
-    assert _Pipe()._reject_implausible_slot({"start_time": _iso(900)}) is not None
+    assert _dispatcher()._reject_implausible_slot({"start_time": _iso(900)}) is not None
 
 
 def test_the_past_is_rejected_for_a_new_booking():
@@ -130,7 +125,7 @@ def test_the_past_is_rejected_for_a_new_booking():
 
     contractor = {"timezone": "America/New_York"}
     assert slot_is_plausible(_iso(-3), contractor) is True, "Confirm still allows it"
-    assert _Pipe()._reject_implausible_slot({"start_time": _iso(-3)}) is not None
+    assert _dispatcher()._reject_implausible_slot({"start_time": _iso(-3)}) is not None
 
 
 # --- wiring -----------------------------------------------------------------
@@ -234,7 +229,7 @@ def test_recovery_wording_survives_a_year_boundary():
     the caller instead of recovering.
     """
     payload = json.loads(
-        _Pipe()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
+        _dispatcher()._reject_implausible_slot({"start_time": "2020-08-21T15:00:00-04:00"})
     )
 
     assert "current year" not in payload["message"]

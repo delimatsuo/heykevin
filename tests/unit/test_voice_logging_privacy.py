@@ -14,6 +14,7 @@ os.environ.setdefault("TWILIO_PHONE_NUMBER", "test-number")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("USER_PHONE", "test-user-number")
 
+from app.services import voice_events, voice_tool_dispatch
 from app.services import voice_pipeline as voice_pipeline_module
 from app.services.voice_pipeline import VoicePipeline
 
@@ -127,7 +128,8 @@ async def test_legacy_tts_error_log_excludes_provider_body(caplog):
     assert "private speech input" not in messages
 
 
-def test_legacy_voice_logger_fstrings_do_not_embed_sensitive_values():
+@pytest.mark.parametrize("module", [voice_pipeline_module, voice_events, voice_tool_dispatch])
+def test_voice_logger_fstrings_do_not_embed_sensitive_values(module):
     forbidden_names = {
         "api_err",
         "caller_phone",
@@ -138,7 +140,7 @@ def test_legacy_voice_logger_fstrings_do_not_embed_sensitive_values():
         "text",
         "transcript",
     }
-    tree = ast.parse(inspect.getsource(voice_pipeline_module))
+    tree = ast.parse(inspect.getsource(module))
 
     for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
         function = call.func
@@ -166,7 +168,7 @@ def test_legacy_tool_failure_log_uses_short_call_label_and_safe_metadata(caplog)
     private_error = "private caller payload at a full address"
     caplog.set_level(logging.INFO, logger="app.services.voice_pipeline")
 
-    voice_pipeline_module._log_tool_execution_failure(
+    voice_events._log_tool_execution_failure(
         "book_appointment\nprivate caller",
         "CA1234567890FULL",
         RuntimeError(private_error),
@@ -181,7 +183,8 @@ def test_legacy_tool_failure_log_uses_short_call_label_and_safe_metadata(caplog)
     assert "\nprivate caller" not in messages
 
 
-def test_legacy_voice_source_has_no_full_call_sid_log_templates():
-    source = inspect.getsource(voice_pipeline_module)
+@pytest.mark.parametrize("module", [voice_pipeline_module, voice_events, voice_tool_dispatch])
+def test_voice_source_has_no_full_call_sid_log_templates(module):
+    source = inspect.getsource(module)
 
     assert "call_sid=%s" not in source

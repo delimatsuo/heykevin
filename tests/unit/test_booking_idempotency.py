@@ -366,7 +366,7 @@ async def test_booking_without_a_call_sid_still_succeeds(monkeypatch):
 
 def test_managed_booking_identity_is_stable_across_calls_and_phone_formatting():
     """Provider identity is semantic product state, never a call/tool ID."""
-    from app.services.voice_pipeline import _managed_booking_identity
+    from app.services.voice_tool_dispatch import _managed_booking_identity
 
     first = _managed_booking_identity(
         "contractor-1",

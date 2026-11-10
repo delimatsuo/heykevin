@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 from app.services.gated_actions import ActionKey
 from app.services.gemini_pipeline import GeminiPipeline
 from app.services.voice_pipeline import VoicePipeline
+from app.services.voice_tool_dispatch import VoiceToolDispatcher
 
 def _upcoming(hour: int) -> str:
     """An upcoming slot, relative to now.
@@ -130,7 +131,7 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
         "gated_actions": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
     monkeypatch.setattr(
-        pipeline,
+        pipeline._tool_dispatcher,
         "_create_managed_google_booking",
         AsyncMock(side_effect=AssertionError("provider saga must not run")),
     )
@@ -149,7 +150,7 @@ async def test_google_book_appointment_requires_automation_approval(monkeypatch)
     # See tests/unit/test_appointment_requests.py for the request contract.
     assert result["booked"] is False
     assert result["status"] == "request_recorded"
-    pipeline._create_managed_google_booking.assert_not_awaited()
+    pipeline._tool_dispatcher._create_managed_google_booking.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -170,7 +171,7 @@ async def test_google_book_appointment_calls_managed_saga_when_gate_allows(monke
         "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
     monkeypatch.setattr(
-        pipeline,
+        pipeline._tool_dispatcher,
         "_create_managed_google_booking",
         fake_managed_create,
     )
@@ -215,9 +216,9 @@ async def test_google_booking_requires_literal_tenant_mutation_flag(
         config["service_request_mutations_enabled"] = flag_value
     pipeline = _pipeline(config)
     managed_create = AsyncMock(side_effect=AssertionError("provider saga must stay closed"))
-    monkeypatch.setattr(pipeline, "_create_managed_google_booking", managed_create)
+    monkeypatch.setattr(pipeline._tool_dispatcher, "_create_managed_google_booking", managed_create)
     monkeypatch.setattr(
-        pipeline,
+        pipeline._tool_dispatcher,
         "_record_appointment_request",
         AsyncMock(return_value='{"status":"request_recorded","booked":false}'),
     )
@@ -254,9 +255,9 @@ async def test_google_booking_stays_request_only_until_recovery_is_ready(monkeyp
         "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
     managed_create = AsyncMock(side_effect=AssertionError("provider saga must stay closed"))
-    monkeypatch.setattr(pipeline, "_create_managed_google_booking", managed_create)
+    monkeypatch.setattr(pipeline._tool_dispatcher, "_create_managed_google_booking", managed_create)
     monkeypatch.setattr(
-        pipeline,
+        pipeline._tool_dispatcher,
         "_record_appointment_request",
         AsyncMock(return_value='{"status":"request_recorded","booked":false}'),
     )
@@ -513,7 +514,7 @@ async def test_google_tool_exception_returns_generic_error_and_sanitizes_logs(mo
         "automation_approvals": {ActionKey.GOOGLE_CREATE_EVENT.value: True},
     })
     monkeypatch.setattr(
-        pipeline,
+        pipeline._tool_dispatcher,
         "_create_managed_google_booking",
         fake_managed_create,
     )
@@ -619,8 +620,6 @@ async def test_gemini_jobber_book_appointment_returns_unknown_tool_and_does_not_
 
 @pytest.mark.asyncio
 async def test_gemini_tool_log_allowlists_provider_tool_name(monkeypatch, caplog):
-    from app.services.voice_pipeline import VoicePipeline
-
     class FakeWebSocket:
         def __init__(self):
             self.sent = []
@@ -631,7 +630,7 @@ async def test_gemini_tool_log_allowlists_provider_tool_name(monkeypatch, caplog
     async def fake_execute_tool(_self, _tool_name, _tool_input):
         return json.dumps({"error": "Unavailable"})
 
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute_tool)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", fake_execute_tool)
     pipeline = GeminiPipeline(
         on_audio_out=_noop,
         on_transcript=_noop,
@@ -669,7 +668,7 @@ async def test_gemini_delegated_tool_exception_returns_generic_error_and_sanitiz
     )
 
     async def fake_execute_tool(self, tool_name, tool_input):
-        assert self._call_sid == "CA-GEMINI-EXCEPTION"
+        assert self.context.call_sid == "CA-GEMINI-EXCEPTION"
         assert tool_name == "book_appointment"
         assert tool_input["client_id"] == "client-sensitive"
         raise RuntimeError(
@@ -677,7 +676,7 @@ async def test_gemini_delegated_tool_exception_returns_generic_error_and_sanitiz
             "callback +15551234567, gate code 2468, client-sensitive."
         )
 
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute_tool)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", fake_execute_tool)
 
     pipeline = GeminiPipeline(
         on_audio_out=_noop,
@@ -851,11 +850,11 @@ async def test_voice_tool_call_logging_does_not_include_sensitive_tool_input(mon
 
 
 @pytest.mark.asyncio
-async def test_gemini_tool_calls_delegate_to_voice_pipeline_with_call_sid(monkeypatch):
+async def test_gemini_tool_calls_bind_dispatcher_to_call_sid(monkeypatch):
     seen = []
 
     async def fake_execute_tool(self, tool_name, tool_input):
-        seen.append((self._call_sid, self._contractor_config, tool_name, tool_input))
+        seen.append((self.context.call_sid, self.context.contractor_config, tool_name, tool_input))
         return json.dumps({"success": False, "error": "blocked"})
 
     class FakeWebSocket:
@@ -865,7 +864,7 @@ async def test_gemini_tool_calls_delegate_to_voice_pipeline_with_call_sid(monkey
         async def send(self, payload):
             self.sent.append(json.loads(payload))
 
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", fake_execute_tool)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", fake_execute_tool)
 
     pipeline = GeminiPipeline(
         on_audio_out=_noop,
@@ -912,7 +911,7 @@ async def test_gemini_staging_disables_model_tools_and_denies_calls_without_payl
         "app.services.gemini_pipeline.staging_native_live_safety_controls_enabled",
         lambda: True,
     )
-    monkeypatch.setattr(VoicePipeline, "_execute_tool", fail_if_executed)
+    monkeypatch.setattr(VoiceToolDispatcher, "execute", fail_if_executed)
     pipeline = GeminiPipeline(
         on_audio_out=_noop,
         on_transcript=_noop,

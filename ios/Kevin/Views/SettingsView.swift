@@ -2340,8 +2340,8 @@ struct SettingsHost<Root: View>: View {
     private func applyHydratedProfile(
         contractor: [String: Any],
         decision: SettingsHydrationDecision,
-        capturedSMSToken: Int? = nil,
-        capturedAuth: CallAuthContext? = nil
+        capturedSMSToken: Int?,
+        capturedAuth: CallAuthContext
     ) {
         let name = contractor["owner_name"] as? String ?? ""
         let biz = contractor["business_name"] as? String ?? ""
@@ -2350,17 +2350,14 @@ struct SettingsHost<Root: View>: View {
         if !biz.isEmpty { appState.businessName = biz }
         if !svc.isEmpty { appState.serviceType = svc }
 
-        let subStatus = contractor["subscription_status"] as? String ?? ""
-        let subTier = contractor["subscription_tier"] as? String ?? ""
-        if !subStatus.isEmpty { appState.subscriptionStatus = subStatus }
-        if !subTier.isEmpty { appState.subscriptionTier = subTier }
+        appState.applySubscriptionProfile(contractor, for: capturedAuth)
 
         let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
         appState.autoReplySms = autoReply
         appState.serviceBinding = ServiceBindingParser.parse(from: contractor)
 
-        if let token = capturedSMSToken, let auth = capturedAuth {
-            ownerSMSPreference.applyHydration(dict: contractor, token: token, auth: auth)
+        if let token = capturedSMSToken {
+            ownerSMSPreference.applyHydration(dict: contractor, token: token, auth: capturedAuth)
         }
 
         var projection = SettingsGuardedStateProjection(

@@ -62,61 +62,63 @@ class AppState: ObservableObject {
 
     let inMemory: Bool
     private let authProviderClosure: (() -> CallAuthContext)?
+    private let persistence: AccountPersistence
     private let injectedSecureStore: KeychainManager?
-    private var secureStore: KeychainManager { injectedSecureStore ?? .shared }
+    private var secureStore: KeychainManager { injectedSecureStore ?? persistence.keychain }
     private var inMemoryBearerToken = ""
     private var inMemoryGeneration = 0
     private(set) var recoveryCommitPending = false
     private(set) var pendingAccountRecovery: AccountRecoveryCheckpoint?
     private static let recoveryMarkerKey = "accountRecoveryCommit"
 
-    private static func migrateToKeychain(_ key: String) -> String {
-        KeychainManager.shared.readMigratingLegacy(key).stringValue ?? ""
+    private func migrateToKeychain(_ key: String) -> String {
+        persistence.keychain.readMigratingLegacy(key, defaults: persistence.defaults).stringValue ?? ""
     }
 
     init(authProvider: (() -> CallAuthContext)? = nil, inMemory: Bool = false,
-         secureStore: KeychainManager? = nil) {
+         secureStore: KeychainManager? = nil, persistence: AccountPersistence = .live) {
+        self.persistence = persistence
         self.inMemory = inMemory
         self.authProviderClosure = authProvider
         self.injectedSecureStore = secureStore
 
         if !inMemory && !inScreenshotFixture {
-            let initialContractor = Self.migrateToKeychain("contractorId")
+            let initialContractor = migrateToKeychain("contractorId")
             self.contractorId = initialContractor
-            self.isOnboarded = UserDefaults.standard.bool(forKey: "isOnboarded")
-            self.subscriptionStatus = KeychainManager.shared.retrieve("subscriptionStatus") ?? "trial"
-            self.subscriptionTier = KeychainManager.shared.retrieve("subscriptionTier") ?? "none"
-            self.subscriptionUUID = KeychainManager.shared.retrieve("subscriptionUUID") ?? ""
-            self.kevinNumber = UserDefaults.standard.string(forKey: "kevinNumber") ?? ""
-            self.forwardingActivated = UserDefaults.standard.bool(forKey: "forwardingActivated")
-            self.appleUserId = Self.migrateToKeychain("appleUserId")
-            self.userName = UserDefaults.standard.string(forKey: "userName") ?? ""
-            self.businessName = UserDefaults.standard.string(forKey: "businessName") ?? ""
-            self.businessAddress = UserDefaults.standard.string(forKey: "businessAddress") ?? ""
-            self.businessCity = UserDefaults.standard.string(forKey: "businessCity") ?? ""
-            self.serviceType = UserDefaults.standard.string(forKey: "serviceType") ?? ""
-            self.mode = UserDefaults.standard.string(forKey: "kevinMode") ?? "business"
-            self.ringThroughContacts = UserDefaults.standard.object(forKey: "ringThroughContacts") as? Bool ?? true
-            self.contactsUploadConsent = UserDefaults.standard.bool(forKey: "contactsUploadConsent")
-            self.isVerizonCarrier = UserDefaults.standard.bool(forKey: "isVerizonCarrier")
-            self.sitToneEnabled = UserDefaults.standard.object(forKey: "sitToneEnabled") as? Bool ?? false
-            self.autoReplySms = UserDefaults.standard.object(forKey: "autoReplySms") as? Bool ?? false
-            self.smartInterruption = UserDefaults.standard.object(forKey: "smartInterruption") as? Bool ?? true
-            self.kevinLanguage = UserDefaults.standard.string(forKey: "kevinLanguage") ?? "auto"
-            self.countryCode = UserDefaults.standard.string(forKey: "countryCode") ?? ""
-            self.readCallIds = Self.loadReadCallIds(for: initialContractor)
-            self.jobberConnected = UserDefaults.standard.bool(forKey: "jobberConnected")
-            self.googleCalendarConnected = UserDefaults.standard.bool(forKey: "googleCalendarConnected")
+            self.isOnboarded = persistence.defaults.bool(forKey: "isOnboarded")
+            self.subscriptionStatus = persistence.keychain.retrieve("subscriptionStatus") ?? "trial"
+            self.subscriptionTier = persistence.keychain.retrieve("subscriptionTier") ?? "none"
+            self.subscriptionUUID = persistence.keychain.retrieve("subscriptionUUID") ?? ""
+            self.kevinNumber = persistence.defaults.string(forKey: "kevinNumber") ?? ""
+            self.forwardingActivated = persistence.defaults.bool(forKey: "forwardingActivated")
+            self.appleUserId = migrateToKeychain("appleUserId")
+            self.userName = persistence.defaults.string(forKey: "userName") ?? ""
+            self.businessName = persistence.defaults.string(forKey: "businessName") ?? ""
+            self.businessAddress = persistence.defaults.string(forKey: "businessAddress") ?? ""
+            self.businessCity = persistence.defaults.string(forKey: "businessCity") ?? ""
+            self.serviceType = persistence.defaults.string(forKey: "serviceType") ?? ""
+            self.mode = persistence.defaults.string(forKey: "kevinMode") ?? "business"
+            self.ringThroughContacts = persistence.defaults.object(forKey: "ringThroughContacts") as? Bool ?? true
+            self.contactsUploadConsent = persistence.defaults.bool(forKey: "contactsUploadConsent")
+            self.isVerizonCarrier = persistence.defaults.bool(forKey: "isVerizonCarrier")
+            self.sitToneEnabled = persistence.defaults.object(forKey: "sitToneEnabled") as? Bool ?? false
+            self.autoReplySms = persistence.defaults.object(forKey: "autoReplySms") as? Bool ?? false
+            self.smartInterruption = persistence.defaults.object(forKey: "smartInterruption") as? Bool ?? true
+            self.kevinLanguage = persistence.defaults.string(forKey: "kevinLanguage") ?? "auto"
+            self.countryCode = persistence.defaults.string(forKey: "countryCode") ?? ""
+            self.readCallIds = loadReadCallIds(for: initialContractor)
+            self.jobberConnected = persistence.defaults.bool(forKey: "jobberConnected")
+            self.googleCalendarConnected = persistence.defaults.bool(forKey: "googleCalendarConnected")
         }
 
         if !inMemory {
-            NotificationCenter.default.addObserver(
+            persistence.epoch.notificationCenter.addObserver(
                 self,
                 selector: #selector(handleAuthEpochChanged),
                 name: CallSessionEpoch.didChangeNotification,
                 object: nil
             )
-            NotificationCenter.default.addObserver(
+            persistence.epoch.notificationCenter.addObserver(
                 self,
                 selector: #selector(handleProtectedDataBecameAvailable),
                 name: UIApplication.protectedDataDidBecomeAvailableNotification,
@@ -126,7 +128,7 @@ class AppState: ObservableObject {
     }
 
     deinit {
-        NotificationCenter.default.removeObserver(self)
+        persistence.epoch.notificationCenter.removeObserver(self)
     }
 
     @objc private func handleProtectedDataBecameAvailable() {
@@ -151,7 +153,7 @@ class AppState: ObservableObject {
         }
         let current = contractorId
         if !inMemory && !inScreenshotFixture {
-            readCallIds = Self.loadReadCallIds(for: current)
+            readCallIds = loadReadCallIds(for: current)
         } else {
             readCallIds = []
         }
@@ -168,7 +170,7 @@ class AppState: ObservableObject {
         if let custom = authProviderClosure?() {
             return custom.generation
         }
-        return inMemory ? inMemoryGeneration : CallSessionEpoch.shared.generation
+        return inMemory ? inMemoryGeneration : persistence.epoch.generation
     }
 
     // Onboarding
@@ -176,7 +178,7 @@ class AppState: ObservableObject {
         didSet {
             let loggedOut = oldValue && !isOnboarded
             if !inScreenshotFixture && !inMemory {
-                DispatchQueue.main.async { UserDefaults.standard.set(self.isOnboarded, forKey: "isOnboarded") }
+                DispatchQueue.main.async { self.persistence.defaults.set(self.isOnboarded, forKey: "isOnboarded") }
             }
             if !isOnboarded {
                 sessionState = .notOnboarded
@@ -184,7 +186,7 @@ class AppState: ObservableObject {
             if loggedOut {
                 callLifecycleRevision += 1
                 if !inMemory && !inScreenshotFixture {
-                    CallSessionEpoch.shared.advance()
+                    persistence.epoch.advance()
                 }
             }
         }
@@ -194,16 +196,16 @@ class AppState: ObservableObject {
             let changed = oldValue != contractorId
             if !inScreenshotFixture && !inMemory {
                 if contractorId.isEmpty {
-                    KeychainManager.shared.delete("contractorId")
+                    persistence.keychain.delete("contractorId")
                 } else {
-                    KeychainManager.shared.save("contractorId", value: contractorId)
+                    persistence.keychain.save("contractorId", value: contractorId)
                 }
             }
             if changed {
                 if inMemory { inMemoryGeneration += 1 }
                 callLifecycleRevision += 1
                 if !inMemory && !inScreenshotFixture {
-                    readCallIds = Self.loadReadCallIds(for: contractorId)
+                    readCallIds = loadReadCallIds(for: contractorId)
                 } else {
                     readCallIds = []
                 }
@@ -212,7 +214,7 @@ class AppState: ObservableObject {
                 notificationCallMessage = ""
                 serviceBinding = nil
                 if !inMemory && !inScreenshotFixture {
-                    CallSessionEpoch.shared.advance()
+                    persistence.epoch.advance()
                 }
             }
         }
@@ -224,9 +226,9 @@ class AppState: ObservableObject {
         didSet {
             if inScreenshotFixture || inMemory { return }
             if subscriptionStatus.isEmpty {
-                KeychainManager.shared.delete("subscriptionStatus")
+                persistence.keychain.delete("subscriptionStatus")
             } else {
-                KeychainManager.shared.save("subscriptionStatus", value: subscriptionStatus)
+                persistence.keychain.save("subscriptionStatus", value: subscriptionStatus)
             }
         }
     }
@@ -234,9 +236,9 @@ class AppState: ObservableObject {
         didSet {
             if inScreenshotFixture || inMemory { return }
             if subscriptionTier.isEmpty {
-                KeychainManager.shared.delete("subscriptionTier")
+                persistence.keychain.delete("subscriptionTier")
             } else {
-                KeychainManager.shared.save("subscriptionTier", value: subscriptionTier)
+                persistence.keychain.save("subscriptionTier", value: subscriptionTier)
             }
         }
     }
@@ -244,9 +246,9 @@ class AppState: ObservableObject {
         didSet {
             if inScreenshotFixture || inMemory { return }
             if subscriptionUUID.isEmpty {
-                KeychainManager.shared.delete("subscriptionUUID")
+                persistence.keychain.delete("subscriptionUUID")
             } else {
-                KeychainManager.shared.save("subscriptionUUID", value: subscriptionUUID)
+                persistence.keychain.save("subscriptionUUID", value: subscriptionUUID)
             }
         }
     }
@@ -276,12 +278,12 @@ class AppState: ObservableObject {
     @Published var kevinNumber: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.kevinNumber, forKey: "kevinNumber") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.kevinNumber, forKey: "kevinNumber") }
             // New number means forwarding needs to be re-activated
             if !kevinNumber.isEmpty {
-                let stored = UserDefaults.standard.string(forKey: "forwardingActivatedFor") ?? ""
+                let stored = persistence.defaults.string(forKey: "forwardingActivatedFor") ?? ""
                 if stored != kevinNumber {
-                    DispatchQueue.main.async { UserDefaults.standard.set(false, forKey: "forwardingActivated") }
+                    DispatchQueue.main.async { self.persistence.defaults.set(false, forKey: "forwardingActivated") }
                 }
             }
         }
@@ -289,16 +291,16 @@ class AppState: ObservableObject {
     @Published var forwardingActivated: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.forwardingActivated, forKey: "forwardingActivated") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.forwardingActivated, forKey: "forwardingActivated") }
         }
     }
     @Published var appleUserId: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
             if appleUserId.isEmpty {
-                KeychainManager.shared.delete("appleUserId")
+                persistence.keychain.delete("appleUserId")
             } else {
-                KeychainManager.shared.save("appleUserId", value: appleUserId)
+                persistence.keychain.save("appleUserId", value: appleUserId)
             }
         }
     }
@@ -361,13 +363,13 @@ class AppState: ObservableObject {
     @Published var userName: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.userName, forKey: "userName") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.userName, forKey: "userName") }
         }
     }
     @Published var businessName: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.businessName, forKey: "businessName") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.businessName, forKey: "businessName") }
         }
     }
     // Business street address and city required for Twilio number
@@ -377,25 +379,25 @@ class AppState: ObservableObject {
     @Published var businessAddress: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.businessAddress, forKey: "businessAddress") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.businessAddress, forKey: "businessAddress") }
         }
     }
     @Published var businessCity: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.businessCity, forKey: "businessCity") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.businessCity, forKey: "businessCity") }
         }
     }
     @Published var serviceType: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.serviceType, forKey: "serviceType") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.serviceType, forKey: "serviceType") }
         }
     }
     @Published var mode: String = "business" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.mode, forKey: "kevinMode") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.mode, forKey: "kevinMode") }
         }
     }
 
@@ -412,7 +414,7 @@ class AppState: ObservableObject {
     @Published var ringThroughContacts: Bool = true {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.ringThroughContacts, forKey: "ringThroughContacts") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.ringThroughContacts, forKey: "ringThroughContacts") }
         }
     }
 
@@ -420,7 +422,7 @@ class AppState: ObservableObject {
     @Published var contactsUploadConsent: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            UserDefaults.standard.set(contactsUploadConsent, forKey: "contactsUploadConsent")
+            persistence.defaults.set(contactsUploadConsent, forKey: "contactsUploadConsent")
         }
     }
 
@@ -429,32 +431,32 @@ class AppState: ObservableObject {
     @Published var isVerizonCarrier: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.isVerizonCarrier, forKey: "isVerizonCarrier") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.isVerizonCarrier, forKey: "isVerizonCarrier") }
         }
     }
 
     @Published var sitToneEnabled: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.sitToneEnabled, forKey: "sitToneEnabled") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.sitToneEnabled, forKey: "sitToneEnabled") }
         }
     }
     @Published var autoReplySms: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.autoReplySms, forKey: "autoReplySms") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.autoReplySms, forKey: "autoReplySms") }
         }
     }
     @Published var smartInterruption: Bool = true {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.smartInterruption, forKey: "smartInterruption") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.smartInterruption, forKey: "smartInterruption") }
         }
     }
     @Published var kevinLanguage: String = "auto" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.kevinLanguage, forKey: "kevinLanguage") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.kevinLanguage, forKey: "kevinLanguage") }
         }
     }
 
@@ -463,13 +465,13 @@ class AppState: ObservableObject {
     @Published var countryCode: String = "" {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.countryCode, forKey: "countryCode") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.countryCode, forKey: "countryCode") }
         }
     }
 
-    private static func loadReadCallIds(for contractor: String) -> Set<String> {
+    private func loadReadCallIds(for contractor: String) -> Set<String> {
         guard !contractor.isEmpty else { return [] }
-        let arr = UserDefaults.standard.stringArray(forKey: "readCallIds_\(contractor)") ?? []
+        let arr = persistence.defaults.stringArray(forKey: "readCallIds_\(contractor)") ?? []
         return Set(arr)
     }
 
@@ -479,7 +481,7 @@ class AppState: ObservableObject {
             if inScreenshotFixture || inMemory { return }
             let contractor = contractorId
             guard !contractor.isEmpty else { return }
-            UserDefaults.standard.set(Array(self.readCallIds), forKey: "readCallIds_\(contractor)")
+            persistence.defaults.set(Array(self.readCallIds), forKey: "readCallIds_\(contractor)")
         }
     }
 
@@ -509,13 +511,13 @@ class AppState: ObservableObject {
     @Published var jobberConnected: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.jobberConnected, forKey: "jobberConnected") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.jobberConnected, forKey: "jobberConnected") }
         }
     }
     @Published var googleCalendarConnected: Bool = false {
         didSet {
             if inScreenshotFixture || inMemory { return }
-            DispatchQueue.main.async { UserDefaults.standard.set(self.googleCalendarConnected, forKey: "googleCalendarConnected") }
+            DispatchQueue.main.async { self.persistence.defaults.set(self.googleCalendarConnected, forKey: "googleCalendarConnected") }
         }
     }
 
@@ -535,7 +537,7 @@ class AppState: ObservableObject {
         #endif
         return CallAuthContext(
             contractorId: contractorId,
-            bearerToken: inMemory ? inMemoryBearerToken : APIClient.shared.contractorToken,
+            bearerToken: inMemory ? inMemoryBearerToken : persistence.contractorToken,
             generation: sessionGeneration
         )
     }
@@ -722,7 +724,7 @@ class AppState: ObservableObject {
         } else {
             // The staged Keychain write already replaced the token, so a
             // token setter comparing its new value cannot advance this epoch.
-            CallSessionEpoch.shared.advance()
+            persistence.epoch.advance()
         }
         recoveryCommitPending = false
         pendingAccountRecovery = nil
@@ -771,7 +773,7 @@ class AppState: ObservableObject {
         }
         if !inMemory {
             for key in ["contractorId", "contractorApiToken", "appleUserId"] where reads[key] == .missing {
-                let migrated = secureStore.readMigratingLegacy(key)
+                let migrated = secureStore.readMigratingLegacy(key, defaults: persistence.defaults)
                 guard case .error = migrated else { reads[key] = migrated; continue }
                 sessionState = .storageUnavailable(reason: "Secure storage is temporarily unavailable")
                 return

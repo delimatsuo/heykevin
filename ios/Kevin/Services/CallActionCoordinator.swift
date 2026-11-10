@@ -9,8 +9,13 @@ extension Notification.Name {
 final class CallSessionEpoch: @unchecked Sendable {
     static let shared = CallSessionEpoch()
     static let didChangeNotification = Notification.Name.callSessionEpochDidChange
+    let notificationCenter: NotificationCenter
     private let lock = NSRecursiveLock()
     private var value = 0
+    init(notificationCenter: NotificationCenter = .default) {
+        self.notificationCenter = notificationCenter
+    }
+
     var generation: Int { synchronized { value } }
     @discardableResult func advance() -> Int {
         let newGen = synchronized {
@@ -18,7 +23,7 @@ final class CallSessionEpoch: @unchecked Sendable {
             return value
         }
         DispatchQueue.main.async {
-            NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+            self.notificationCenter.post(name: Self.didChangeNotification, object: nil)
         }
         return newGen
     }

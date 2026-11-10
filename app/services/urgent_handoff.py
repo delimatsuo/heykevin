@@ -1,8 +1,10 @@
 """Once-only, bounded urgent escalation without allocating a conference."""
 from __future__ import annotations
 import asyncio
+
 import secrets
 import time
+from app.services.call_tasks import pipeline_tasks
 from app.db.contractors import get_contractor
 from app.services import owner_call_actions as actions
 from app.services.push_notification import send_urgent_push, send_voip_push
@@ -95,6 +97,6 @@ def start_urgency_task(pipeline, callback, text):
             raise
         except Exception:
             pass
-    task = asyncio.create_task(run())
+    task = pipeline_tasks(pipeline).create(run())
     pipeline._urgency_task = task
     return task

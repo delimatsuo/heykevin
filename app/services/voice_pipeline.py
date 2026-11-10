@@ -10,6 +10,7 @@ Full-duplex architecture based on Deepgram best practices:
 """
 
 import asyncio
+
 import base64
 import hashlib
 import json
@@ -24,6 +25,7 @@ import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from app.services.call_tasks import pipeline_tasks
 from app.config import settings
 from app.services.entitlements import effective_mode
 from app.services.gated_actions import ActionKey, GateContext, GateReason, check_gated_action
@@ -854,23 +856,27 @@ class VoicePipeline:
 
     async def start(self):
         """Connect to Deepgram and send Kevin's greeting."""
+        if pipeline_tasks(self).stopping:
+            return False
         connected = await self._connect_deepgram_with_retry()
         if not connected:
             logger.error("Failed to connect to Deepgram")
             return False
 
+        if pipeline_tasks(self).stopping:
+            return False
         self._connected = True
 
         # Proactive Jobber caller lookup — inject CRM context before first response
         if self._has_jobber() and self._caller_phone:
-            asyncio.create_task(self._prefetch_jobber_context())
+            pipeline_tasks(self).create(self._prefetch_jobber_context())
 
         # Start RTDB command polling loop
         if self._call_sid:
-            self._command_check_task = asyncio.create_task(self._command_check_loop())
+            self._command_check_task = pipeline_tasks(self).create(self._command_check_loop())
 
         # Start silence timeout check loop
-        self._silence_check_task = asyncio.create_task(self._silence_check_loop())
+        self._silence_check_task = pipeline_tasks(self).create(self._silence_check_loop())
 
         business_name = self._contractor_config.get(
             "business_name",
@@ -905,13 +911,17 @@ class VoicePipeline:
                     _log_voice_exception("greeting_translation_error", error, self._call_sid)
 
         async with self._response_lock:
+            if pipeline_tasks(self).stopping:
+                return False
             self._conversation.append({"role": "assistant", "content": greeting})
             await self.on_transcript("Kevin", greeting)
+            if pipeline_tasks(self).stopping:
+                return False
             self._audio_input_ready.set()
             await self._speak(greeting)
             self._greeting_done = True
 
-        return True
+        return not pipeline_tasks(self).stopping
 
     async def wait_until_audio_ready(self) -> bool:
         """Wait until Deepgram can accept caller audio during the greeting."""
@@ -936,9 +946,9 @@ class VoicePipeline:
     async def _prepare_message_delivery(self, intent: dict) -> bool:
         self._message_taking_pending = True
         if self._unavailable_task and not self._unavailable_task.done() and self._unavailable_task is not asyncio.current_task():
-            self._unavailable_task.cancel()
+            pipeline_tasks(self).cancel(self._unavailable_task)
         if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            self._summary_task.cancel()
+            pipeline_tasks(self).cancel(self._summary_task)
 
         if not getattr(self, '_transition_lock_held', False):
             await self._response_lock.acquire()
@@ -1060,35 +1070,24 @@ class VoicePipeline:
         return True
 
     async def stop(self):
+        tasks = pipeline_tasks(self)
         self._connected = False
-        if getattr(self, '_urgency_task', None):
-            self._urgency_task.cancel()
         self._audio_input_ready.set()
         self._interrupt_speaking = True
-        # Cancel RTDB command polling
-        if self._command_check_task and not self._command_check_task.done() and self._command_check_task is not asyncio.current_task():
-            self._command_check_task.cancel()
-        # Cancel silence timeout check
-        if self._silence_check_task and not self._silence_check_task.done() and self._silence_check_task is not asyncio.current_task():
-            self._silence_check_task.cancel()
-        if self._unavailable_task and not self._unavailable_task.done() and self._unavailable_task is not asyncio.current_task():
-            self._unavailable_task.cancel()
-        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            self._summary_task.cancel()
-        if self._deepgram_task and not self._deepgram_task.done() and self._deepgram_task is not asyncio.current_task():
-            self._deepgram_task.cancel()
-        if self._deepgram_ws:
-            try:
-                await self._deepgram_ws.send(json.dumps({"type": "CloseStream"}))
-                await self._deepgram_ws.close()
-            except Exception:
-                pass
-        # Close persistent HTTP client
-        try:
-            await self._http_client.aclose()
-        except Exception:
-            pass
-        logger.info("Voice pipeline stopped")
+        tasks.adopt(*(getattr(self, name, None) for name in (
+            '_urgency_task', '_command_check_task', '_silence_check_task',
+            '_unavailable_task', '_summary_task', '_deepgram_task',
+        )))
+
+        async def close_deepgram():
+            websocket, self._deepgram_ws = self._deepgram_ws, None
+            if websocket:
+                try:
+                    await websocket.send(json.dumps({"type": "CloseStream"}))
+                finally:
+                    await websocket.close()
+
+        await tasks.close((close_deepgram, self._http_client.aclose))
 
     # --- Deepgram STT ---
 
@@ -1114,6 +1113,8 @@ class VoicePipeline:
           homophone misrecognitions (e.g. "clogged sink" -> "client sync")
         - speech_final marks the TRUE end of an utterance (not just is_final)
         """
+        if pipeline_tasks(self).stopping:
+            return False
         try:
             from urllib.parse import quote
 
@@ -1135,20 +1136,31 @@ class VoicePipeline:
             )
 
             # Cancel old receive task before creating a new one (prevents duplicate loops)
-            if self._deepgram_task and not self._deepgram_task.done():
-                self._deepgram_task.cancel()
+            if (self._deepgram_task and not self._deepgram_task.done()
+                    and self._deepgram_task is not asyncio.current_task()):
+                pipeline_tasks(self).cancel(self._deepgram_task)
                 try:
-                    await self._deepgram_task
-                except (asyncio.CancelledError, Exception):
+                    await asyncio.shield(self._deepgram_task)
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                except Exception:
                     pass
+
+            if pipeline_tasks(self).stopping:
+                return False
 
             self._deepgram_ws = await websockets.connect(
                 url,
                 additional_headers={"Authorization": f"Token {settings.deepgram_api_key}"},
                 open_timeout=DEEPGRAM_OPEN_TIMEOUT_SECONDS,
             )
+            if pipeline_tasks(self).stopping:
+                websocket, self._deepgram_ws = self._deepgram_ws, None
+                await pipeline_tasks(self).close_resource(websocket.close)
+                return False
 
-            self._deepgram_task = asyncio.create_task(self._deepgram_receive_loop())
+            self._deepgram_task = pipeline_tasks(self).create(self._deepgram_receive_loop())
             logger.info("Deepgram STT connected (nova-3, mulaw 8kHz, interim+speech_final)")
             return True
 
@@ -1191,7 +1203,7 @@ class VoicePipeline:
                         pass
                     reconnected = await self._connect_deepgram()
                     self._reconnecting = False
-                    if not reconnected:
+                    if not reconnected and not pipeline_tasks(self).stopping:
                         logger.error("Deepgram reconnection failed — ending call gracefully")
                         if self.on_call_complete:
                             await self.on_call_complete()
@@ -1342,7 +1354,7 @@ class VoicePipeline:
 
         # Start or preserve the 30-second owner availability timer
         if not self._unavailable_task or self._unavailable_task.done():
-            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+            self._unavailable_task = pipeline_tasks(self).create(self._unavailable_timer())
 
         # Fire callback non-blocking (don't await APNs before caller continues)
         if self.on_urgency_detected:
@@ -1353,7 +1365,7 @@ class VoicePipeline:
         if self._is_speaking:
             self._interrupt_speaking = True
             if self.on_clear_audio:
-                asyncio.create_task(self.on_clear_audio())
+                pipeline_tasks(self).create(self.on_clear_audio())
 
     async def _flush_utterance(self):
         """Combine accumulated segments and process as one complete utterance."""
@@ -1373,7 +1385,7 @@ class VoicePipeline:
             chars=len(combined),
             segments=segment_count,
         )
-        asyncio.create_task(self._process_utterance(combined))
+        pipeline_tasks(self).create(self._process_utterance(combined))
 
     async def _process_utterance(self, text: str):
         """Run one Claude→TTS cycle, serialized by lock."""
@@ -2189,13 +2201,13 @@ class VoicePipeline:
         self._owner_availability_wait_started_at = now
         self._caller_silence_prompted_at = None
         if not self._unavailable_task or self._unavailable_task.done():
-            self._unavailable_task = asyncio.create_task(self._unavailable_timer())
+            self._unavailable_task = pipeline_tasks(self).create(self._unavailable_timer())
         _log_voice_event("owner_availability_hold_started", self._call_sid)
         if not self._screening_summary_push_sent:
             self._screening_summary_push_sent = True
             if self._summary_task and not self._summary_task.done():
-                self._summary_task.cancel()
-            self._summary_task = asyncio.create_task(self._trigger_screening_summary_push())
+                pipeline_tasks(self).cancel(self._summary_task)
+            self._summary_task = pipeline_tasks(self).create(self._trigger_screening_summary_push())
 
     async def _trigger_screening_summary_push(self) -> None:
         if not self._connected or not self._waiting_for_owner_availability:
@@ -2256,7 +2268,7 @@ class VoicePipeline:
         self._owner_availability_wait_started_at = 0.0
         self._caller_silence_prompted_at = None
         if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            self._summary_task.cancel()
+            pipeline_tasks(self).cancel(self._summary_task)
 
     def _mark_caller_activity(self):
         now = time.time()

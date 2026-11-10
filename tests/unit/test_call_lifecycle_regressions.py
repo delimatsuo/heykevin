@@ -171,15 +171,7 @@ async def _noop(*_args):
 
 
 @pytest.mark.parametrize("engine", ["gemini", "voice", "relay"])
-@pytest.mark.parametrize(
-    "cleanup_already_finished",
-    [
-        True,
-        pytest.param(
-            False, marks=_gap("pipeline stop cancels but does not join summary-task cleanup")
-        ),
-    ],
-)
+@pytest.mark.parametrize("cleanup_already_finished", [True, False])
 async def test_stop_returns_after_owned_task_cleanup(monkeypatch, engine, cleanup_already_finished):
     # Replace only the unused HTTP transport. Run actual constructors and stop().
     monkeypatch.setattr("app.services.voice_pipeline.httpx.AsyncClient", lambda **_: AsyncMock())
@@ -232,8 +224,7 @@ async def test_stop_returns_after_owned_task_cleanup(monkeypatch, engine, cleanu
         await _settle(owned)
 
     assert sorted(events) == ["cleanup-finished", "stop-returned"]
-    if events != ["cleanup-finished", "stop-returned"]:
-        raise KnownLifecycleGap(f"{engine} stop returned before owned cleanup finished")
+    assert events == ["cleanup-finished", "stop-returned"]
 
 
 class _SetupProbeComplete(Exception):

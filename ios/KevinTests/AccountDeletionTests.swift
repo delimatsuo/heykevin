@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Security
 import XCTest
@@ -238,9 +239,140 @@ final class AccountDeletionCompletionTests: XCTestCase {
         }
     }
 
+    private struct CompletionResetSnapshot: Equatable {
+        let contractorId: String
+        let userName: String
+        let businessName: String
+        let businessAddress: String
+        let businessCity: String
+        let serviceType: String
+        let mode: String
+        let kevinNumber: String
+        let countryCode: String
+        let forwardingActivated: Bool
+        let jobberConnected: Bool
+        let googleCalendarConnected: Bool
+        let appleUserId: String
+        let appleIdentityToken: String
+        let needsReauth: Bool
+        let subscriptionStatus: String
+        let subscriptionTier: String
+        let subscriptionUUID: String
+        let isOnboarded: Bool
+        let bearerWrites: [String]
+
+        @MainActor
+        init(state: AppState, bearerWrites: [String]) {
+            contractorId = state.contractorId
+            userName = state.userName
+            businessName = state.businessName
+            businessAddress = state.businessAddress
+            businessCity = state.businessCity
+            serviceType = state.serviceType
+            mode = state.mode
+            kevinNumber = state.kevinNumber
+            countryCode = state.countryCode
+            forwardingActivated = state.forwardingActivated
+            jobberConnected = state.jobberConnected
+            googleCalendarConnected = state.googleCalendarConnected
+            appleUserId = state.appleUserId
+            appleIdentityToken = state.appleIdentityToken
+            needsReauth = state.needsReauth
+            subscriptionStatus = state.subscriptionStatus
+            subscriptionTier = state.subscriptionTier
+            subscriptionUUID = state.subscriptionUUID
+            isOnboarded = state.isOnboarded
+            self.bearerWrites = bearerWrites
+        }
+
+        static func expected(bearerWrites: [String]) -> Self {
+            Self(
+                contractorId: "",
+                userName: "",
+                businessName: "",
+                businessAddress: "",
+                businessCity: "",
+                serviceType: "",
+                mode: "business",
+                kevinNumber: "",
+                countryCode: "",
+                forwardingActivated: false,
+                jobberConnected: false,
+                googleCalendarConnected: false,
+                appleUserId: "",
+                appleIdentityToken: "",
+                needsReauth: false,
+                subscriptionStatus: "trial",
+                subscriptionTier: "none",
+                subscriptionUUID: "",
+                isOnboarded: false,
+                bearerWrites: bearerWrites
+            )
+        }
+
+        private init(
+            contractorId: String,
+            userName: String,
+            businessName: String,
+            businessAddress: String,
+            businessCity: String,
+            serviceType: String,
+            mode: String,
+            kevinNumber: String,
+            countryCode: String,
+            forwardingActivated: Bool,
+            jobberConnected: Bool,
+            googleCalendarConnected: Bool,
+            appleUserId: String,
+            appleIdentityToken: String,
+            needsReauth: Bool,
+            subscriptionStatus: String,
+            subscriptionTier: String,
+            subscriptionUUID: String,
+            isOnboarded: Bool,
+            bearerWrites: [String]
+        ) {
+            self.contractorId = contractorId
+            self.userName = userName
+            self.businessName = businessName
+            self.businessAddress = businessAddress
+            self.businessCity = businessCity
+            self.serviceType = serviceType
+            self.mode = mode
+            self.kevinNumber = kevinNumber
+            self.countryCode = countryCode
+            self.forwardingActivated = forwardingActivated
+            self.jobberConnected = jobberConnected
+            self.googleCalendarConnected = googleCalendarConnected
+            self.appleUserId = appleUserId
+            self.appleIdentityToken = appleIdentityToken
+            self.needsReauth = needsReauth
+            self.subscriptionStatus = subscriptionStatus
+            self.subscriptionTier = subscriptionTier
+            self.subscriptionUUID = subscriptionUUID
+            self.isOnboarded = isOnboarded
+            self.bearerWrites = bearerWrites
+        }
+    }
+
     func testSuccessInvalidatesOwnedCallAndWritesEmptyBearerLastOnlyOnce() throws {
         let f = Fixture()
         let state = f.state
+        state.userName = "fixture-owner"
+        state.businessName = "fixture-business"
+        state.businessAddress = "fixture-address"
+        state.businessCity = "fixture-city"
+        state.serviceType = "fixture-service"
+        state.mode = "personal"
+        state.appleUserId = "fixture-apple"
+        state.appleIdentityToken = "fixture-identity-token"
+        state.needsReauth = true
+        state.forwardingActivated = true
+        state.jobberConnected = true
+        state.googleCalendarConnected = true
+        state.subscriptionStatus = "active"
+        state.subscriptionTier = "businessPro"
+        state.subscriptionUUID = "uuid-a"
         let token = try f.begin()
         state.pushToken = "fixture-apns"; state.voipToken = "fixture-voip"
         state.isVerizonCarrier = true
@@ -253,14 +385,22 @@ final class AccountDeletionCompletionTests: XCTestCase {
         state.captureScreeningTranscript(for: lease)
         XCTAssertEqual(state.screeningTranscript(for: lease)?.lines, ["fixture line"])
 
+        var notOnboardedTransitions: [CompletionResetSnapshot] = []
+        let cancellable = state.$sessionState.dropFirst().sink { sessionState in
+            guard sessionState == .notOnboarded else { return }
+            notOnboardedTransitions.append(CompletionResetSnapshot(state: state, bearerWrites: f.bearerWrites))
+        }
+        defer { cancellable.cancel() }
+
+        var bearerCallbackSnapshots: [CompletionResetSnapshot] = []
         f.onBearerWrite = {
-            XCTAssertEqual(state.contractorId, "")
-            XCTAssertEqual(state.kevinNumber, "")
-            XCTAssertEqual(state.countryCode, "")
-            XCTAssertFalse(state.isOnboarded)
+            XCTAssertEqual(state.sessionState, .notOnboarded)
+            bearerCallbackSnapshots.append(CompletionResetSnapshot(state: state, bearerWrites: f.bearerWrites))
         }
         XCTAssertEqual(f.complete(.deleted, token: token), .deleted)
         XCTAssertNil(f.complete(.deleted, token: token))
+        XCTAssertEqual(notOnboardedTransitions, [.expected(bearerWrites: [])])
+        XCTAssertEqual(bearerCallbackSnapshots, [.expected(bearerWrites: [""])])
         XCTAssertEqual(f.bearerWrites, [""])
         XCTAssertFalse(f.fence.isPending)
         XCTAssertEqual(state.sessionState, .notOnboarded)
@@ -342,33 +482,73 @@ final class AccountDeletionCompletionTests: XCTestCase {
     }
 
     func testConfirmedDeletionAccountStateInvariants() throws {
-        let f = Fixture()
-        let state = f.state
-        state.businessName = "fixture business"; state.appleUserId = "fixture-apple"
-        state.subscriptionStatus = "active"; state.subscriptionTier = "businessPro"
-        state.subscriptionUUID = "00000000-0000-4000-8000-000000000001"
-        state.contactsUploadConsent = true
-        XCTAssertTrue(state.hasOwnedContactsUploadConsent(for: "account-a"))
-        XCTAssertTrue(state.hasBusinessProEntitlement)
-        let token = try f.begin()
-        XCTAssertEqual(f.complete(.deleted, token: token), .deleted)
-        XCTAssertEqual(state.sessionState, .notOnboarded)
-        XCTAssertEqual(f.bearerWrites, [""])
-        XCTAssertFalse(state.contactsUploadConsent)
-        XCTAssertNil(state.contactsUploadConsentOwner)
+        let cases: [(status: String, tier: String, uuid: String)] = [
+            ("active", "businessPro", "00000000-0000-4000-8000-000000000001"),
+            ("expired", "personal", "00000000-0000-4000-8000-000000000002"),
+        ]
+        for entry in cases {
+            let f = Fixture()
+            let state = f.state
+            state.userName = "fixture owner"
+            state.businessName = "fixture business"
+            state.businessAddress = "fixture address"
+            state.businessCity = "fixture city"
+            state.serviceType = "fixture service"
+            state.mode = "personal"
+            state.appleUserId = "fixture-apple"
+            state.appleIdentityToken = "fixture-apple-token"
+            state.needsReauth = true
+            state.forwardingActivated = true
+            state.jobberConnected = true
+            state.googleCalendarConnected = true
+            state.subscriptionStatus = entry.status
+            state.subscriptionTier = entry.tier
+            state.subscriptionUUID = entry.uuid
+            state.contactsUploadConsent = true
+            XCTAssertTrue(state.hasOwnedContactsUploadConsent(for: "account-a"), entry.status)
+            if entry.status == "active" {
+                XCTAssertTrue(state.isSubscriptionActive)
+                XCTAssertTrue(state.hasBusinessEntitlement)
+                XCTAssertTrue(state.hasBusinessProEntitlement)
+            } else {
+                XCTAssertFalse(state.isSubscriptionActive)
+                XCTAssertFalse(state.hasBusinessEntitlement)
+                XCTAssertFalse(state.hasBusinessProEntitlement)
+            }
+            let token = try f.begin()
+            XCTAssertTrue(state.persistRecoveredCredentials([
+                "contractorId": "account-a",
+                "appleUserId": "fixture-apple",
+            ]))
+            XCTAssertTrue(state.recoveryCommitPending)
+            XCTAssertNotNil(state.pendingAccountRecovery)
 
-        expectResetGap("deleted-profile-and-apple-identity", state.businessName.isEmpty && state.appleUserId.isEmpty)
-        expectResetGap("deleted-subscription-cache", state.subscriptionStatus != "active"
-            && state.subscriptionTier != "businessPro" && state.subscriptionUUID.isEmpty)
-    }
-
-    private func expectResetGap(_ tag: String, _ invariant: Bool, file: String = #filePath, line: Int = #line) {
-        XCTExpectFailure("Account deletion reset: \(tag)", strict: true, failingBlock: {
-            guard !invariant else { return }
-            let location = XCTSourceCodeLocation(filePath: file, lineNumber: line)
-            record(XCTIssue(type: .assertionFailure, compactDescription: tag,
-                            sourceCodeContext: XCTSourceCodeContext(location: location)))
-        }, issueMatcher: { $0.type == .assertionFailure && $0.compactDescription == tag })
+            XCTAssertEqual(f.complete(.deleted, token: token), .deleted, entry.status)
+            XCTAssertEqual(state.sessionState, .notOnboarded, entry.status)
+            XCTAssertEqual(f.bearerWrites, [""], entry.status)
+            XCTAssertFalse(state.contactsUploadConsent, entry.status)
+            XCTAssertNil(state.contactsUploadConsentOwner, entry.status)
+            XCTAssertEqual(state.userName, "", entry.status)
+            XCTAssertEqual(state.businessName, "", entry.status)
+            XCTAssertEqual(state.businessAddress, "", entry.status)
+            XCTAssertEqual(state.businessCity, "", entry.status)
+            XCTAssertEqual(state.serviceType, "", entry.status)
+            XCTAssertEqual(state.mode, "business", entry.status)
+            XCTAssertEqual(state.appleUserId, "", entry.status)
+            XCTAssertEqual(state.appleIdentityToken, "", entry.status)
+            XCTAssertFalse(state.needsReauth, entry.status)
+            XCTAssertFalse(state.forwardingActivated, entry.status)
+            XCTAssertFalse(state.jobberConnected, entry.status)
+            XCTAssertFalse(state.googleCalendarConnected, entry.status)
+            XCTAssertEqual(state.subscriptionStatus, "trial", entry.status)
+            XCTAssertEqual(state.subscriptionTier, "none", entry.status)
+            XCTAssertEqual(state.subscriptionUUID, "", entry.status)
+            XCTAssertTrue(state.isSubscriptionActive, entry.status)
+            XCTAssertFalse(state.hasBusinessEntitlement, entry.status)
+            XCTAssertFalse(state.hasBusinessProEntitlement, entry.status)
+            XCTAssertFalse(state.recoveryCommitPending, entry.status)
+            XCTAssertNil(state.pendingAccountRecovery, entry.status)
+        }
     }
 }
 
@@ -379,7 +559,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         "isOnboarded": true, "kevinNumber": "number-A", "countryCode": "US",
         "forwardingActivated": true, "forwardingActivatedFor": "number-A",
         "userName": "owner-A", "businessName": "business-A", "businessAddress": "address-A",
-        "businessCity": "city-A", "serviceType": "service-A", "kevinMode": "business",
+        "businessCity": "city-A", "serviceType": "service-A", "kevinMode": "personal",
         "ringThroughContacts": false, "contactsUploadConsent": true, "isVerizonCarrier": true,
         "sitToneEnabled": true, "autoReplySms": true, "smartInterruption": false, "kevinLanguage": "fr",
         "jobberConnected": true, "googleCalendarConnected": true,
@@ -391,6 +571,10 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         "contractorId": "account-A", "contractorApiToken": "bearer-A", "appleUserId": "apple-A",
         "subscriptionStatus": "active", "subscriptionTier": "businessPro",
         "subscriptionUUID": "00000000-0000-4000-8000-00000000000a",
+    ]
+    private static let deletedSecureRemovalOrder = [
+        "contractorId", "appleUserId", "subscriptionStatus",
+        "subscriptionTier", "subscriptionUUID", "contractorApiToken",
     ]
 
     /// A value snapshot taken from the raw stores, independent of any AppState or process-local epoch.
@@ -521,10 +705,12 @@ final class AccountDeletionPersistenceTests: XCTestCase {
 
     func testConfirmedDeletionSettlesAndFreshStateHydratesAccountResidue() async throws {
         let original = try await readyA()
+        XCTAssertEqual(original.state.mode, "personal")
         let token = try original.begin()
         XCTAssertEqual(original.complete(.deleted, token), .deleted)
         XCTAssertNil(original.complete(.deleted, token))
-        XCTAssertEqual(original.secure.attemptedRemovals, ["contractorId", "contractorApiToken"])
+        XCTAssertEqual(original.secure.attemptedRemovals, Self.deletedSecureRemovalOrder)
+        XCTAssertTrue(original.secure.writes.isEmpty)
         await Self.drainMainQueue()
 
         let image = try original.snapshot()
@@ -533,13 +719,28 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         expectedDefaults["countryCode"] = ""
         expectedDefaults["isOnboarded"] = false
         expectedDefaults["contactsUploadConsent"] = false
+        expectedDefaults["userName"] = ""
+        expectedDefaults["businessName"] = ""
+        expectedDefaults["businessAddress"] = ""
+        expectedDefaults["businessCity"] = ""
+        expectedDefaults["serviceType"] = ""
+        expectedDefaults["kevinMode"] = "business"
+        expectedDefaults["forwardingActivated"] = false
+        expectedDefaults["jobberConnected"] = false
+        expectedDefaults["googleCalendarConnected"] = false
+        expectedDefaults.removeValue(forKey: "forwardingActivatedFor")
+        expectedDefaults.removeValue(forKey: "readCallIds_account-A")
         XCTAssertEqual(image.defaults as NSDictionary, expectedDefaults as NSDictionary)
-        var expectedSecure = Self.secureA
-        expectedSecure.removeValue(forKey: "contractorId")
-        expectedSecure.removeValue(forKey: "contractorApiToken")
-        XCTAssertEqual(try image.secureValues(), expectedSecure)
+        XCTAssertNil(image.defaults["forwardingActivatedFor"])
+        XCTAssertNil(image.defaults["readCallIds_account-A"])
+        XCTAssertEqual(image.defaults["readCallIds_account-B"] as? [String], [])
+        XCTAssertEqual(image.defaults["contractorId"] as? String, "")
+        XCTAssertEqual(image.defaults["contractorApiToken"] as? String, "")
+        XCTAssertEqual(image.defaults["appleUserId"] as? String, "")
+        XCTAssertEqual(try image.secureValues(), [:])
 
         let fresh = try reopen(original)
+        XCTAssertTrue(fresh.secure.writes.isEmpty)
         let state = fresh.state
         XCTAssertEqual(state.sessionState, .notOnboarded)
         XCTAssertFalse(state.isOnboarded)
@@ -549,42 +750,31 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(state.kevinNumber, "")
         XCTAssertEqual(state.countryCode, "")
         XCTAssertTrue(state.readCallIds.isEmpty)
-        XCTAssertEqual(state.userName, "owner-A")
-        XCTAssertEqual(state.businessName, "business-A")
-        XCTAssertEqual(state.businessAddress, "address-A")
-        XCTAssertEqual(state.businessCity, "city-A")
-        XCTAssertEqual(state.serviceType, "service-A")
+        XCTAssertEqual(state.userName, "")
+        XCTAssertEqual(state.businessName, "")
+        XCTAssertEqual(state.businessAddress, "")
+        XCTAssertEqual(state.businessCity, "")
+        XCTAssertEqual(state.serviceType, "")
         XCTAssertEqual(state.mode, "business")
-        XCTAssertEqual(state.appleUserId, "apple-A")
-        XCTAssertEqual(state.subscriptionStatus, "active")
-        XCTAssertEqual(state.subscriptionTier, "businessPro")
-        XCTAssertEqual(state.subscriptionUUID, Self.secureA["subscriptionUUID"])
+        XCTAssertEqual(state.appleUserId, "")
+        XCTAssertEqual(state.appleIdentityToken, "")
+        XCTAssertEqual(state.subscriptionStatus, "trial")
+        XCTAssertEqual(state.subscriptionTier, "none")
+        XCTAssertEqual(state.subscriptionUUID, "")
+        XCTAssertFalse(state.hasBusinessEntitlement)
+        XCTAssertFalse(state.hasBusinessProEntitlement)
         XCTAssertFalse(state.contactsUploadConsent)
         XCTAssertNil(state.contactsUploadConsentOwner)
-        XCTAssertTrue(state.jobberConnected)
-        XCTAssertTrue(state.googleCalendarConnected)
-        XCTAssertTrue(state.forwardingActivated)
+        XCTAssertFalse(state.jobberConnected)
+        XCTAssertFalse(state.googleCalendarConnected)
+        XCTAssertFalse(state.forwardingActivated)
+        XCTAssertFalse(state.needsReauth)
         XCTAssertFalse(state.ringThroughContacts)
         XCTAssertTrue(state.isVerizonCarrier)
         XCTAssertTrue(state.sitToneEnabled)
         XCTAssertTrue(state.autoReplySms)
         XCTAssertFalse(state.smartInterruption)
         XCTAssertEqual(state.kevinLanguage, "fr")
-
-        expectDurableGap("durable-deleted-business-name", state.businessName.isEmpty)
-        expectDurableGap("durable-deleted-apple-user-id", state.appleUserId.isEmpty)
-        expectDurableGap("durable-deleted-subscription-status", state.subscriptionStatus != "active")
-        expectDurableGap("durable-deleted-subscription-tier", state.subscriptionTier != "businessPro")
-        expectDurableGap("durable-deleted-subscription-uuid", state.subscriptionUUID.isEmpty)
-    }
-
-    private func expectDurableGap(_ tag: String, _ invariant: Bool, file: String = #filePath, line: Int = #line) {
-        XCTExpectFailure("Account deletion reset: \(tag)", strict: true, failingBlock: {
-            guard !invariant else { return }
-            let location = XCTSourceCodeLocation(filePath: file, lineNumber: line)
-            record(XCTIssue(type: .assertionFailure, compactDescription: tag,
-                            sourceCodeContext: XCTSourceCodeContext(location: location)))
-        }, issueMatcher: { $0.type == .assertionFailure && $0.compactDescription == tag })
     }
 
     func testFailureAndLateReplyPreserveTheStoredAccountAndAllowRetry() async throws {
@@ -631,13 +821,24 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(try before.secureValues()["contractorApiToken"], "bearer-A")
         XCTAssertNil(try after.secureValues()["contractorApiToken"])
         await Self.drainMainQueue()
-        XCTAssertEqual(try original.snapshot().defaults["isOnboarded"] as? Bool, false)
+        let drained = try original.snapshot()
+        XCTAssertEqual(drained.defaults["isOnboarded"] as? Bool, false)
+        XCTAssertEqual(drained.defaults["kevinNumber"] as? String, "")
+        XCTAssertEqual(drained.defaults["countryCode"] as? String, "")
+        XCTAssertEqual(drained.defaults["businessName"] as? String, "")
 
         for image in [before, after] {
-            XCTAssertNil(try image.secureValues()["contractorId"])
+            let secure = try image.secureValues()
+            XCTAssertNil(secure["contractorId"])
+            XCTAssertNil(secure["appleUserId"])
+            XCTAssertNil(secure["subscriptionStatus"])
+            XCTAssertNil(secure["subscriptionTier"])
+            XCTAssertNil(secure["subscriptionUUID"])
+            XCTAssertNil(image.defaults["readCallIds_account-A"])
             XCTAssertEqual(image.defaults["isOnboarded"] as? Bool, true)
             XCTAssertEqual(image.defaults["kevinNumber"] as? String, "number-A")
             XCTAssertEqual(image.defaults["countryCode"] as? String, "US")
+            XCTAssertEqual(image.defaults["businessName"] as? String, "business-A")
             let fork = try open(image)
             fork.state.refreshSecureStorageForActiveUse()
             XCTAssertEqual(fork.state.sessionState, .needsRecovery)
@@ -645,7 +846,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
             XCTAssertEqual(fork.state.kevinNumber, "number-A")
             XCTAssertEqual(fork.state.countryCode, "US")
             XCTAssertEqual(fork.state.contractorId, "")
-            XCTAssertEqual(fork.api.contractorToken, try image.secureValues()["contractorApiToken"] ?? "")
+            XCTAssertEqual(fork.api.contractorToken, secure["contractorApiToken"] ?? "")
             XCTAssertFalse(fork.state.currentAuthContext().isValid)
         }
     }
@@ -679,24 +880,33 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(result, .deleted)
         XCTAssertFalse(original.fence.isPending)
         // A denied Keychain read is not verified absence, so the setter still attempts deletion.
-        XCTAssertEqual(original.secure.attemptedRemovals, ["contractorId", "contractorApiToken"])
+        XCTAssertEqual(original.secure.attemptedRemovals, Self.deletedSecureRemovalOrder)
         XCTAssertEqual(original.state.sessionGeneration, token.auth.generation + 3)
-        XCTAssertNil(original.secure.values["contractorId"])
-        XCTAssertNil(original.secure.values["contractorApiToken"])
+        XCTAssertTrue(original.secure.values.isEmpty)
         await Self.drainMainQueue()
         let fresh = try reopen(original)
         XCTAssertEqual(fresh.state.sessionState, .notOnboarded)
         XCTAssertEqual(fresh.api.contractorToken, "")
         XCTAssertFalse(fresh.state.currentAuthContext().isValid)
+        XCTAssertEqual(fresh.state.userName, "")
+        XCTAssertEqual(fresh.state.businessName, "")
+        XCTAssertEqual(fresh.state.businessAddress, "")
+        XCTAssertEqual(fresh.state.businessCity, "")
+        XCTAssertEqual(fresh.state.serviceType, "")
+        XCTAssertEqual(fresh.state.mode, "business")
+        XCTAssertEqual(fresh.state.appleUserId, "")
+        XCTAssertEqual(fresh.state.subscriptionStatus, "trial")
+        XCTAssertEqual(fresh.state.subscriptionTier, "none")
+        XCTAssertEqual(fresh.state.subscriptionUUID, "")
     }
 
     func testIgnoredProtectedRemovalsLeaveLocalCredentialsBehindSignedOutGate() async throws {
         let original = try await readyA()
         let token = try original.begin()
-        original.secure.ignoredRemovals = ["contractorId", "contractorApiToken"]
+        original.secure.ignoredRemovals = Set(Self.secureA.keys)
         XCTAssertEqual(original.complete(.deleted, token), .deleted)
         XCTAssertFalse(original.fence.isPending)
-        XCTAssertEqual(original.secure.attemptedRemovals, ["contractorId", "contractorApiToken"])
+        XCTAssertEqual(original.secure.attemptedRemovals, Self.deletedSecureRemovalOrder)
         XCTAssertEqual(original.state.sessionGeneration, token.auth.generation + 3)
         await Self.drainMainQueue()
         let image = try original.snapshot()
@@ -705,13 +915,19 @@ final class AccountDeletionPersistenceTests: XCTestCase {
 
         let locked = try open(image, locked: true)
         locked.state.refreshSecureStorageForActiveUse()
+        XCTAssertTrue(locked.secure.writes.isEmpty)
         XCTAssertTrue(locked.state.sessionState.isUnavailable)
         XCTAssertFalse(locked.state.currentAuthContext().isValid)
         XCTAssertEqual(locked.secure.values, Self.secureA)
         locked.secure.locked = false
         locked.state.refreshSecureStorageForActiveUse()
+        XCTAssertTrue(locked.secure.writes.isEmpty)
         XCTAssertEqual(locked.state.sessionState, .notOnboarded)
         XCTAssertEqual(locked.state.contractorId, "")
+        XCTAssertEqual(locked.state.appleUserId, "")
+        XCTAssertEqual(locked.state.subscriptionStatus, "trial")
+        XCTAssertEqual(locked.state.subscriptionTier, "none")
+        XCTAssertEqual(locked.state.subscriptionUUID, "")
         XCTAssertEqual(locked.api.contractorToken, "bearer-A")
 
         let unlocked = try reopen(original)
@@ -732,7 +948,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(state.sessionState, .notOnboarded)
         XCTAssertEqual(state.contractorId, "")
         XCTAssertEqual(state.kevinNumber, "")
-        XCTAssertEqual(state.appleUserId, "apple-A")
+        XCTAssertEqual(state.appleUserId, "")
         XCTAssertFalse(state.contactsUploadConsent)
         XCTAssertNil(state.pendingAccountRecovery)
 
@@ -769,7 +985,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         state.markCallAsRead("read-B")
         await Self.drainMainQueue()
         let image = try signedOut.snapshot()
-        XCTAssertEqual(image.defaults["readCallIds_account-A"] as? [String], ["read-A"])
+        XCTAssertNil(image.defaults["readCallIds_account-A"])
         XCTAssertEqual(image.defaults["readCallIds_account-B"] as? [String], ["read-B"])
         XCTAssertEqual(image.defaults["contactsUploadConsent"] as? Bool, false)
         let fresh = try reopen(signedOut)
@@ -824,7 +1040,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         XCTAssertEqual(state.sessionState, .notOnboarded)
         XCTAssertEqual(state.contractorId, "")
         XCTAssertEqual(signedOut.api.contractorToken, "")
-        XCTAssertEqual(state.appleUserId, "apple-A")
+        XCTAssertEqual(state.appleUserId, "")
         XCTAssertFalse(state.contactsUploadConsent)
         XCTAssertNil(state.pendingAccountRecovery)
 
@@ -911,11 +1127,13 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         var preferences = Self.preferencesA
         preferences["contractorId"] = "legacy-account"
         preferences["contractorApiToken"] = "legacy-bearer"
+        preferences["appleUserId"] = "legacy-apple"
         preferences["readCallIds_legacy-account"] = [String]()
         let original = try await readyA(preferences: preferences)
         let readyImage = try original.snapshot()
         XCTAssertNil(readyImage.defaults["contractorId"])
         XCTAssertNil(readyImage.defaults["contractorApiToken"])
+        XCTAssertNil(readyImage.defaults["appleUserId"])
 
         let token = try original.begin()
         var justRemoved: Result<Snapshot, Error>?
@@ -926,14 +1144,17 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         let image = try XCTUnwrap(justRemoved).get()
         XCTAssertNil(try image.secureValues()["contractorId"])
         XCTAssertNil(try image.secureValues()["contractorApiToken"])
+        XCTAssertNil(try image.secureValues()["appleUserId"])
         XCTAssertNil(image.defaults["contractorId"])
         XCTAssertNil(image.defaults["contractorApiToken"])
+        XCTAssertNil(image.defaults["appleUserId"])
 
         await Self.drainMainQueue()
         let fresh = try reopen(original)
         XCTAssertEqual(fresh.state.sessionState, .notOnboarded)
         XCTAssertEqual(fresh.state.currentAuthContext().contractorId, "")
         XCTAssertEqual(fresh.state.currentAuthContext().bearerToken, "")
+        XCTAssertEqual(fresh.state.appleUserId, "")
         XCTAssertFalse(fresh.state.currentAuthContext().isValid)
 
         // Also prove deletion itself scrubs duplicate legacy defaults injected right before completion
@@ -941,6 +1162,7 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         let injected = try await readyA()
         let injectedToken = try injected.begin()
         injected.defaults.set("late-legacy-account", forKey: "contractorId")
+        injected.defaults.set("late-legacy-apple", forKey: "appleUserId")
         var afterDirectScrub: Result<Snapshot, Error>?
         let injectedResult = injected.complete(.deleted, injectedToken, beforeBearer: {
             injected.defaults.set("late-legacy-bearer", forKey: "contractorApiToken")
@@ -951,14 +1173,88 @@ final class AccountDeletionPersistenceTests: XCTestCase {
         let scrubbed = try XCTUnwrap(afterDirectScrub).get()
         XCTAssertNil(try scrubbed.secureValues()["contractorId"])
         XCTAssertNil(try scrubbed.secureValues()["contractorApiToken"])
+        XCTAssertNil(try scrubbed.secureValues()["appleUserId"])
         XCTAssertNil(scrubbed.defaults["contractorId"])
         XCTAssertNil(scrubbed.defaults["contractorApiToken"])
+        XCTAssertNil(scrubbed.defaults["appleUserId"])
         await Self.drainMainQueue()
         let reopenedInjected = try reopen(injected)
         XCTAssertEqual(reopenedInjected.state.sessionState, .notOnboarded)
         XCTAssertEqual(reopenedInjected.state.currentAuthContext().contractorId, "")
         XCTAssertEqual(reopenedInjected.state.currentAuthContext().bearerToken, "")
+        XCTAssertEqual(reopenedInjected.state.appleUserId, "")
         XCTAssertFalse(reopenedInjected.state.currentAuthContext().isValid)
+    }
+
+    func testConfirmedDeletionClearsRecoveryMarkerAndTrialKeychainEntries() async throws {
+        var trialSecure = Self.secureA
+        trialSecure["subscriptionStatus"] = "trial"
+        trialSecure["subscriptionTier"] = "none"
+        trialSecure["subscriptionUUID"] = "uuid-trial"
+
+        let original = try await readyA(secure: trialSecure)
+        XCTAssertEqual(original.state.subscriptionStatus, "trial")
+        XCTAssertEqual(original.state.subscriptionTier, "none")
+        XCTAssertEqual(original.state.subscriptionUUID, "uuid-trial")
+        let token = try original.begin()
+
+        let checkpoint = AccountRecoveryCheckpoint(
+            contractorId: "account-A",
+            appleUserId: "apple-A",
+            allowsUnfinishedSetup: false
+        )
+        original.state.beginAccountRecovery(checkpoint: checkpoint)
+        XCTAssertTrue(original.state.recoveryCommitPending)
+        XCTAssertEqual(original.state.pendingAccountRecovery, checkpoint)
+        XCTAssertNotNil(original.secure.values["accountRecoveryCommit"])
+        original.secure.writes.removeAll()
+
+        XCTAssertEqual(original.complete(.deleted, token), .deleted)
+        XCTAssertEqual(
+            original.secure.attemptedRemovals,
+            ["accountRecoveryCommit"] + Self.deletedSecureRemovalOrder
+        )
+        XCTAssertTrue(original.secure.writes.isEmpty)
+        XCTAssertFalse(original.state.recoveryCommitPending)
+        XCTAssertNil(original.state.pendingAccountRecovery)
+        await Self.drainMainQueue()
+
+        let image = try original.snapshot()
+        XCTAssertEqual(try image.secureValues(), [:])
+
+        let fresh = try reopen(original)
+        XCTAssertTrue(fresh.secure.writes.isEmpty)
+        XCTAssertEqual(fresh.state.sessionState, .notOnboarded)
+        XCTAssertEqual(fresh.state.contractorId, "")
+        XCTAssertEqual(fresh.state.appleUserId, "")
+        XCTAssertFalse(fresh.state.recoveryCommitPending)
+        XCTAssertNil(fresh.state.pendingAccountRecovery)
+        XCTAssertEqual(fresh.state.subscriptionStatus, "trial")
+        XCTAssertEqual(fresh.state.subscriptionTier, "none")
+        XCTAssertEqual(fresh.state.subscriptionUUID, "")
+
+        // Also verify deletion removes a post-recovery "complete" marker alongside trial/none cache entries.
+        let recovered = try await readyA(secure: trialSecure)
+        XCTAssertTrue(recovered.state.finishAccountRecovery(bearerToken: "bearer-A"))
+        XCTAssertEqual(recovered.secure.values["accountRecoveryCommit"], "complete")
+        recovered.secure.writes.removeAll()
+
+        let recoveredToken = try recovered.begin()
+        XCTAssertEqual(recovered.complete(.deleted, recoveredToken), .deleted)
+        XCTAssertEqual(
+            recovered.secure.attemptedRemovals,
+            ["accountRecoveryCommit"] + Self.deletedSecureRemovalOrder
+        )
+        XCTAssertTrue(recovered.secure.writes.isEmpty)
+        await Self.drainMainQueue()
+
+        let recoveredImage = try recovered.snapshot()
+        XCTAssertEqual(try recoveredImage.secureValues(), [:])
+        let reopenedRecovered = try reopen(recovered)
+        XCTAssertTrue(reopenedRecovered.secure.writes.isEmpty)
+        XCTAssertEqual(reopenedRecovered.state.sessionState, .notOnboarded)
+        XCTAssertEqual(reopenedRecovered.state.contractorId, "")
+        XCTAssertEqual(reopenedRecovered.state.appleUserId, "")
     }
 
     func testHistoricalPreFixDeletedStoreWithMigratedIdentityRejectsUnownedAndMismatchedConsent() async throws {

@@ -2719,6 +2719,10 @@ struct OnboardingView: View {
             guard let profile = await APIClient.shared.getContractorProfile(
                 contractorId: initialAuth.contractorId,
                 bearerToken: initialAuth.bearerToken
+            ),
+            let payload = ContractorProfilePayload(
+                profile: profile,
+                expectedContractorId: initialAuth.contractorId
             ) else {
                 if appState.currentAuthContext() == initialAuth && appState.appleUserId == initialAppleUserId {
                     errorMessage = String(localized: "Could not reconnect your account. Please try again.")
@@ -2726,14 +2730,13 @@ struct OnboardingView: View {
                 isLoading = false
                 return
             }
-            existingProfileKnowledge = profile["knowledge"] as? String
+            existingProfileKnowledge = payload.knowledge
             guard appState.currentAuthContext() == initialAuth,
                   appState.appleUserId == initialAppleUserId else {
                 isLoading = false
                 return
             }
-            if let existing = profile["twilio_number"] as? String,
-               !existing.isEmpty {
+            if let existing = payload.nonemptyTwilioNumber {
                 do {
                     let updated = try await APIClient.shared.patchContractor(
                         initialAuth.contractorId,
@@ -2767,21 +2770,21 @@ struct OnboardingView: View {
                 if !resolvedOwnerName.isEmpty { appState.userName = resolvedOwnerName }
                 if !resolvedBusinessName.isEmpty { appState.businessName = resolvedBusinessName }
                 appState.mode = mode
-                if let subUUID = profile["subscription_uuid"] as? String, !subUUID.isEmpty {
+                if let subUUID = payload.subscriptionUUIDString {
                     appState.subscriptionUUID = subUUID
                 }
-                if let country = SettingsCountry.accountCountry(from: profile) {
+                if let country = payload.accountCountry {
                     appState.countryCode = country
                 }
-                appState.serviceBinding = ServiceBindingParser.parse(from: profile)
+                appState.serviceBinding = payload.serviceBinding
                 step = .forwarding
                 isLoading = false
                 return
             }
 
             // Restored profile without assigned number: gate before any mode write or provisioning!
-            let profileCountry = SettingsCountry.accountCountry(from: profile) ?? selectedCountryCode
-            let profilePhone = (profile["owner_phone"] as? String) ?? phoneNumber
+            let profileCountry = payload.accountCountry ?? selectedCountryCode
+            let profilePhone = payload.ownerPhone ?? phoneNumber
             let snapshot = SignupAdmissionSnapshot(
                 countryCode: profileCountry,
                 phone: profilePhone,
@@ -2935,13 +2938,19 @@ struct OnboardingView: View {
                 isLoading = false
                 return
             }
+            guard appState.pendingAccountRecovery == nil,
+                  let apiToken = result?["api_token"] as? String,
+                  !apiToken.isEmpty else {
+                errorMessage = result?["error"] as? String ?? String(localized: "Failed to create profile. Please try again.")
+                isLoading = false
+                return
+            }
             appState.contractorId = newContractorId
+            appState.recordInMemoryBearerToken(apiToken)
             if explicitOnboardingContactConsent {
                 appState.grantContactsUploadConsent(for: newContractorId)
             }
-            if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
-                APIClient.shared.contractorToken = apiToken
-            }
+            APIClient.shared.contractorToken = apiToken
             opAuthContext = appState.currentAuthContext()
             opAppleUserId = appState.appleUserId
             patchProfileClosure = nil
@@ -3183,10 +3192,10 @@ struct OnboardingView: View {
             }
             return
         }
-        if appState.hasBusinessEntitlement {
-            Task {
-                let ready = await prepareBusinessDraftProfile()
-                guard ready else { return }
+        Task {
+            let ready = await prepareBusinessDraftProfile()
+            guard ready else { return }
+            if appState.hasBusinessEntitlement {
                 let result = await activateBusinessAfterPurchase(
                     authContext: appState.currentAuthContext()
                 ) {
@@ -3195,19 +3204,15 @@ struct OnboardingView: View {
                 if case .failure(let message) = result {
                     errorMessage = message
                 }
-            }
-        } else {
-            Task {
-                let ready = await prepareBusinessDraftProfile()
-                if ready {
-                    showPaywall = true
-                }
+            } else {
+                showPaywall = true
             }
         }
     }
 
     @MainActor
     private func prepareBusinessDraftProfile() async -> Bool {
+        guard !isRecoveryMode else { return false }
         isLoading = true
         errorMessage = ""
         defer { isLoading = false }
@@ -3215,13 +3220,7 @@ struct OnboardingView: View {
         let servicesToSave = effectiveServicesPayload
         let knowledgeToSave = effectiveKnowledgeMarkdown
 
-        var profilePatchBody: [String: Any] = [
-            "owner_name": ownerName,
-            "business_name": businessName,
-            "service_type": serviceType,
-        ]
-        if let servicesToSave { profilePatchBody["services"] = servicesToSave }
-
+        let createClosure: () async -> OnboardingBusinessDraftCoordinator.CreateOutcome
         if appState.contractorId.isEmpty {
             let currentCountry = selectedCountryCode
             let validation = SignupPhone.validate(phoneNumber, countryCode: currentCountry)
@@ -3250,119 +3249,114 @@ struct OnboardingView: View {
                 return false
             }
 
-            let outcome = await callWithFreshAppleTokenOnAuthFailure { [appState, validPhone, ownerName, businessName, serviceType, currentCountry, servicesToSave, knowledgeToSave] in
-                try await SignupAdmission.runIfAllowed(
-                    status: admission,
-                    snapshot: originSnapshot,
-                    current: {
-                        SignupAdmissionSnapshot(
-                            countryCode: self.selectedCountryCode,
-                            phone: SignupPhone.validate(self.phoneNumber, countryCode: self.selectedCountryCode).e164 ?? "",
-                            authContext: self.appState.currentAuthContext(),
-                            appleUserId: self.appState.appleUserId
+            createClosure = { [self, appState, validPhone, ownerName, businessName, serviceType, currentCountry, servicesToSave, knowledgeToSave] in
+                let outcome = await callWithFreshAppleTokenOnAuthFailure {
+                    try await SignupAdmission.runIfAllowed(
+                        status: admission,
+                        snapshot: originSnapshot,
+                        current: {
+                            SignupAdmissionSnapshot(
+                                countryCode: self.selectedCountryCode,
+                                phone: SignupPhone.validate(self.phoneNumber, countryCode: self.selectedCountryCode).e164 ?? "",
+                                authContext: self.appState.currentAuthContext(),
+                                appleUserId: self.appState.appleUserId
+                            )
+                        }
+                    ) {
+                        try await APIClient.shared.createContractor(
+                            ownerName: ownerName,
+                            businessName: businessName,
+                            serviceType: serviceType,
+                            mode: "personal",
+                            ownerPhone: validPhone,
+                            countryCode: currentCountry,
+                            appleUserId: appState.appleUserId,
+                            appleIdentityToken: appState.appleIdentityToken,
+                            declaredOnboardingIntent: "business",
+                            services: servicesToSave,
+                            knowledge: knowledgeToSave
                         )
                     }
-                ) {
-                    try await APIClient.shared.createContractor(
-                        ownerName: ownerName,
-                        businessName: businessName,
-                        serviceType: serviceType,
-                        mode: "personal",
-                        ownerPhone: validPhone,
-                        countryCode: currentCountry,
-                        appleUserId: appState.appleUserId,
-                        appleIdentityToken: appState.appleIdentityToken,
-                        declaredOnboardingIntent: "business",
-                        services: servicesToSave,
-                        knowledge: knowledgeToSave
-                    )
                 }
-            }
-            guard originSnapshot.isCurrent(
-                countryCode: selectedCountryCode,
-                phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
-                authContext: appState.currentAuthContext(),
-                appleUserId: appState.appleUserId
-            ) else {
-                return false
-            }
-            let result: [String: Any]?
-            switch outcome {
-            case .authFailed:
-                await handleBootstrapAuthFailure()
-                return false
-            case .success(let value):
-                result = value
-            }
-            guard let contractorId = result?["contractor_id"] as? String, !contractorId.isEmpty else {
-                errorMessage = result?["error"] as? String ?? String(localized: "Failed to prepare your business profile. Please try again.")
-                return false
-            }
-            appState.contractorId = contractorId
-            if let apiToken = result?["api_token"] as? String, !apiToken.isEmpty {
-                APIClient.shared.contractorToken = apiToken
-            }
-            if let knowledgeToSave {
-                let existingKnowledge: String?
-                if result?["existing"] as? Bool == true,
-                   let existingProfile = await APIClient.shared.getContractorProfile(contractorId: contractorId) {
-                    existingKnowledge = existingProfile["knowledge"] as? String
-                } else {
-                    existingKnowledge = nil
+                guard originSnapshot.isCurrent(
+                    countryCode: selectedCountryCode,
+                    phone: (SignupPhone.validate(phoneNumber, countryCode: selectedCountryCode).e164 ?? ""),
+                    authContext: appState.currentAuthContext(),
+                    appleUserId: appState.appleUserId
+                ) else {
+                    return .aborted
                 }
-                if let merged = OnboardingServicesDraft.mergeKnowledge(
-                    existing: existingKnowledge,
-                    additionalSection: knowledgeToSave
-                ) {
-                    profilePatchBody["knowledge"] = merged
+                switch outcome {
+                case .authFailed:
+                    return .authFailed
+                case .success(let value):
+                    return .success(value)
                 }
-            }
-            do {
-                let updated = try await APIClient.shared.patchContractor(contractorId, body: profilePatchBody)
-                if !updated {
-                    errorMessage = String(localized: "Failed to save your business profile. Please try again.")
-                    return false
-                }
-            } catch {
-                errorMessage = String(localized: "Failed to save your business profile. Please try again.")
-                return false
             }
         } else {
-            if let knowledgeToSave {
-                let existingProfile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId)
-                let existingKnowledge = existingProfile?["knowledge"] as? String
-                if let merged = OnboardingServicesDraft.mergeKnowledge(
-                    existing: existingKnowledge,
-                    additionalSection: knowledgeToSave
-                ) {
-                    profilePatchBody["knowledge"] = merged
-                }
-            }
-            do {
-                let updated = try await APIClient.shared.patchContractor(appState.contractorId, body: profilePatchBody)
-                if !updated {
-                    errorMessage = String(localized: "Failed to save your business profile. Please try again.")
-                    return false
-                }
-            } catch {
-                errorMessage = String(localized: "Failed to save your business profile. Please try again.")
-                return false
-            }
+            createClosure = { .success(nil) }
         }
 
-        appState.userName = ownerName
-        appState.businessName = businessName
-        appState.serviceType = serviceType
-
-        if let profile = await APIClient.shared.getContractorProfile(contractorId: appState.contractorId) {
-            let subUUID = profile["subscription_uuid"] as? String ?? ""
-            if !subUUID.isEmpty {
-                appState.subscriptionUUID = subUUID
+        let outcome = await OnboardingBusinessDraftCoordinator.prepare(
+            appState: appState,
+            ownerName: ownerName,
+            businessName: businessName,
+            serviceType: serviceType,
+            servicesPayload: servicesToSave,
+            knowledgeToSave: knowledgeToSave,
+            explicitContactConsent: explicitOnboardingContactConsent,
+            createContractor: createClosure,
+            restoreBootstrap: { [self] response in
+                guard !isRecoveryMode else { return .superseded }
+                let coordinator = AccountRestoreCoordinator.shared
+                guard let revision = coordinator.beginAttempt() else {
+                    return .failed(String(localized: "Could not reconnect your account. Please try again."))
+                }
+                signInAttemptRevision = revision
+                let restoreOutcome = await coordinator.restoreBootstrapResponse(
+                    response,
+                    appleUserId: appState.appleUserId,
+                    appleIdentityToken: appState.appleIdentityToken,
+                    retainedContractorId: appState.contractorId,
+                    retainedAppleUserId: appState.appleUserId,
+                    retainedKevinNumber: appState.kevinNumber,
+                    signupContinuation: signupContinuation,
+                    attemptRevision: revision
+                )
+                guard signInAttemptRevision == revision else { return .superseded }
+                signInAttemptRevision = nil
+                return restoreOutcome
+            },
+            onAuthFailure: { [self] in
+                await handleBootstrapAuthFailure()
+            },
+            writeBearerToken: { token in
+                APIClient.shared.contractorToken = token
+            },
+            fetchProfile: { contractorId, bearerToken in
+                await APIClient.shared.getContractorProfile(
+                    contractorId: contractorId,
+                    bearerToken: bearerToken
+                )
+            },
+            patchContractor: { contractorId, body, bearerToken in
+                try await APIClient.shared.patchContractor(
+                    contractorId,
+                    body: body,
+                    bearerToken: bearerToken
+                )
             }
-            appState.serviceBinding = ServiceBindingParser.parse(from: profile)
-        }
+        )
 
-        return true
+        switch outcome {
+        case .readyForNextStep:
+            return true
+        case .restoredCompletedAccount, .aborted:
+            return false
+        case .failed(let message):
+            errorMessage = message
+            return false
+        }
     }
 
     @MainActor
@@ -3389,7 +3383,12 @@ struct OnboardingView: View {
                         contractorId: contractorId,
                         bearerToken: bearerToken
                     )
-                    let existingKnowledge = existingProfile?["knowledge"] as? String
+                    let existingKnowledge = existingProfile.flatMap {
+                        ContractorProfilePayload(
+                            profile: $0,
+                            expectedContractorId: contractorId
+                        )?.knowledge
+                    }
                     if let merged = OnboardingServicesDraft.mergeKnowledge(
                         existing: existingKnowledge,
                         additionalSection: knowledgeToSave
@@ -3528,5 +3527,206 @@ struct OnboardingView: View {
         appState.appleIdentityToken = ""
         isLoading = false
         step = .signIn
+    }
+}
+
+@MainActor
+enum OnboardingBusinessDraftCoordinator {
+    enum CreateOutcome {
+        case success([String: Any]?)
+        case authFailed
+        case aborted
+    }
+
+    enum Outcome: Equatable, Sendable {
+        case readyForNextStep
+        case restoredCompletedAccount
+        case aborted
+        case failed(String)
+    }
+
+    static func prepare(
+        appState: AppState,
+        ownerName: String,
+        businessName: String,
+        serviceType: String,
+        servicesPayload: [[String: Any]]? = nil,
+        knowledgeToSave: String? = nil,
+        explicitContactConsent: Bool = false,
+        createContractor: () async -> CreateOutcome = { .success(nil) },
+        restoreBootstrap: ([String: Any]?) async -> AccountRestoreOutcome = { _ in .superseded },
+        onAuthFailure: () async -> Void = {},
+        writeBearerToken: (String) -> Void = { _ in },
+        fetchProfile: (_ contractorId: String, _ bearerToken: String) async -> [String: Any]?,
+        patchContractor: (_ contractorId: String, _ body: [String: Any], _ bearerToken: String) async throws -> Bool
+    ) async -> Outcome {
+        var patchBody: [String: Any] = [
+            "owner_name": ownerName,
+            "business_name": businessName,
+            "service_type": serviceType,
+        ]
+        if let servicesPayload {
+            patchBody["services"] = servicesPayload
+        }
+
+        let prepareFailureMessage = String(localized: "Failed to prepare your business profile. Please try again.")
+        let saveFailureMessage = String(localized: "Failed to save your business profile. Please try again.")
+
+        func commitFencedDraft(
+            draftAuth: CallAuthContext,
+            draftAppleUserId: String,
+            shouldFetchExistingKnowledge: Bool
+        ) async -> Outcome {
+            func isStillCurrent() -> Bool {
+                appState.currentAuthContext() == draftAuth && appState.appleUserId == draftAppleUserId
+            }
+
+            if let knowledgeToSave {
+                let existingKnowledge: String?
+                if shouldFetchExistingKnowledge {
+                    let existingProfile = await fetchProfile(
+                        draftAuth.contractorId,
+                        draftAuth.bearerToken
+                    )
+                    guard isStillCurrent() else { return .aborted }
+                    existingKnowledge = existingProfile.flatMap {
+                        ContractorProfilePayload(
+                            profile: $0,
+                            expectedContractorId: draftAuth.contractorId
+                        )?.knowledge
+                    }
+                } else {
+                    existingKnowledge = nil
+                }
+                if let merged = OnboardingServicesDraft.mergeKnowledge(
+                    existing: existingKnowledge,
+                    additionalSection: knowledgeToSave
+                ) {
+                    patchBody["knowledge"] = merged
+                }
+            }
+
+            do {
+                let updated = try await patchContractor(
+                    draftAuth.contractorId,
+                    patchBody,
+                    draftAuth.bearerToken
+                )
+                guard isStillCurrent() else { return .aborted }
+                if !updated {
+                    return .failed(saveFailureMessage)
+                }
+            } catch {
+                guard isStillCurrent() else { return .aborted }
+                return .failed(saveFailureMessage)
+            }
+
+            let finalProfile = await fetchProfile(
+                draftAuth.contractorId,
+                draftAuth.bearerToken
+            )
+            guard isStillCurrent() else { return .aborted }
+
+            appState.userName = ownerName
+            appState.businessName = businessName
+            appState.serviceType = serviceType
+
+            if let finalProfile {
+                _ = appState.applyOnboardingDraftMetadata(
+                    from: finalProfile,
+                    for: draftAuth,
+                    expectedAppleUserId: draftAppleUserId
+                )
+            }
+
+            return .readyForNextStep
+        }
+
+        if appState.contractorId.isEmpty {
+            let originAuth = appState.currentAuthContext()
+            let createResult: [String: Any]?
+            switch await createContractor() {
+            case .aborted:
+                return .aborted
+            case .authFailed:
+                await onAuthFailure()
+                return .aborted
+            case .success(let value):
+                createResult = value
+            }
+
+            guard appState.contractorId.isEmpty, appState.currentAuthContext() == originAuth else {
+                return .aborted
+            }
+
+            if createResult?["status"] as? String == "error" {
+                return .failed(createResult?["error"] as? String ?? prepareFailureMessage)
+            }
+
+            if createResult?["existing"] as? Bool == true {
+                let restoreOutcome = await restoreBootstrap(createResult)
+                switch restoreOutcome {
+                case .authFailed:
+                    await onAuthFailure()
+                    return .aborted
+                case .notFound(let msg), .failed(let msg):
+                    return .failed(msg)
+                case .superseded, .newAccountNeeded:
+                    return .aborted
+                case .success(_, let needsProvisioning):
+                    guard needsProvisioning else {
+                        return .restoredCompletedAccount
+                    }
+                    let draftAuth = appState.currentAuthContext()
+                    let draftAppleUserId = appState.appleUserId
+                    guard draftAuth.isValid else {
+                        return .failed(prepareFailureMessage)
+                    }
+                    return await commitFencedDraft(
+                        draftAuth: draftAuth,
+                        draftAppleUserId: draftAppleUserId,
+                        shouldFetchExistingKnowledge: true
+                    )
+                }
+            } else {
+                guard appState.pendingAccountRecovery == nil,
+                      let contractorId = createResult?["contractor_id"] as? String,
+                      !contractorId.isEmpty,
+                      let apiToken = createResult?["api_token"] as? String,
+                      !apiToken.isEmpty else {
+                    return .failed(createResult?["error"] as? String ?? prepareFailureMessage)
+                }
+
+                appState.contractorId = contractorId
+                appState.recordInMemoryBearerToken(apiToken)
+                if explicitContactConsent {
+                    appState.grantContactsUploadConsent(for: contractorId)
+                }
+                writeBearerToken(apiToken)
+
+                let draftAuth = appState.currentAuthContext()
+                let draftAppleUserId = appState.appleUserId
+                guard draftAuth.isValid,
+                      draftAuth.contractorId.utf8.elementsEqual(contractorId.utf8) else {
+                    return .failed(prepareFailureMessage)
+                }
+                return await commitFencedDraft(
+                    draftAuth: draftAuth,
+                    draftAppleUserId: draftAppleUserId,
+                    shouldFetchExistingKnowledge: false
+                )
+            }
+        } else {
+            let draftAuth = appState.currentAuthContext()
+            let draftAppleUserId = appState.appleUserId
+            guard draftAuth.isValid else {
+                return .failed(prepareFailureMessage)
+            }
+            return await commitFencedDraft(
+                draftAuth: draftAuth,
+                draftAppleUserId: draftAppleUserId,
+                shouldFetchExistingKnowledge: true
+            )
+        }
     }
 }

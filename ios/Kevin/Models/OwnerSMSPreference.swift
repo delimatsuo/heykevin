@@ -236,7 +236,14 @@ struct OwnerSMSPreferenceState: Equatable, Sendable {
 
     /// Apply profile GET hydration if the load token is still current and auth matches.
     mutating func applyHydration(dict: [String: Any], token: Int, auth: CallAuthContext) {
-        guard auth.isValid, auth == boundAuth, token == fenceRevision, !isSaving else {
+        guard auth.isValid,
+              auth == boundAuth,
+              token == fenceRevision,
+              !isSaving,
+              ContractorProfilePayload.matchesOptionalContractorId(
+                  in: dict,
+                  expectedContractorId: auth.contractorId
+              ) else {
             return // Stale GET result or cross-account response arriving after newer toggle/auth change
         }
         let parsed = OwnerSMSResponseParser.parseProfile(dict: dict)

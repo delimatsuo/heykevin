@@ -389,4 +389,109 @@ final class AccountRestoreTests: XCTestCase {
         XCTAssertNil(hFail.state.contactsUploadConsentOwner)
         XCTAssertFalse(hFail.state.hasOwnedContactsUploadConsent(for: "owner"))
     }
+
+    private static func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    func testPersistentRestorePreservesServiceBindingAcrossQueuedEpochDrainAndClearsOnSubsequentAuthChange() async throws {
+        let suite = "Kevin.AccountRestoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let store = RecoveryTestKeychain()
+        let epoch = CallSessionEpoch(notificationCenter: NotificationCenter())
+        let persistence = AccountPersistence(
+            defaults: defaults,
+            keychain: store.client,
+            epoch: epoch
+        )
+        let state = AppState(persistence: persistence)
+        XCTAssertFalse(state.inMemory)
+
+        var didDrainDuringReconcile = false
+        let coordinator = AccountRestoreCoordinator(
+            state: state,
+            lookupHandler: { _, _ in
+                .found(contractorId: "owner-ca", apiToken: "restored-token")
+            },
+            profileFetcher: { id, token in
+                XCTAssertEqual(id, "owner-ca")
+                XCTAssertEqual(token, "restored-token")
+                return [
+                    "contractor_id": "owner-ca",
+                    "active": true,
+                    "subscription_status": "active",
+                    "subscription_tier": "business",
+                    "twilio_number": "+16045550177",
+                    "country_code": "CA",
+                    "service_binding": [
+                        "country_code": "CA",
+                        "provider": "twilio",
+                    ],
+                ]
+            },
+            notificationReconciler: {
+                await Self.drainMainQueue()
+                didDrainDuringReconcile = true
+            },
+            contactSyncHandler: { _ in }
+        )
+
+        let revision = try XCTUnwrap(coordinator.beginAttempt())
+        let outcome = await coordinator.restoreAccount(
+            appleUserId: "apple-ca",
+            appleIdentityToken: "fresh-apple-token",
+            isRecoveryMode: false,
+            attemptRevision: revision
+        )
+
+        XCTAssertTrue(didDrainDuringReconcile)
+        XCTAssertEqual(outcome, .success(contractorId: "owner-ca", needsProvisioning: false))
+        XCTAssertEqual(state.sessionState, .ready)
+        XCTAssertEqual(state.serviceBinding?.countryCode, "CA")
+        XCTAssertEqual(state.serviceBinding?.provider, "twilio")
+
+        // A genuine subsequent auth epoch advance must clear serviceBinding to nil
+        persistence.epoch.advance()
+        await Self.drainMainQueue()
+        XCTAssertNil(state.serviceBinding)
+
+        await Self.drainMainQueue()
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    func testRestoreRejectsByteDistinctNormalizedContractorId() async {
+        let nfc = "caf\u{00E9}"
+        let nfd = "cafe\u{0301}"
+        let store = RecoveryTestKeychain()
+        let state = AppState(inMemory: true, secureStore: store.client)
+        let coordinator = AccountRestoreCoordinator(
+            state: state,
+            lookupHandler: { _, _ in .found(contractorId: nfc, apiToken: "new-token") },
+            profileFetcher: { _, _ in
+                [
+                    "contractor_id": nfd,
+                    "active": true,
+                    "subscription_status": "active",
+                    "subscription_tier": "personal",
+                    "twilio_number": "+15005550006",
+                ]
+            },
+            notificationReconciler: { XCTFail("Must not reconcile on mismatched UTF-8 contractor_id") },
+            contactSyncHandler: { _ in XCTFail("Must not sync contacts on mismatched UTF-8 contractor_id") }
+        )
+
+        let outcome = await coordinator.restoreAccount(
+            appleUserId: "apple",
+            appleIdentityToken: "fresh",
+            isRecoveryMode: false,
+            attemptRevision: coordinator.beginAttempt()!
+        )
+        guard case .failed = outcome else {
+            return XCTFail("Expected failure for NFD vs NFC contractor_id mismatch, got \(outcome)")
+        }
+        XCTAssertTrue(store.writes.isEmpty)
+        XCTAssertEqual(state.contractorId, "")
+    }
 }

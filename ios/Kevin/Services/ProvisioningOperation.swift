@@ -50,8 +50,14 @@ enum ProvisioningOperation {
             }
         }
 
-        let initialProfile = await fetchProfile()
+        let rawInitialProfile = await fetchProfile()
         guard isCurrent() else { return .superseded }
+        let initialProfile = rawInitialProfile.flatMap {
+            ContractorProfilePayload.matchesOptionalContractorId(
+                in: $0,
+                expectedContractorId: capturedAuth.contractorId
+            ) ? $0 : nil
+        }
 
         let resolvedNumber: String
         let resolvedCountry: String?
@@ -97,13 +103,16 @@ enum ProvisioningOperation {
         }
 
         var subscriptionUUID: String? = nil
-        if let finalProfile = await fetchProfile() {
-            guard isCurrent() else { return .superseded }
-            if let uuid = finalProfile["subscription_uuid"] as? String, !uuid.isEmpty {
-                subscriptionUUID = uuid
-            }
-        } else {
-            guard isCurrent() else { return .superseded }
+        let rawFinalProfile = await fetchProfile()
+        guard isCurrent() else { return .superseded }
+        if let finalProfile = rawFinalProfile,
+           ContractorProfilePayload.matchesOptionalContractorId(
+               in: finalProfile,
+               expectedContractorId: capturedAuth.contractorId
+           ),
+           let uuid = finalProfile["subscription_uuid"] as? String,
+           !uuid.isEmpty {
+            subscriptionUUID = uuid
         }
 
         guard isCurrent() else { return .superseded }

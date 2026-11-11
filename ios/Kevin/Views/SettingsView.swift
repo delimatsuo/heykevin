@@ -1987,6 +1987,7 @@ struct SettingsHost<Root: View>: View {
         Task { @MainActor in
             defer { if appState.currentAuthContext() == auth { isPreparingSMSConsent = false } }
             guard let profile = await APIClient.shared.getContractorProfile(contractorId: auth.contractorId, bearerToken: auth.bearerToken),
+                  ContractorProfilePayload(profile: profile, expectedContractorId: auth.contractorId) != nil,
                   appState.currentAuthContext() == auth, appState.kevinNumber == number else {
                 if appState.currentAuthContext() == auth { ownerSMSPreference.recordLoadFailure(token: token, auth: auth) }
                 return
@@ -2285,7 +2286,7 @@ struct SettingsHost<Root: View>: View {
             fieldMutationRevisions: loadCoordinator.fieldMutationRevisions
         )
 
-        let succeeded = await SettingsProfileHydrator.hydrate(
+        let succeeded = await SettingsProfileHydrator.hydrateChecked(
             capturedAuth: capturedAuth,
             capturedRevisions: capturedRevisions,
             fetchProfile: {
@@ -2325,7 +2326,7 @@ struct SettingsHost<Root: View>: View {
             currentFieldRevisions: { [self] in
                 loadCoordinator.fieldMutationRevisions
             },
-            applyProfile: { [self] contractor, decision in
+            applyProfile: { [self] (contractor, decision) -> Bool in
                 applyHydratedProfile(
                     contractor: contractor,
                     decision: decision,
@@ -2345,22 +2346,13 @@ struct SettingsHost<Root: View>: View {
         decision: SettingsHydrationDecision,
         capturedSMSToken: Int?,
         capturedAuth: CallAuthContext
-    ) {
-        let name = contractor["owner_name"] as? String ?? ""
-        let biz = contractor["business_name"] as? String ?? ""
-        let svc = contractor["service_type"] as? String ?? ""
-        if !name.isEmpty { appState.userName = name }
-        if !biz.isEmpty { appState.businessName = biz }
-        if !svc.isEmpty { appState.serviceType = svc }
-
-        appState.applySubscriptionProfile(contractor, for: capturedAuth)
-
-        let autoReply = contractor["auto_reply_sms"] as? Bool ?? false
-        appState.autoReplySms = autoReply
-        appState.serviceBinding = ServiceBindingParser.parse(from: contractor)
-
-        if let token = capturedSMSToken {
-            ownerSMSPreference.applyHydration(dict: contractor, token: token, auth: capturedAuth)
+    ) -> Bool {
+        guard let payload = ContractorProfilePayload(
+                  profile: contractor,
+                  expectedContractorId: capturedAuth.contractorId
+              ),
+              appState.currentAuthContext() == capturedAuth else {
+            return false
         }
 
         var projection = SettingsGuardedStateProjection(
@@ -2386,25 +2378,30 @@ struct SettingsHost<Root: View>: View {
         )
 
         SettingsRefreshPolicy.applyGuardedProfile(
-            contractor: contractor,
+            contractor: payload.rawProfile,
             decision: decision,
             state: &projection
         )
+
+        guard appState.applyHydratedSettingsProfile(
+            payload,
+            projection: projection,
+            for: capturedAuth
+        ) else {
+            return false
+        }
+
+        if let token = capturedSMSToken {
+            ownerSMSPreference.applyHydration(dict: payload.rawProfile, token: token, auth: capturedAuth)
+        }
 
         confirmedBaseline = projection.baseline
         knowledgeText = projection.drafts.knowledgeText
         isKnowledgeDirty = projection.drafts.isKnowledgeDirty
         regulatoryAddressDraft = projection.drafts.regulatoryAddress
         regulatoryCityDraft = projection.drafts.regulatoryCity
-        appState.businessAddress = projection.appStateBusinessAddress
-        appState.businessCity = projection.appStateBusinessCity
-        appState.smartInterruption = projection.appStateSmartInterruption
         smartInterruptionSelection = projection.smartInterruptionSelection
-        appState.ringThroughContacts = projection.appStateRingThroughContacts
-        appState.sitToneEnabled = projection.appStateSitToneEnabled
-        appState.countryCode = projection.appStateCountryCode
         countrySelection = projection.countrySelection
-        appState.mode = projection.appStateMode
 
         if decision.shouldUpdateBusinessHours {
             if let startDate = SettingsRefreshPolicy.parseHours(string: projection.drafts.businessHoursStart) {
@@ -2414,6 +2411,7 @@ struct SettingsHost<Root: View>: View {
                 businessHoursEnd = endDate
             }
         }
+        return true
     }
 
     // MARK: - Jobber Actions

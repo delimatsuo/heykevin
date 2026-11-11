@@ -1,6 +1,12 @@
 import Foundation
 import StoreKit
 
+enum ServerSubscriptionUUIDResolution: Equatable, Sendable {
+    case resolved(UUID)
+    case accountChanged
+    case missingOrInvalid
+}
+
 /// Singleton that manages StoreKit 2 subscriptions for Kevin AI.
 ///
 /// Server is the single source of truth. This class handles:
@@ -108,18 +114,33 @@ class SubscriptionManager: ObservableObject {
             purchaseError = SubscriptionError.missingContractor.localizedDescription
             throw SubscriptionError.missingContractor
         }
-        guard let subscriptionUUID = await loadServerSubscriptionUUID(context: context) else {
+        switch await Self.resolveServerSubscriptionUUID(
+            context: context,
+            appState: .shared,
+            fetchProfile: APIClient.shared.getContractorProfile(contractorId:bearerToken:)
+        ) {
+        case .resolved(let uuid):
+            purchaseOptions.insert(.appAccountToken(uuid))
+        case .accountChanged:
+            purchaseError = SubscriptionError.accountChanged.localizedDescription
+            throw SubscriptionError.accountChanged
+        case .missingOrInvalid:
             purchaseError = SubscriptionError.missingSubscriptionUUID.localizedDescription
             throw SubscriptionError.missingSubscriptionUUID
         }
-        purchaseOptions.insert(.appAccountToken(subscriptionUUID))
 
         // Attach promotional offer if provided
         if let offerID = offerID {
+            guard isCurrent(context) else {
+                purchaseError = SubscriptionError.accountChanged.localizedDescription
+                throw SubscriptionError.accountChanged
+            }
             let signedOffer = await APIClient.shared.signSubscriptionOffer(
                 productId: product.id,
                 offerId: offerID,
-                applicationUsername: AppState.shared.contractorId
+                applicationUsername: context.contractorID,
+                contractorId: context.contractorID,
+                bearerToken: context.bearerToken
             )
             if let offer = signedOffer,
                let keyID = offer["keyIdentifier"] as? String,
@@ -451,28 +472,55 @@ class SubscriptionManager: ObservableObject {
         }
     }
 
+    @MainActor
+    static func resolveServerSubscriptionUUID(
+        context: SubscriptionVerificationContext,
+        appState: AppState,
+        fetchProfile: (_ contractorId: String, _ bearerToken: String) async -> [String: Any]?
+    ) async -> ServerSubscriptionUUIDResolution {
+        let auth = CallAuthContext(
+            contractorId: context.contractorID,
+            bearerToken: context.bearerToken,
+            generation: context.generation
+        )
+        guard auth.isValid, appState.currentAuthContext() == auth else {
+            return .accountChanged
+        }
+
+        // Always fetch from server; never short-circuit on cached appState.subscriptionUUID.
+        let profile = await fetchProfile(auth.contractorId, auth.bearerToken)
+        guard appState.currentAuthContext() == auth else {
+            return .accountChanged
+        }
+
+        guard let profile,
+              let uuid = appState.applySubscriptionUUID(
+                  from: profile,
+                  for: auth,
+                  requiresReadySession: false
+              ) else {
+            return .missingOrInvalid
+        }
+
+        return .resolved(uuid)
+    }
+
     private func loadServerSubscriptionUUID(
         context: SubscriptionVerificationContext
     ) async -> UUID? {
-        guard isCurrent(context) else {
+        switch await Self.resolveServerSubscriptionUUID(
+            context: context,
+            appState: .shared,
+            fetchProfile: APIClient.shared.getContractorProfile(contractorId:bearerToken:)
+        ) {
+        case .resolved(let uuid):
+            return uuid
+        case .accountChanged:
             purchaseError = SubscriptionError.accountChanged.localizedDescription
             return nil
-        }
-
-        // Always prefer Firestore's UUID. Older app builds could cache a local
-        // temporary UUID, which would make Apple's appAccountToken fail ownership checks.
-        guard let profile = await APIClient.shared.getContractorProfile(
-                  contractorId: context.contractorID,
-                  bearerToken: context.bearerToken
-              ),
-              isCurrent(context),
-              let subscriptionUUID = profile["subscription_uuid"] as? String,
-              let uuid = UUID(uuidString: subscriptionUUID) else {
+        case .missingOrInvalid:
             return nil
         }
-
-        AppState.shared.subscriptionUUID = subscriptionUUID
-        return uuid
     }
 
     private func currentVerificationContext() -> SubscriptionVerificationContext? {

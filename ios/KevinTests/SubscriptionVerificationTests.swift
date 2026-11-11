@@ -861,6 +861,366 @@ final class SubscriptionVerificationTests: XCTestCase {
         XCTAssertEqual(verifyCallCount, 0)
     }
 
+    // MARK: - ContractorProfilePayload & Subscription UUID Tests
+
+    func testContractorProfilePayload_validatesIdentityUnicodeBytesAndFieldPreservation() {
+        let invalidPayloads: [[String: Any]] = [
+            [:],
+            ["contractor_id": ""],
+            ["contractor_id": NSNull()],
+            ["contractor_id": 123],
+            ["contractor_id": true],
+        ]
+        for invalid in invalidPayloads {
+            XCTAssertNil(ContractorProfilePayload(profile: invalid))
+            XCTAssertNil(ContractorProfilePayload(profile: invalid, expectedContractorId: "c1"))
+        }
+
+        let nfc = "caf\u{00E9}"
+        let nfd = "cafe\u{0301}"
+        XCTAssertEqual(nfc, nfd, "Swift String equality treats NFC and NFD as equal")
+        XCTAssertFalse(nfc.utf8.elementsEqual(nfd.utf8))
+
+        XCTAssertNil(
+            ContractorProfilePayload(
+                profile: ["contractor_id": nfd],
+                expectedContractorId: nfc
+            ),
+            "Byte-distinct NFD contractor_id must be rejected when expecting NFC"
+        )
+        XCTAssertNotNil(
+            ContractorProfilePayload(
+                profile: ["contractor_id": nfc],
+                expectedContractorId: nfc
+            )
+        )
+        XCTAssertNil(
+            ContractorProfilePayload(
+                profile: ["contractor_id": "c1"],
+                expectedContractorId: ""
+            ),
+            "Empty expectedContractorId must fail closed"
+        )
+
+        // matchesOptionalContractorId table checks
+        XCTAssertFalse(
+            ContractorProfilePayload.matchesOptionalContractorId(
+                in: [:],
+                expectedContractorId: ""
+            )
+        )
+        XCTAssertFalse(
+            ContractorProfilePayload.matchesOptionalContractorId(
+                in: ["contractor_id": "c1"],
+                expectedContractorId: ""
+            )
+        )
+        XCTAssertTrue(
+            ContractorProfilePayload.matchesOptionalContractorId(
+                in: ["owner_name": "Alice"],
+                expectedContractorId: "c1"
+            ),
+            "Absent contractor_id key is permitted for pure-policy synthetic dicts"
+        )
+        for badValue: Any in [NSNull(), 123, "", "other", nfd] {
+            XCTAssertFalse(
+                ContractorProfilePayload.matchesOptionalContractorId(
+                    in: ["contractor_id": badValue],
+                    expectedContractorId: nfc
+                ),
+                "Present invalid/mismatched contractor_id (\(badValue)) must fail closed"
+            )
+        }
+        XCTAssertTrue(
+            ContractorProfilePayload.matchesOptionalContractorId(
+                in: ["contractor_id": nfc],
+                expectedContractorId: nfc
+            )
+        )
+
+        // knowledge: "" preserved as .some("") vs nil when absent; untrimmed status/tier preserved
+        let lowercaseUUID = "550e8400-e29b-41d4-a716-446655440000"
+        let emptyKnowledgePayload = ContractorProfilePayload(
+            profile: [
+                "contractor_id": "c1",
+                "knowledge": "",
+                "subscription_status": " future ",
+                "subscription_tier": " enterprise ",
+                "subscription_uuid": lowercaseUUID,
+                "owner_phone": "",
+            ],
+            expectedContractorId: "c1"
+        )
+        XCTAssertEqual(emptyKnowledgePayload?.knowledge, .some(""))
+        XCTAssertEqual(emptyKnowledgePayload?.subscriptionStatus, " future ")
+        XCTAssertEqual(emptyKnowledgePayload?.subscriptionTier, " enterprise ")
+        XCTAssertEqual(emptyKnowledgePayload?.subscriptionUUIDString, lowercaseUUID)
+        XCTAssertEqual(emptyKnowledgePayload?.parsedSubscriptionUUID, UUID(uuidString: lowercaseUUID))
+        XCTAssertNil(emptyKnowledgePayload?.ownerPhone)
+
+        let absentKnowledgePayload = ContractorProfilePayload(
+            profile: ["contractor_id": "c1"],
+            expectedContractorId: "c1"
+        )
+        XCTAssertNil(absentKnowledgePayload?.knowledge)
+    }
+
+    func testAPIClientGetContractorProfile_enforcesContractorIdMatchOverHTTP() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer {
+            session.invalidateAndCancel()
+            MockURLProtocol.requestHandler = nil
+        }
+        let client = APIClient(session: session)
+
+        let nfc = "caf\u{00E9}"
+        let nfd = "cafe\u{0301}"
+
+        let rejectedBodies: [(requestedId: String, body: [String: Any])] = [
+            ("c1", [:]),
+            ("c1", ["contractor_id": ""]),
+            ("c1", ["contractor_id": "other"]),
+            (nfc, ["contractor_id": nfd]),
+        ]
+
+        for testCase in rejectedBodies {
+            MockURLProtocol.requestHandler = { request in
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                let data = try JSONSerialization.data(withJSONObject: testCase.body)
+                return (response, data)
+            }
+            let fetched = await client.getContractorProfile(
+                contractorId: testCase.requestedId,
+                bearerToken: "token-1"
+            )
+            XCTAssertNil(fetched, "Expected nil for mismatched/missing contractor_id: \(testCase.body)")
+        }
+
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token-1")
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            let data = try JSONSerialization.data(withJSONObject: [
+                "contractor_id": nfc,
+                "owner_name": "Deli",
+            ])
+            return (response, data)
+        }
+        let valid = await client.getContractorProfile(
+            contractorId: nfc,
+            bearerToken: "token-1"
+        )
+        XCTAssertEqual(valid?["contractor_id"] as? String, nfc)
+        XCTAssertEqual(valid?["owner_name"] as? String, "Deli")
+    }
+
+    @MainActor
+    func testApplyAndResolveServerSubscriptionUUID_fencesSessionPreservesRawCasingAndNeverShortCircuitsCache() async {
+        var activeAuth = CallAuthContext(contractorId: "c1", bearerToken: "token-1", generation: 1)
+        let state = AppState(authProvider: { activeAuth }, inMemory: true)
+        state.contractorId = "c1"
+        state.sessionState = .notOnboarded
+
+        let cachedValidUUID = "11111111-2222-3333-4444-555555555555"
+        let serverLowercaseUUID = "aa0e8400-e29b-41d4-a716-4466554400bb"
+        state.subscriptionUUID = cachedValidUUID
+
+        // Rejects wrong contractor_id and invalid UUID without mutating cached subscriptionUUID
+        XCTAssertNil(
+            state.applySubscriptionUUID(
+                from: ["contractor_id": "other", "subscription_uuid": serverLowercaseUUID],
+                for: activeAuth
+            )
+        )
+        XCTAssertEqual(state.subscriptionUUID, cachedValidUUID)
+
+        XCTAssertNil(
+            state.applySubscriptionUUID(
+                from: ["contractor_id": "c1", "subscription_uuid": "not-a-valid-uuid"],
+                for: activeAuth
+            )
+        )
+        XCTAssertEqual(state.subscriptionUUID, cachedValidUUID)
+
+        // Always fetches server profile even when appState.subscriptionUUID already holds a valid UUID,
+        // works while sessionState == .notOnboarded, and preserves lowercase hex in appState.subscriptionUUID.
+        var fetchCount = 0
+        let context = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 1
+        )
+        let resolved = await SubscriptionManager.resolveServerSubscriptionUUID(
+            context: context,
+            appState: state,
+            fetchProfile: { cid, token in
+                fetchCount += 1
+                XCTAssertEqual(cid, "c1")
+                XCTAssertEqual(token, "token-1")
+                return [
+                    "contractor_id": "c1",
+                    "subscription_uuid": serverLowercaseUUID,
+                ]
+            }
+        )
+        XCTAssertEqual(fetchCount, 1, "Must always fetch from server even when cached UUID is non-empty")
+        XCTAssertEqual(resolved, .resolved(UUID(uuidString: serverLowercaseUUID)!))
+        XCTAssertEqual(
+            state.subscriptionUUID,
+            serverLowercaseUUID,
+            "Must store raw validated UUID string without uppercasing hex digits"
+        )
+
+        // Invalid server UUID returns .missingOrInvalid (distinct from .accountChanged)
+        let invalidOutcome = await SubscriptionManager.resolveServerSubscriptionUUID(
+            context: context,
+            appState: state,
+            fetchProfile: { _, _ in
+                ["contractor_id": "c1", "subscription_uuid": "malformed-uuid"]
+            }
+        )
+        XCTAssertEqual(invalidOutcome, .missingOrInvalid)
+        XCTAssertEqual(state.subscriptionUUID, serverLowercaseUUID)
+
+        // Stale context before start returns .accountChanged without fetching
+        var staleFetchCalled = false
+        let staleContext = SubscriptionVerificationContext(
+            contractorID: "c1",
+            bearerToken: "token-1",
+            generation: 99
+        )
+        let preSwitchOutcome = await SubscriptionManager.resolveServerSubscriptionUUID(
+            context: staleContext,
+            appState: state,
+            fetchProfile: { _, _ in
+                staleFetchCalled = true
+                return nil
+            }
+        )
+        XCTAssertEqual(preSwitchOutcome, .accountChanged)
+        XCTAssertFalse(staleFetchCalled)
+
+        // Account/generation switch during suspension returns .accountChanged and does not overwrite replacement UUID
+        let gate = AsyncGate()
+        defer { gate.open() }
+
+        let newAccountUUID = "99999999-aaaa-bbbb-cccc-dddddddddddd"
+        let task = Task { @MainActor in
+            await SubscriptionManager.resolveServerSubscriptionUUID(
+                context: context,
+                appState: state,
+                fetchProfile: { _, _ in
+                    await gate.signalAndPause()
+                    return [
+                        "contractor_id": "c1",
+                        "subscription_uuid": "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb",
+                    ]
+                }
+            )
+        }
+
+        let entered = await gate.waitForEntry()
+        XCTAssertTrue(entered)
+
+        activeAuth = CallAuthContext(contractorId: "c2", bearerToken: "token-2", generation: 2)
+        state.subscriptionUUID = newAccountUUID
+
+        gate.open()
+        let midFlightOutcome = await task.value
+        XCTAssertEqual(midFlightOutcome, .accountChanged)
+        XCTAssertEqual(state.subscriptionUUID, newAccountUUID)
+    }
+
+    func testAPIClientSignSubscriptionOffer_usesExplicitContractorIdAndBearerToken() async throws {
+        let suite = "Kevin.SignOfferTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let keychain = RecoveryTestKeychain()
+        let persistence = AccountPersistence(
+            defaults: defaults,
+            keychain: keychain.client,
+            epoch: CallSessionEpoch(notificationCenter: NotificationCenter())
+        )
+        persistence.contractorToken = "wrong-global-token"
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer {
+            session.invalidateAndCancel()
+            MockURLProtocol.requestHandler = nil
+            defaults.removePersistentDomain(forName: suite)
+        }
+
+        let client = APIClient(session: session, persistence: persistence)
+        var capturedHeader: String?
+        var capturedBody: [String: Any]?
+
+        MockURLProtocol.requestHandler = { request in
+            capturedHeader = request.value(forHTTPHeaderField: "Authorization")
+            let bodyData = try Self.readRequestBody(from: request)
+            capturedBody = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
+
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            let payload: [String: Any] = [
+                "signature": [
+                    "keyIdentifier": "KEY123",
+                    "nonce": "550e8400-e29b-41d4-a716-446655440000",
+                    "signature": Data("sig".utf8).base64EncodedString(),
+                    "timestamp": 1_700_000_000_000,
+                ]
+            ]
+            return (response, try JSONSerialization.data(withJSONObject: payload))
+        }
+
+        let sig = await client.signSubscriptionOffer(
+            productId: "com.kevin.callscreen.business.monthly",
+            offerId: "founding_member_75off_business",
+            applicationUsername: "explicit-contractor",
+            contractorId: "explicit-contractor",
+            bearerToken: "explicit-bearer-token"
+        )
+
+        XCTAssertEqual(capturedHeader, "Bearer explicit-bearer-token")
+        XCTAssertEqual(capturedBody?["contractor_id"] as? String, "explicit-contractor")
+        XCTAssertEqual(capturedBody?["application_username"] as? String, "explicit-contractor")
+        XCTAssertEqual(capturedBody?["product_id"] as? String, "com.kevin.callscreen.business.monthly")
+        XCTAssertEqual(capturedBody?["offer_id"] as? String, "founding_member_75off_business")
+        XCTAssertEqual(sig?["keyIdentifier"] as? String, "KEY123")
+    }
+
+    private static func readRequestBody(from request: URLRequest) throws -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+        let stream = try XCTUnwrap(request.httpBodyStream)
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+
     private func httpResponse(
         status: Int,
         headers: [String: String]? = nil

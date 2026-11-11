@@ -172,10 +172,20 @@ class AppState: ObservableObject {
         unreadCallCount = 0
         notificationCallSid = ""
         notificationCallMessage = ""
-        serviceBinding = nil
+        if let origin = serviceBindingAuth, origin == currentAuth, currentAuth.isValid {
+            // Preserve serviceBinding bound to the exact current valid auth context
+            // when a queued CallSessionEpoch notification drains after finishAccountRecovery.
+        } else {
+            serviceBinding = nil
+        }
     }
 
-    @Published var serviceBinding: ServiceBinding? = nil
+    private var serviceBindingAuth: CallAuthContext? = nil
+    @Published var serviceBinding: ServiceBinding? = nil {
+        didSet {
+            serviceBindingAuth = serviceBinding == nil ? nil : currentAuthContext()
+        }
+    }
 
     // Session generation incremented on logout, contractor change, and credential change
     var sessionGeneration: Int {
@@ -288,12 +298,137 @@ class AppState: ObservableObject {
     ) -> String? {
         guard capturedAuth.isValid, currentAuthContext() == capturedAuth,
               !requiresReadySession || sessionState == .ready,
-              let update = SubscriptionProfileUpdate(profile: profile),
-              update.contractorId.utf8.elementsEqual(capturedAuth.contractorId.utf8) else { return nil }
+              let payload = ContractorProfilePayload(
+                  profile: profile,
+                  expectedContractorId: capturedAuth.contractorId
+              ) else { return nil }
 
-        if let status = update.status { subscriptionStatus = status }
-        if let tier = update.tier { subscriptionTier = tier }
-        return update.status
+        if let status = payload.subscriptionStatus { subscriptionStatus = status }
+        if let tier = payload.subscriptionTier { subscriptionTier = tier }
+        return payload.subscriptionStatus
+    }
+
+    @MainActor
+    @discardableResult
+    func applySubscriptionUUID(
+        from profile: [String: Any],
+        for capturedAuth: CallAuthContext,
+        requiresReadySession: Bool = false
+    ) -> UUID? {
+        guard capturedAuth.isValid,
+              currentAuthContext() == capturedAuth,
+              !requiresReadySession || sessionState == .ready,
+              let payload = ContractorProfilePayload(
+                  profile: profile,
+                  expectedContractorId: capturedAuth.contractorId
+              ),
+              let rawUUID = payload.subscriptionUUIDString,
+              let uuid = payload.parsedSubscriptionUUID else { return nil }
+
+        if subscriptionUUID != rawUUID {
+            subscriptionUUID = rawUUID
+        }
+        return uuid
+    }
+
+    @MainActor
+    @discardableResult
+    func applyHydratedSettingsProfile(
+        _ payload: ContractorProfilePayload,
+        projection: SettingsGuardedStateProjection,
+        for capturedAuth: CallAuthContext
+    ) -> Bool {
+        guard capturedAuth.isValid,
+              currentAuthContext() == capturedAuth,
+              payload.contractorId.utf8.elementsEqual(capturedAuth.contractorId.utf8) else {
+            return false
+        }
+
+        if !payload.ownerName.isEmpty { userName = payload.ownerName }
+        if !payload.businessName.isEmpty { businessName = payload.businessName }
+        if !payload.serviceType.isEmpty { serviceType = payload.serviceType }
+        if let status = payload.subscriptionStatus { subscriptionStatus = status }
+        if let tier = payload.subscriptionTier { subscriptionTier = tier }
+        autoReplySms = payload.autoReplySms
+        serviceBinding = payload.serviceBinding
+        businessAddress = projection.appStateBusinessAddress
+        businessCity = projection.appStateBusinessCity
+        smartInterruption = projection.appStateSmartInterruption
+        ringThroughContacts = projection.appStateRingThroughContacts
+        sitToneEnabled = projection.appStateSitToneEnabled
+        countryCode = projection.appStateCountryCode
+        mode = projection.appStateMode
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    func applyOnboardingDraftMetadata(
+        from profile: [String: Any],
+        for capturedAuth: CallAuthContext,
+        expectedAppleUserId: String? = nil
+    ) -> Bool {
+        guard capturedAuth.isValid,
+              currentAuthContext() == capturedAuth,
+              expectedAppleUserId.map({ appleUserId == $0 }) ?? true,
+              let payload = ContractorProfilePayload(
+                  profile: profile,
+                  expectedContractorId: capturedAuth.contractorId
+              ) else {
+            return false
+        }
+
+        if let rawUUID = payload.subscriptionUUIDString, subscriptionUUID != rawUUID {
+            subscriptionUUID = rawUUID
+        }
+        serviceBinding = payload.serviceBinding
+        return true
+    }
+
+    @MainActor
+    func commitRestoredAccountProfile(
+        _ payload: ContractorProfilePayload,
+        contractorId id: String,
+        appleUserId: String,
+        subscriptionStatus status: String,
+        subscriptionTier tier: String,
+        bearerToken token: String
+    ) -> Bool {
+        guard !id.isEmpty, payload.contractorId.utf8.elementsEqual(id.utf8) else {
+            return false
+        }
+
+        userName = payload.ownerName
+        businessName = payload.businessName
+        businessAddress = payload.businessAddress
+        businessCity = payload.businessCity
+        serviceType = payload.serviceType
+        mode = payload.resolvedMode
+        countryCode = payload.accountCountry ?? ""
+        subscriptionStatus = status
+        subscriptionTier = tier
+        subscriptionUUID = payload.subscriptionUUIDString ?? ""
+        jobberConnected = false
+        googleCalendarConnected = false
+        contractorId = id
+        self.appleUserId = appleUserId
+        appleIdentityToken = ""
+        kevinNumber = payload.twilioNumber
+        serviceBinding = nil
+        readCallIds = []
+        unreadCallCount = 0
+        clearActiveCall()
+        if !payload.twilioNumber.isEmpty { isOnboarded = true }
+        guard finishAccountRecovery(bearerToken: token) else { return false }
+        serviceBinding = payload.serviceBinding
+        return true
+    }
+
+    @MainActor
+    func recordInMemoryBearerToken(_ bearerToken: String) {
+        guard inMemory else { return }
+        inMemoryBearerToken = bearerToken
+        inMemoryGeneration += 1
     }
 
     @Published var kevinNumber: String = "" {

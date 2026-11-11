@@ -508,4 +508,427 @@ final class ProvisioningOperationTests: XCTestCase {
 
         MockURLProtocol.requestHandler = nil
     }
+
+    // MARK: - Cross-Account Profile Rejection & OnboardingBusinessDraftCoordinator Tests
+
+    func testProvisioningOperation_ignoresInitialAndFinalProfilesFromDifferentContractorId() async {
+        let auth = CallAuthContext(contractorId: "owner-A", bearerToken: "token-A", generation: 1)
+        let cachedBinding = ServiceBindingParser.parseBinding(["country_code": "US", "provider": "twilio"])
+
+        // 1. Cached number present: wrong-account initial & final profiles must not override cached fields or inject UUID
+        var committedCached: ProvisioningOperation.Output?
+        let resultWithCache = await ProvisioningOperation.run(
+            capturedAuth: auth,
+            isCurrent: { true },
+            cachedNumber: "+14155550101",
+            cachedCountry: "US",
+            cachedBinding: cachedBinding,
+            fetchProfile: {
+                [
+                    "contractor_id": "owner-B",
+                    "twilio_number": "+16045559999",
+                    "country_code": "CA",
+                    "service_binding": ["country_code": "CA", "provider": "twilio"],
+                    "subscription_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                ]
+            },
+            provisionNumber: {
+                XCTFail("provisionNumber should not be called when cachedNumber is used")
+                return nil
+            },
+            commit: { committedCached = $0 }
+        )
+        XCTAssertEqual(resultWithCache, .completed)
+        XCTAssertEqual(committedCached?.number, "+14155550101")
+        XCTAssertEqual(committedCached?.country, "US")
+        XCTAssertEqual(committedCached?.binding?.countryCode, "US")
+        XCTAssertNil(committedCached?.subscriptionUUID)
+
+        // 2. Empty cachedNumber + wrong-account initial profile fails closed without provisioning or adopting wrong number
+        var provisionCalled = false
+        let failedWrongInitial = await ProvisioningOperation.run(
+            capturedAuth: auth,
+            isCurrent: { true },
+            fetchProfile: {
+                [
+                    "contractor_id": "owner-B",
+                    "twilio_number": "+16045559999",
+                ]
+            },
+            provisionNumber: {
+                provisionCalled = true
+                return nil
+            },
+            commit: { _ in XCTFail("Must not commit wrong-account initial profile") }
+        )
+        if case .failed = failedWrongInitial {
+            // Expected fail-closed behavior
+        } else {
+            XCTFail("Expected failure when initial profile has mismatched contractor_id, got \(failedWrongInitial)")
+        }
+        XCTAssertFalse(provisionCalled)
+
+        // 3. Matching initial profile (no number yet) + wrong-account final profile: provisions cleanly without adopting wrong subscription_uuid
+        var fetchStep = 0
+        var committedProvisioned: ProvisioningOperation.Output?
+        let resultWrongFinal = await ProvisioningOperation.run(
+            capturedAuth: auth,
+            isCurrent: { true },
+            fetchProfile: {
+                fetchStep += 1
+                if fetchStep == 1 {
+                    return ["contractor_id": "owner-A", "twilio_number": ""]
+                }
+                return [
+                    "contractor_id": "owner-B",
+                    "subscription_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                ]
+            },
+            provisionNumber: {
+                [
+                    "status": "ok",
+                    "phone_number": "+14155550199",
+                    "country_code": "US",
+                    "service_binding": ["country_code": "US", "provider": "twilio"],
+                ]
+            },
+            commit: { committedProvisioned = $0 }
+        )
+        XCTAssertEqual(resultWrongFinal, .completed)
+        XCTAssertEqual(committedProvisioned?.number, "+14155550199")
+        XCTAssertEqual(committedProvisioned?.country, "US")
+        XCTAssertEqual(committedProvisioned?.binding?.countryCode, "US")
+        XCTAssertNil(committedProvisioned?.subscriptionUUID)
+    }
+
+    func testOnboardingBusinessDraftCoordinator_existingContinuationRestoresMergesPatchesAndHydratesMetadata() async throws {
+        let store = RecoveryTestKeychain()
+        let state = AppState(inMemory: true, secureStore: store.client)
+        state.isOnboarded = false
+        state.contractorId = ""
+        state.appleUserId = "apple-1"
+        state.appleIdentityToken = "apple-jwt-1"
+
+        let draftUUID = "550e8400-e29b-41d4-a716-4466554400aa"
+        let continuation = SignupContinuation(contractorId: "draft-owner", appleUserId: "apple-1")
+
+        let coordinator = AccountRestoreCoordinator(
+            state: state,
+            lookupHandler: { appleUser, identityToken in
+                XCTAssertEqual(appleUser, "apple-1")
+                XCTAssertEqual(identityToken, "apple-jwt-1")
+                return .found(contractorId: "draft-owner", apiToken: "verified-bearer-token")
+            },
+            profileFetcher: { id, token in
+                XCTAssertEqual(id, "draft-owner")
+                XCTAssertEqual(token, "verified-bearer-token")
+                return [
+                    "contractor_id": "draft-owner",
+                    "active": true,
+                    "subscription_status": "trial",
+                    "subscription_tier": "none",
+                    "twilio_number": "",
+                    "knowledge": "Existing Hours Note",
+                ]
+            },
+            notificationReconciler: {},
+            contactSyncHandler: { _ in }
+        )
+
+        var patchedContractorId: String?
+        var patchedBearerToken: String?
+        var patchedBody: [String: Any]?
+        var fetchCalls = 0
+
+        let outcome = await OnboardingBusinessDraftCoordinator.prepare(
+            appState: state,
+            ownerName: "Alice Smith",
+            businessName: "Smith Plumbing",
+            serviceType: "plumbing",
+            servicesPayload: [["name": "Drain Cleaning", "min_price": 150]],
+            knowledgeToSave: "## Services & Pricing\n- Drain Cleaning: $150+",
+            createContractor: {
+                .success([
+                    "status": "ok",
+                    "contractor_id": "draft-owner",
+                    "api_token": "untrusted-bootstrap-token",
+                    "existing": true,
+                ])
+            },
+            restoreBootstrap: { response in
+                let rev = coordinator.beginAttempt()!
+                return await coordinator.restoreBootstrapResponse(
+                    response,
+                    appleUserId: state.appleUserId,
+                    appleIdentityToken: state.appleIdentityToken,
+                    signupContinuation: continuation,
+                    attemptRevision: rev
+                )
+            },
+            fetchProfile: { cid, token in
+                fetchCalls += 1
+                XCTAssertEqual(cid, "draft-owner")
+                XCTAssertEqual(token, "verified-bearer-token")
+                if fetchCalls == 1 {
+                    return [
+                        "contractor_id": "draft-owner",
+                        "knowledge": "Existing Hours Note",
+                    ]
+                }
+                return [
+                    "contractor_id": "draft-owner",
+                    "subscription_uuid": draftUUID,
+                    "service_binding": ["country_code": "CA", "provider": "twilio"],
+                ]
+            },
+            patchContractor: { cid, body, token in
+                patchedContractorId = cid
+                patchedBody = body
+                patchedBearerToken = token
+                return true
+            }
+        )
+
+        XCTAssertEqual(outcome, .readyForNextStep)
+        XCTAssertEqual(patchedContractorId, "draft-owner")
+        XCTAssertEqual(patchedBearerToken, "verified-bearer-token")
+        XCTAssertEqual(patchedBody?["owner_name"] as? String, "Alice Smith")
+        XCTAssertEqual(patchedBody?["business_name"] as? String, "Smith Plumbing")
+        XCTAssertEqual(patchedBody?["service_type"] as? String, "plumbing")
+        let mergedKnowledge = try XCTUnwrap(patchedBody?["knowledge"] as? String)
+        XCTAssertTrue(mergedKnowledge.contains("Existing Hours Note"))
+        XCTAssertTrue(mergedKnowledge.contains("Drain Cleaning"))
+        XCTAssertEqual(state.userName, "Alice Smith")
+        XCTAssertEqual(state.businessName, "Smith Plumbing")
+        XCTAssertEqual(state.serviceType, "plumbing")
+        XCTAssertEqual(state.subscriptionUUID, draftUUID)
+        XCTAssertEqual(state.serviceBinding?.countryCode, "CA")
+    }
+
+    func testOnboardingBusinessDraftCoordinator_returningOnboardedAccountStopsWithoutPatchingOrOverwritingFields() async {
+        let store = RecoveryTestKeychain()
+        let state = AppState(inMemory: true, secureStore: store.client)
+        state.isOnboarded = false
+        state.contractorId = ""
+        state.appleUserId = "apple-returning"
+        state.appleIdentityToken = "apple-jwt-returning"
+
+        let coordinator = AccountRestoreCoordinator(
+            state: state,
+            lookupHandler: { _, _ in
+                .found(contractorId: "returning-owner", apiToken: "returning-bearer")
+            },
+            profileFetcher: { _, _ in
+                [
+                    "contractor_id": "returning-owner",
+                    "active": true,
+                    "subscription_status": "active",
+                    "subscription_tier": "business",
+                    "twilio_number": "+14155550188",
+                    "owner_name": "Restored Owner",
+                    "business_name": "Restored Electric",
+                    "service_type": "electrical",
+                ]
+            },
+            notificationReconciler: {},
+            contactSyncHandler: { _ in }
+        )
+
+        var patchCalled = false
+        var fetchCalled = false
+
+        let outcome = await OnboardingBusinessDraftCoordinator.prepare(
+            appState: state,
+            ownerName: "Typed Form Name",
+            businessName: "Typed Form Biz",
+            serviceType: "plumbing",
+            knowledgeToSave: "## New Draft Knowledge",
+            createContractor: {
+                .success([
+                    "status": "ok",
+                    "contractor_id": "returning-owner",
+                    "api_token": "bootstrap-hint",
+                    "existing": true,
+                ])
+            },
+            restoreBootstrap: { response in
+                let rev = coordinator.beginAttempt()!
+                return await coordinator.restoreBootstrapResponse(
+                    response,
+                    appleUserId: state.appleUserId,
+                    appleIdentityToken: state.appleIdentityToken,
+                    attemptRevision: rev
+                )
+            },
+            fetchProfile: { _, _ in
+                fetchCalled = true
+                return nil
+            },
+            patchContractor: { _, _, _ in
+                patchCalled = true
+                return true
+            }
+        )
+
+        XCTAssertEqual(outcome, .restoredCompletedAccount)
+        XCTAssertFalse(patchCalled)
+        XCTAssertFalse(fetchCalled)
+        XCTAssertTrue(state.isOnboarded)
+        XCTAssertEqual(state.sessionState, .ready)
+        XCTAssertEqual(state.userName, "Restored Owner")
+        XCTAssertEqual(state.businessName, "Restored Electric")
+        XCTAssertEqual(state.serviceType, "electrical")
+    }
+
+    func testOnboardingBusinessDraftCoordinator_missingApiTokenOrPendingRecoveryFailsClosedWithZeroWrites() async {
+        // 1. Missing or empty api_token on new contractor creation
+        for response in [
+            ["status": "ok", "contractor_id": "new-c1"] as [String: Any],
+            ["status": "ok", "contractor_id": "new-c1", "api_token": ""] as [String: Any],
+        ] {
+            let state = AppState(inMemory: true)
+            state.appleUserId = "apple-new"
+            var writtenTokens: [String] = []
+            var patchCalled = false
+
+            let outcome = await OnboardingBusinessDraftCoordinator.prepare(
+                appState: state,
+                ownerName: "New Owner",
+                businessName: "New Roofing",
+                serviceType: "roofing",
+                createContractor: { .success(response) },
+                writeBearerToken: { writtenTokens.append($0) },
+                fetchProfile: { _, _ in nil },
+                patchContractor: { _, _, _ in
+                    patchCalled = true
+                    return true
+                }
+            )
+
+            guard case .failed = outcome else {
+                return XCTFail("Expected failure for missing/empty api_token, got \(outcome)")
+            }
+            XCTAssertEqual(state.contractorId, "")
+            XCTAssertEqual(state.currentAuthContext().bearerToken, "")
+            XCTAssertTrue(writtenTokens.isEmpty)
+            XCTAssertFalse(patchCalled)
+        }
+
+        // 2. Pending account recovery blocks brand-new contractor commit with zero writes
+        let recoveryStore = RecoveryTestKeychain()
+        let recoveryState = AppState(inMemory: true, secureStore: recoveryStore.client)
+        recoveryState.beginAccountRecovery(
+            checkpoint: AccountRecoveryCheckpoint(
+                contractorId: "checkpoint-owner",
+                appleUserId: "apple-checkpoint",
+                allowsUnfinishedSetup: true
+            )
+        )
+        var writtenRecoveryTokens: [String] = []
+
+        let recoveryOutcome = await OnboardingBusinessDraftCoordinator.prepare(
+            appState: recoveryState,
+            ownerName: "New Owner",
+            businessName: "New Roofing",
+            serviceType: "roofing",
+            createContractor: {
+                .success([
+                    "status": "ok",
+                    "contractor_id": "brand-new-id",
+                    "api_token": "brand-new-token",
+                ])
+            },
+            writeBearerToken: { writtenRecoveryTokens.append($0) },
+            fetchProfile: { _, _ in nil },
+            patchContractor: { _, _, _ in
+                XCTFail("patchContractor must not be called while pendingAccountRecovery != nil")
+                return true
+            }
+        )
+
+        guard case .failed = recoveryOutcome else {
+            return XCTFail("Expected failure when pendingAccountRecovery != nil, got \(recoveryOutcome)")
+        }
+        XCTAssertEqual(recoveryState.contractorId, "")
+        XCTAssertTrue(writtenRecoveryTokens.isEmpty)
+    }
+
+    func testOnboardingBusinessDraftCoordinator_midFlightAuthOrAppleSwitchAbortsWithoutMutatingReplacementAccount() async {
+        let replacementBinding = ServiceBindingParser.parseBinding(["country_code": "US", "provider": "twilio"])
+
+        // 1. Mid-flight auth switch during patchContractor
+        do {
+            var activeAuth = CallAuthContext(contractorId: "draft-A", bearerToken: "token-A", generation: 1)
+            let state = AppState(authProvider: { activeAuth }, inMemory: true)
+            state.contractorId = "draft-A"
+            state.appleUserId = "apple-A"
+            state.userName = "Original User"
+            state.businessName = "Original Biz"
+            state.subscriptionUUID = "11111111-1111-4111-8111-111111111111"
+            state.serviceBinding = replacementBinding
+
+            let outcome = await OnboardingBusinessDraftCoordinator.prepare(
+                appState: state,
+                ownerName: "Stale Draft Name",
+                businessName: "Stale Draft Biz",
+                serviceType: "hvac",
+                fetchProfile: { _, _ in
+                    XCTFail("Final fetchProfile must not execute after auth switch during patch")
+                    return nil
+                },
+                patchContractor: { _, _, _ in
+                    // Switch to replacement Account B mid-flight
+                    state.contractorId = "account-B"
+                    state.appleUserId = "apple-B"
+                    state.userName = "Replacement Owner"
+                    state.businessName = "Replacement Biz"
+                    state.subscriptionUUID = "22222222-2222-4222-8222-222222222222"
+                    activeAuth = CallAuthContext(contractorId: "account-B", bearerToken: "token-B", generation: 2)
+                    state.serviceBinding = replacementBinding
+                    return true
+                }
+            )
+
+            XCTAssertEqual(outcome, .aborted)
+            XCTAssertEqual(state.userName, "Replacement Owner")
+            XCTAssertEqual(state.businessName, "Replacement Biz")
+            XCTAssertEqual(state.subscriptionUUID, "22222222-2222-4222-8222-222222222222")
+            XCTAssertEqual(state.serviceBinding, replacementBinding)
+        }
+
+        // 2. Mid-flight Apple-ID switch during final profile fetch
+        do {
+            let activeAuth = CallAuthContext(contractorId: "draft-A", bearerToken: "token-A", generation: 1)
+            let state = AppState(authProvider: { activeAuth }, inMemory: true)
+            state.contractorId = "draft-A"
+            state.appleUserId = "apple-A"
+            state.userName = "Replacement Owner"
+            state.businessName = "Replacement Biz"
+            state.subscriptionUUID = "22222222-2222-4222-8222-222222222222"
+            state.serviceBinding = replacementBinding
+
+            let outcome = await OnboardingBusinessDraftCoordinator.prepare(
+                appState: state,
+                ownerName: "Stale Draft Name",
+                businessName: "Stale Draft Biz",
+                serviceType: "hvac",
+                fetchProfile: { _, _ in
+                    // Apple ID changes while final profile fetch is suspended
+                    state.appleUserId = "apple-B"
+                    return [
+                        "contractor_id": "draft-A",
+                        "subscription_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "service_binding": ["country_code": "CA", "provider": "twilio"],
+                    ]
+                },
+                patchContractor: { _, _, _ in true }
+            )
+
+            XCTAssertEqual(outcome, .aborted)
+            XCTAssertEqual(state.userName, "Replacement Owner")
+            XCTAssertEqual(state.businessName, "Replacement Biz")
+            XCTAssertEqual(state.subscriptionUUID, "22222222-2222-4222-8222-222222222222")
+            XCTAssertEqual(state.serviceBinding, replacementBinding)
+        }
+    }
 }

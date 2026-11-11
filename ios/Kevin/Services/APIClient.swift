@@ -1070,7 +1070,11 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
 
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      ContractorProfilePayload(profile: json, expectedContractorId: contractorId) != nil else {
+                    return nil
+                }
+                return json
             }
         } catch {
             debugLog("Get contractor failed: \(error.localizedDescription)")
@@ -1530,8 +1534,24 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
     }
 
     func signSubscriptionOffer(productId: String, offerId: String, applicationUsername: String) async -> [String: Any]? {
-        let contractorId = await MainActor.run { AppState.shared.contractorId }
-        guard !contractorId.isEmpty else { return nil }
+        let auth = await MainActor.run { AppState.shared.currentAuthContext() }
+        return await signSubscriptionOffer(
+            productId: productId,
+            offerId: offerId,
+            applicationUsername: applicationUsername,
+            contractorId: auth.contractorId,
+            bearerToken: auth.bearerToken
+        )
+    }
+
+    func signSubscriptionOffer(
+        productId: String,
+        offerId: String,
+        applicationUsername: String,
+        contractorId: String,
+        bearerToken: String
+    ) async -> [String: Any]? {
+        guard !contractorId.isEmpty, !bearerToken.isEmpty else { return nil }
         do {
             let url = URL(string: "\(baseURL)/api/subscription/sign-offer")!
             var request = URLRequest(url: url)
@@ -1544,7 +1564,7 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
                 "offer_id": offerId,
                 "application_username": applicationUsername,
             ])
-            authorize(&request)
+            request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
             let (data, response) = try await retryRequest(request)
             if let http = response as? HTTPURLResponse, http.statusCode == 200,
                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],

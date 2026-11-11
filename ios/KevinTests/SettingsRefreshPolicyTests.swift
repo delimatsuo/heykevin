@@ -1668,6 +1668,213 @@ final class SettingsRefreshPolicyTests: XCTestCase {
             authProvider: { events.append("auth"); return auth }, isBusinessMode: false)
         XCTAssertNil(coalesced); XCTAssertEqual(events, ["permission", "auth"])
     }
+
+    // MARK: - 33. Contractor Identity & Hydration Return Propagation
+
+    func testSettingsProfileHydrator_rejectsMalformedOrMismatchedContractorIdAndPropagatesApplyFailure() async {
+        let nfc = "caf\u{00E9}"
+        let nfd = "cafe\u{0301}"
+        let auth = makeAuthContext(contractorId: nfc, bearerToken: "token-A", generation: 1)
+
+        let invalidProfiles: [[String: Any]] = [
+            ["contractor_id": "other", "owner_name": "Wrong"],
+            ["contractor_id": "", "owner_name": "Empty"],
+            ["contractor_id": 123, "owner_name": "Numeric"],
+            ["contractor_id": NSNull(), "owner_name": "Null"],
+            ["contractor_id": nfd, "owner_name": "NFD"],
+        ]
+
+        for invalidProfile in invalidProfiles {
+            var applyCalled = false
+            let hydrated = await SettingsProfileHydrator.hydrateChecked(
+                capturedAuth: auth,
+                capturedRevisions: SettingsProfileHydrator.CapturedRevisions(),
+                fetchProfile: { invalidProfile },
+                ownsOperation: { true },
+                currentDraftProvider: { SettingsDraftSnapshot() },
+                baselineProvider: { SettingsConfirmedBaseline() },
+                fenceProvider: { _ in SettingsProfileHydrator.FencePermits() },
+                currentFieldRevisions: { SettingsFieldMutationRevisions() },
+                applyProfile: { _, _ in
+                    applyCalled = true
+                    return true
+                }
+            )
+            XCTAssertFalse(hydrated, "Hydrator must reject invalid contractor_id: \(invalidProfile)")
+            XCTAssertFalse(applyCalled, "applyProfile must not run when contractor_id is invalid")
+        }
+
+        // Propagates false when Bool-returning applyProfile rejects payload
+        var applyInvoked = false
+        let propagatedFalse = await SettingsProfileHydrator.hydrateChecked(
+            capturedAuth: auth,
+            capturedRevisions: SettingsProfileHydrator.CapturedRevisions(),
+            fetchProfile: { ["contractor_id": nfc, "owner_name": "Valid"] },
+            ownsOperation: { true },
+            currentDraftProvider: { SettingsDraftSnapshot() },
+            baselineProvider: { SettingsConfirmedBaseline() },
+            fenceProvider: { _ in SettingsProfileHydrator.FencePermits() },
+            currentFieldRevisions: { SettingsFieldMutationRevisions() },
+            applyProfile: { _, _ in
+                applyInvoked = true
+                return false
+            }
+        )
+        XCTAssertTrue(applyInvoked)
+        XCTAssertFalse(propagatedFalse)
+    }
+
+    func testApplyHydratedSettingsProfile_rejectsStaleAuthOrMismatchedPayloadWithZeroAppStateMutations() throws {
+        var activeAuth = CallAuthContext(contractorId: "owner-A", bearerToken: "token-A", generation: 1)
+        let state = AppState(authProvider: { activeAuth }, inMemory: true)
+        state.contractorId = "owner-A"
+        state.userName = "Original Name"
+        state.businessName = "Original Biz"
+        state.serviceType = "plumbing"
+        state.subscriptionStatus = "trial"
+        state.subscriptionTier = "none"
+        state.autoReplySms = false
+        state.businessAddress = "100 First St"
+        state.businessCity = "Austin"
+        state.smartInterruption = true
+        state.ringThroughContacts = true
+        state.sitToneEnabled = false
+        state.countryCode = "US"
+        state.mode = "personal"
+
+        let dirtyProjection = SettingsGuardedStateProjection(
+            appStateBusinessAddress: "999 Other St",
+            appStateBusinessCity: "Toronto",
+            appStateSmartInterruption: false,
+            appStateRingThroughContacts: false,
+            appStateSitToneEnabled: true,
+            appStateCountryCode: "CA",
+            appStateMode: "business"
+        )
+
+        let mismatchedPayload = try XCTUnwrap(
+            ContractorProfilePayload(
+                profile: [
+                    "contractor_id": "owner-B",
+                    "owner_name": "Intruder",
+                    "business_name": "Intruder Co",
+                    "service_type": "hvac",
+                    "subscription_status": "active",
+                    "subscription_tier": "business",
+                    "auto_reply_sms": true,
+                    "service_binding": ["country_code": "CA", "provider": "twilio"],
+                ]
+            )
+        )
+        XCTAssertFalse(
+            state.applyHydratedSettingsProfile(
+                mismatchedPayload,
+                projection: dirtyProjection,
+                for: activeAuth
+            )
+        )
+
+        let matchingPayload = try XCTUnwrap(
+            ContractorProfilePayload(
+                profile: [
+                    "contractor_id": "owner-A",
+                    "owner_name": "Updated Owner",
+                    "business_name": "Updated Biz",
+                    "service_type": "electrical",
+                    "subscription_status": "active",
+                    "subscription_tier": "business",
+                    "auto_reply_sms": true,
+                    "service_binding": ["country_code": "CA", "provider": "twilio"],
+                ],
+                expectedContractorId: "owner-A"
+            )
+        )
+
+        // Stale auth generation must also fail closed with zero mutations
+        let staleAuth = CallAuthContext(contractorId: "owner-A", bearerToken: "token-A", generation: 99)
+        XCTAssertFalse(
+            state.applyHydratedSettingsProfile(
+                matchingPayload,
+                projection: dirtyProjection,
+                for: staleAuth
+            )
+        )
+
+        XCTAssertEqual(state.userName, "Original Name")
+        XCTAssertEqual(state.businessName, "Original Biz")
+        XCTAssertEqual(state.serviceType, "plumbing")
+        XCTAssertEqual(state.subscriptionStatus, "trial")
+        XCTAssertEqual(state.subscriptionTier, "none")
+        XCTAssertFalse(state.autoReplySms)
+        XCTAssertNil(state.serviceBinding)
+        XCTAssertEqual(state.businessAddress, "100 First St")
+        XCTAssertEqual(state.businessCity, "Austin")
+        XCTAssertTrue(state.smartInterruption)
+        XCTAssertTrue(state.ringThroughContacts)
+        XCTAssertFalse(state.sitToneEnabled)
+        XCTAssertEqual(state.countryCode, "US")
+        XCTAssertEqual(state.mode, "personal")
+
+        // Valid current auth applies cleanly
+        XCTAssertTrue(
+            state.applyHydratedSettingsProfile(
+                matchingPayload,
+                projection: dirtyProjection,
+                for: activeAuth
+            )
+        )
+        XCTAssertEqual(state.userName, "Updated Owner")
+        XCTAssertEqual(state.businessName, "Updated Biz")
+        XCTAssertEqual(state.serviceType, "electrical")
+        XCTAssertEqual(state.subscriptionStatus, "active")
+        XCTAssertEqual(state.subscriptionTier, "business")
+        XCTAssertTrue(state.autoReplySms)
+        XCTAssertEqual(state.serviceBinding?.countryCode, "CA")
+        XCTAssertEqual(state.countryCode, "CA")
+        XCTAssertEqual(state.mode, "business")
+    }
+
+    func testSettingsDeletionConfirmationLoader_ignoresWrongAccountAndEmptyFreshSubscriptionFields() async {
+        let authA = makeAuthContext(contractorId: "contractor-A", bearerToken: "token-A", generation: 1)
+
+        let hostileProfiles: [[String: Any]] = [
+            [
+                "contractor_id": "other",
+                "subscription_status": "expired",
+                "subscription_tier": "none",
+            ],
+            [
+                "subscription_status": "",
+                "subscription_tier": "",
+            ],
+        ]
+
+        for profile in hostileProfiles {
+            let loader = SettingsDeletionConfirmationLoader()
+            let readyExp = expectation(description: "Deletion step emitted")
+            var observedStep: AccountDeletionFirstStep?
+
+            loader.requestConfirmation(
+                auth: authA,
+                isAccountPresented: { true },
+                currentAuth: { authA },
+                cachedStatus: "active",
+                cachedTier: "business",
+                fetchProfile: { _ in profile },
+                onReady: { step in
+                    observedStep = step
+                    readyExp.fulfill()
+                }
+            )
+
+            await fulfillment(of: [readyExp], timeout: 2.0)
+            XCTAssertEqual(
+                observedStep,
+                .warnActiveSubscription,
+                "Must warn active subscription rather than downgrading to confirmDelete for profile: \(profile)"
+            )
+        }
+    }
 }
 
 private final class KnowledgeSaveURLProtocol: URLProtocol {

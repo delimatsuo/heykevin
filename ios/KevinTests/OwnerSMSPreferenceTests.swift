@@ -542,4 +542,78 @@ extension OwnerSMSPreferenceTests {
         XCTAssertEqual(state.boundAuth, other)
         XCTAssertFalse(state.isLoaded)
     }
+
+    func testApplyHydrationIgnoresPresentMismatchedOrMalformedContractorId() throws {
+        let nfc = "caf\u{00E9}"
+        let nfd = "cafe\u{0301}"
+        let auth = CallAuthContext(contractorId: nfc, bearerToken: "token-1", generation: 1)
+
+        let badContractorIds: [Any] = ["other", "", NSNull(), 42, true, nfd]
+
+        // 1. Unloaded initial state: neither versioned nor unversioned wrong-account dicts may mutate state
+        for badId in badContractorIds {
+            var unloaded = OwnerSMSPreferenceState()
+            let token1 = try XCTUnwrap(unloaded.captureLoadToken(auth: auth))
+            unloaded.applyHydration(
+                dict: [
+                    "contractor_id": badId,
+                    "owner_sms_enabled": false,
+                    "owner_sms_opted_out": false,
+                    "owner_sms_opt_out_revision": 2,
+                    "owner_sms_settings_version": 1,
+                ],
+                token: token1,
+                auth: auth
+            )
+            XCTAssertFalse(unloaded.isLoaded)
+            XCTAssertFalse(unloaded.isUnsupportedBackend)
+            XCTAssertTrue(unloaded.confirmedEnabled)
+
+            let token2 = try XCTUnwrap(unloaded.captureLoadToken(auth: auth))
+            unloaded.applyHydration(
+                dict: [
+                    "contractor_id": badId,
+                    // Missing owner_sms_settings_version would flip isUnsupportedBackend = true if accepted
+                ],
+                token: token2,
+                auth: auth
+            )
+            XCTAssertFalse(unloaded.isLoaded)
+            XCTAssertFalse(unloaded.isUnsupportedBackend)
+            XCTAssertTrue(unloaded.confirmedEnabled)
+        }
+
+        // 2. Already-loaded state: wrong/malformed contractor_id must not flip isLoaded, isUnsupportedBackend, or confirmedEnabled
+        var loaded = OwnerSMSPreferenceState()
+        let initialToken = try XCTUnwrap(loaded.captureLoadToken(auth: auth))
+        loaded.applyHydration(
+            dict: [
+                "contractor_id": nfc,
+                "owner_sms_enabled": true,
+                "owner_sms_opted_out": false,
+                "owner_sms_opt_out_revision": 1,
+                "owner_sms_settings_version": 1,
+            ],
+            token: initialToken,
+            auth: auth
+        )
+        XCTAssertTrue(loaded.isLoaded)
+        XCTAssertFalse(loaded.isUnsupportedBackend)
+        XCTAssertTrue(loaded.confirmedEnabled)
+
+        for badId in badContractorIds {
+            let reloadToken = try XCTUnwrap(loaded.captureLoadToken(auth: auth))
+            loaded.applyHydration(
+                dict: [
+                    "contractor_id": badId,
+                    "owner_sms_enabled": false,
+                ],
+                token: reloadToken,
+                auth: auth
+            )
+            XCTAssertTrue(loaded.isLoaded)
+            XCTAssertFalse(loaded.isUnsupportedBackend)
+            XCTAssertTrue(loaded.confirmedEnabled)
+        }
+    }
 }

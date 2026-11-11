@@ -145,13 +145,13 @@ final class AccountRestoreCoordinator {
            signupContinuation.contractorId != id || signupContinuation.appleUserId != appleUserId { return wrongAccount }
         guard let profile = await fetchProfile(id, token) else { return isCurrent() ? failure : .superseded }
         guard isCurrent() else { return .superseded }
-        guard profile["contractor_id"] as? String == id,
-              profile["active"] as? Bool == true,
-              let status = profile["subscription_status"] as? String,
+        guard let payload = ContractorProfilePayload(profile: profile, expectedContractorId: id),
+              payload.active == true,
+              let status = payload.subscriptionStatus,
               ["trial", "active", "expired", "cancelled"].contains(status),
-              let tier = profile["subscription_tier"] as? String,
+              let tier = payload.subscriptionTier,
               ["none", "personal", "business", "businessPro"].contains(tier) else { return failure }
-        let number = profile["twilio_number"] as? String ?? ""
+        let number = payload.twilioNumber
         let requiresExistingNumber = isRecoveryMode || originCheckpoint?.allowsUnfinishedSetup == false || !retainedKevinNumber.isEmpty
         if requiresExistingNumber {
             guard !number.isEmpty else { return .failed(String(localized: "Your existing Kevin number could not be restored. Please try again or contact support.")) }
@@ -159,7 +159,7 @@ final class AccountRestoreCoordinator {
         }
         let values = ["contractorId": id, "contractorApiToken": token, "appleUserId": appleUserId,
                       "subscriptionStatus": status, "subscriptionTier": tier,
-                      "subscriptionUUID": profile["subscription_uuid"] as? String ?? ""]
+                      "subscriptionUUID": payload.subscriptionUUIDString ?? ""]
         // Clear unowned restored consent before the first credential write can
         // make a staged contractor ID look like a previously trusted identity.
         let keepConsent = signupContinuation?.explicitContactConsent
@@ -177,29 +177,14 @@ final class AccountRestoreCoordinator {
         }
         // No suspension between persistence and publication. Every credential
         // and its recovery marker was verified before authenticated UI can open.
-        state.userName = profile["owner_name"] as? String ?? ""
-        state.businessName = profile["business_name"] as? String ?? ""
-        state.businessAddress = profile["business_address"] as? String ?? ""
-        state.businessCity = profile["business_city"] as? String ?? ""
-        state.serviceType = profile["service_type"] as? String ?? ""
-        let mode = profile["effective_mode"] as? String ?? profile["mode"] as? String ?? "personal"
-        state.mode = mode == "personal" ? "personal" : "business"
-        state.countryCode = SettingsCountry.accountCountry(from: profile) ?? ""
-        state.subscriptionStatus = status
-        state.subscriptionTier = tier
-        state.subscriptionUUID = values["subscriptionUUID"] ?? ""
-        state.jobberConnected = false
-        state.googleCalendarConnected = false
-        state.contractorId = id
-        state.appleUserId = appleUserId
-        state.appleIdentityToken = ""
-        state.kevinNumber = number
-        state.serviceBinding = ServiceBindingParser.parse(from: profile)
-        state.readCallIds = []
-        state.unreadCallCount = 0
-        state.clearActiveCall()
-        if !number.isEmpty { state.isOnboarded = true }
-        guard state.finishAccountRecovery(bearerToken: token) else {
+        guard state.commitRestoredAccountProfile(
+            payload,
+            contractorId: id,
+            appleUserId: appleUserId,
+            subscriptionStatus: status,
+            subscriptionTier: tier,
+            bearerToken: token
+        ) else {
             state.beginAccountRecovery(checkpoint: checkpoint)
             return .failed(String(localized: "Could not save your sign-in securely. Please unlock your iPhone and try again."))
         }

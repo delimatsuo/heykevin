@@ -293,6 +293,12 @@ enum SettingsRefreshPolicy {
         decision: SettingsHydrationDecision,
         state: inout SettingsGuardedStateProjection
     ) {
+        if contractor.keys.contains("contractor_id") {
+            guard let cid = contractor["contractor_id"] as? String, !cid.isEmpty else {
+                return
+            }
+        }
+
         if decision.shouldUpdateMode {
             let mode = contractor["effective_mode"] as? String ?? contractor["mode"] as? String ?? "personal"
             let resolved = (mode == "personal") ? "personal" : "business"
@@ -443,7 +449,7 @@ struct SettingsProfileHydrator {
         }
     }
 
-    static func hydrate(
+    static func hydrateChecked(
         capturedAuth: CallAuthContext,
         capturedRevisions: CapturedRevisions,
         fetchProfile: () async -> [String: Any]?,
@@ -452,7 +458,7 @@ struct SettingsProfileHydrator {
         baselineProvider: () -> SettingsConfirmedBaseline,
         fenceProvider: (CapturedRevisions) -> FencePermits,
         currentFieldRevisions: () -> SettingsFieldMutationRevisions,
-        applyProfile: ([String: Any], SettingsHydrationDecision) -> Void
+        applyProfile: ([String: Any], SettingsHydrationDecision) -> Bool
     ) async -> Bool {
         // 1. Await the profile fetch (do NOT evaluate drafts before await)
         guard let profile = await fetchProfile() else {
@@ -461,6 +467,13 @@ struct SettingsProfileHydrator {
 
         // 2. Check ownership after fetch completes
         guard ownsOperation() else {
+            return false
+        }
+
+        guard ContractorProfilePayload.matchesOptionalContractorId(
+            in: profile,
+            expectedContractorId: capturedAuth.contractorId
+        ) else {
             return false
         }
 
@@ -497,8 +510,34 @@ struct SettingsProfileHydrator {
         }
 
         // 6. Apply profile synchronously
-        applyProfile(profile, decision)
-        return true
+        return applyProfile(profile, decision)
+    }
+
+    static func hydrate(
+        capturedAuth: CallAuthContext,
+        capturedRevisions: CapturedRevisions,
+        fetchProfile: () async -> [String: Any]?,
+        ownsOperation: () -> Bool,
+        currentDraftProvider: () -> SettingsDraftSnapshot,
+        baselineProvider: () -> SettingsConfirmedBaseline,
+        fenceProvider: (CapturedRevisions) -> FencePermits,
+        currentFieldRevisions: () -> SettingsFieldMutationRevisions,
+        applyProfile: ([String: Any], SettingsHydrationDecision) -> Void
+    ) async -> Bool {
+        await hydrateChecked(
+            capturedAuth: capturedAuth,
+            capturedRevisions: capturedRevisions,
+            fetchProfile: fetchProfile,
+            ownsOperation: ownsOperation,
+            currentDraftProvider: currentDraftProvider,
+            baselineProvider: baselineProvider,
+            fenceProvider: fenceProvider,
+            currentFieldRevisions: currentFieldRevisions,
+            applyProfile: { profile, decision in
+                applyProfile(profile, decision)
+                return true
+            }
+        )
     }
 }
 
@@ -542,9 +581,22 @@ final class SettingsDeletionConfirmationLoader {
             guard currentAuth() == auth else { return }
             guard isAccountPresented() else { return }
 
+            let verifiedProfile = profile.flatMap {
+                ContractorProfilePayload.matchesOptionalContractorId(
+                    in: $0,
+                    expectedContractorId: auth.contractorId
+                ) ? $0 : nil
+            }
+            let freshStatus = (verifiedProfile?["subscription_status"] as? String).flatMap {
+                $0.isEmpty ? nil : $0
+            }
+            let freshTier = (verifiedProfile?["subscription_tier"] as? String).flatMap {
+                $0.isEmpty ? nil : $0
+            }
+
             let resolved = AccountDeletionFlow.resolve(
-                freshStatus: profile?["subscription_status"] as? String,
-                freshTier: profile?["subscription_tier"] as? String,
+                freshStatus: freshStatus,
+                freshTier: freshTier,
                 cachedStatus: cachedStatus,
                 cachedTier: cachedTier
             )

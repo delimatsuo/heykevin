@@ -74,6 +74,7 @@ class AppState: ObservableObject {
     static let contactsUploadConsentOwnerKey = "contactsUploadConsentOwner"
     private var isHydratingInitialStorage = false
     private var isUpdatingConsentState = false
+    private var isClearingSubscriptionCache = false
     private(set) var contactsUploadConsentOwner: String? = nil
 
     private func migrateToKeychain(_ key: String) -> String {
@@ -244,7 +245,7 @@ class AppState: ObservableObject {
     // Subscription state (Keychain-backed — UI cache only, server is source of truth)
     @Published var subscriptionStatus: String = "trial" {
         didSet {
-            if inScreenshotFixture || inMemory { return }
+            if isHydratingInitialStorage || isClearingSubscriptionCache || inScreenshotFixture || inMemory { return }
             if subscriptionStatus.isEmpty {
                 persistence.keychain.delete("subscriptionStatus")
             } else {
@@ -254,7 +255,7 @@ class AppState: ObservableObject {
     }
     @Published var subscriptionTier: String = "none" {
         didSet {
-            if inScreenshotFixture || inMemory { return }
+            if isHydratingInitialStorage || isClearingSubscriptionCache || inScreenshotFixture || inMemory { return }
             if subscriptionTier.isEmpty {
                 persistence.keychain.delete("subscriptionTier")
             } else {
@@ -264,7 +265,7 @@ class AppState: ObservableObject {
     }
     @Published var subscriptionUUID: String = "" {
         didSet {
-            if inScreenshotFixture || inMemory { return }
+            if isHydratingInitialStorage || isClearingSubscriptionCache || inScreenshotFixture || inMemory { return }
             if subscriptionUUID.isEmpty {
                 persistence.keychain.delete("subscriptionUUID")
             } else {
@@ -857,6 +858,58 @@ class AppState: ObservableObject {
             self.refreshSecureStorageForActiveUse()
             LiveCallObserver.shared.requestRefresh()
         }
+    }
+
+    @MainActor
+    func resetDeletedAccountState() {
+        let deletedContractorId = contractorId.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        userName = ""
+        businessName = ""
+        businessAddress = ""
+        businessCity = ""
+        serviceType = ""
+        mode = "business"
+        kevinNumber = ""
+        countryCode = ""
+        forwardingActivated = false
+        jobberConnected = false
+        googleCalendarConnected = false
+        appleIdentityToken = ""
+        needsReauth = false
+        recoveryCommitPending = false
+        pendingAccountRecovery = nil
+
+        if !inScreenshotFixture && !inMemory {
+            if !deletedContractorId.isEmpty {
+                persistence.defaults.removeObject(forKey: "readCallIds_\(deletedContractorId)")
+            }
+            DispatchQueue.main.async {
+                self.persistence.defaults.removeObject(forKey: "forwardingActivatedFor")
+            }
+        }
+        if (!inMemory || injectedSecureStore != nil) && !inScreenshotFixture {
+            if secureStore.read(Self.recoveryMarkerKey) != .missing {
+                _ = secureStore.delete(Self.recoveryMarkerKey)
+            }
+        }
+        revokeContactsUploadConsent()
+
+        contractorId = ""
+        appleUserId = ""
+
+        isClearingSubscriptionCache = true
+        subscriptionStatus = "trial"
+        subscriptionTier = "none"
+        subscriptionUUID = ""
+        isClearingSubscriptionCache = false
+        if !inScreenshotFixture && !inMemory {
+            persistence.keychain.delete("subscriptionStatus")
+            persistence.keychain.delete("subscriptionTier")
+            persistence.keychain.delete("subscriptionUUID")
+        }
+
+        isOnboarded = false
     }
 
     /// A marker is written before any credential replacement. An interrupted

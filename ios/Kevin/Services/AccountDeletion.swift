@@ -60,10 +60,7 @@ enum AccountDeletionFlow {
     ) -> AccountDeletionOutcome? {
         guard finish(token, appState.currentAuthContext()) else { return nil }
         if outcome == .deleted {
-            appState.contractorId = ""
-            appState.kevinNumber = ""
-            appState.countryCode = ""
-            appState.isOnboarded = false
+            appState.resetDeletedAccountState()
             writeBearer("")
         }
         return outcome

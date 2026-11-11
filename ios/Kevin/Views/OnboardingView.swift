@@ -2205,175 +2205,28 @@ struct OnboardingView: View {
     }
 
     private var forwardingCodes: ForwardingCodes? {
-        ForwardingDialCodes.codes(
+        OnboardingForwardingStepView.resolvedDialCodes(
+            kevinNumber: kevinNumber,
             countryCode: forwardingCountry,
-            instructions: forwardingInstructions,
-            number: kevinNumber,
-            isVerizon: isVerizon
+            isVerizon: isVerizon,
+            instructions: forwardingInstructions
         )
-    }
-
-    private var forwardingCountryName: String {
-        Locale.current.localizedString(forRegionCode: forwardingCountry) ?? forwardingCountry
     }
 
     // MARK: - Forwarding Setup
 
     private var forwardingStep: some View {
-        VStack(spacing: 20) {
-            Text(String(localized: "Set Up Call Forwarding"))
-                .font(.title.bold())
-
-            Text(String(localized: "Forward your missed calls to Kevin.\nYour phone rings first — Kevin catches what you miss."))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            // Carrier choice comes FIRST: the dial buttons below derive their
-            // codes from it. The existing carrier picker is available only in the US.
-            Group {
-                if forwardingCountry != "US" {
-                    Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Carrier setup in preparation"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(String(localized: "Your carrier"))
-                            .font(.subheadline.weight(.medium))
-                        Picker(String(localized: "Your carrier"), selection: $isVerizon) {
-                            Text(String(localized: "AT&T, T-Mobile, other")).tag(false)
-                            Text(String(localized: "Verizon")).tag(true)
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: isVerizon) { _, newValue in
-                            appState.isVerizonCarrier = newValue
-                        }
-                        Text(String(localized: "Verizon uses different codes — pick first, then dial."))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .task(id: forwardingCountry) {
-                guard !ForwardingCountry.isNANP(forwardingCountry) else { return }
-                if let fetched = await APIClient.shared.getForwardingInstructions(countryCode: forwardingCountry) {
-                    forwardingInstructions = fetched
-                }
-            }
-
-            if let codes = forwardingCodes {
-                VStack(spacing: 12) {
-                    // Step 1: Clear existing forwarding
-                    Button {
-                        if let url = ForwardingDialCodes.telURL(codes.clearExisting) {
-                            UIApplication.shared.open(url)
-                        }
-                    } label: {
-                        HStack {
-                            Text("1")
-                                .font(.caption.bold())
-                                .frame(width: 24, height: 24)
-                                .background(Circle().fill(.blue))
-                                .foregroundStyle(.white)
-                            Text(String(localized: "Clear existing forwarding"))
-                                .font(.subheadline)
-                            Spacer()
-                            Image(systemName: "phone.arrow.right")
-                        }
-                        .padding()
-                        .background(Color(.systemGray6))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    }
-                    .buttonStyle(.plain)
-
-                    // Step 2: Set Kevin forwarding
-                    Button {
-                        if let url = ForwardingDialCodes.telURL(codes.activate) {
-                            UIApplication.shared.open(url)
-                        }
-                    } label: {
-                        HStack {
-                            Text("2")
-                                .font(.caption.bold())
-                                .frame(width: 24, height: 24)
-                                .background(Circle().fill(.blue))
-                                .foregroundStyle(.white)
-                            Text(String(localized: "Forward missed calls to Kevin"))
-                                .font(.subheadline)
-                            Spacer()
-                            Image(systemName: "phone.arrow.right")
-                        }
-                        .padding()
-                        .background(Color(.systemGray6))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    }
-                    .buttonStyle(.plain)
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(forwardingCountry == "CA" ? CanadaForwardingGuidance.title : String(localized: "Call forwarding in preparation"), systemImage: "info.circle.fill")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.blue)
-                    Text(forwardingCountry == "CA" ? CanadaForwardingGuidance.setup : String(localized: "Call forwarding for your region is currently being prepared. No carrier dialing codes are required at this time."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if forwardingCountry == "CA" {
-                        Text(CanadaForwardingGuidance.baseline)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-                .background(Color.blue.opacity(0.10))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
-
-            // iOS Live Voicemail answers calls on-device before the carrier's
-            // no-answer timer fires, so the forward never triggers. Apple's own
-            // guidance is to turn it off when carrier forwarding misbehaves.
-            // There is no URL scheme that deep-links here — Settings can only be
-            // opened to our own app's pane — so these are plain instructions.
-            if forwardingCountry != "CA" {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(String(localized: "Turn off Live Voicemail first"), systemImage: "exclamationmark.triangle.fill")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.orange)
-                    Text(String(localized: "If Live Voicemail is on, your iPhone answers before Kevin can. Open Settings, find Phone, then Live Voicemail, and switch it off."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-                .background(Color.orange.opacity(0.10))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
-
-            Text(String(localized: "Your Kevin number: \(kevinNumber)"))
-                .font(.subheadline.monospacedDigit())
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Button {
-                recordForwardingOutcome(didSetUp: true)
-                completeOnboarding()
-            } label: {
-                Text(forwardingCountry == "CA" ? String(localized: "Continue — set up with my carrier later") : String(localized: "I'm All Set"))
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-            }
-            .buttonStyle(.borderedProminent)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-
-            Button(String(localized: "Skip for now")) {
-                recordForwardingOutcome(didSetUp: false)
+        OnboardingForwardingStepView(
+            kevinNumber: kevinNumber,
+            countryCode: forwardingCountry,
+            mode: selectedMode,
+            isVerizon: $isVerizon,
+            forwardingInstructions: $forwardingInstructions,
+            onComplete: { didSetUp in
+                recordForwardingOutcome(didSetUp: didSetUp)
                 completeOnboarding()
             }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-        }
+        )
     }
 
     // MARK: - Done

@@ -518,7 +518,6 @@ class AppState: ObservableObject {
     @Published var transcriptLines: [TranscriptLine] = []
     @Published var callStartTime: Date? = nil
     @Published var callIgnored: Bool = false
-    @Published var isOnCall: Bool = false
 
     // Settings
     @Published var userName: String = "" {
@@ -877,7 +876,6 @@ class AppState: ObservableObject {
             transcriptLines = []
             callIgnored = false
             callStartTime = Date()
-            isOnCall = false
         } else {
             activeCallerPhone = callerPhone
             activeCallerName = callerName
@@ -984,7 +982,6 @@ class AppState: ObservableObject {
         transcriptLines = []
         callStartTime = nil
         callIgnored = false
-        isOnCall = false
     }
 
     /// Check backend for an active call (used on app foreground)

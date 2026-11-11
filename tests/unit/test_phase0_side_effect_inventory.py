@@ -13,6 +13,7 @@ REQUIRED_PATHS = {
     "app/webhooks/telegram_callback.py",
     "app/webhooks/twilio_incoming.py",
     "app/webhooks/media_stream.py",
+    "app/webhooks/stream_transport.py",
     "app/db/jobs.py",
     "app/services/job_card.py",
     "app/services/calendar.py",
@@ -74,3 +75,11 @@ def test_jobber_inventory_pins_post_call_request_semantics_and_no_voice_tool():
     assert "expose no Jobber write tool" in voice_surface.current_behavior
     assert "Jobber exposes no write tool" in voice_surface.required_gate
     assert "Jobber write tool attempts are rejected as unknown tools" in voice_surface.required_evidence
+
+
+def test_stream_transport_inventory_covers_call_completion_and_live_transcript():
+    surface = surfaces_by_path()["app/webhooks/stream_transport.py"][0]
+
+    assert "_complete_twilio_call" in surface.current_behavior
+    assert "LiveTranscriptPusher" in surface.current_behavior
+    assert surface.risk == "twilio_mutation"

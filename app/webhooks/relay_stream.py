@@ -20,8 +20,8 @@ from app.db.cache import (
     get_active_call,
 )
 from app.services.relay_pipeline import RelayPipeline
-from app.services.voice_pipeline import _call_label
-from app.webhooks.media_stream import (
+from app.services.voice_events import _call_label
+from app.webhooks.stream_transport import (
     LiveTranscriptPusher,
     _log_safe_exception,
     _resolve_active_call,

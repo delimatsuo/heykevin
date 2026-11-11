@@ -17,7 +17,7 @@ import re
 import time
 import unicodedata
 from datetime import datetime
-from typing import Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 import httpx
 import websockets
@@ -33,8 +33,6 @@ from app.services.receptionist_context import (
 from app.services.receptionist_tools import ReceptionistToolExecutor
 from app.services.urgency import (
     URGENCY_KEYWORDS as LIVE_URGENCY_KEYWORDS,
-)
-from app.services.urgency import (
     find_urgent_signal,
 )
 from app.services.voice_events import (
@@ -46,6 +44,9 @@ from app.services.voice_events import (
 from app.services.voice_tool_declarations import ANTHROPIC_CALENDAR_TOOLS, ANTHROPIC_JOBBER_TOOLS
 from app.services.voice_tool_dispatch import VoiceToolContext, VoiceToolDispatcher
 from app.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from app.services.owner_call_actions import MessageDeliveryState
 
 logger = get_logger(__name__)
 
@@ -754,6 +755,119 @@ class VoicePipeline:
             except Exception:
                 pass
 
+    def contractor_id(self) -> str:
+        cfg = getattr(self, '_contractor_config', None)
+        if isinstance(cfg, dict):
+            return cfg.get('contractor_id', '') or ''
+        return ''
+
+    def call_sid(self) -> str:
+        return getattr(self, '_call_sid', '') or ''
+
+    def command_ws_token(self) -> str:
+        return getattr(self, '_command_ws_token', '') or ''
+
+    def is_message_delivery_alive(self) -> bool:
+        return bool(getattr(self, '_connected', False)) and not bool(getattr(self, '_ending', False))
+
+    def is_owner_timeout_alive(self) -> bool:
+        return self.is_message_delivery_alive()
+
+    def is_unavailable_said(self) -> bool:
+        return bool(getattr(self, '_unavailable_said', False))
+
+    def owner_availability_timeout_seconds(self) -> float:
+        return self.OWNER_AVAILABILITY_TIMEOUT_SECONDS
+
+    def message_delivery_state(self) -> 'MessageDeliveryState':
+        from app.services.owner_call_actions import MessageDeliveryState
+
+        state = getattr(self, '_message_delivery_state', None)
+        if not isinstance(state, MessageDeliveryState):
+            existing_lock = getattr(self, '_message_delivery_lock', None)
+            lock = existing_lock if isinstance(existing_lock, asyncio.Lock) else asyncio.Lock()
+            state = MessageDeliveryState(
+                lock=lock,
+                intent_accepted_key=getattr(self, '_intent_accepted_key', None),
+                intent_accepted_at=getattr(self, '_intent_accepted_at', None),
+                delivery_key=getattr(self, '_message_delivery_key', None),
+            )
+            self._message_delivery_state = state
+            self._message_delivery_lock = lock
+        else:
+            if state.intent_accepted_key is None:
+                mirrored_accepted_key = getattr(self, '_intent_accepted_key', None)
+                if mirrored_accepted_key is not None:
+                    state.intent_accepted_key = mirrored_accepted_key
+            if state.intent_accepted_at is None:
+                mirrored_accepted_at = getattr(self, '_intent_accepted_at', None)
+                if mirrored_accepted_at is not None:
+                    state.intent_accepted_at = mirrored_accepted_at
+            if state.delivery_key is None:
+                mirrored_key = getattr(self, '_message_delivery_key', None)
+                if mirrored_key is not None:
+                    state.delivery_key = mirrored_key
+        return state
+
+    def record_intent_accepted(
+        self,
+        key: tuple[str, str, str, str, str, str],
+        now_monotonic: float,
+    ) -> float:
+        state = self.message_delivery_state()
+        if state.intent_accepted_key == key:
+            accepted_at = state.intent_accepted_at
+            if accepted_at is None:
+                accepted_at = now_monotonic
+                state.intent_accepted_at = accepted_at
+        else:
+            accepted_at = now_monotonic
+            state.intent_accepted_key = key
+            state.intent_accepted_at = accepted_at
+        self._intent_accepted_key = key
+        self._intent_accepted_at = accepted_at
+        return accepted_at
+
+    def record_message_delivered(
+        self,
+        key: tuple[str, str, str, str, str, str],
+    ) -> None:
+        state = self.message_delivery_state()
+        state.delivery_key = key
+        self._message_delivery_key = key
+
+    def set_message_taking_pending(self, pending: bool) -> None:
+        self._message_taking_pending = pending
+
+    def set_message_delivery_guard(
+        self,
+        guard: Optional[Callable[..., Awaitable[bool]]],
+    ) -> None:
+        if guard is None:
+            self.__dict__.pop('_message_delivery_guard', None)
+        else:
+            self._message_delivery_guard = guard
+
+    def set_message_continuation_guard(
+        self,
+        guard: Optional[Callable[[], Awaitable[bool]]],
+    ) -> None:
+        if guard is None:
+            self.__dict__.pop('_message_continuation_guard', None)
+        else:
+            self._message_continuation_guard = guard
+
+    async def prepare_message_delivery(self, intent: dict) -> bool:
+        prepare_fn = getattr(self, '_prepare_message_delivery', None)
+        if prepare_fn is not None and callable(prepare_fn):
+            return await prepare_fn(intent)
+        return True
+
+    def finish_message_delivery_attempt(self) -> None:
+        finish_fn = getattr(self, '_finish_message_delivery_attempt', None)
+        if finish_fn is not None and callable(finish_fn):
+            finish_fn()
+
     async def trigger_take_message(self):
         """Tell the caller the owner is unavailable after 'Take a message'."""
         if getattr(self, '_unavailable_said', False):
@@ -763,13 +877,19 @@ class VoicePipeline:
 
     async def _prepare_message_delivery(self, intent: dict) -> bool:
         self._message_taking_pending = True
-        if self._unavailable_task and not self._unavailable_task.done() and self._unavailable_task is not asyncio.current_task():
-            pipeline_tasks(self).cancel(self._unavailable_task)
-        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            pipeline_tasks(self).cancel(self._summary_task)
+        unavailable_task = getattr(self, '_unavailable_task', None)
+        if unavailable_task and not unavailable_task.done() and unavailable_task is not asyncio.current_task():
+            pipeline_tasks(self).cancel(unavailable_task)
+        summary_task = getattr(self, '_summary_task', None)
+        if summary_task and not summary_task.done() and summary_task is not asyncio.current_task():
+            pipeline_tasks(self).cancel(summary_task)
 
         if not getattr(self, '_transition_lock_held', False):
-            await self._response_lock.acquire()
+            response_lock = getattr(self, '_response_lock', None)
+            if response_lock is None:
+                response_lock = asyncio.Lock()
+                self._response_lock = response_lock
+            await response_lock.acquire()
             self._transition_lock_held = True
 
         if not getattr(self, '_connected', False):
@@ -795,9 +915,9 @@ class VoicePipeline:
             await asyncio.sleep(delay)
 
         # Allow buffered caller utterance from during grace to settle briefly
-        if self._utterance_buffer and getattr(self, '_connected', False):
+        if getattr(self, '_utterance_buffer', None) and getattr(self, '_connected', False):
             wait_deadline = asyncio.get_event_loop().time() + 2.0
-            while self._utterance_buffer and asyncio.get_event_loop().time() < wait_deadline:
+            while getattr(self, '_utterance_buffer', None) and asyncio.get_event_loop().time() < wait_deadline:
                 if not getattr(self, '_connected', False):
                     return False
                 await asyncio.sleep(0.05)
@@ -1721,7 +1841,7 @@ class VoicePipeline:
 
     async def _check_commands(self):
         from app.services.owner_call_actions import consume_message_intent
-        if not self._call_sid:
+        if not self.call_sid():
             return
         try:
             await consume_message_intent(self, self._deliver_message_instruction)

@@ -92,8 +92,10 @@ _EXPECTED_LIVE_HASHES = {
     # authenticated fallback-stream confirmation. Bakeoff imports and
     # activation remain prohibited by the structural assertions below.
     # Re-pinned 2026-11-04 for the Business Pro check on Jobber and Google Calendar.
+    # Re-pinned 2026-11-11 for reviewed Slice 5C extraction of shared stream
+    # transport helpers to app/webhooks/stream_transport.py.
     Path("app/webhooks/media_stream.py"):
-        "c76fe998c6a58a580e54671e6e7d73f0c7cc3256431da4ff285966b31e6d60ef",
+        "16e6e1eaec8967c0c0ed5222ea0aeacdb84558d1d6e501b227ad53119a88ed4f",
     Path("app/experiments/voice_bakeoff_app.py"):
         "082d82e73deff2db331ba120513327f6911f41f1c9f0e9e7279e8f711df13127",
 }

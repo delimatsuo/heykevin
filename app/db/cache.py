@@ -11,7 +11,7 @@ import time
 from typing import Optional
 
 import firebase_admin
-from firebase_admin import credentials, db as rtdb
+from firebase_admin import db as rtdb
 
 from app.config import settings
 from app.services.state_machine import ACTIVE_STATES, ActiveCall, CallState, can_transition

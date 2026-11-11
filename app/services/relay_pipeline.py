@@ -19,7 +19,7 @@ import asyncio
 
 import json
 import time
-from typing import Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 import httpx
 
@@ -42,6 +42,9 @@ from app.services.message_taking import (
 )
 from app.services.receptionist_context import build_greeting_text as _shared_greeting_text
 from app.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from app.services.owner_call_actions import MessageDeliveryState
 
 logger = get_logger(__name__)
 
@@ -834,7 +837,7 @@ class RelayPipeline:
             return True
         if is_owner_availability_hold(getattr(self, "_streamed_text", "")) or is_owner_availability_hold_text(getattr(self, "_streamed_text", "")):
             return True
-        for entry in self._history:
+        for entry in getattr(self, "_history", ()):
             if entry.get("role") == "model":
                 for part in entry.get("parts", []):
                     txt = part.get("text", "")
@@ -1099,9 +1102,122 @@ class RelayPipeline:
         except asyncio.CancelledError:
             pass
 
+    def contractor_id(self) -> str:
+        cfg = getattr(self, "_contractor_config", None)
+        if isinstance(cfg, dict):
+            return cfg.get("contractor_id", "") or ""
+        return ""
+
+    def call_sid(self) -> str:
+        return getattr(self, "_call_sid", "") or ""
+
+    def command_ws_token(self) -> str:
+        return getattr(self, "_command_ws_token", "") or ""
+
+    def is_message_delivery_alive(self) -> bool:
+        return bool(getattr(self, "_active", False)) and not bool(getattr(self, "_ending", False))
+
+    def is_owner_timeout_alive(self) -> bool:
+        return self.is_message_delivery_alive()
+
+    def is_unavailable_said(self) -> bool:
+        return bool(getattr(self, "_unavailable_said", False))
+
+    def owner_availability_timeout_seconds(self) -> float:
+        return self.OWNER_AVAILABILITY_TIMEOUT_SECONDS
+
+    def message_delivery_state(self) -> "MessageDeliveryState":
+        from app.services.owner_call_actions import MessageDeliveryState
+
+        state = getattr(self, "_message_delivery_state", None)
+        if not isinstance(state, MessageDeliveryState):
+            existing_lock = getattr(self, "_message_delivery_lock", None)
+            lock = existing_lock if isinstance(existing_lock, asyncio.Lock) else asyncio.Lock()
+            state = MessageDeliveryState(
+                lock=lock,
+                intent_accepted_key=getattr(self, "_intent_accepted_key", None),
+                intent_accepted_at=getattr(self, "_intent_accepted_at", None),
+                delivery_key=getattr(self, "_message_delivery_key", None),
+            )
+            self._message_delivery_state = state
+            self._message_delivery_lock = lock
+        else:
+            if state.intent_accepted_key is None:
+                mirrored_accepted_key = getattr(self, "_intent_accepted_key", None)
+                if mirrored_accepted_key is not None:
+                    state.intent_accepted_key = mirrored_accepted_key
+            if state.intent_accepted_at is None:
+                mirrored_accepted_at = getattr(self, "_intent_accepted_at", None)
+                if mirrored_accepted_at is not None:
+                    state.intent_accepted_at = mirrored_accepted_at
+            if state.delivery_key is None:
+                mirrored_key = getattr(self, "_message_delivery_key", None)
+                if mirrored_key is not None:
+                    state.delivery_key = mirrored_key
+        return state
+
+    def record_intent_accepted(
+        self,
+        key: tuple[str, str, str, str, str, str],
+        now_monotonic: float,
+    ) -> float:
+        state = self.message_delivery_state()
+        if state.intent_accepted_key == key:
+            accepted_at = state.intent_accepted_at
+            if accepted_at is None:
+                accepted_at = now_monotonic
+                state.intent_accepted_at = accepted_at
+        else:
+            accepted_at = now_monotonic
+            state.intent_accepted_key = key
+            state.intent_accepted_at = accepted_at
+        self._intent_accepted_key = key
+        self._intent_accepted_at = accepted_at
+        return accepted_at
+
+    def record_message_delivered(
+        self,
+        key: tuple[str, str, str, str, str, str],
+    ) -> None:
+        state = self.message_delivery_state()
+        state.delivery_key = key
+        self._message_delivery_key = key
+
+    def set_message_taking_pending(self, pending: bool) -> None:
+        self._message_taking_pending = pending
+
+    def set_message_delivery_guard(
+        self,
+        guard: Optional[Callable[..., Awaitable[bool]]],
+    ) -> None:
+        if guard is None:
+            self.__dict__.pop("_message_delivery_guard", None)
+        else:
+            self._message_delivery_guard = guard
+
+    def set_message_continuation_guard(
+        self,
+        guard: Optional[Callable[[], Awaitable[bool]]],
+    ) -> None:
+        if guard is None:
+            self.__dict__.pop("_message_continuation_guard", None)
+        else:
+            self._message_continuation_guard = guard
+
+    async def prepare_message_delivery(self, intent: dict) -> bool:
+        prepare_fn = getattr(self, "_prepare_message_delivery", None)
+        if prepare_fn is not None and callable(prepare_fn):
+            return await prepare_fn(intent)
+        return True
+
+    def finish_message_delivery_attempt(self) -> None:
+        finish_fn = getattr(self, "_finish_message_delivery_attempt", None)
+        if finish_fn is not None and callable(finish_fn):
+            finish_fn()
+
     async def _check_commands(self):
         from app.services.owner_call_actions import consume_message_intent
-        if not self._call_sid:
+        if not self.call_sid():
             return
         try:
             await consume_message_intent(self, self._deliver_message_instruction)
@@ -1117,15 +1233,17 @@ class RelayPipeline:
     async def _prepare_message_delivery(self, intent: dict) -> bool:
         """Prepare for message delivery: wait for in-flight generation or cancel zero-token turn."""
         self._message_taking_pending = True
-        if self._hold_task and not self._hold_task.done() and self._hold_task is not asyncio.current_task():
-            pipeline_tasks(self).cancel(self._hold_task)
-        if self._summary_task and not self._summary_task.done() and self._summary_task is not asyncio.current_task():
-            pipeline_tasks(self).cancel(self._summary_task)
+        hold_task = getattr(self, "_hold_task", None)
+        if hold_task and not hold_task.done() and hold_task is not asyncio.current_task():
+            pipeline_tasks(self).cancel(hold_task)
+        summary_task = getattr(self, "_summary_task", None)
+        if summary_task and not summary_task.done() and summary_task is not asyncio.current_task():
+            pipeline_tasks(self).cancel(summary_task)
 
-        task = self._generate_task
+        task = getattr(self, "_generate_task", None)
         if task and not task.done():
             # If zero tokens have been streamed to Twilio, cancel generation before first send
-            if not self._streamed_text:
+            if not getattr(self, "_streamed_text", ""):
                 self._cancel_generation()
             else:
                 # Tokens already sent: await regular speech shielded for 15s
@@ -1143,7 +1261,7 @@ class RelayPipeline:
                 except Exception:
                     return False
 
-        if not self._active or self._ending:
+        if not getattr(self, "_active", False) or getattr(self, "_ending", False):
             return False
 
         action = str(intent.get("action") or "decline").strip().lower()
@@ -1259,14 +1377,15 @@ class RelayPipeline:
         """Synchronous cleanup hook called by common consume_message_intent in finally."""
         self._message_taking_pending = False
         guard = getattr(self, "_message_continuation_guard", None)
-        if not self._active or self._ending:
+        if not getattr(self, "_active", False) or getattr(self, "_ending", False):
             self._message_caller_response_pending = False
             return
 
+        gen_task = getattr(self, "_generate_task", None)
         if (
             getattr(self, "_message_caller_response_pending", False)
             and getattr(self, "_unavailable_said", False)
-            and (self._generate_task is None or self._generate_task.done())
+            and (gen_task is None or gen_task.done())
             and guard is not None
             and callable(guard)
         ):

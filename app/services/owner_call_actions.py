@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 import math
 import re
 import secrets
 import time
+from typing import Protocol, runtime_checkable
 
 from fastapi import HTTPException
 from app.config import settings
@@ -427,45 +430,220 @@ async def acknowledge_owner_action(call_sid, new_status=STATUS_TAKING_MESSAGE, *
     return bool(matches(result) and result.get('owner_action_status') == new_status)
 
 
-def _pipeline_cid(pipeline) -> str:
-    cfg = getattr(pipeline, '_contractor_config', None)
-    if isinstance(cfg, dict):
-        return cfg.get('contractor_id', '') or ''
-    return ''
+@dataclass
+class MessageDeliveryState:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    intent_accepted_key: tuple[str, str, str, str, str, str] | None = None
+    intent_accepted_at: float | None = None
+    delivery_key: tuple[str, str, str, str, str, str] | None = None
 
 
-def _pipeline_sid(pipeline) -> str:
-    return getattr(pipeline, '_call_sid', '') or ''
+@runtime_checkable
+class MessageDeliverySession(Protocol):
+    """Explicit contract for owner message-taking delivery and timeout arbitration."""
+
+    def contractor_id(self) -> str: ...
+    def call_sid(self) -> str: ...
+    def command_ws_token(self) -> str: ...
+    def is_message_delivery_alive(self) -> bool: ...
+    def is_owner_timeout_alive(self) -> bool: ...
+    def is_unavailable_said(self) -> bool: ...
+    def owner_availability_timeout_seconds(self) -> float: ...
+    def message_delivery_state(self) -> MessageDeliveryState: ...
+    def record_intent_accepted(
+        self,
+        key: tuple[str, str, str, str, str, str],
+        now_monotonic: float,
+    ) -> float: ...
+    def record_message_delivered(
+        self,
+        key: tuple[str, str, str, str, str, str],
+    ) -> None: ...
+    def set_message_taking_pending(self, pending: bool) -> None: ...
+    def set_message_delivery_guard(
+        self,
+        guard: Callable[..., Awaitable[bool]] | None,
+    ) -> None: ...
+    def set_message_continuation_guard(
+        self,
+        guard: Callable[[], Awaitable[bool]] | None,
+    ) -> None: ...
+    async def prepare_message_delivery(self, intent: dict) -> bool: ...
+    def finish_message_delivery_attempt(self) -> None: ...
 
 
-def _pipeline_ws(pipeline) -> str:
-    return getattr(pipeline, '_command_ws_token', '') or ''
+class _FallbackMessageDeliverySession:
+    """Compatibility adapter confining legacy attribute reflection to non-Protocol fakes."""
+
+    def __init__(self, target: object) -> None:
+        self._target = target
+
+    def contractor_id(self) -> str:
+        cfg = getattr(self._target, '_contractor_config', None)
+        if isinstance(cfg, dict):
+            return cfg.get('contractor_id', '') or ''
+        return ''
+
+    def call_sid(self) -> str:
+        return getattr(self._target, '_call_sid', '') or ''
+
+    def command_ws_token(self) -> str:
+        return getattr(self._target, '_command_ws_token', '') or ''
+
+    def is_message_delivery_alive(self) -> bool:
+        target = self._target
+        if hasattr(target, '_connected') and not target._connected:
+            return False
+        if hasattr(target, '_active') and not target._active:
+            return False
+        if getattr(target, '_ending', False):
+            return False
+        return True
+
+    def is_owner_timeout_alive(self) -> bool:
+        target = self._target
+        active = getattr(target, '_connected', getattr(target, '_active', False))
+        return bool(active) and not bool(getattr(target, '_ending', False))
+
+    def is_unavailable_said(self) -> bool:
+        return bool(getattr(self._target, '_unavailable_said', False))
+
+    def owner_availability_timeout_seconds(self) -> float:
+        return getattr(self._target, 'OWNER_AVAILABILITY_TIMEOUT_SECONDS', 30)
+
+    def message_delivery_state(self) -> MessageDeliveryState:
+        target = self._target
+        state = getattr(target, '_message_delivery_state', None)
+        if not isinstance(state, MessageDeliveryState):
+            existing_lock = getattr(target, '_message_delivery_lock', None)
+            lock = existing_lock if isinstance(existing_lock, asyncio.Lock) else asyncio.Lock()
+            state = MessageDeliveryState(
+                lock=lock,
+                intent_accepted_key=getattr(target, '_intent_accepted_key', None),
+                intent_accepted_at=getattr(target, '_intent_accepted_at', None),
+                delivery_key=getattr(target, '_message_delivery_key', None),
+            )
+            setattr(target, '_message_delivery_state', state)
+            setattr(target, '_message_delivery_lock', lock)
+        else:
+            if state.intent_accepted_key is None:
+                mirrored_accepted_key = getattr(target, '_intent_accepted_key', None)
+                if mirrored_accepted_key is not None:
+                    state.intent_accepted_key = mirrored_accepted_key
+            if state.intent_accepted_at is None:
+                mirrored_accepted_at = getattr(target, '_intent_accepted_at', None)
+                if mirrored_accepted_at is not None:
+                    state.intent_accepted_at = mirrored_accepted_at
+            if state.delivery_key is None:
+                mirrored_key = getattr(target, '_message_delivery_key', None)
+                if mirrored_key is not None:
+                    state.delivery_key = mirrored_key
+        return state
+
+    def record_intent_accepted(
+        self,
+        key: tuple[str, str, str, str, str, str],
+        now_monotonic: float,
+    ) -> float:
+        state = self.message_delivery_state()
+        if state.intent_accepted_key == key:
+            accepted_at = state.intent_accepted_at
+            if accepted_at is None:
+                accepted_at = now_monotonic
+                state.intent_accepted_at = accepted_at
+        else:
+            accepted_at = now_monotonic
+            state.intent_accepted_key = key
+            state.intent_accepted_at = accepted_at
+        setattr(self._target, '_intent_accepted_key', key)
+        setattr(self._target, '_intent_accepted_at', accepted_at)
+        return accepted_at
+
+    def record_message_delivered(
+        self,
+        key: tuple[str, str, str, str, str, str],
+    ) -> None:
+        state = self.message_delivery_state()
+        state.delivery_key = key
+        setattr(self._target, '_message_delivery_key', key)
+
+    def set_message_taking_pending(self, pending: bool) -> None:
+        setattr(self._target, '_message_taking_pending', pending)
+
+    def set_message_delivery_guard(
+        self,
+        guard: Callable[..., Awaitable[bool]] | None,
+    ) -> None:
+        if guard is None:
+            if hasattr(self._target, '_message_delivery_guard'):
+                try:
+                    delattr(self._target, '_message_delivery_guard')
+                except AttributeError:
+                    pass
+        else:
+            setattr(self._target, '_message_delivery_guard', guard)
+
+    def set_message_continuation_guard(
+        self,
+        guard: Callable[[], Awaitable[bool]] | None,
+    ) -> None:
+        if guard is None:
+            if hasattr(self._target, '_message_continuation_guard'):
+                try:
+                    delattr(self._target, '_message_continuation_guard')
+                except AttributeError:
+                    pass
+        else:
+            setattr(self._target, '_message_continuation_guard', guard)
+
+    async def prepare_message_delivery(self, intent: dict) -> bool:
+        prepare_fn = getattr(self._target, '_prepare_message_delivery', None)
+        if prepare_fn is not None and callable(prepare_fn):
+            return await prepare_fn(intent)
+        return True
+
+    def finish_message_delivery_attempt(self) -> None:
+        finish_fn = getattr(self._target, '_finish_message_delivery_attempt', None)
+        if finish_fn is not None and callable(finish_fn):
+            finish_fn()
 
 
-def _pipeline_alive(pipeline) -> bool:
-    if hasattr(pipeline, '_connected') and not pipeline._connected:
-        return False
-    if hasattr(pipeline, '_active') and not pipeline._active:
-        return False
-    if getattr(pipeline, '_ending', False):
-        return False
-    return True
+def _coerce_message_delivery_session(
+    pipeline: MessageDeliverySession | object,
+) -> MessageDeliverySession:
+    if isinstance(pipeline, MessageDeliverySession):
+        return pipeline
+    return _FallbackMessageDeliverySession(pipeline)
+
+
+def _session_matches(
+    session: MessageDeliverySession,
+    cid: str,
+    sid: str,
+    ws_token: str,
+) -> bool:
+    return (
+        session.is_message_delivery_alive()
+        and session.contractor_id() == cid
+        and session.call_sid() == sid
+        and session.command_ws_token() == ws_token
+    )
 
 
 async def consume_message_intent(pipeline, deliver):
-    lock = getattr(pipeline, '_message_delivery_lock', None)
-    if lock is None:
-        lock = pipeline._message_delivery_lock = asyncio.Lock()
-    async with lock:
-        return await _consume_message_intent(pipeline, deliver)
+    session = _coerce_message_delivery_session(pipeline)
+    state = session.message_delivery_state()
+    async with state.lock:
+        return await _consume_message_intent(session, deliver)
 
 
 async def _consume_message_intent(pipeline, deliver):
     """Fence delivery and acknowledgment to the same claim and authenticated stream."""
-    cid = _pipeline_cid(pipeline)
-    sid = _pipeline_sid(pipeline)
-    ws_token = _pipeline_ws(pipeline)
-    if not cid or not sid or not ws_token or not _pipeline_alive(pipeline):
+    session = _coerce_message_delivery_session(pipeline)
+    cid = session.contractor_id()
+    sid = session.call_sid()
+    ws_token = session.command_ws_token()
+    if not cid or not sid or not ws_token or not session.is_message_delivery_alive():
         return False
 
     continuation_guard = None
@@ -479,13 +657,11 @@ async def _consume_message_intent(pipeline, deliver):
             raise
         except Exception:
             pass
-        if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
-                or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+        if not _session_matches(session, cid, sid, ws_token):
             return False
 
     intent = await pending_message_intent(sid, cid)
-    if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
-            or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+    if not _session_matches(session, cid, sid, ws_token):
         return False
 
     if not intent:
@@ -493,8 +669,7 @@ async def _consume_message_intent(pipeline, deliver):
         # a lost cleanup response or a projection that arrived after acknowledgment.
         if legacy_snapshot:
             current = await read_record(sid)
-            if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
-                    or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+            if not _session_matches(session, cid, sid, ws_token):
                 return False
             expected = legacy_snapshot.intent
             completed = message_intent_from_record(current, cid, statuses=(STATUS_TAKING_MESSAGE,),
@@ -505,8 +680,7 @@ async def _consume_message_intent(pipeline, deliver):
         return False
 
     current = await read_record(sid)
-    if (not _pipeline_alive(pipeline) or _pipeline_cid(pipeline) != cid
-            or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token):
+    if not _session_matches(session, cid, sid, ws_token):
         return False
 
     if not message_intent_from_record(current, cid, operation_id=intent['operation_id'],
@@ -515,29 +689,18 @@ async def _consume_message_intent(pipeline, deliver):
     if legacy_snapshot and legacy_snapshot.intent != intent:
         return False
 
+    state = session.message_delivery_state()
     key = (cid, sid, ws_token, intent['operation_id'], intent['action'], intent['claim_nonce'])
-    if getattr(pipeline, '_intent_accepted_key', None) == key:
-        accepted_at = getattr(pipeline, '_intent_accepted_at', None)
-        if accepted_at is None:
-            accepted_at = time.monotonic()
-            pipeline._intent_accepted_at = accepted_at
-    else:
-        accepted_at = time.monotonic()
-        pipeline._intent_accepted_key = key
-        pipeline._intent_accepted_at = accepted_at
+    accepted_at = session.record_intent_accepted(key, time.monotonic())
 
     intent_copy = dict(intent)
     intent_copy['accepted_at'] = accepted_at
 
     async def _guard(*, allow_acknowledged: bool = False) -> bool:
-        if not _pipeline_alive(pipeline):
-            return False
-        if _pipeline_cid(pipeline) != cid or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token:
+        if not _session_matches(session, cid, sid, ws_token):
             return False
         rec = await read_record(sid)
-        if not _pipeline_alive(pipeline):
-            return False
-        if _pipeline_cid(pipeline) != cid or _pipeline_sid(pipeline) != sid or _pipeline_ws(pipeline) != ws_token:
+        if not _session_matches(session, cid, sid, ws_token):
             return False
         statuses = (STATUS_MESSAGE_REQUESTED, STATUS_TAKING_MESSAGE) if allow_acknowledged else (STATUS_MESSAGE_REQUESTED,)
         if not message_intent_from_record(rec, cid, statuses=statuses, operation_id=intent['operation_id'],
@@ -545,21 +708,19 @@ async def _consume_message_intent(pipeline, deliver):
             return False
         return True
 
-    pipeline._message_delivery_guard = _guard
+    session.set_message_delivery_guard(_guard)
     try:
-        if getattr(pipeline, '_message_delivery_key', None) != key:
-            pipeline._message_taking_pending = True
-            prepare_fn = getattr(pipeline, '_prepare_message_delivery', None)
-            if prepare_fn is not None and callable(prepare_fn):
-                prepared = await prepare_fn(intent_copy)
-                if prepared is False:
-                    return False
+        if state.delivery_key != key:
+            session.set_message_taking_pending(True)
+            prepared = await session.prepare_message_delivery(intent_copy)
+            if prepared is False:
+                return False
             if not await _guard():
                 return False
             delivered = await deliver()
             if delivered is False:
                 return False
-            pipeline._message_delivery_key = key
+            session.record_message_delivered(key)
 
         if not await _guard():
             return False
@@ -576,31 +737,16 @@ async def _consume_message_intent(pipeline, deliver):
             await _cleanup_legacy_snapshot(sid, legacy_snapshot)
         return acked
     finally:
-        pipeline._message_taking_pending = False
-        if hasattr(pipeline, '_message_delivery_guard'):
-            try:
-                del pipeline._message_delivery_guard
-            except AttributeError:
-                pass
-        pipeline._message_continuation_guard = continuation_guard
+        session.set_message_taking_pending(False)
+        session.set_message_delivery_guard(None)
+        session.set_message_continuation_guard(continuation_guard)
         try:
-            finish_fn = getattr(pipeline, '_finish_message_delivery_attempt', None)
-            if finish_fn is not None and callable(finish_fn):
-                try:
-                    finish_fn()
-                except Exception:
-                    pass
+            session.finish_message_delivery_attempt()
+        except Exception:
+            pass
         finally:
-            if hasattr(pipeline, '_message_continuation_guard'):
-                try:
-                    del pipeline._message_continuation_guard
-                except AttributeError:
-                    pass
-            if hasattr(pipeline, '_message_delivery_guard'):
-                try:
-                    del pipeline._message_delivery_guard
-                except AttributeError:
-                    pass
+            session.set_message_continuation_guard(None)
+            session.set_message_delivery_guard(None)
 
 
 async def _cleanup_legacy_snapshot(call_sid, snapshot):
@@ -687,18 +833,21 @@ async def ensure_owner_deadline(call_sid, contractor_id, *, urgent=False, deadli
 
 async def run_owner_timeout(pipeline, deliver):
     """Keep retrying unavailable storage without crashing or abandoning a live caller."""
-    sid, cid = getattr(pipeline, '_call_sid', ''), getattr(pipeline, '_contractor_config', {}).get('contractor_id', '')
-    if getattr(pipeline, '_unavailable_said', False):
+    session = _coerce_message_delivery_session(pipeline)
+    sid = session.call_sid()
+    cid = session.contractor_id()
+    if session.is_unavailable_said():
         return
+    timeout_seconds = session.owner_availability_timeout_seconds()
     # Public/local pipelines without an authenticated real call keep ordinary hold behavior.
     if not sid or not cid:
-        await asyncio.sleep(pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS)
-        if getattr(pipeline, '_connected', getattr(pipeline, '_active', False)):
+        await asyncio.sleep(timeout_seconds)
+        if session.is_owner_timeout_alive():
             await deliver()
         return
     deadline = None
-    first_deadline = time.time() + pipeline.OWNER_AVAILABILITY_TIMEOUT_SECONDS
-    while getattr(pipeline, '_connected', getattr(pipeline, '_active', False)) and not getattr(pipeline, '_ending', False):
+    first_deadline = time.time() + timeout_seconds
+    while session.is_owner_timeout_alive():
         try:
             if deadline is None:
                 deadline = await ensure_owner_deadline(sid, cid, deadline=first_deadline)
@@ -712,7 +861,7 @@ async def run_owner_timeout(pipeline, deliver):
             await asyncio.sleep(max(0, deadline - time.time()))
             if await arbitrate_owner_timeout(sid, cid):
                 await consume_message_intent(pipeline, deliver)
-                if getattr(pipeline, '_message_delivery_key', None):
+                if session.message_delivery_state().delivery_key is not None:
                     return
             else:
                 current = await read_record(sid)

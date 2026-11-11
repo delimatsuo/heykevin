@@ -848,3 +848,171 @@ async def test_screening_reason_guard_mutations_are_detected(backend, guard, cha
     namespace = vars(a).copy()
     exec(source.replace(guard, ''), namespace)
     assert await namespace['publish_screening_reason']('CA1', 'owner', 'ws1', 'Late summary')
+
+
+def test_all_concrete_pipelines_satisfy_message_delivery_session_on_bare_new():
+    from app.services.gemini_pipeline import GeminiPipeline
+    from app.services.public_demo_pipeline import PublicDemoGeminiPipeline
+    from app.services.relay_pipeline import RelayPipeline
+    from app.services.voice_pipeline import VoicePipeline
+
+    for cls in (VoicePipeline, GeminiPipeline, PublicDemoGeminiPipeline, RelayPipeline):
+        instance = cls.__new__(cls)
+        assert isinstance(instance, a.MessageDeliverySession)
+        assert a._coerce_message_delivery_session(instance) is instance
+        assert instance.contractor_id() == ''
+        assert instance.call_sid() == ''
+        assert instance.command_ws_token() == ''
+        assert instance.is_message_delivery_alive() is False
+        assert instance.is_owner_timeout_alive() is False
+        assert instance.is_unavailable_said() is False
+        assert instance.owner_availability_timeout_seconds() == 30
+
+        state = instance.message_delivery_state()
+        assert isinstance(state, a.MessageDeliveryState)
+        assert instance.message_delivery_state() is state
+
+        async def _dummy_guard(*_args, **_kwargs):
+            return True
+
+        instance.set_message_delivery_guard(_dummy_guard)
+        assert hasattr(instance, '_message_delivery_guard')
+        instance.set_message_delivery_guard(None)
+        assert not hasattr(instance, '_message_delivery_guard')
+
+        instance.set_message_continuation_guard(_dummy_guard)
+        assert hasattr(instance, '_message_continuation_guard')
+        instance.set_message_continuation_guard(None)
+        assert not hasattr(instance, '_message_continuation_guard')
+
+
+def test_per_engine_and_fallback_liveness_contracts():
+    from app.services.gemini_pipeline import GeminiPipeline
+    from app.services.relay_pipeline import RelayPipeline
+    from app.services.voice_pipeline import VoicePipeline
+
+    gemini = GeminiPipeline.__new__(GeminiPipeline)
+    gemini._connected = True
+    gemini._ws = None
+    assert gemini.is_message_delivery_alive() is True
+    assert gemini.is_owner_timeout_alive() is True
+    gemini._ending = True
+    assert gemini.is_message_delivery_alive() is False
+
+    voice = VoicePipeline.__new__(VoicePipeline)
+    voice._connected = True
+    assert voice.is_message_delivery_alive() is True
+    voice._ending = True
+    assert voice.is_message_delivery_alive() is False
+
+    relay = RelayPipeline.__new__(RelayPipeline)
+    relay._active = True
+    assert relay.is_message_delivery_alive() is True
+    assert relay.is_owner_timeout_alive() is True
+    relay._ending = True
+    assert relay.is_message_delivery_alive() is False
+
+    bare_fake = SimpleNamespace(_call_sid='CA1')
+    fallback = a._coerce_message_delivery_session(bare_fake)
+    assert isinstance(fallback, a._FallbackMessageDeliverySession)
+    assert fallback.is_message_delivery_alive() is True
+    assert fallback.is_owner_timeout_alive() is False
+    bare_fake._active = True
+    assert fallback.is_owner_timeout_alive() is True
+    bare_fake._ending = True
+    assert fallback.is_message_delivery_alive() is False
+    assert fallback.is_owner_timeout_alive() is False
+
+
+@pytest.mark.parametrize('engine', ['voice', 'gemini', 'relay'])
+@pytest.mark.asyncio
+async def test_protocol_accessors_are_live_uncached_and_private_hooks_delegate(engine):
+    from app.services.gemini_pipeline import GeminiPipeline
+    from app.services.relay_pipeline import RelayPipeline
+    from app.services.voice_pipeline import VoicePipeline
+
+    cls = {'voice': VoicePipeline, 'gemini': GeminiPipeline, 'relay': RelayPipeline}[engine]
+    instance = cls.__new__(cls)
+    instance._contractor_config = {'contractor_id': 'ctr_a'}
+    instance._call_sid = 'CA_a'
+    instance._command_ws_token = 'tok_a'
+    assert instance.contractor_id() == 'ctr_a'
+    assert instance.call_sid() == 'CA_a'
+    assert instance.command_ws_token() == 'tok_a'
+
+    # Mutate live identity attributes in place and verify zero caching
+    instance._contractor_config['contractor_id'] = 'ctr_b'
+    instance._call_sid = 'CA_b'
+    instance._command_ws_token = 'tok_b'
+    instance.OWNER_AVAILABILITY_TIMEOUT_SECONDS = 0.03
+    assert instance.contractor_id() == 'ctr_b'
+    assert instance.call_sid() == 'CA_b'
+    assert instance.command_ws_token() == 'tok_b'
+    assert instance.owner_availability_timeout_seconds() == 0.03
+
+    key = ('ctr_b', 'CA_b', 'tok_b', 'op1', 'decline', 'nonce1')
+    assert instance.record_intent_accepted(key, 10.5) == 10.5
+    assert instance.record_intent_accepted(key, 99.0) == 10.5
+    assert instance._intent_accepted_key == key
+    assert instance._intent_accepted_at == 10.5
+
+    instance.record_message_delivered(key)
+    assert instance.message_delivery_state().delivery_key == key
+    assert instance._message_delivery_key == key
+
+    finished = []
+    instance._prepare_message_delivery = AsyncMock(return_value=False)
+    instance._finish_message_delivery_attempt = lambda: finished.append(True)
+    assert await instance.prepare_message_delivery({'action': 'decline'}) is False
+    instance.finish_message_delivery_attempt()
+    assert finished == [True]
+
+
+def test_orchestration_paths_are_reflection_free():
+    import ast
+    import inspect
+
+    forbidden = {'getattr', 'setattr', 'hasattr', 'delattr'}
+    for fn in (a.consume_message_intent, a._consume_message_intent, a.run_owner_timeout):
+        tree = ast.parse(inspect.getsource(fn))
+        calls = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert calls.isdisjoint(forbidden), f'{fn.__name__} called reflection helpers: {calls & forbidden}'
+
+
+@pytest.mark.parametrize('engine', ['voice', 'gemini', 'relay'])
+@pytest.mark.asyncio
+async def test_consume_message_intent_aborts_on_post_await_session_token_rotation(backend, monkeypatch, engine):
+    from app.services.gemini_pipeline import GeminiPipeline
+    from app.services.relay_pipeline import RelayPipeline
+    from app.services.voice_pipeline import VoicePipeline
+
+    await act('decline', 'op1')
+    cls = {'voice': VoicePipeline, 'gemini': GeminiPipeline, 'relay': RelayPipeline}[engine]
+    pipeline = cls.__new__(cls)
+    pipeline._contractor_config = {'contractor_id': 'owner'}
+    pipeline._call_sid = 'CA1'
+    pipeline._command_ws_token = 'ws1'
+    if engine == 'relay':
+        pipeline._active = True
+    else:
+        pipeline._connected = True
+        pipeline._ws = None
+    pipeline._prepare_message_delivery = AsyncMock(return_value=True)
+
+    original_pending = a.pending_message_intent
+
+    async def rotating_pending(sid, cid):
+        intent = await original_pending(sid, cid)
+        pipeline._command_ws_token = 'rotated_ws_token'
+        return intent
+
+    monkeypatch.setattr(a, 'pending_message_intent', rotating_pending)
+    deliver = AsyncMock(return_value=True)
+    assert await a.consume_message_intent(pipeline, deliver) is False
+    pipeline._prepare_message_delivery.assert_not_awaited()
+    deliver.assert_not_awaited()
+    assert backend.record['owner_action_status'] == 'message_requested'

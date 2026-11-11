@@ -10,7 +10,7 @@ import base64
 from collections import deque
 import json
 import time
-from typing import Callable, Awaitable, Optional
+from typing import TYPE_CHECKING, Callable, Awaitable, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -42,6 +42,9 @@ from app.services.receptionist_context import (
 )
 from app.utils.audio import mulaw_to_pcm16k, pcm24k_to_mulaw
 from app.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from app.services.owner_call_actions import MessageDeliveryState
 
 logger = get_logger(__name__)
 
@@ -1999,9 +2002,122 @@ class GeminiPipeline:
         except asyncio.CancelledError:
             pass
 
+    def contractor_id(self) -> str:
+        cfg = getattr(self, "_contractor_config", None)
+        if isinstance(cfg, dict):
+            return cfg.get("contractor_id", "") or ""
+        return ""
+
+    def call_sid(self) -> str:
+        return getattr(self, "_call_sid", "") or ""
+
+    def command_ws_token(self) -> str:
+        return getattr(self, "_command_ws_token", "") or ""
+
+    def is_message_delivery_alive(self) -> bool:
+        return bool(getattr(self, "_connected", False)) and not bool(getattr(self, "_ending", False))
+
+    def is_owner_timeout_alive(self) -> bool:
+        return self.is_message_delivery_alive()
+
+    def is_unavailable_said(self) -> bool:
+        return bool(getattr(self, "_unavailable_said", False))
+
+    def owner_availability_timeout_seconds(self) -> float:
+        return self.OWNER_AVAILABILITY_TIMEOUT_SECONDS
+
+    def message_delivery_state(self) -> "MessageDeliveryState":
+        from app.services.owner_call_actions import MessageDeliveryState
+
+        state = getattr(self, "_message_delivery_state", None)
+        if not isinstance(state, MessageDeliveryState):
+            existing_lock = getattr(self, "_message_delivery_lock", None)
+            lock = existing_lock if isinstance(existing_lock, asyncio.Lock) else asyncio.Lock()
+            state = MessageDeliveryState(
+                lock=lock,
+                intent_accepted_key=getattr(self, "_intent_accepted_key", None),
+                intent_accepted_at=getattr(self, "_intent_accepted_at", None),
+                delivery_key=getattr(self, "_message_delivery_key", None),
+            )
+            self._message_delivery_state = state
+            self._message_delivery_lock = lock
+        else:
+            if state.intent_accepted_key is None:
+                mirrored_accepted_key = getattr(self, "_intent_accepted_key", None)
+                if mirrored_accepted_key is not None:
+                    state.intent_accepted_key = mirrored_accepted_key
+            if state.intent_accepted_at is None:
+                mirrored_accepted_at = getattr(self, "_intent_accepted_at", None)
+                if mirrored_accepted_at is not None:
+                    state.intent_accepted_at = mirrored_accepted_at
+            if state.delivery_key is None:
+                mirrored_key = getattr(self, "_message_delivery_key", None)
+                if mirrored_key is not None:
+                    state.delivery_key = mirrored_key
+        return state
+
+    def record_intent_accepted(
+        self,
+        key: tuple[str, str, str, str, str, str],
+        now_monotonic: float,
+    ) -> float:
+        state = self.message_delivery_state()
+        if state.intent_accepted_key == key:
+            accepted_at = state.intent_accepted_at
+            if accepted_at is None:
+                accepted_at = now_monotonic
+                state.intent_accepted_at = accepted_at
+        else:
+            accepted_at = now_monotonic
+            state.intent_accepted_key = key
+            state.intent_accepted_at = accepted_at
+        self._intent_accepted_key = key
+        self._intent_accepted_at = accepted_at
+        return accepted_at
+
+    def record_message_delivered(
+        self,
+        key: tuple[str, str, str, str, str, str],
+    ) -> None:
+        state = self.message_delivery_state()
+        state.delivery_key = key
+        self._message_delivery_key = key
+
+    def set_message_taking_pending(self, pending: bool) -> None:
+        self._message_taking_pending = pending
+
+    def set_message_delivery_guard(
+        self,
+        guard: Optional[Callable[..., Awaitable[bool]]],
+    ) -> None:
+        if guard is None:
+            self.__dict__.pop("_message_delivery_guard", None)
+        else:
+            self._message_delivery_guard = guard
+
+    def set_message_continuation_guard(
+        self,
+        guard: Optional[Callable[[], Awaitable[bool]]],
+    ) -> None:
+        if guard is None:
+            self.__dict__.pop("_message_continuation_guard", None)
+        else:
+            self._message_continuation_guard = guard
+
+    async def prepare_message_delivery(self, intent: dict) -> bool:
+        prepare_fn = getattr(self, "_prepare_message_delivery", None)
+        if prepare_fn is not None and callable(prepare_fn):
+            return await prepare_fn(intent)
+        return True
+
+    def finish_message_delivery_attempt(self) -> None:
+        finish_fn = getattr(self, "_finish_message_delivery_attempt", None)
+        if finish_fn is not None and callable(finish_fn):
+            finish_fn()
+
     async def _check_commands(self):
         from app.services.owner_call_actions import consume_message_intent
-        if not self._call_sid:
+        if not self.call_sid():
             return
         try:
             await consume_message_intent(self, self._deliver_message_instruction)
@@ -2082,18 +2198,20 @@ class GeminiPipeline:
         action = str(intent.get("action") or "decline").strip().lower()
 
         if action == "decline":
+            unavailable_task = getattr(self, "_unavailable_task", None)
             if (
-                self._unavailable_task
-                and not self._unavailable_task.done()
-                and self._unavailable_task is not asyncio.current_task()
+                unavailable_task
+                and not unavailable_task.done()
+                and unavailable_task is not asyncio.current_task()
             ):
-                pipeline_tasks(self).cancel(self._unavailable_task)
+                pipeline_tasks(self).cancel(unavailable_task)
+            summary_task = getattr(self, "_summary_task", None)
             if (
-                self._summary_task
-                and not self._summary_task.done()
-                and self._summary_task is not asyncio.current_task()
+                summary_task
+                and not summary_task.done()
+                and summary_task is not asyncio.current_task()
             ):
-                pipeline_tasks(self).cancel(self._summary_task)
+                pipeline_tasks(self).cancel(summary_task)
 
         if not getattr(self, "_connected", False) or getattr(self, "_ws", None) is None:
             return False

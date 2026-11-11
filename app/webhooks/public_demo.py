@@ -38,7 +38,7 @@ from app.services.public_demo_pipeline import PublicDemoGeminiPipeline
 from app.utils.error_handlers import twiml_response
 from app.utils.logging import get_logger
 from app.utils.phone import normalize_phone
-from app.webhooks.media_stream import (
+from app.webhooks.stream_transport import (
     _cancel_task,
     _log_safe_exception,
     _send_twilio_audio,

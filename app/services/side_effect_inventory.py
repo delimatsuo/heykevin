@@ -104,6 +104,13 @@ SIDE_EFFECT_SURFACES: tuple[SideEffectSurface, ...] = (
         risk="sensitive_read",
     ),
     SideEffectSurface(
+        path="app/webhooks/stream_transport.py",
+        current_behavior="Shared Twilio WebSocket media/mark/clear wire helpers, bounded media ingress queue, Twilio REST call completion (_complete_twilio_call), and coalesced RTDB live-transcript writer (LiveTranscriptPusher).",
+        required_gate="Transcript writes must verify active call ownership and ws_token authority; transport logs must emit no raw audio, speech, or caller identifiers; hangup fallback closes the WebSocket cleanly.",
+        required_evidence="Transport unit tests, transcript lifecycle authority tests, AST logger privacy checks, and call-completion fallback tests.",
+        risk="twilio_mutation",
+    ),
+    SideEffectSurface(
         path="app/db/jobs.py",
         current_behavior="Stores job cards and can list/update jobs.",
         required_gate="Job records are call-derived sensitive data with contractor ownership, retention, deletion, export, and encryption rules.",

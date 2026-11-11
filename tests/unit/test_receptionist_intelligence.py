@@ -2462,7 +2462,7 @@ async def test_gemini_waiting_inbound_frame_is_not_sent_after_disconnect():
 
 def test_live_voice_logger_calls_do_not_embed_sensitive_runtime_values():
     from app.services import gemini_pipeline
-    from app.webhooks import media_stream
+    from app.webhooks import media_stream, stream_transport
 
     forbidden_names = {
         "api_err",
@@ -2476,7 +2476,7 @@ def test_live_voice_logger_calls_do_not_embed_sensitive_runtime_values():
         "ws_token",
     }
 
-    for module in (gemini_pipeline, media_stream):
+    for module in (gemini_pipeline, media_stream, stream_transport):
         tree = ast.parse(inspect.getsource(module))
         for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
             function = call.func

@@ -1306,7 +1306,15 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
 
     // MARK: - Bulk Contact Sync
 
-    func bulkSyncContacts(contractorId: String, contacts: [(name: String, phone: String)], contactsHash: String) async -> ContactSyncUploadResult {
+    func bulkSyncContacts(
+        contractorId: String,
+        contacts: [(name: String, phone: String)],
+        contactsHash: String,
+        bearerToken: String? = nil
+    ) async -> ContactSyncUploadResult {
+        if let token = bearerToken {
+            guard !token.isEmpty else { return .failed }
+        }
         do {
             let url = URL(string: "\(baseURL)/api/contacts/bulk-sync")!
             var request = URLRequest(url: url)
@@ -1320,7 +1328,11 @@ final class APIClient: @unchecked Sendable, JobberAPIClientProtocol {
                 "contacts_hash": contactsHash,
             ]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            authorize(&request)
+            if let token = bearerToken {
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            } else {
+                authorize(&request)
+            }
 
             let (data, response) = try await (customSession ?? contactSyncSession).data(for: request)
             return ContactSyncResponseParser.parse(data: data, response: response)

@@ -183,6 +183,96 @@ final class ContactSyncTests: XCTestCase {
         XCTAssertFalse(SyncResult.success(synced: 412, removed: 3).isFailure)
         XCTAssertFalse(SyncResult.rateLimited.isFailure)
     }
+
+    func testBulkSyncContacts_usesExplicitBearerTokenAndRejectsEmptyExplicitBearer() async throws {
+        let suite = "ContactSyncTests.ExplicitBearer.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let keychain = RecoveryTestKeychain()
+        let persistence = AccountPersistence(
+            defaults: defaults,
+            keychain: keychain.client,
+            epoch: CallSessionEpoch(notificationCenter: NotificationCenter())
+        )
+        persistence.contractorToken = "live-persistence-token"
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer {
+            session.invalidateAndCancel()
+            MockURLProtocol.requestHandler = nil
+            defaults.removePersistentDomain(forName: suite)
+        }
+
+        let client = APIClient(session: session, persistence: persistence)
+        var capturedHeaders: [String?] = []
+        var capturedBodies: [[String: Any]] = []
+
+        MockURLProtocol.requestHandler = { request in
+            capturedHeaders.append(request.value(forHTTPHeaderField: "Authorization"))
+            let bodyData = try Self.readRequestBody(from: request)
+            if let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                capturedBodies.append(json)
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(#"{"status": "ok", "synced": 1, "removed": 0}"#.utf8))
+        }
+
+        let contacts = [(name: "Alice", phone: "+12025550101")]
+        let hash = ContactSyncManager.listHash(contacts)
+
+        // Explicit non-empty bearerToken overrides live contractorToken / AppState.shared token.
+        let explicitOutcome = await client.bulkSyncContacts(
+            contractorId: "c-captured",
+            contacts: contacts,
+            contactsHash: hash,
+            bearerToken: "captured-token"
+        )
+        XCTAssertEqual(explicitOutcome, .synced(synced: 1, removed: 0))
+        XCTAssertEqual(capturedHeaders, ["Bearer captured-token"])
+        XCTAssertEqual(capturedBodies.first?["contractor_id"] as? String, "c-captured")
+
+        // Explicit empty bearerToken fails closed with zero HTTP requests.
+        let emptyExplicitOutcome = await client.bulkSyncContacts(
+            contractorId: "c-captured",
+            contacts: contacts,
+            contactsHash: hash,
+            bearerToken: ""
+        )
+        XCTAssertEqual(emptyExplicitOutcome, .failed)
+        XCTAssertEqual(capturedHeaders.count, 1, "Empty explicit bearerToken must not send an HTTP request")
+
+        // Default nil bearerToken preserves legacy authorize(&request) fallback.
+        let legacyOutcome = await client.bulkSyncContacts(
+            contractorId: "c-captured",
+            contacts: contacts,
+            contactsHash: hash
+        )
+        XCTAssertEqual(legacyOutcome, .synced(synced: 1, removed: 0))
+        XCTAssertEqual(capturedHeaders, ["Bearer captured-token", "Bearer live-persistence-token"])
+    }
+
+    private static func readRequestBody(from request: URLRequest) throws -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+        let stream = try XCTUnwrap(request.httpBodyStream)
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 }
 
 final class ContactsAccessTests: XCTestCase {

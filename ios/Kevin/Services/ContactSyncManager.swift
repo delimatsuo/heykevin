@@ -49,9 +49,12 @@ actor ContactSyncManager {
     private var isSyncing = false
 
     /// Request full contacts access and sync all contacts to backend.
-    func syncContacts(contractorId: String, force: Bool = false) async -> SyncResult {
+    func syncContacts(contractorId: String, bearerToken: String? = nil, force: Bool = false) async -> SyncResult {
         guard !contractorId.isEmpty else {
             return .error("Missing contractor ID")
+        }
+        guard !Task.isCancelled else {
+            return .error("Cancelled")
         }
 
         // Prevent concurrent syncs
@@ -85,16 +88,27 @@ actor ContactSyncManager {
             break
         case .notAsked:
             do {
-                guard try await store.requestAccess(for: .contacts) else {
+                let granted = try await store.requestAccess(for: .contacts)
+                guard !Task.isCancelled else {
+                    return .error("Cancelled")
+                }
+                guard granted else {
                     return .permissionDenied
                 }
             } catch {
+                guard !Task.isCancelled else {
+                    return .error("Cancelled")
+                }
                 debugLog("Contact access request failed: \(error)")
                 return .error("Contact access request failed: \(error.localizedDescription)")
             }
         case .denied:
             debugLog("Contact access not authorized: \(status.rawValue)")
             return .permissionDenied
+        }
+
+        guard !Task.isCancelled else {
+            return .error("Cancelled")
         }
 
         isSyncing = true
@@ -109,6 +123,10 @@ actor ContactSyncManager {
             let request = CNContactFetchRequest(keysToFetch: keys)
             request.sortOrder = .givenName
             try store.enumerateContacts(with: request) { contact, stop in
+                if Task.isCancelled {
+                    stop.pointee = true
+                    return
+                }
                 let name = "\(contact.givenName) \(contact.familyName)".trimmingCharacters(in: .whitespaces)
                 for phone in contact.phoneNumbers {
                     let number = phone.value.stringValue
@@ -120,13 +138,28 @@ actor ContactSyncManager {
                     stop.pointee = true
                 }
             }
+            guard !Task.isCancelled else {
+                return .error("Cancelled")
+            }
         } catch {
+            guard !Task.isCancelled else {
+                return .error("Cancelled")
+            }
             debugLog("Contact fetch failed: \(error)")
             return .error("Contact fetch failed: \(error.localizedDescription)")
         }
 
+        guard !Task.isCancelled else {
+            return .error("Cancelled")
+        }
+
         let (result, completed) = await Self.upload(contacts, force: force, defaults: .standard) { list, hash in
-            await APIClient.shared.bulkSyncContacts(contractorId: contractorId, contacts: list, contactsHash: hash)
+            await APIClient.shared.bulkSyncContacts(
+                contractorId: contractorId,
+                contacts: list,
+                contactsHash: hash,
+                bearerToken: bearerToken
+            )
         }
         if completed {
             lastSyncTime = Date()

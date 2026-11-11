@@ -163,8 +163,12 @@ final class AccountRestoreCoordinator {
         // Clear unowned restored consent before the first credential write can
         // make a staged contractor ID look like a previously trusted identity.
         let keepConsent = signupContinuation?.explicitContactConsent
-            ?? (!retainedContractorId.isEmpty && retainedContractorId == id && state.contactsUploadConsent)
-        state.contactsUploadConsent = keepConsent
+            ?? (!retainedContractorId.isEmpty
+                && retainedContractorId == id
+                && state.hasOwnedContactsUploadConsent(for: id))
+        if !keepConsent || !state.hasOwnedContactsUploadConsent(for: id) {
+            state.revokeContactsUploadConsent()
+        }
         let checkpoint = AccountRecoveryCheckpoint(contractorId: id, appleUserId: appleUserId,
             allowsUnfinishedSetup: !requiresExistingNumber && !state.isOnboarded && number.isEmpty)
         guard saveCredentials(values, checkpoint) else {
@@ -199,12 +203,17 @@ final class AccountRestoreCoordinator {
             state.beginAccountRecovery(checkpoint: checkpoint)
             return .failed(String(localized: "Could not save your sign-in securely. Please unlock your iPhone and try again."))
         }
+        if keepConsent {
+            state.grantContactsUploadConsent(for: id)
+        } else {
+            state.revokeContactsUploadConsent()
+        }
         if number.isEmpty { return .success(contractorId: id, needsProvisioning: true) }
         let restoredAuth = state.currentAuthContext()
         await reconcileNotifications()
         guard activeAttemptRevision == attemptRevision, state.currentAuthContext() == restoredAuth,
               state.sessionState == .ready, !Task.isCancelled else { return .superseded }
-        if keepConsent {
+        if keepConsent, state.hasOwnedContactsUploadConsent(for: id) {
             await syncContacts(id)
             guard activeAttemptRevision == attemptRevision, state.currentAuthContext() == restoredAuth,
                   state.sessionState == .ready, !Task.isCancelled else { return .superseded }

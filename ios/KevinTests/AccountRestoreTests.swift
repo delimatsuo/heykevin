@@ -306,4 +306,87 @@ final class AccountRestoreTests: XCTestCase {
         let outcome = await task.value
         XCTAssertEqual(outcome, .superseded); XCTAssertTrue(h.store.writes.isEmpty)
     }
+
+    func testUnownedOrMismatchedConsentIsRejectedEvenWhenRetainedContractorIdMatches() async {
+        let unowned = Harness()
+        unowned.state.contractorId = ""
+        unowned.state.contactsUploadConsent = true
+        XCTAssertNil(unowned.state.contactsUploadConsentOwner)
+        let unownedOutcome = await unowned.coordinator.restoreAccount(
+            appleUserId: "apple",
+            appleIdentityToken: "fresh",
+            isRecoveryMode: true,
+            retainedContractorId: "owner",
+            retainedAppleUserId: unowned.state.appleUserId,
+            retainedKevinNumber: unowned.state.kevinNumber,
+            attemptRevision: unowned.coordinator.beginAttempt()!
+        )
+        XCTAssertEqual(unownedOutcome, .success(contractorId: "owner", needsProvisioning: false))
+        XCTAssertEqual(unowned.syncs, 0)
+        XCTAssertFalse(unowned.state.contactsUploadConsent)
+        XCTAssertNil(unowned.state.contactsUploadConsentOwner)
+        XCTAssertFalse(unowned.state.hasOwnedContactsUploadConsent(for: "owner"))
+
+        let mismatched = Harness()
+        mismatched.state.grantContactsUploadConsent(for: "other-owner")
+        XCTAssertTrue(mismatched.state.contactsUploadConsent)
+        XCTAssertEqual(mismatched.state.contactsUploadConsentOwner, "other-owner")
+        let mismatchedOutcome = await mismatched.restore()
+        XCTAssertEqual(mismatchedOutcome, .success(contractorId: "owner", needsProvisioning: false))
+        XCTAssertEqual(mismatched.syncs, 0)
+        XCTAssertFalse(mismatched.state.contactsUploadConsent)
+        XCTAssertNil(mismatched.state.contactsUploadConsentOwner)
+        XCTAssertFalse(mismatched.state.hasOwnedContactsUploadConsent(for: "owner"))
+    }
+
+    func testSignupContinuationWithUnprovisionedAccountBindsOwnedConsentOnlyAfterFinishRecoverySucceeds() async {
+        let h = Harness()
+        h.state.isOnboarded = false
+        h.state.contractorId = ""
+        h.state.kevinNumber = ""
+        h.profile?["twilio_number"] = ""
+        let continuation = SignupContinuation(contractorId: "owner", appleUserId: "apple", explicitContactConsent: true)
+        let response: [String: Any] = ["status": "ok", "contractor_id": "owner", "api_token": "initial", "existing": true]
+        let outcome = await h.coordinator.restoreBootstrapResponse(
+            response,
+            appleUserId: "apple",
+            appleIdentityToken: "fresh",
+            signupContinuation: continuation,
+            attemptRevision: h.coordinator.beginAttempt()!
+        )
+        XCTAssertEqual(outcome, .success(contractorId: "owner", needsProvisioning: true))
+        XCTAssertTrue(h.state.contactsUploadConsent)
+        XCTAssertEqual(h.state.contactsUploadConsentOwner, "owner")
+        XCTAssertTrue(h.state.hasOwnedContactsUploadConsent(for: "owner"))
+        XCTAssertEqual(h.syncs, 0)
+
+        let hFail = Harness()
+        hFail.state.isOnboarded = false
+        hFail.state.contractorId = ""
+        hFail.state.kevinNumber = ""
+        hFail.profile?["twilio_number"] = ""
+        let failingCoordinator = AccountRestoreCoordinator(
+            state: hFail.state,
+            lookupHandler: { _, _ in .found(contractorId: "owner", apiToken: "new-token") },
+            profileFetcher: { _, _ in hFail.profile },
+            credentialSaver: { values, checkpoint in
+                let saved = hFail.state.persistRecoveredCredentials(values, checkpoint: checkpoint)
+                hFail.store.failingKey = "accountRecoveryCommit"
+                return saved
+            },
+            notificationReconciler: {},
+            contactSyncHandler: { _ in XCTFail("Failed recovery finish must not sync") }
+        )
+        let failOutcome = await failingCoordinator.restoreBootstrapResponse(
+            response,
+            appleUserId: "apple",
+            appleIdentityToken: "fresh",
+            signupContinuation: continuation,
+            attemptRevision: failingCoordinator.beginAttempt()!
+        )
+        guard case .failed = failOutcome else { return XCTFail("Failed recovery finish succeeded: \(failOutcome)") }
+        XCTAssertFalse(hFail.state.contactsUploadConsent)
+        XCTAssertNil(hFail.state.contactsUploadConsentOwner)
+        XCTAssertFalse(hFail.state.hasOwnedContactsUploadConsent(for: "owner"))
+    }
 }

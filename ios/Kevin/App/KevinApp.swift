@@ -209,14 +209,14 @@ struct KevinApp: App {
                 // ContactSyncManager also persists a longer battery guard across launches.
                 let syncAuth = appState.currentAuthContext()
                 if appState.isOnboarded, appState.sessionState == .ready, syncAuth.isValid,
-                   appState.contactsUploadConsent,
+                   appState.hasOwnedContactsUploadConsent(for: syncAuth.contractorId),
                    Date().timeIntervalSince(lastSyncTime) > 3600 {
                     lastSyncTime = Date()
                     Task {
                         // Delay 2s to let other startup tasks finish first
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                         guard appState.currentAuthContext() == syncAuth, appState.sessionState == .ready,
-                              appState.contactsUploadConsent else { return }
+                              appState.hasOwnedContactsUploadConsent(for: syncAuth.contractorId) else { return }
                         _ = await ContactSyncManager.shared.syncContacts(contractorId: syncAuth.contractorId)
                     }
                 }

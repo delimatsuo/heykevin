@@ -1000,11 +1000,14 @@ struct SettingsHost<Root: View>: View {
                 }
                 #endif
                 Task {
-                    appState.contactsUploadConsent = true
+                    let auth = appState.currentAuthContext()
+                    guard appState.isOnboarded, appState.sessionState == .ready, auth.isValid else { return }
+                    appState.grantContactsUploadConsent(for: auth.contractorId)
                     let result = await ContactSyncManager.shared.syncContacts(
-                        contractorId: appState.contractorId,
+                        contractorId: auth.contractorId,
                         force: true
                     )
+                    guard appState.currentAuthContext() == auth else { return }
                     syncFailed = result.isFailure
                     switch result {
                     case .success(let synced, _):

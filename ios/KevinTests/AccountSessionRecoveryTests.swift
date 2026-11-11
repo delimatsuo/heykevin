@@ -178,4 +178,57 @@ final class AccountSessionRecoveryTests: XCTestCase {
         state.refreshSecureStorageForActiveUse()
         XCTAssertEqual(state.sessionState, .notOnboarded)
     }
+
+    func testReadMigratingLegacyScrubsDuplicatesPreservesSentinelsAndVerifiedDeleteChecksReadback() {
+        let name = "Kevin.RecoveryTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+
+        let store = RecoveryTestKeychain()
+        store.values["contractorApiToken"] = "secure"
+        defaults.set("duplicate-legacy", forKey: "contractorApiToken")
+        XCTAssertEqual(store.client.readMigratingLegacy("contractorApiToken", defaults: defaults), .value("secure"))
+        XCTAssertNil(defaults.object(forKey: "contractorApiToken"))
+
+        store.values["contractorId"] = "secure-id"
+        defaults.set("", forKey: "contractorId")
+        XCTAssertEqual(store.client.readMigratingLegacy("contractorId", defaults: defaults), .value("secure-id"))
+        XCTAssertEqual(defaults.object(forKey: "contractorId") as? String, "")
+
+        defaults.set("preserved-legacy", forKey: "contractorApiToken")
+        store.readError = errSecInteractionNotAllowed
+        XCTAssertEqual(
+            store.client.readMigratingLegacy("contractorApiToken", defaults: defaults),
+            .error(errSecInteractionNotAllowed)
+        )
+        XCTAssertEqual(defaults.string(forKey: "contractorApiToken"), "preserved-legacy")
+        store.readError = nil
+
+        XCTAssertTrue(store.client.delete("contractorId"))
+        XCTAssertNil(store.values["contractorId"])
+        XCTAssertTrue(store.client.delete("contractorId"))
+
+        var ignoredValues = ["token": "retained"]
+        let ignoredClient = KeychainManager(
+            reader: { key in ignoredValues[key].map(KeychainReadResult.value) ?? .missing },
+            writer: { key, value in ignoredValues[key] = value; return true },
+            remover: { _ in }
+        )
+        XCTAssertFalse(ignoredClient.delete("token"))
+
+        var unreadableAfterDelete = ["token": "removed"]
+        var errorAfterRemove = false
+        let errorReadbackClient = KeychainManager(
+            reader: { key in
+                if errorAfterRemove { return .error(errSecInteractionNotAllowed) }
+                return unreadableAfterDelete[key].map(KeychainReadResult.value) ?? .missing
+            },
+            writer: { key, value in unreadableAfterDelete[key] = value; return true },
+            remover: { key in
+                unreadableAfterDelete.removeValue(forKey: key)
+                errorAfterRemove = true
+            }
+        )
+        XCTAssertFalse(errorReadbackClient.delete("token"))
+    }
 }

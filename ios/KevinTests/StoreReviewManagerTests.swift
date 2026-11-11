@@ -211,6 +211,64 @@ final class StoreReviewManagerTests: XCTestCase {
         XCTAssertEqual(promptCount, 1)
     }
 
+    func testDefaultIsCallActiveProvider_suppressesReviewWhenAppStateHasActiveCall() {
+        let previousAuth = AppState.shared.currentAuthContext()
+        let previousSessionState = AppState.shared.sessionState
+        let previousNeedsReauth = AppState.shared.needsReauth
+        let previousOnCall = CallManager.shared.isOnCall
+        defer {
+            AppState.shared.clearActiveCall()
+            CallManager.shared.isOnCall = previousOnCall
+            AppState.shared.contractorId = previousAuth.contractorId
+            _ = AppState.shared.finishAccountRecovery(bearerToken: previousAuth.bearerToken)
+            AppState.shared.sessionState = previousSessionState
+            AppState.shared.needsReauth = previousNeedsReauth
+        }
+
+        AppState.shared.clearActiveCall()
+        CallManager.shared.isOnCall = false
+        AppState.shared.contractorId = "cnt_review_guard"
+        XCTAssertTrue(AppState.shared.finishAccountRecovery(bearerToken: "tok_review_guard"))
+
+        var promptCount = 0
+        let manager = StoreReviewManager(
+            userDefaults: testDefaults,
+            currentDateProvider: { Date(timeIntervalSince1970: 1_000_000) },
+            currentVersionProvider: { "1.2.11" },
+            reviewRequester: { promptCount += 1 }
+        )
+
+        manager.recordAppointmentConfirmed()
+        XCTAssertTrue(manager.isMilestoneMet)
+
+        // 1. Owned active screening call on AppState.shared blocks review even when CallManager is idle.
+        AppState.shared.setActiveCall(
+            callSid: "CA_review_guard",
+            callerPhone: "+14155550101",
+            callerName: "Caller",
+            authContext: AppState.shared.currentAuthContext()
+        )
+        XCTAssertTrue(AppState.shared.hasActiveCall)
+        XCTAssertFalse(CallManager.shared.isOnCall)
+        XCTAssertFalse(manager.isEligibleForReview)
+        XCTAssertFalse(manager.requestReviewIfEligible())
+        XCTAssertEqual(promptCount, 0)
+
+        // 2. Active VoIP call on CallManager.shared blocks review even after screening state clears.
+        AppState.shared.clearActiveCall()
+        XCTAssertFalse(AppState.shared.hasActiveCall)
+        CallManager.shared.isOnCall = true
+        XCTAssertFalse(manager.isEligibleForReview)
+        XCTAssertFalse(manager.requestReviewIfEligible())
+        XCTAssertEqual(promptCount, 0)
+
+        // 3. Once both active screening and VoIP call state clear, review prompt succeeds.
+        CallManager.shared.isOnCall = false
+        XCTAssertTrue(manager.isEligibleForReview)
+        XCTAssertTrue(manager.requestReviewIfEligible())
+        XCTAssertEqual(promptCount, 1)
+    }
+
     // MARK: - Feedback Support Tests
 
     func testFeedbackBuildMailtoURL() {

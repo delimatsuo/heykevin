@@ -39,7 +39,7 @@ final class StoreReviewManager: ObservableObject {
         currentDateProvider: @escaping () -> Date = { Date() },
         currentVersionProvider: @escaping () -> String = { AppVersionService.marketingVersion() },
         isCallActiveProvider: @escaping () -> Bool = {
-            AppState.shared.hasActiveCall || AppState.shared.isOnCall || CallManager.shared.isOnCall
+            AppState.shared.hasActiveCall || CallManager.shared.isOnCall
         },
         reviewRequester: @escaping @MainActor () -> Void = {
             StoreReviewManager.requestAppStoreReview()

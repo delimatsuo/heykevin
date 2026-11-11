@@ -7,7 +7,6 @@ dependencies = [
     "fastapi==0.104.1",
     "uvicorn[standard]==0.24.0",
     "twilio==9.10.4",
-    "httpx==0.28.1",
     "python-telegram-bot==21.0",
     "pydantic==2.12.5",
     "pydantic-settings==2.11.0",

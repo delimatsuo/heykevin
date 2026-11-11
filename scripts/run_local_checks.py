@@ -107,9 +107,12 @@ _NETWORK_GUARD_PLUGIN_SOURCE = '''"""Pre-collection pytest offline network guard
 
 from __future__ import annotations
 
+import _socket
 import errno
 import ipaddress
 import socket
+import sys
+import threading
 
 _BLOCKED_FAMILIES = frozenset(
     family
@@ -120,11 +123,16 @@ _BLOCKED_FAMILIES = frozenset(
     if family is not None
 )
 
+_ORIG_BIND = socket.socket.bind
 _ORIG_CONNECT = socket.socket.connect
 _ORIG_CONNECT_EX = socket.socket.connect_ex
 _ORIG_SENDTO = socket.socket.sendto
-_ORIG_CREATE_CONNECTION = socket.create_connection
+_ORIG_SENDMSG = getattr(socket.socket, "sendmsg", None)
 _ORIG_GETADDRINFO = socket.getaddrinfo
+_ORIG_C_GETADDRINFO = _socket.getaddrinfo
+_ORIG_C_GETNAMEINFO = _socket.getnameinfo
+
+_NUMERIC_GETNAMEINFO_STATE = threading.local()
 
 
 def _deny_network(operation: str, target: object) -> PermissionError:
@@ -134,9 +142,25 @@ def _deny_network(operation: str, target: object) -> PermissionError:
     )
 
 
-def _is_numeric_or_wildcard_host(host: object) -> bool:
-    if host is None or host == "" or host == b"":
-        return True
+def _parse_numeric_ipv4_literal(host: object) -> str | None:
+    if isinstance(host, bytes):
+        try:
+            text = host.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    elif isinstance(host, str):
+        text = host
+    else:
+        return None
+    if not text:
+        return None
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ValueError:
+        return None
+
+
+def _is_strict_numeric_ip(host: object) -> bool:
     if isinstance(host, bytes):
         try:
             text = host.decode("ascii")
@@ -146,14 +170,36 @@ def _is_numeric_or_wildcard_host(host: object) -> bool:
         text = host
     else:
         return False
-    addr_part = text.split("%", 1)[0]
-    if addr_part.startswith("[") and addr_part.endswith("]"):
-        addr_part = addr_part[1:-1]
+    if not text:
+        return False
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    if "%" in text:
+        addr_part, scope_part = text.split("%", 1)
+        if not scope_part:
+            return False
+        try:
+            ipaddress.IPv6Address(addr_part)
+            return True
+        except ValueError:
+            return False
     try:
-        ipaddress.ip_address(addr_part)
+        ipaddress.ip_address(text)
         return True
     except ValueError:
         return False
+
+
+def _is_numeric_or_wildcard_host(host: object) -> bool:
+    if host is None or host == "" or host == b"":
+        return True
+    return _is_strict_numeric_ip(host)
+
+
+def _guarded_bind(self: socket.socket, address: object) -> object:
+    if self.family in _BLOCKED_FAMILIES:
+        raise _deny_network("socket.bind", address)
+    return _ORIG_BIND(self, address)
 
 
 def _guarded_connect(self: socket.socket, address: object) -> object:
@@ -175,10 +221,41 @@ def _guarded_sendto(self: socket.socket, data: object, *args: object) -> int:
     return _ORIG_SENDTO(self, data, *args)
 
 
+def _guarded_sendmsg(self: socket.socket, *args: object, **kwargs: object) -> int:
+    if self.family in _BLOCKED_FAMILIES:
+        target = args[3] if len(args) >= 4 else kwargs.get("address")
+        raise _deny_network("socket.sendmsg", target)
+    if _ORIG_SENDMSG is None:
+        raise _deny_network("socket.sendmsg", None)
+    return _ORIG_SENDMSG(self, *args, **kwargs)
+
+
 def _guarded_create_connection(
     address: object, *args: object, **kwargs: object
 ) -> socket.socket:
     raise _deny_network("socket.create_connection", address)
+
+
+def _guarded_create_server(
+    address: object, *args: object, **kwargs: object
+) -> socket.socket:
+    raise _deny_network("socket.create_server", address)
+
+
+def _guarded_c_getaddrinfo(
+    host: object,
+    port: object,
+    family: int = 0,
+    type: int = 0,
+    proto: int = 0,
+    flags: int = 0,
+) -> object:
+    if not _is_numeric_or_wildcard_host(host):
+        raise _deny_network("_socket.getaddrinfo", host)
+    effective_flags = flags
+    if host not in (None, "", b""):
+        effective_flags |= getattr(socket, "AI_NUMERICHOST", 0)
+    return _ORIG_C_GETADDRINFO(host, port, family, type, proto, effective_flags)
 
 
 def _guarded_getaddrinfo(
@@ -197,11 +274,97 @@ def _guarded_getaddrinfo(
     return _ORIG_GETADDRINFO(host, port, family, type, proto, effective_flags)
 
 
+def _guarded_gethostbyname(hostname: object) -> str:
+    numeric_ipv4 = _parse_numeric_ipv4_literal(hostname)
+    if numeric_ipv4 is not None:
+        return numeric_ipv4
+    raise _deny_network("socket.gethostbyname", hostname)
+
+
+def _guarded_gethostbyname_ex(hostname: object) -> tuple[str, list[str], list[str]]:
+    numeric_ipv4 = _parse_numeric_ipv4_literal(hostname)
+    if numeric_ipv4 is not None:
+        return (numeric_ipv4, [], [numeric_ipv4])
+    raise _deny_network("socket.gethostbyname_ex", hostname)
+
+
+def _guarded_gethostbyaddr(ip_address: object) -> object:
+    raise _deny_network("socket.gethostbyaddr", ip_address)
+
+
+def _guarded_getnameinfo(sockaddr: object, flags: int) -> object:
+    ni_numerichost = getattr(socket, "NI_NUMERICHOST", 0)
+    if (
+        not isinstance(flags, int)
+        or isinstance(flags, bool)
+        or not (flags & ni_numerichost)
+        or not isinstance(sockaddr, tuple)
+        or len(sockaddr) not in (2, 4)
+        or not _is_strict_numeric_ip(sockaddr[0])
+    ):
+        raise _deny_network("socket.getnameinfo", sockaddr)
+    current_depth = getattr(_NUMERIC_GETNAMEINFO_STATE, "depth", 0)
+    _NUMERIC_GETNAMEINFO_STATE.depth = current_depth + 1
+    try:
+        return _ORIG_C_GETNAMEINFO(sockaddr, flags | ni_numerichost)
+    finally:
+        _NUMERIC_GETNAMEINFO_STATE.depth = current_depth
+
+
+def _guarded_getfqdn(name: str = "") -> str:
+    raise _deny_network("socket.getfqdn", name)
+
+
+def _audit_network_guard(event: str, args: tuple[object, ...]) -> None:
+    if event in ("socket.bind", "socket.connect", "socket.sendto", "socket.sendmsg"):
+        sock = args[0] if args else None
+        if getattr(sock, "family", None) in _BLOCKED_FAMILIES:
+            target = args[1] if len(args) > 1 else None
+            raise _deny_network(event, target)
+    elif event == "socket.gethostbyname":
+        host = args[0] if args else None
+        if _parse_numeric_ipv4_literal(host) is None:
+            raise _deny_network(event, host)
+    elif event == "socket.gethostbyaddr":
+        raise _deny_network(event, args[0] if args else None)
+    elif event == "socket.getaddrinfo":
+        host = args[0] if args else None
+        if not _is_numeric_or_wildcard_host(host):
+            raise _deny_network(event, host)
+    elif event == "socket.getnameinfo":
+        sockaddr = args[0] if args else None
+        if (
+            getattr(_NUMERIC_GETNAMEINFO_STATE, "depth", 0) <= 0
+            or not isinstance(sockaddr, tuple)
+            or len(sockaddr) not in (2, 4)
+            or not _is_strict_numeric_ip(sockaddr[0])
+        ):
+            raise _deny_network(event, sockaddr)
+
+
+socket.socket.bind = _guarded_bind  # type: ignore[method-assign]
 socket.socket.connect = _guarded_connect  # type: ignore[method-assign]
 socket.socket.connect_ex = _guarded_connect_ex  # type: ignore[method-assign]
 socket.socket.sendto = _guarded_sendto  # type: ignore[method-assign]
+if _ORIG_SENDMSG is not None:
+    socket.socket.sendmsg = _guarded_sendmsg  # type: ignore[method-assign]
 socket.create_connection = _guarded_create_connection  # type: ignore[assignment]
+if hasattr(socket, "create_server"):
+    socket.create_server = _guarded_create_server  # type: ignore[assignment]
 socket.getaddrinfo = _guarded_getaddrinfo  # type: ignore[assignment]
+socket.gethostbyname = _guarded_gethostbyname  # type: ignore[assignment]
+socket.gethostbyname_ex = _guarded_gethostbyname_ex  # type: ignore[assignment]
+socket.gethostbyaddr = _guarded_gethostbyaddr  # type: ignore[assignment]
+socket.getnameinfo = _guarded_getnameinfo  # type: ignore[assignment]
+socket.getfqdn = _guarded_getfqdn  # type: ignore[assignment]
+
+_socket.getaddrinfo = _guarded_c_getaddrinfo  # type: ignore[assignment]
+_socket.gethostbyname = _guarded_gethostbyname  # type: ignore[assignment]
+_socket.gethostbyname_ex = _guarded_gethostbyname_ex  # type: ignore[assignment]
+_socket.gethostbyaddr = _guarded_gethostbyaddr  # type: ignore[assignment]
+_socket.getnameinfo = _guarded_getnameinfo  # type: ignore[assignment]
+
+sys.addaudithook(_audit_network_guard)
 '''
 
 

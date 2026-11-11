@@ -41,12 +41,28 @@ class SubscriptionManager: ObservableObject {
         let task: Task<Void, Never>
     }
 
+    private let authProvider: @MainActor () -> CallAuthContext
     private var transactionListenerTask: Task<Void, Never>?
     private var verificationRetryTasks: [String: VerificationRetryTask] = [:]
     private var finishedVerificationKeys: Set<String> = []
     private let verificationCoordinator = SubscriptionVerificationCoordinator()
 
-    private init() {}
+    init(authProvider: @escaping @MainActor () -> CallAuthContext = { AppState.shared.currentAuthContext() }) {
+        self.authProvider = authProvider
+    }
+
+    var activeVerificationRetryCount: Int {
+        verificationRetryTasks.count
+    }
+
+    func hasActiveVerificationRetry(
+        transactionID: String,
+        context: SubscriptionVerificationContext
+    ) -> Bool {
+        let key = verificationKey(context: context, transactionID: transactionID)
+        guard let retry = verificationRetryTasks[key] else { return false }
+        return !retry.task.isCancelled
+    }
 
     enum SubscriptionError: LocalizedError {
         case missingContractor
@@ -81,6 +97,19 @@ class SubscriptionManager: ObservableObject {
                 await handleTransactionUpdate(verificationResult)
             }
         }
+    }
+
+    func handleAuthChange(currentAuth: CallAuthContext) {
+        guard currentAuth.isValid else {
+            cancelAllVerificationRetries()
+            return
+        }
+        let context = SubscriptionVerificationContext(
+            contractorID: currentAuth.contractorId,
+            bearerToken: currentAuth.bearerToken,
+            generation: currentAuth.generation
+        )
+        cancelRetriesNotMatching(context)
     }
 
     // MARK: - Product Fetching
@@ -260,10 +289,11 @@ class SubscriptionManager: ObservableObject {
         source: SubscriptionVerificationSource = .launch,
         context: SubscriptionVerificationContext? = nil
     ) async -> Bool {
+        guard !Task.isCancelled else { return false }
         guard let context = context ?? currentVerificationContext() else { return false }
         var anyActive = false
         for await result in Transaction.currentEntitlements {
-            guard isCurrent(context) else { return false }
+            guard !Task.isCancelled, isCurrent(context) else { return false }
             guard case .verified(let transaction) = result else { continue }
             // Only count this entitlement if the refreshed backend profile
             // says the contractor is currently active. A
@@ -294,14 +324,10 @@ class SubscriptionManager: ObservableObject {
         guard isCurrent(context) else { return .rejected(reason: "account_changed") }
 
         let key = verificationKey(context: context, transactionID: transactionID)
-        let outcome = await verificationCoordinator.result(for: key) {
+        let outcome = await verificationCoordinator.result(for: key) { [weak self] in
             let isCurrent = await MainActor.run {
-                let auth = AppState.shared.currentAuthContext()
-                return context.matches(
-                    contractorID: auth.contractorId,
-                    bearerToken: auth.bearerToken,
-                    generation: auth.generation
-                )
+                guard let self else { return false }
+                return self.isCurrent(context)
             }
             guard isCurrent else {
                 return .rejected(reason: "account_changed")
@@ -411,7 +437,28 @@ class SubscriptionManager: ObservableObject {
         context: SubscriptionVerificationContext,
         after requestedDelay: TimeInterval
     ) {
-        let transactionID = String(transaction.id)
+        scheduleVerificationRetryTask(
+            transactionID: String(transaction.id),
+            context: context,
+            after: requestedDelay,
+            onTerminal: { [weak self] terminal in
+                guard let self else { return }
+                _ = await self.handleVerificationResolution(
+                    terminal,
+                    for: transaction,
+                    context: context
+                )
+            }
+        )
+    }
+
+    func scheduleVerificationRetryTask(
+        transactionID: String,
+        context: SubscriptionVerificationContext,
+        after requestedDelay: TimeInterval,
+        attempt: (@MainActor () async -> SubscriptionServerResolution)? = nil,
+        onTerminal: (@MainActor (SubscriptionServerResolution) async -> Void)? = nil
+    ) {
         let retryKey = verificationKey(
             context: context,
             transactionID: transactionID
@@ -421,13 +468,16 @@ class SubscriptionManager: ObservableObject {
         guard verificationRetryTasks[retryKey] == nil else { return }
 
         let retryID = UUID()
-        let task = Task { [weak self] in
+        let task = Task { @MainActor [weak self] in
             guard let self else { return }
             let terminal = await SubscriptionVerificationRetryRunner.run(
                 initialDelay: requestedDelay
             ) {
                 guard self.isCurrent(context) else {
                     return .rejected(reason: "account_changed")
+                }
+                if let attempt {
+                    return await attempt()
                 }
                 return await self.verifyWithServer(
                     transactionID: transactionID,
@@ -441,11 +491,7 @@ class SubscriptionManager: ObservableObject {
             }
             self.verificationRetryTasks[retryKey] = nil
             guard let terminal else { return }
-            _ = await self.handleVerificationResolution(
-                terminal,
-                for: transaction,
-                context: context
-            )
+            await onTerminal?(terminal)
         }
         verificationRetryTasks[retryKey] = VerificationRetryTask(
             id: retryID,
@@ -459,6 +505,13 @@ class SubscriptionManager: ObservableObject {
             return
         }
         retry.task.cancel()
+    }
+
+    private func cancelAllVerificationRetries() {
+        let keys = Array(verificationRetryTasks.keys)
+        for key in keys {
+            cancelVerificationRetry(for: key)
+        }
     }
 
     private func cancelRetriesNotMatching(
@@ -524,8 +577,11 @@ class SubscriptionManager: ObservableObject {
     }
 
     private func currentVerificationContext() -> SubscriptionVerificationContext? {
-        let auth = AppState.shared.currentAuthContext()
-        guard auth.isValid else { return nil }
+        let auth = authProvider()
+        guard auth.isValid else {
+            cancelAllVerificationRetries()
+            return nil
+        }
 
         let context = SubscriptionVerificationContext(
             contractorID: auth.contractorId,
@@ -537,7 +593,7 @@ class SubscriptionManager: ObservableObject {
     }
 
     private func isCurrent(_ context: SubscriptionVerificationContext) -> Bool {
-        let auth = AppState.shared.currentAuthContext()
+        let auth = authProvider()
         return context.matches(
             contractorID: auth.contractorId,
             bearerToken: auth.bearerToken,

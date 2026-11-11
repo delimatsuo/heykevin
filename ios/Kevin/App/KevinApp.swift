@@ -6,9 +6,6 @@ struct KevinApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState: AppState
     @Environment(\.scenePhase) var scenePhase
-    @State private var lastSyncTime: Date = .distantPast
-    @State private var isFirstLaunch = true
-    @State private var listenerStarted = false
 
     init() {
         let state = AppState.shared
@@ -102,18 +99,24 @@ struct KevinApp: App {
                 }
                 .onChange(of: appState.isOnboarded) {
                     appState.refreshSecureStorageForActiveUse()
+                    AppLifecycleCoordinator.shared.handleSessionReadinessChange()
                 }
                 .onChange(of: appState.sessionState) {
+                    AppLifecycleCoordinator.shared.handleSessionReadinessChange()
                     guard appState.isOnboarded, appState.sessionState == .ready else { return }
                     Task { @MainActor in await PushRegistrationCoordinator.shared.handleAccountReady() }
                 }
                 .onChange(of: appState.currentAuthContext()) {
+                    AppLifecycleCoordinator.shared.handleAuthChange()
                     PushRegistrationCoordinator.shared.handleAuthChange()
                     Task { @MainActor in
                         await AcquisitionCoordinator.shared.handleAuthChange()
                     }
                     guard appState.isOnboarded, appState.sessionState == .ready else { return }
                     Task { @MainActor in await PushRegistrationCoordinator.shared.handleAccountReady() }
+                }
+                .onChange(of: appState.contactsUploadConsent) {
+                    AppLifecycleCoordinator.shared.handleContactsConsentChange()
                 }
                 .appVersionGate()
                 .task {
@@ -127,18 +130,12 @@ struct KevinApp: App {
                 }
             }
         }
-        .onChange(of: scenePhase) {
+        .onChange(of: scenePhase, initial: true) {
             if ProcessInfo.processInfo.environment["KEVIN_UNIT_TESTS"] == "1" { return }
             if scenePhase == .active {
                 Self.enforceLightWindows()
                 guard !AppStoreScreenshotFixtures.isEnabled else { return }
                 appState.refreshSecureStorageForActiveUse()
-
-                // Start StoreKit transaction listener once
-                if !listenerStarted {
-                    listenerStarted = true
-                    SubscriptionManager.shared.startTransactionListener()
-                }
 
                 // Push Registration and Permission Reconciliation via coordinator
                 Task { @MainActor in
@@ -179,47 +176,10 @@ struct KevinApp: App {
                 }
                 #endif
 
-                let wasFirstLaunch = isFirstLaunch
-                if wasFirstLaunch {
-                    isFirstLaunch = false
-                }
-
-                // Delay API calls on cold start — iOS networking needs time to initialize
-                Task { @MainActor in
-                    if wasFirstLaunch {
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    }
-
-                    let auth = appState.currentAuthContext()
-                    guard appState.isOnboarded, appState.sessionState == .ready, auth.isValid else { return }
-                    if wasFirstLaunch {
-                        if let profile = await APIClient.shared.getContractorProfile(
-                            contractorId: auth.contractorId, bearerToken: auth.bearerToken
-                        ) {
-                            appState.applySubscriptionProfile(profile, for: auth, requiresReadySession: true)
-                        }
-                        guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
-                        await SubscriptionManager.shared.verifyCurrentEntitlements()
-                    }
-                    guard appState.currentAuthContext() == auth, appState.sessionState == .ready else { return }
-                    appState.checkForActiveCall()
-                }
-
-                // Ask for an automatic contact sync at most once per foreground hour.
-                // ContactSyncManager also persists a longer battery guard across launches.
-                let syncAuth = appState.currentAuthContext()
-                if appState.isOnboarded, appState.sessionState == .ready, syncAuth.isValid,
-                   appState.hasOwnedContactsUploadConsent(for: syncAuth.contractorId),
-                   Date().timeIntervalSince(lastSyncTime) > 3600 {
-                    lastSyncTime = Date()
-                    Task {
-                        // Delay 2s to let other startup tasks finish first
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        guard appState.currentAuthContext() == syncAuth, appState.sessionState == .ready,
-                              appState.hasOwnedContactsUploadConsent(for: syncAuth.contractorId) else { return }
-                        _ = await ContactSyncManager.shared.syncContacts(contractorId: syncAuth.contractorId)
-                    }
-                }
+                AppLifecycleCoordinator.shared.handleScenePhaseChange(.active)
+            } else {
+                guard !AppStoreScreenshotFixtures.isEnabled else { return }
+                AppLifecycleCoordinator.shared.handleScenePhaseChange(scenePhase)
             }
         }
     }

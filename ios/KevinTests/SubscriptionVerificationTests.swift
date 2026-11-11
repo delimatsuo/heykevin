@@ -1204,6 +1204,71 @@ final class SubscriptionVerificationTests: XCTestCase {
         XCTAssertEqual(sig?["keyIdentifier"] as? String, "KEY123")
     }
 
+    func testSubscriptionManagerHandleAuthChange_cancelsStaleAndSignedOutRetryTasks() async {
+        let authA = CallAuthContext(contractorId: "c1", bearerToken: "t1", generation: 1)
+        let authB = CallAuthContext(contractorId: "c2", bearerToken: "t2", generation: 2)
+        let signedOutInvalidAuth = CallAuthContext(contractorId: "", bearerToken: "", generation: 3)
+
+        let contextA = SubscriptionVerificationContext(contractorID: "c1", bearerToken: "t1", generation: 1)
+        let contextB = SubscriptionVerificationContext(contractorID: "c2", bearerToken: "t2", generation: 2)
+
+        var currentAuth = authA
+        let manager = SubscriptionManager(authProvider: { currentAuth })
+        var attemptCalls = 0
+
+        manager.scheduleVerificationRetryTask(
+            transactionID: "tx-alpha",
+            context: contextA,
+            after: 60,
+            attempt: {
+                attemptCalls += 1
+                return .active
+            }
+        )
+        XCTAssertEqual(manager.activeVerificationRetryCount, 1)
+        XCTAssertTrue(manager.hasActiveVerificationRetry(transactionID: "tx-alpha", context: contextA))
+        await Task.yield()
+
+        // Same auth retains Account A's retry task.
+        manager.handleAuthChange(currentAuth: authA)
+        XCTAssertEqual(manager.activeVerificationRetryCount, 1)
+        XCTAssertTrue(manager.hasActiveVerificationRetry(transactionID: "tx-alpha", context: contextA))
+        XCTAssertEqual(attemptCalls, 0)
+
+        // Switching to Account B immediately cancels and removes Account A's retry before retry closure runs.
+        currentAuth = authB
+        manager.handleAuthChange(currentAuth: authB)
+        XCTAssertEqual(manager.activeVerificationRetryCount, 0)
+        XCTAssertFalse(manager.hasActiveVerificationRetry(transactionID: "tx-alpha", context: contextA))
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        XCTAssertEqual(attemptCalls, 0)
+
+        // Schedule retry for Account B and verify signed-out invalid auth cancels and removes ALL retries.
+        manager.scheduleVerificationRetryTask(
+            transactionID: "tx-beta",
+            context: contextB,
+            after: 60,
+            attempt: {
+                attemptCalls += 1
+                return .active
+            }
+        )
+        XCTAssertEqual(manager.activeVerificationRetryCount, 1)
+        XCTAssertTrue(manager.hasActiveVerificationRetry(transactionID: "tx-beta", context: contextB))
+        await Task.yield()
+
+        currentAuth = signedOutInvalidAuth
+        manager.handleAuthChange(currentAuth: signedOutInvalidAuth)
+        XCTAssertEqual(manager.activeVerificationRetryCount, 0)
+        XCTAssertFalse(manager.hasActiveVerificationRetry(transactionID: "tx-beta", context: contextB))
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        XCTAssertEqual(attemptCalls, 0)
+    }
+
     private static func readRequestBody(from request: URLRequest) throws -> Data {
         if let body = request.httpBody {
             return body

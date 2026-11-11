@@ -12,7 +12,6 @@
 		08404F384F8E392958CB7398 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 0D7B880F361308E971A34589 /* Localizable.xcstrings */; };
 		0D40BFF2E0A4EC9E31B9F48A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63ACE0E69E2007E754E2B30 /* ContentView.swift */; };
 		1350A5D8B974608BC1FEC2B6 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47EE37D6867D61B09BEC0482 /* APIClient.swift */; };
-		139164FEE42D4FFE89CD02FF /* ContactSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 751985E010C0549E4EF9FF86 /* ContactSyncTests.swift */; };
 		15568B734437A06FBC3F647C /* PushRegistrationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C836A2F442C95376CE1544 /* PushRegistrationCoordinator.swift */; };
 		16CAB28B70C12CE7EC100700 /* JobberManagement.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF45FC3A8CD34E02E43AD820 /* JobberManagement.swift */; };
 		1A3B3B63CDB4CC685B398A46 /* SubscriptionVerificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08E758246EB2D96C5B29D06 /* SubscriptionVerificationTests.swift */; };
@@ -24,6 +23,7 @@
 		2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */; };
 		3264B76455C462BEC0EE7B26 /* JobberManagementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A4F0AF71A55BF0D143D708 /* JobberManagementTests.swift */; };
 		32E28E1C8F27DA9EB56FEEAC /* AccountDeletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3218F28F84345FE46322FFD3 /* AccountDeletion.swift */; };
+		34EE8ED8C435ADF512539D91 /* AppLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47302DCBB4DD828ADCC8451F /* AppLifecycleCoordinator.swift */; };
 		36420701C5474C5BD1AE1D6F /* OnboardingServicesDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D728FCE96527FBC245039E1 /* OnboardingServicesDraftTests.swift */; };
 		3820333AA0FC0D1233351C5A /* AccountDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBDE9896D97FEDA79E395568 /* AccountDeletionTests.swift */; };
 		3A44D6826E83FD5CF68A2448 /* PaywallPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC12C2202F43FA069F313BB /* PaywallPolicy.swift */; };
@@ -34,6 +34,7 @@
 		50F4C8B9EF0C72931D9F16CF /* RegulatoryAddressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 873DFCD1C285EE67D8AB70C0 /* RegulatoryAddressTests.swift */; };
 		5B4F1CEFF9585597C0999F62 /* SettingsRefreshPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96022DACEDA870A9CE43670C /* SettingsRefreshPolicyTests.swift */; };
 		5EA4124A788A436E94558F6C /* MarketsAdmissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 802178E5E94D96F1CED67E5C /* MarketsAdmissionTests.swift */; };
+		631267D56582FDF5FB47FAF6 /* ContactSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16BBD9D58E3127D48B1CF8B8 /* ContactSyncTests.swift */; };
 		63B9A02E0F7BB4CA8F62DABB /* CallManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5785E9B2BC1B30AE3E1FBD /* CallManager.swift */; };
 		67B3C158C6AC0D76A0DC4377 /* AppVersionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */; };
 		6B58067C9247D03F41C2016B /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55C15FE7B191D1F576798620 /* Theme.swift */; };
@@ -70,6 +71,7 @@
 		B9AC9B9621CF69893008F61A /* ActiveCallCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61C468E7CC1598CBD5EEFF63 /* ActiveCallCard.swift */; };
 		BDD86EC278FFF225F73A8773 /* KeychainManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 359DC411E16B65BDC5671DB2 /* KeychainManager.swift */; };
 		BE8FCBC0DF500DCAEB88B5EA /* AccountRestoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C51F526945B632953AAD92E2 /* AccountRestoreTests.swift */; };
+		C8F16A438F78CAEC3AE46ECA /* AppLifecycleCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6894A80D42AA94ECDC0FA97C /* AppLifecycleCoordinatorTests.swift */; };
 		C9EA0A211944CEE40CEC243D /* CallHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09A23D5E418687FDCFD9F90B /* CallHistoryView.swift */; };
 		CB80A009443FB46C1AD74EAF /* CallActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 055D3AEE6FAF53B070EF5886 /* CallActionTests.swift */; };
 		CBC1321AF32D63C2E942389B /* PhoneFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B2CDD06B01EAAE824F1B2D /* PhoneFormatter.swift */; };
@@ -120,6 +122,7 @@
 		0B4D3F4353001283E75341A9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0D7B880F361308E971A34589 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		15D11DB4DC84616ED0764DE2 /* CallHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallHistoryTests.swift; sourceTree = "<group>"; };
+		16BBD9D58E3127D48B1CF8B8 /* ContactSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactSyncTests.swift; sourceTree = "<group>"; };
 		1CE0EB11F52756367AE9E873 /* Kevin.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Kevin.entitlements; sourceTree = "<group>"; };
 		209B913556FB8C7CECC176C6 /* CallHistoryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallHistoryModel.swift; sourceTree = "<group>"; };
 		213965F72CCE6A36995428AF /* SignupPhone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignupPhone.swift; sourceTree = "<group>"; };
@@ -140,6 +143,7 @@
 		401DA3ECE84C842B701BC783 /* CallActionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallActionCoordinator.swift; sourceTree = "<group>"; };
 		40B745FA4D84858230574C78 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		46C836A2F442C95376CE1544 /* PushRegistrationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushRegistrationCoordinator.swift; sourceTree = "<group>"; };
+		47302DCBB4DD828ADCC8451F /* AppLifecycleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLifecycleCoordinator.swift; sourceTree = "<group>"; };
 		47EE37D6867D61B09BEC0482 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		494AB4716A815E7A63DCAC02 /* PaywallFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallFlowTests.swift; sourceTree = "<group>"; };
 		49F6A86132787B3D4BD82DCE /* KevinUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = KevinUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -152,11 +156,11 @@
 		5DE4B6CB9A81B78F6E28C578 /* KevinStaging.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KevinStaging.entitlements; sourceTree = "<group>"; };
 		61C468E7CC1598CBD5EEFF63 /* ActiveCallCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveCallCard.swift; sourceTree = "<group>"; };
 		62C9CE3CE81D6EF91F10CB69 /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
+		6894A80D42AA94ECDC0FA97C /* AppLifecycleCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLifecycleCoordinatorTests.swift; sourceTree = "<group>"; };
 		68B2CDD06B01EAAE824F1B2D /* PhoneFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneFormatter.swift; sourceTree = "<group>"; };
 		69C8CE051BFA7F3186E45B9B /* PaywallFlowCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallFlowCoordinator.swift; sourceTree = "<group>"; };
 		6BA706F99F80397D1BEB9B52 /* ServicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServicesView.swift; sourceTree = "<group>"; };
 		72360B62F6E469A25EF6497D /* OnboardingServicesDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingServicesDraft.swift; sourceTree = "<group>"; };
-		751985E010C0549E4EF9FF86 /* ContactSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactSyncTests.swift; sourceTree = "<group>"; };
 		75E7CE6639F7C036F139197C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		7649463A1EF80FC5B392E6B1 /* ProvisioningOperationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProvisioningOperationTests.swift; sourceTree = "<group>"; };
 		7D5BA48FE5494D5FC061B7B7 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaywallView.swift; sourceTree = "<group>"; };
@@ -290,11 +294,12 @@
 				C51F526945B632953AAD92E2 /* AccountRestoreTests.swift */,
 				35E38B581B4C22A31DFD3E56 /* AccountSessionRecoveryTests.swift */,
 				D12F4B8DDAC9C2F4FC08B543 /* AcquisitionCoordinatorTests.swift */,
+				6894A80D42AA94ECDC0FA97C /* AppLifecycleCoordinatorTests.swift */,
 				3C3EADDA5E5E888AB9E19746 /* AppStateOwnershipTests.swift */,
 				8D9C9B0057D0E32DFB404880 /* AppVersionTests.swift */,
 				055D3AEE6FAF53B070EF5886 /* CallActionTests.swift */,
 				15D11DB4DC84616ED0764DE2 /* CallHistoryTests.swift */,
-				751985E010C0549E4EF9FF86 /* ContactSyncTests.swift */,
+				16BBD9D58E3127D48B1CF8B8 /* ContactSyncTests.swift */,
 				CB4523976C8CA1F94FD69173 /* ForwardingInstructionsTests.swift */,
 				8A0625AF43AB896BB6139159 /* FrontendNavigationTests.swift */,
 				B3A4F0AF71A55BF0D143D708 /* JobberManagementTests.swift */,
@@ -352,6 +357,7 @@
 				B9DDBAE88AB8840997A9045A /* AcquisitionCoordinator.swift */,
 				47EE37D6867D61B09BEC0482 /* APIClient.swift */,
 				88463F331C9E006AA3406E5C /* AppleIdentityRefresher.swift */,
+				47302DCBB4DD828ADCC8451F /* AppLifecycleCoordinator.swift */,
 				B6B04CDAC5246DFD52D0C222 /* AppVersionService.swift */,
 				401DA3ECE84C842B701BC783 /* CallActionCoordinator.swift */,
 				2D5785E9B2BC1B30AE3E1FBD /* CallManager.swift */,
@@ -489,7 +495,6 @@
 				};
 			};
 			buildConfigurationList = 3CB04EED462A0AAEA9428AA2 /* Build configuration list for PBXProject "Kevin" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -504,6 +509,7 @@
 				FCA61563E52A862E6066AE7F /* XCRemoteSwiftPackageReference "twilio-voice-ios" */,
 			);
 			preferredProjectObjectVersion = 77;
+			productRefGroup = 875369D71AB65AFA16003017 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -539,11 +545,12 @@
 				BE8FCBC0DF500DCAEB88B5EA /* AccountRestoreTests.swift in Sources */,
 				DDFA69E97CC4C340840D3077 /* AccountSessionRecoveryTests.swift in Sources */,
 				FF0700968CF1914794A453A0 /* AcquisitionCoordinatorTests.swift in Sources */,
+				C8F16A438F78CAEC3AE46ECA /* AppLifecycleCoordinatorTests.swift in Sources */,
 				713D90BFE7D394C1B628B965 /* AppStateOwnershipTests.swift in Sources */,
 				2F4C684099B258AFEF6E62A1 /* AppVersionTests.swift in Sources */,
 				CB80A009443FB46C1AD74EAF /* CallActionTests.swift in Sources */,
 				EB9E3A43192EAF8BB89BD082 /* CallHistoryTests.swift in Sources */,
-				139164FEE42D4FFE89CD02FF /* ContactSyncTests.swift in Sources */,
+				631267D56582FDF5FB47FAF6 /* ContactSyncTests.swift in Sources */,
 				B670617C06440B284622AA7E /* ForwardingInstructionsTests.swift in Sources */,
 				284EBDB5D5E2621BF034D4B8 /* FrontendNavigationTests.swift in Sources */,
 				3264B76455C462BEC0EE7B26 /* JobberManagementTests.swift in Sources */,
@@ -577,6 +584,7 @@
 				CD2A17878FF41110865E42A5 /* AcquisitionCoordinator.swift in Sources */,
 				B9AC9B9621CF69893008F61A /* ActiveCallCard.swift in Sources */,
 				AEEEB58F01869C0D299ACC4C /* AppDelegate.swift in Sources */,
+				34EE8ED8C435ADF512539D91 /* AppLifecycleCoordinator.swift in Sources */,
 				04E14990283A4EB360D3FF82 /* AppState.swift in Sources */,
 				EC3DBCCF4D0EC9EB624553E4 /* AppStoreScreenshotFixtures.swift in Sources */,
 				67B3C158C6AC0D76A0DC4377 /* AppVersionService.swift in Sources */,

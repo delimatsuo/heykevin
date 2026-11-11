@@ -449,7 +449,7 @@ struct SettingsProfileHydrator {
         }
     }
 
-    static func hydrate(
+    static func hydrateChecked(
         capturedAuth: CallAuthContext,
         capturedRevisions: CapturedRevisions,
         fetchProfile: () async -> [String: Any]?,
@@ -513,7 +513,6 @@ struct SettingsProfileHydrator {
         return applyProfile(profile, decision)
     }
 
-    @_disfavoredOverload
     static func hydrate(
         capturedAuth: CallAuthContext,
         capturedRevisions: CapturedRevisions,
@@ -525,7 +524,7 @@ struct SettingsProfileHydrator {
         currentFieldRevisions: () -> SettingsFieldMutationRevisions,
         applyProfile: ([String: Any], SettingsHydrationDecision) -> Void
     ) async -> Bool {
-        await hydrate(
+        await hydrateChecked(
             capturedAuth: capturedAuth,
             capturedRevisions: capturedRevisions,
             fetchProfile: fetchProfile,
@@ -534,7 +533,7 @@ struct SettingsProfileHydrator {
             baselineProvider: baselineProvider,
             fenceProvider: fenceProvider,
             currentFieldRevisions: currentFieldRevisions,
-            applyProfile: { (profile, decision) -> Bool in
+            applyProfile: { profile, decision in
                 applyProfile(profile, decision)
                 return true
             }

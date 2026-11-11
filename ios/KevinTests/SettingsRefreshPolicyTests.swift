@@ -1686,7 +1686,7 @@ final class SettingsRefreshPolicyTests: XCTestCase {
 
         for invalidProfile in invalidProfiles {
             var applyCalled = false
-            let hydrated = await SettingsProfileHydrator.hydrate(
+            let hydrated = await SettingsProfileHydrator.hydrateChecked(
                 capturedAuth: auth,
                 capturedRevisions: SettingsProfileHydrator.CapturedRevisions(),
                 fetchProfile: { invalidProfile },
@@ -1695,7 +1695,7 @@ final class SettingsRefreshPolicyTests: XCTestCase {
                 baselineProvider: { SettingsConfirmedBaseline() },
                 fenceProvider: { _ in SettingsProfileHydrator.FencePermits() },
                 currentFieldRevisions: { SettingsFieldMutationRevisions() },
-                applyProfile: { (_, _) -> Bool in
+                applyProfile: { _, _ in
                     applyCalled = true
                     return true
                 }
@@ -1706,7 +1706,7 @@ final class SettingsRefreshPolicyTests: XCTestCase {
 
         // Propagates false when Bool-returning applyProfile rejects payload
         var applyInvoked = false
-        let propagatedFalse = await SettingsProfileHydrator.hydrate(
+        let propagatedFalse = await SettingsProfileHydrator.hydrateChecked(
             capturedAuth: auth,
             capturedRevisions: SettingsProfileHydrator.CapturedRevisions(),
             fetchProfile: { ["contractor_id": nfc, "owner_name": "Valid"] },
@@ -1715,7 +1715,7 @@ final class SettingsRefreshPolicyTests: XCTestCase {
             baselineProvider: { SettingsConfirmedBaseline() },
             fenceProvider: { _ in SettingsProfileHydrator.FencePermits() },
             currentFieldRevisions: { SettingsFieldMutationRevisions() },
-            applyProfile: { (_, _) -> Bool in
+            applyProfile: { _, _ in
                 applyInvoked = true
                 return false
             }

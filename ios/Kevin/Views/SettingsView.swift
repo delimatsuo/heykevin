@@ -2286,7 +2286,7 @@ struct SettingsHost<Root: View>: View {
             fieldMutationRevisions: loadCoordinator.fieldMutationRevisions
         )
 
-        let succeeded = await SettingsProfileHydrator.hydrate(
+        let succeeded = await SettingsProfileHydrator.hydrateChecked(
             capturedAuth: capturedAuth,
             capturedRevisions: capturedRevisions,
             fetchProfile: {
